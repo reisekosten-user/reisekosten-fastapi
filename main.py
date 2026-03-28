@@ -4,6 +4,7 @@ import psycopg2
 from pydantic import BaseModel
 import imaplib
 import email
+import re
 
 app = FastAPI()
 
@@ -19,6 +20,32 @@ def get_conn():
 
 class EmailInput(BaseModel):
     text: str
+
+
+def extract_trip_name(text: str) -> str:
+    text_lower = text.lower()
+
+    if "münchen" in text_lower and "delhi" in text_lower:
+        return "München-Delhi"
+    if "indien" in text_lower:
+        return "Indien"
+    if "delhi" in text_lower:
+        return "Delhi"
+    if "berlin" in text_lower and "london" in text_lower:
+        return "Berlin-London"
+
+    return "Unbekannt"
+
+
+def extract_dates(text: str):
+    matches = re.findall(r"\b\d{1,2}\.\d{1,2}\.\d{4}\b", text)
+
+    if len(matches) >= 2:
+        return matches[0], matches[1]
+    if len(matches) == 1:
+        return matches[0], "unbekannt"
+
+    return "unbekannt", "unbekannt"
 
 
 @app.get("/")
@@ -79,18 +106,10 @@ def get_trips():
 
 @app.post("/email")
 def create_trip_from_email(payload: EmailInput):
-    text = payload.text.lower()
+    text = payload.text
 
-    name = "Unbekannt"
-    start = "unbekannt"
-    end = "unbekannt"
-
-    if "indien" in text:
-        name = "Indien"
-    elif "delhi" in text:
-        name = "Delhi"
-    elif "münchen" in text and "delhi" in text:
-        name = "München-Delhi"
+    name = extract_trip_name(text)
+    start, end = extract_dates(text)
 
     conn = get_conn()
     cur = conn.cursor()
@@ -105,6 +124,8 @@ def create_trip_from_email(payload: EmailInput):
     return {
         "status": "Reise aus Mail angelegt",
         "recognized_name": name,
+        "recognized_start": start,
+        "recognized_end": end,
         "raw_text": payload.text
     }
 
@@ -154,19 +175,14 @@ def fetch_mails():
                 if payload:
                     body = payload.decode(errors="ignore")
 
-            text = (subject + " " + body).lower()
+            text = subject + " " + body
 
-            name = "Unbekannt"
-            if "indien" in text:
-                name = "Indien"
-            elif "delhi" in text:
-                name = "Delhi"
-            elif "münchen" in text and "delhi" in text:
-                name = "München-Delhi"
+            name = extract_trip_name(text)
+            start, end = extract_dates(text)
 
             cur.execute(
                 "INSERT INTO trips (name, start_date, end_date) VALUES (%s, %s, %s)",
-                (name, "unbekannt", "unbekannt")
+                (name, start, end)
             )
 
             cur.execute(
