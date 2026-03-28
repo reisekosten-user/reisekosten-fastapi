@@ -2,10 +2,16 @@ from fastapi import FastAPI
 import os
 import psycopg2
 from pydantic import BaseModel
+import imaplib
+import email
 
 app = FastAPI()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+IMAP_HOST = os.getenv("IMAP_HOST")
+IMAP_USER = os.getenv("IMAP_USER")
+IMAP_PASS = os.getenv("IMAP_PASS")
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
@@ -69,8 +75,6 @@ def create_trip_from_email(payload: EmailInput):
         name = "Indien"
     elif "delhi" in text:
         name = "Delhi"
-    elif "münchen" in text and "delhi" in text:
-        name = "München-Delhi"
 
     conn = get_conn()
     cur = conn.cursor()
@@ -82,8 +86,57 @@ def create_trip_from_email(payload: EmailInput):
     cur.close()
     conn.close()
 
-    return {
-        "status": "Reise aus Mail angelegt",
-        "recognized_name": name,
-        "raw_text": payload.text
-    }
+    return {"status": "Reise aus Mail angelegt"}
+
+# 🔥 NEU: echte Mail abholen
+@app.get("/fetch-mails")
+def fetch_mails():
+    try:
+        mail = imaplib.IMAP4_SSL(IMAP_HOST)
+        mail.login(IMAP_USER, IMAP_PASS)
+        mail.select("inbox")
+
+        status, messages = mail.search(None, "ALL")
+
+        count = 0
+
+        for num in messages[0].split()[-5:]:  # nur letzte 5 Mails
+            status, data = mail.fetch(num, "(RFC822)")
+            msg = email.message_from_bytes(data[0][1])
+
+            subject = msg["subject"] or ""
+            body = ""
+
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == "text/plain":
+                        body = part.get_payload(decode=True).decode(errors="ignore")
+            else:
+                body = msg.get_payload(decode=True).decode(errors="ignore")
+
+            text = (subject + " " + body).lower()
+
+            name = "Unbekannt"
+            if "indien" in text:
+                name = "Indien"
+            elif "delhi" in text:
+                name = "Delhi"
+
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO trips (name, start_date, end_date) VALUES (%s, %s, %s)",
+                (name, "unbekannt", "unbekannt")
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+
+            count += 1
+
+        mail.logout()
+
+        return {"status": "Mails verarbeitet", "count": count}
+
+    except Exception as e:
+        return {"error": str(e)}
