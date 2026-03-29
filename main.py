@@ -1,10 +1,8 @@
-from fastapi import FastAPI, Form, UploadFile, File
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import os
 import psycopg2
-from datetime import datetime
-import shutil
 import imaplib
 import email
 from email.header import decode_header
@@ -13,8 +11,6 @@ import re
 app = FastAPI()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-UPLOAD_DIR = "uploads"
-
 IMAP_HOST = os.getenv("IMAP_HOST")
 IMAP_USER = os.getenv("IMAP_USER")
 IMAP_PASS = os.getenv("IMAP_PASS")
@@ -24,33 +20,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
-
-
-def ensure_upload_dir():
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-
-def generate_trip_code():
-    year = datetime.now().strftime("%y")
-
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT trip_code FROM trips WHERE trip_code LIKE %s ORDER BY id DESC LIMIT 1",
-        (f"{year}-%",)
-    )
-    last = cur.fetchone()
-
-    if last and last[0]:
-        last_number = int(last[0].split("-")[1])
-        new_number = last_number + 1
-    else:
-        new_number = 1
-
-    cur.close()
-    conn.close()
-
-    return f"{year}-{str(new_number).zfill(3)}"
 
 
 def extract_trip_code(text: str):
@@ -71,6 +40,45 @@ def decode_mime_header(value):
     return "".join(result)
 
 
+def detect_mail_type(text: str):
+    t = text.lower()
+
+    if any(x in t for x in ["flug", "flight", "boarding", "boardingpass", "boarding pass", "pnr", "ticket", "airline"]):
+        return "Flug"
+
+    if any(x in t for x in ["hotel", "booking.com", "check-in", "check out", "check-out", "reservation", "zimmer"]):
+        return "Hotel"
+
+    if any(x in t for x in ["taxi", "uber", "cab"]):
+        return "Taxi"
+
+    if any(x in t for x in ["bahn", "zug", "train", "ice", "db "]):
+        return "Bahn"
+
+    if any(x in t for x in ["meal", "restaurant", "verpflegung", "essen", "dinner", "lunch", "breakfast"]):
+        return "Verpflegung"
+
+    if any(x in t for x in ["mietwagen", "rental car", "car rental", "hertz", "sixt", "avis"]):
+        return "Mietwagen"
+
+    return "Unbekannt"
+
+
+def detect_destination(text: str):
+    t = text.lower()
+
+    places = [
+        "delhi", "mumbai", "bangalore", "new york", "london", "paris",
+        "dubai", "shanghai", "beijing", "tokyo", "singapore", "mexico city"
+    ]
+
+    for place in places:
+        if place in t:
+            return place.title()
+
+    return ""
+
+
 def page_shell(title: str, content: str):
     return f"""
     <html>
@@ -78,17 +86,69 @@ def page_shell(title: str, content: str):
         <meta charset="utf-8">
         <title>{title}</title>
         <style>
-            body {{ font-family: Arial; margin:0; background:#eef4fb; }}
-            .topbar {{ background:#12365f; color:white; padding:20px; display:flex; align-items:center; gap:15px; }}
-            .topbar img {{ height:60px; background:rgba(255,255,255,0.3); padding:10px; border-radius:10px; }}
-            .wrap {{ padding:20px; }}
-            .card {{ background:white; padding:20px; border-radius:10px; margin-bottom:20px; }}
-            .btn {{ background:#2a6ab1; color:white; padding:10px; border:none; border-radius:6px; text-decoration:none; }}
+            body {{
+                font-family: Arial;
+                margin: 0;
+                background: #eef4fb;
+            }}
+            .topbar {{
+                background: #12365f;
+                color: white;
+                padding: 20px;
+                display: flex;
+                align-items: center;
+                gap: 15px;
+            }}
+            .topbar .logo-wrap {{
+                background: rgba(255,255,255,0.55);
+                padding: 10px 14px;
+                border-radius: 12px;
+                display: inline-flex;
+                align-items: center;
+            }}
+            .topbar img {{
+                height: 60px;
+                display: block;
+            }}
+            .wrap {{
+                padding: 20px;
+            }}
+            .card {{
+                background: white;
+                padding: 20px;
+                border-radius: 10px;
+                margin-bottom: 20px;
+            }}
+            .btn {{
+                background: #2a6ab1;
+                color: white;
+                padding: 10px 12px;
+                border: none;
+                border-radius: 6px;
+                text-decoration: none;
+                display: inline-block;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                background: white;
+            }}
+            th, td {{
+                border: 1px solid #d9e2ec;
+                padding: 8px;
+                text-align: left;
+                vertical-align: top;
+            }}
+            th {{
+                background: #f4f7fb;
+            }}
         </style>
     </head>
     <body>
         <div class="topbar">
-            <img src="/static/herrhammer-logo.png">
+            <div class="logo-wrap">
+                <img src="/static/herrhammer-logo.png" alt="Herrhammer Logo">
+            </div>
             <h2>Herrhammer Reisekosten</h2>
         </div>
         <div class="wrap">
@@ -109,6 +169,31 @@ def home():
         <a class="btn" href="/mail-log">Mail Log</a>
     </div>
     """)
+
+
+@app.get("/init")
+def init():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mail_messages (
+            id SERIAL PRIMARY KEY,
+            mail_uid TEXT UNIQUE,
+            sender TEXT,
+            subject TEXT,
+            body TEXT,
+            trip_code TEXT,
+            detected_type TEXT,
+            detected_destination TEXT
+        )
+    """)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"status": "ok"}
 
 
 @app.get("/fetch-mails", response_class=HTMLResponse)
@@ -143,15 +228,25 @@ def fetch_mails():
             if msg.is_multipart():
                 for part in msg.walk():
                     if part.get_content_type() == "text/plain":
-                        body = part.get_payload(decode=True).decode(errors="ignore")
-                        break
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            body = payload.decode(errors="ignore")
+                            break
+            else:
+                payload = msg.get_payload(decode=True)
+                if payload:
+                    body = payload.decode(errors="ignore")
 
-            code = extract_trip_code(subject + body)
+            full_text = subject + "\n" + body
+            code = extract_trip_code(full_text)
+            detected_type = detect_mail_type(full_text)
+            detected_destination = detect_destination(full_text)
 
             cur.execute("""
-                INSERT INTO mail_messages (mail_uid, sender, subject, body, trip_code)
-                VALUES (%s,%s,%s,%s,%s)
-            """, (uid, sender, subject, body, code))
+                INSERT INTO mail_messages
+                (mail_uid, sender, subject, body, trip_code, detected_type, detected_destination)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """, (uid, sender, subject, body, code, detected_type, detected_destination))
 
             count += 1
 
@@ -160,10 +255,10 @@ def fetch_mails():
         conn.close()
         mail.logout()
 
-        return page_shell("OK", f"<div class='card'>Importiert: {count}</div>")
+        return page_shell("OK", f"<div class='card'><h2>Mails importiert</h2><p>Importiert: <b>{count}</b></p></div>")
 
     except Exception as e:
-        return page_shell("Fehler", f"<div class='card'>{e}</div>")
+        return page_shell("Fehler", f"<div class='card'><h2>Fehler beim Mailabruf</h2><p>{e}</p></div>")
 
 
 @app.get("/mail-log", response_class=HTMLResponse)
@@ -171,44 +266,41 @@ def mail_log():
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("SELECT sender, subject, trip_code FROM mail_messages ORDER BY id DESC LIMIT 20")
+    cur.execute("""
+        SELECT sender, subject, trip_code, detected_type, detected_destination
+        FROM mail_messages
+        ORDER BY id DESC
+        LIMIT 50
+    """)
     rows = cur.fetchall()
 
     html = ""
     for r in rows:
-        html += f"<tr><td>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td></tr>"
+        html += f"""
+        <tr>
+            <td>{r[0] or ''}</td>
+            <td>{r[1] or ''}</td>
+            <td>{r[2] or ''}</td>
+            <td>{r[3] or ''}</td>
+            <td>{r[4] or ''}</td>
+        </tr>
+        """
 
     cur.close()
     conn.close()
 
-    return page_shell("Log", f"""
+    return page_shell("Mail Log", f"""
     <div class="card">
-        <table border="1" cellpadding="5">
-            <tr><th>Von</th><th>Betreff</th><th>Code</th></tr>
+        <h2>Mail Log mit Erkennung</h2>
+        <table>
+            <tr>
+                <th>Von</th>
+                <th>Betreff</th>
+                <th>Code</th>
+                <th>Typ erkannt</th>
+                <th>Ziel erkannt</th>
+            </tr>
             {html}
         </table>
     </div>
     """)
-
-
-@app.get("/init")
-def init():
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS mail_messages (
-            id SERIAL PRIMARY KEY,
-            mail_uid TEXT UNIQUE,
-            sender TEXT,
-            subject TEXT,
-            body TEXT,
-            trip_code TEXT
-        )
-    """)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    return {"status": "ok"}
