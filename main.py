@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Form, UploadFile, File
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 import os
 import psycopg2
 from datetime import datetime
@@ -9,6 +10,8 @@ app = FastAPI()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 UPLOAD_DIR = "uploads"
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 def get_conn():
@@ -28,7 +31,6 @@ def generate_trip_code():
 
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute(
         "SELECT trip_code FROM trips WHERE trip_code LIKE %s ORDER BY id DESC LIMIT 1",
         (f"{year}-%",)
@@ -57,25 +59,23 @@ def page_shell(title: str, content: str):
         <title>{title}</title>
         <style>
             :root {{
-                --blue-950: #0b2440;
-                --blue-900: #12365f;
-                --blue-800: #1b4e86;
-                --blue-700: #2567ad;
+                --blue-950: #0b2340;
+                --blue-900: #143762;
+                --blue-800: #1f4e86;
+                --blue-700: #2a6ab1;
                 --blue-100: #eaf2fb;
                 --blue-050: #f6f9fd;
-                --text: #17324d;
-                --muted: #60748a;
+                --text: #16324c;
+                --muted: #64788f;
                 --line: #d7e2ee;
                 --ok: #177245;
                 --warn: #b46b00;
                 --white: #ffffff;
-                --shadow: 0 10px 28px rgba(16, 38, 64, 0.08);
+                --shadow: 0 12px 28px rgba(16, 38, 64, 0.08);
                 --radius: 18px;
             }}
 
-            * {{
-                box-sizing: border-box;
-            }}
+            * {{ box-sizing: border-box; }}
 
             body {{
                 margin: 0;
@@ -88,6 +88,7 @@ def page_shell(title: str, content: str):
                 background: linear-gradient(135deg, var(--blue-950), var(--blue-700));
                 color: var(--white);
                 padding: 22px 28px;
+                box-shadow: var(--shadow);
             }}
 
             .brand {{
@@ -98,29 +99,13 @@ def page_shell(title: str, content: str):
                 gap: 18px;
             }}
 
-            .logo {{
-                width: 78px;
-                height: 78px;
-                border-radius: 22px;
-                background: rgba(255,255,255,0.12);
-                border: 1px solid rgba(255,255,255,0.18);
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                font-weight: 700;
-                line-height: 1;
-                letter-spacing: 1px;
-            }}
-
-            .logo .hh {{
-                font-size: 24px;
-            }}
-
-            .logo .mini {{
-                font-size: 10px;
-                opacity: 0.9;
-                margin-top: 4px;
+            .brand img {{
+                height: 88px;
+                width: auto;
+                display: block;
+                background: rgba(255,255,255,0.08);
+                border-radius: 16px;
+                padding: 10px 14px;
             }}
 
             .brand-text h1 {{
@@ -202,10 +187,6 @@ def page_shell(title: str, content: str):
                 box-shadow: 0 0 0 4px rgba(37,103,173,0.12);
             }}
 
-            .full {{
-                grid-column: 1 / -1;
-            }}
-
             .actions {{
                 display: flex;
                 gap: 12px;
@@ -221,6 +202,8 @@ def page_shell(title: str, content: str):
                 padding: 12px 18px;
                 font-weight: 700;
                 cursor: pointer;
+                text-decoration: none;
+                display: inline-block;
             }}
 
             .btn-light {{
@@ -242,13 +225,8 @@ def page_shell(title: str, content: str):
                 line-height: 1.5;
             }}
 
-            .ok {{
-                border-left: 5px solid var(--ok);
-            }}
-
-            .warn {{
-                border-left: 5px solid var(--warn);
-            }}
+            .ok {{ border-left: 5px solid var(--ok); }}
+            .warn {{ border-left: 5px solid var(--warn); }}
 
             .kpis {{
                 display: grid;
@@ -300,13 +278,12 @@ def page_shell(title: str, content: str):
                 vertical-align: top;
             }}
 
-            tr:last-child td {{
-                border-bottom: none;
-            }}
+            tr:last-child td {{ border-bottom: none; }}
 
             .code {{
                 font-weight: 700;
                 color: var(--blue-900);
+                white-space: nowrap;
             }}
 
             .muted {{
@@ -315,35 +292,28 @@ def page_shell(title: str, content: str):
             }}
 
             @media (max-width: 920px) {{
-                .grid {{
-                    grid-template-columns: 1fr;
+                .grid {{ grid-template-columns: 1fr; }}
+                .form-grid {{ grid-template-columns: 1fr; }}
+                .kpis {{ grid-template-columns: 1fr; }}
+                .brand {{
+                    flex-direction: column;
+                    align-items: flex-start;
                 }}
-                .form-grid {{
-                    grid-template-columns: 1fr;
-                }}
-                .kpis {{
-                    grid-template-columns: 1fr;
-                }}
-                .brand-text h1 {{
-                    font-size: 24px;
-                }}
+                .brand-text h1 {{ font-size: 24px; }}
+                .brand img {{ height: 72px; }}
             }}
         </style>
     </head>
     <body>
         <div class="topbar">
             <div class="brand">
-                <div class="logo">
-                    <div class="hh">HH</div>
-                    <div class="mini">TRAVEL</div>
-                </div>
+                <img src="/static/herrhammer-logo.png" alt="Herrhammer Logo">
                 <div class="brand-text">
                     <h1>Herrhammer Reisekosten</h1>
-                    <p>Übersichtlich, codegeführt und bereit für Belege · Reisecode wie 26-001</p>
+                    <p>Codegeführt, übersichtlich und bereit für Belege · Reisecode wie 26-001</p>
                 </div>
             </div>
         </div>
-
         <div class="wrap">
             {content}
         </div>
@@ -355,14 +325,13 @@ def page_shell(title: str, content: str):
 @app.get("/", response_class=HTMLResponse)
 def home():
     today = datetime.now().strftime("%Y-%m-%d")
-
     content = f"""
     <div class="grid">
         <div class="card">
             <h2>Neue Reise anlegen</h2>
             <div class="sub">
                 Das Sekretariat legt die Reise zuerst hier an. Danach erzeugt das System automatisch
-                einen eindeutigen Reisecode. Alle späteren Mails, Belege und Infos müssen diesen Code tragen.
+                einen Reisecode. Alle späteren Mails, Belege und Infos müssen diesen Code tragen.
             </div>
 
             <form action="/create-trip" method="post">
@@ -397,11 +366,11 @@ def home():
         </div>
 
         <div class="card warn">
-            <h3>Pflichtregel</h3>
+            <h3>Pflichtregel für die Zuordnung</h3>
             <div class="hint">
-                Bitte nach der Anlage immer einen Betreff wie diesen verwenden:<br><br>
+                Nach der Anlage bitte immer einen Betreff wie diesen verwenden:<br><br>
                 <b>[26-001] Reiseunterlagen Delhi</b><br><br>
-                Dadurch kann das System später Mails, Belege und Nachträge sauber derselben Reise zuordnen.
+                Dann kann das System alles derselben Reise zuordnen.
             </div>
         </div>
     </div>
@@ -440,9 +409,7 @@ def create_trip(
         content = """
         <div class="card warn">
             <h2>Datum nicht gültig</h2>
-            <div class="hint">
-                Das Enddatum darf nicht vor dem Startdatum liegen.
-            </div>
+            <div class="hint">Das Enddatum darf nicht vor dem Startdatum liegen.</div>
             <div class="actions">
                 <a class="btn-light" href="/">Zurück</a>
             </div>
@@ -537,8 +504,8 @@ def dashboard():
     <div class="card">
         <h2>Dashboard</h2>
         <div class="sub">
-            Alle Vorgänge laufen über den Reisecode. Das macht die spätere Zuordnung von Mails,
-            Belegen und Informationen deutlich robuster.
+            Alle Vorgänge laufen über den Reisecode. Dadurch werden spätere Belege und Informationen
+            robuster zugeordnet.
         </div>
 
         <table>
@@ -565,6 +532,7 @@ def dashboard():
 def receipts_page():
     conn = get_conn()
     cur = conn.cursor()
+
     cur.execute("SELECT trip_code, employee, name FROM trips ORDER BY id DESC")
     trips = cur.fetchall()
 
@@ -600,12 +568,12 @@ def receipts_page():
             <h2>Beleg hochladen</h2>
             <div class="sub">
                 Jeder Beleg wird direkt einem Reisecode zugeordnet. Für den Test speichern wir die Datei
-                lokal im Render-Dateisystem. Das ist für den Test ok, später gehen wir auf Object Storage.
+                lokal. Später hängen wir EU-Object-Storage dahinter.
             </div>
 
             <form action="/upload-receipt" method="post" enctype="multipart/form-data">
                 <div class="form-grid">
-                    <div class="field full">
+                    <div class="field">
                         <label>Reise</label>
                         <select name="trip_code" required>
                             {options}
@@ -627,7 +595,7 @@ def receipts_page():
                         </select>
                     </div>
 
-                    <div class="field">
+                    <div class="field" style="grid-column: 1 / -1;">
                         <label>Datei</label>
                         <input type="file" name="receipt_file" required>
                     </div>
@@ -667,7 +635,6 @@ def upload_receipt(
 
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("SELECT id FROM trips WHERE trip_code = %s", (trip_code,))
     trip = cur.fetchone()
 
@@ -693,7 +660,6 @@ def upload_receipt(
         INSERT INTO receipts (trip_code, category, original_filename, file_path)
         VALUES (%s, %s, %s, %s)
     """, (trip_code, category, receipt_file.filename, file_path))
-
     conn.commit()
     cur.close()
     conn.close()
@@ -718,19 +684,15 @@ def upload_receipt(
 def reset_demo():
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("TRUNCATE TABLE receipts RESTART IDENTITY")
     cur.execute("TRUNCATE TABLE trips RESTART IDENTITY")
-
     cur.execute("""
         INSERT INTO trips (trip_code, employee, name, start_date, end_date)
         VALUES (%s, %s, %s, %s, %s)
     """, ("26-001", "Ralf Diesslin", "Delhi", "2026-04-10", "2026-04-14"))
-
     conn.commit()
     cur.close()
     conn.close()
-
     return {"status": "Alte Daten gelöscht, nur 26-001 bleibt"}
 
 
