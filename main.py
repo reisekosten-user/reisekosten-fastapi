@@ -1,58 +1,180 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse
 import os
 import psycopg2
-from pydantic import BaseModel
-import imaplib
-import email
-import re
+from datetime import datetime
 
 app = FastAPI()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-IMAP_HOST = os.getenv("IMAP_HOST")
-IMAP_USER = os.getenv("IMAP_USER")
-IMAP_PASS = os.getenv("IMAP_PASS")
-
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
+# 🧠 Reisecode erzeugen
+def generate_trip_code():
+    year = datetime.now().strftime("%y")
 
-class EmailInput(BaseModel):
-    text: str
+    conn = get_conn()
+    cur = conn.cursor()
 
+    cur.execute("SELECT trip_code FROM trips WHERE trip_code LIKE %s ORDER BY id DESC LIMIT 1", (f"{year}-%",))
+    last = cur.fetchone()
 
-def extract_trip_name(text: str) -> str:
-    text_lower = text.lower()
+    if last:
+        last_number = int(last[0].split("-")[1])
+        new_number = last_number + 1
+    else:
+        new_number = 1
 
-    if "münchen" in text_lower and "delhi" in text_lower:
-        return "München-Delhi"
-    if "indien" in text_lower:
-        return "Indien"
-    if "delhi" in text_lower:
-        return "Delhi"
-    if "berlin" in text_lower and "london" in text_lower:
-        return "Berlin-London"
+    code = f"{year}-{str(new_number).zfill(3)}"
 
-    return "Unbekannt"
+    cur.close()
+    conn.close()
 
+    return code
 
-def extract_dates(text: str):
-    matches = re.findall(r"\b\d{1,2}\.\d{1,2}\.\d{4}\b", text)
+# 🏁 Startseite
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return f"""
+    <html>
+    <head>
+        <title>Reisekosten System</title>
+        <style>
+            body {{
+                font-family: Arial;
+                background: #f5f8fb;
+                margin: 0;
+            }}
+            .header {{
+                background: #003366;
+                color: white;
+                padding: 20px;
+                font-size: 24px;
+            }}
+            .container {{
+                padding: 20px;
+            }}
+            .card {{
+                background: white;
+                padding: 20px;
+                border-radius: 10px;
+                margin-bottom: 20px;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            }}
+            input, button {{
+                padding: 10px;
+                margin: 5px;
+                border-radius: 5px;
+                border: 1px solid #ccc;
+            }}
+            button {{
+                background: #0055aa;
+                color: white;
+                border: none;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            Herrhammer Reisekosten System
+        </div>
+        <div class="container">
 
-    if len(matches) >= 2:
-        return matches[0], matches[1]
-    if len(matches) == 1:
-        return matches[0], "unbekannt"
+            <div class="card">
+                <h3>Neue Reise anlegen</h3>
+                <form action="/create-trip" method="post">
+                    <input name="employee" placeholder="Mitarbeiter" required>
+                    <input name="destination" placeholder="Ziel (z.B. Delhi)" required>
+                    <input name="start" placeholder="Startdatum (10.04.2026)" required>
+                    <input name="end" placeholder="Enddatum (14.04.2026)" required>
+                    <button type="submit">Reise erstellen</button>
+                </form>
+            </div>
 
-    return "unbekannt", "unbekannt"
+            <div class="card">
+                <a href="/dashboard">→ Zum Dashboard</a>
+            </div>
 
+        </div>
+    </body>
+    </html>
+    """
 
-@app.get("/")
-def read_root():
-    return {"status": "Reisekosten System läuft 🚀"}
+# ➕ Reise erstellen
+@app.post("/create-trip")
+def create_trip(employee: str = Form(...), destination: str = Form(...), start: str = Form(...), end: str = Form(...)):
+    code = generate_trip_code()
 
+    conn = get_conn()
+    cur = conn.cursor()
 
+    cur.execute("""
+        INSERT INTO trips (trip_code, employee, name, start_date, end_date)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (code, employee, destination, start, end))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"status": "Reise erstellt", "code": code}
+
+# 📊 Dashboard
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT trip_code, employee, name, start_date, end_date FROM trips ORDER BY id DESC")
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    rows_html = ""
+    for r in rows:
+        rows_html += f"""
+        <tr>
+            <td><b>{r[0]}</b></td>
+            <td>{r[1]}</td>
+            <td>{r[2]}</td>
+            <td>{r[3]}</td>
+            <td>{r[4]}</td>
+        </tr>
+        """
+
+    return f"""
+    <html>
+    <head>
+        <style>
+            body {{ font-family: Arial; background:#f5f8fb; }}
+            .header {{ background:#003366; color:white; padding:20px; }}
+            table {{ width:100%; background:white; border-collapse:collapse; }}
+            td, th {{ padding:10px; border-bottom:1px solid #ddd; }}
+            .container {{ padding:20px; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">Dashboard – Reisekosten</div>
+        <div class="container">
+            <table>
+                <tr>
+                    <th>Code</th>
+                    <th>Mitarbeiter</th>
+                    <th>Ziel</th>
+                    <th>Start</th>
+                    <th>Ende</th>
+                </tr>
+                {rows_html}
+            </table>
+        </div>
+    </body>
+    </html>
+    """
+
+# 🔧 DB erweitern
 @app.get("/init")
 def init_db():
     conn = get_conn()
@@ -61,143 +183,16 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS trips (
             id SERIAL PRIMARY KEY,
+            trip_code TEXT,
+            employee TEXT,
             name TEXT,
             start_date TEXT,
             end_date TEXT
         )
     """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS processed_mails (
-            id TEXT PRIMARY KEY
-        )
-    """)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"status": "Tabellen erstellt"}
-
-
-@app.post("/trip")
-def create_trip(name: str, start: str, end: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO trips (name, start_date, end_date) VALUES (%s, %s, %s)",
-        (name, start, end)
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"status": "Reise gespeichert"}
-
-
-@app.get("/trips")
-def get_trips():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM trips ORDER BY id")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return {"trips": rows}
-
-
-@app.post("/email")
-def create_trip_from_email(payload: EmailInput):
-    text = payload.text
-
-    name = extract_trip_name(text)
-    start, end = extract_dates(text)
-
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO trips (name, start_date, end_date) VALUES (%s, %s, %s)",
-        (name, start, end)
-    )
     conn.commit()
     cur.close()
     conn.close()
 
-    return {
-        "status": "Reise aus Mail angelegt",
-        "recognized_name": name,
-        "recognized_start": start,
-        "recognized_end": end,
-        "raw_text": payload.text
-    }
-
-
-@app.get("/fetch-mails")
-def fetch_mails():
-    try:
-        mail = imaplib.IMAP4_SSL(IMAP_HOST)
-        mail.login(IMAP_USER, IMAP_PASS)
-        mail.select("inbox")
-
-        conn = get_conn()
-        cur = conn.cursor()
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS processed_mails (
-                id TEXT PRIMARY KEY
-            )
-        """)
-        conn.commit()
-
-        status, messages = mail.search(None, "ALL")
-        count = 0
-
-        for num in messages[0].split()[-5:]:
-            mail_id = num.decode()
-
-            cur.execute("SELECT id FROM processed_mails WHERE id = %s", (mail_id,))
-            if cur.fetchone():
-                continue
-
-            status, data = mail.fetch(num, "(RFC822)")
-            msg = email.message_from_bytes(data[0][1])
-
-            subject = msg["subject"] or ""
-            body = ""
-
-            if msg.is_multipart():
-                for part in msg.walk():
-                    if part.get_content_type() == "text/plain":
-                        payload = part.get_payload(decode=True)
-                        if payload:
-                            body = payload.decode(errors="ignore")
-                            break
-            else:
-                payload = msg.get_payload(decode=True)
-                if payload:
-                    body = payload.decode(errors="ignore")
-
-            text = subject + " " + body
-
-            name = extract_trip_name(text)
-            start, end = extract_dates(text)
-
-            cur.execute(
-                "INSERT INTO trips (name, start_date, end_date) VALUES (%s, %s, %s)",
-                (name, start, end)
-            )
-
-            cur.execute(
-                "INSERT INTO processed_mails (id) VALUES (%s)",
-                (mail_id,)
-            )
-
-            conn.commit()
-            count += 1
-
-        cur.close()
-        conn.close()
-        mail.logout()
-
-        return {"status": "Mails verarbeitet", "count": count}
-
-    except Exception as e:
-        return {"error": str(e)}
+    return {"status": "DB bereit"}
