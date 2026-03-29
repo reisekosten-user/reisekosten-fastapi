@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 import os
 import psycopg2
 from datetime import datetime
+import re
 
 app = FastAPI()
 
@@ -11,7 +12,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
-# 🧠 Reisecode erzeugen
+# 🧠 Code generieren
 def generate_trip_code():
     year = datetime.now().strftime("%y")
 
@@ -34,69 +35,42 @@ def generate_trip_code():
 
     return code
 
+# 🔍 Code aus Text extrahieren
+def extract_trip_code(text):
+    match = re.search(r"\b\d{2}-\d{3}\b", text)
+    if match:
+        return match.group(0)
+    return None
+
 # 🏁 Startseite
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return f"""
+    return """
     <html>
     <head>
-        <title>Reisekosten System</title>
         <style>
-            body {{
-                font-family: Arial;
-                background: #f5f8fb;
-                margin: 0;
-            }}
-            .header {{
-                background: #003366;
-                color: white;
-                padding: 20px;
-                font-size: 24px;
-            }}
-            .container {{
-                padding: 20px;
-            }}
-            .card {{
-                background: white;
-                padding: 20px;
-                border-radius: 10px;
-                margin-bottom: 20px;
-                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-            }}
-            input, button {{
-                padding: 10px;
-                margin: 5px;
-                border-radius: 5px;
-                border: 1px solid #ccc;
-            }}
-            button {{
-                background: #0055aa;
-                color: white;
-                border: none;
-            }}
+            body { font-family: Arial; background:#f5f8fb; margin:0; }
+            .header { background:#003366; color:white; padding:20px; font-size:24px; }
+            .container { padding:20px; }
+            .card { background:white; padding:20px; border-radius:10px; margin-bottom:20px; }
+            input, button { padding:10px; margin:5px; }
+            button { background:#0055aa; color:white; border:none; }
         </style>
     </head>
     <body>
-        <div class="header">
-            Herrhammer Reisekosten System
-        </div>
+        <div class="header">Herrhammer Reisekosten</div>
         <div class="container">
-
             <div class="card">
-                <h3>Neue Reise anlegen</h3>
+                <h3>Neue Reise</h3>
                 <form action="/create-trip" method="post">
-                    <input name="employee" placeholder="Mitarbeiter" required>
-                    <input name="destination" placeholder="Ziel (z.B. Delhi)" required>
-                    <input name="start" placeholder="Startdatum (10.04.2026)" required>
-                    <input name="end" placeholder="Enddatum (14.04.2026)" required>
-                    <button type="submit">Reise erstellen</button>
+                    <input name="employee" placeholder="Mitarbeiter">
+                    <input name="destination" placeholder="Ziel">
+                    <input name="start" placeholder="Startdatum">
+                    <input name="end" placeholder="Enddatum">
+                    <button>Erstellen</button>
                 </form>
             </div>
-
-            <div class="card">
-                <a href="/dashboard">→ Zum Dashboard</a>
-            </div>
-
+            <a href="/dashboard">Dashboard</a>
         </div>
     </body>
     </html>
@@ -119,7 +93,11 @@ def create_trip(employee: str = Form(...), destination: str = Form(...), start: 
     cur.close()
     conn.close()
 
-    return {"status": "Reise erstellt", "code": code}
+    return {
+        "status": "Reise erstellt",
+        "code": code,
+        "hinweis": f"Bitte immer [{code}] im Betreff verwenden!"
+    }
 
 # 📊 Dashboard
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -147,25 +125,12 @@ def dashboard():
 
     return f"""
     <html>
-    <head>
-        <style>
-            body {{ font-family: Arial; background:#f5f8fb; }}
-            .header {{ background:#003366; color:white; padding:20px; }}
-            table {{ width:100%; background:white; border-collapse:collapse; }}
-            td, th {{ padding:10px; border-bottom:1px solid #ddd; }}
-            .container {{ padding:20px; }}
-        </style>
-    </head>
-    <body>
-        <div class="header">Dashboard – Reisekosten</div>
-        <div class="container">
-            <table>
+    <body style="font-family:Arial;background:#f5f8fb;">
+        <div style="background:#003366;color:white;padding:20px;">Dashboard</div>
+        <div style="padding:20px;">
+            <table style="width:100%;background:white;">
                 <tr>
-                    <th>Code</th>
-                    <th>Mitarbeiter</th>
-                    <th>Ziel</th>
-                    <th>Start</th>
-                    <th>Ende</th>
+                    <th>Code</th><th>Mitarbeiter</th><th>Ziel</th><th>Start</th><th>Ende</th>
                 </tr>
                 {rows_html}
             </table>
@@ -173,6 +138,32 @@ def dashboard():
     </body>
     </html>
     """
+
+# ✉️ Mail-Verarbeitung mit Code
+@app.post("/email")
+def email_input(text: str):
+    code = extract_trip_code(text)
+
+    if not code:
+        return {"error": "Kein Reisecode gefunden!"}
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id FROM trips WHERE trip_code = %s", (code,))
+    trip = cur.fetchone()
+
+    if not trip:
+        return {"error": "Reisecode existiert nicht!"}
+
+    # hier später Belege / Infos speichern
+    cur.close()
+    conn.close()
+
+    return {
+        "status": "Mail korrekt zugeordnet",
+        "trip_code": code
+    }
 
 # 🔧 DB erweitern
 @app.get("/init")
