@@ -7,10 +7,11 @@ import imaplib
 import email
 from email.header import decode_header
 import re
-from pathlib import Path
+import boto3
 import pdfplumber
 from PIL import Image
 import pytesseract
+from io import BytesIO
 
 app = FastAPI()
 
@@ -19,8 +20,11 @@ IMAP_HOST = os.getenv("IMAP_HOST")
 IMAP_USER = os.getenv("IMAP_USER")
 IMAP_PASS = os.getenv("IMAP_PASS")
 
-UPLOAD_DIR = "uploads"
-MAIL_ATTACHMENT_DIR = os.path.join(UPLOAD_DIR, "mail_attachments")
+S3_ENDPOINT = os.getenv("S3_ENDPOINT")
+S3_BUCKET = os.getenv("S3_BUCKET")
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
+S3_REGION = os.getenv("S3_REGION")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -29,9 +33,14 @@ def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
 
-def ensure_dirs():
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    os.makedirs(MAIL_ATTACHMENT_DIR, exist_ok=True)
+def get_s3():
+    return boto3.client(
+        "s3",
+        endpoint_url=S3_ENDPOINT,
+        aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY,
+        region_name=S3_REGION,
+    )
 
 
 def extract_trip_code(text: str):
@@ -117,35 +126,9 @@ def detect_attachment_type(filename: str, subject: str, body: str):
     return "Unbekannt"
 
 
-def is_supported_analysis_file(path: str):
-    p = path.lower()
-    return p.endswith(".pdf") or p.endswith(".png") or p.endswith(".jpg") or p.endswith(".jpeg") or p.endswith(".webp")
-
-
-def extract_text_from_file(path: str):
-    if not os.path.exists(path):
-        return "DATEI_FEHLT_AUF_SERVER"
-
-    text = ""
-
-    try:
-        if path.lower().endswith(".pdf"):
-            with pdfplumber.open(path) as pdf:
-                for page in pdf.pages:
-                    text += (page.extract_text() or "") + "\n"
-
-        elif path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-            img = Image.open(path)
-            text = pytesseract.image_to_string(img)
-
-        else:
-            return "NICHT_ANALYSIERBAR"
-
-    except Exception as e:
-        return f"ERROR: {e}"
-
-    text = text.strip()
-    return text[:10000] if text else "KEIN_TEXT_GEFUNDEN"
+def is_supported_analysis_file(filename: str):
+    f = filename.lower()
+    return f.endswith(".pdf") or f.endswith(".png") or f.endswith(".jpg") or f.endswith(".jpeg") or f.endswith(".webp")
 
 
 def extract_amount(text: str):
@@ -171,6 +154,31 @@ def extract_vendor(text: str):
         if len(cleaned) > 3 and "error:" not in cleaned.lower():
             return cleaned[:200]
     return ""
+
+
+def extract_text_from_s3_object(object_key: str, filename: str):
+    try:
+        s3 = get_s3()
+        response = s3.get_object(Bucket=S3_BUCKET, Key=object_key)
+        file_bytes = response["Body"].read()
+
+        if filename.lower().endswith(".pdf"):
+            text = ""
+            with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+                for page in pdf.pages:
+                    text += (page.extract_text() or "") + "\n"
+            text = text.strip()
+            return text[:10000] if text else "KEIN_TEXT_GEFUNDEN"
+
+        if filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            img = Image.open(BytesIO(file_bytes))
+            text = pytesseract.image_to_string(img).strip()
+            return text[:10000] if text else "KEIN_TEXT_GEFUNDEN"
+
+        return "NICHT_ANALYSIERBAR"
+
+    except Exception as e:
+        return f"ERROR: {e}"
 
 
 def page_shell(title: str, content: str):
@@ -291,8 +299,6 @@ def home():
 
 @app.get("/init")
 def init():
-    ensure_dirs()
-
     conn = get_conn()
     cur = conn.cursor()
 
@@ -327,6 +333,7 @@ def init():
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_date TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_vendor TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS analysis_status TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS storage_key TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
 
     conn.commit()
@@ -346,18 +353,13 @@ def reset_mail_log():
     cur.close()
     conn.close()
 
-    ensure_dirs()
-    for path in Path(MAIL_ATTACHMENT_DIR).glob("*"):
-        if path.is_file():
-            path.unlink()
-
     return {"status": "mail log und anhaenge geloescht"}
 
 
 @app.get("/fetch-mails", response_class=HTMLResponse)
 def fetch_mails():
     try:
-        ensure_dirs()
+        s3 = get_s3()
 
         mail = imaplib.IMAP4_SSL(IMAP_HOST)
         mail.login(IMAP_USER, IMAP_PASS)
@@ -446,10 +448,14 @@ def fetch_mails():
 
                     safe_original = sanitize_filename(decoded_filename)
                     saved_filename = f"{uid}_{safe_original}"
-                    file_path = os.path.join(MAIL_ATTACHMENT_DIR, saved_filename)
+                    storage_key = f"mail_attachments/{saved_filename}"
 
-                    with open(file_path, "wb") as f:
-                        f.write(payload)
+                    s3.put_object(
+                        Bucket=S3_BUCKET,
+                        Key=storage_key,
+                        Body=payload,
+                        ContentType=part.get_content_type() or "application/octet-stream"
+                    )
 
                     attachment_type = detect_attachment_type(
                         safe_original,
@@ -459,17 +465,18 @@ def fetch_mails():
 
                     cur.execute("""
                         INSERT INTO mail_attachments
-                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path, detected_type, analysis_status)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path, detected_type, analysis_status, storage_key)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (
                         uid,
                         code,
                         safe_original,
                         saved_filename,
                         part.get_content_type(),
-                        file_path,
+                        storage_key,
                         attachment_type,
-                        "neu"
+                        "neu",
+                        storage_key
                     ))
 
                     attachment_count += 1
@@ -486,7 +493,7 @@ def fetch_mails():
             <h2 class="ok">Mailabruf erfolgreich</h2>
             <p><b>Neu importierte Mails:</b> {imported}</p>
             <p><b>Übersprungen (schon vorhanden):</b> {skipped}</p>
-            <p><b>Gespeicherte Anhänge:</b> {attachment_count}</p>
+            <p><b>Gespeicherte Anhänge im Bucket:</b> {attachment_count}</p>
             <a class="btn" href="/mail-log">Zum Mail Log</a>
             <a class="btn-light" href="/attachment-log">Zum Anhang Log</a>
         </div>
@@ -507,7 +514,7 @@ def analyze_attachments():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT id, file_path
+        SELECT id, storage_key, original_filename
         FROM mail_attachments
         ORDER BY id
     """)
@@ -517,9 +524,10 @@ def analyze_attachments():
 
     for row in rows:
         attachment_id = row[0]
-        file_path = row[1] or ""
+        storage_key = row[1] or ""
+        original_filename = row[2] or ""
 
-        if not os.path.exists(file_path):
+        if not storage_key:
             cur.execute("""
                 UPDATE mail_attachments
                 SET extracted_text=%s,
@@ -529,17 +537,17 @@ def analyze_attachments():
                     analysis_status=%s
                 WHERE id=%s
             """, (
-                "DATEI_FEHLT_AUF_SERVER",
+                "KEIN_STORAGE_KEY",
                 "",
                 "",
                 "",
-                "datei fehlt",
+                "kein storage key",
                 attachment_id
             ))
             processed += 1
             continue
 
-        if not is_supported_analysis_file(file_path):
+        if not is_supported_analysis_file(original_filename):
             cur.execute("""
                 UPDATE mail_attachments
                 SET extracted_text=%s,
@@ -559,15 +567,13 @@ def analyze_attachments():
             processed += 1
             continue
 
-        text = extract_text_from_file(file_path)
+        text = extract_text_from_s3_object(storage_key, original_filename)
         amount = extract_amount(text)
         date = extract_date(text)
         vendor = extract_vendor(text)
 
         status = "ok"
-        if text == "DATEI_FEHLT_AUF_SERVER":
-            status = "datei fehlt"
-        elif text == "NICHT_ANALYSIERBAR":
+        if text == "NICHT_ANALYSIERBAR":
             status = "nicht analysierbar"
         elif text.startswith("ERROR:"):
             status = "analysefehler"
@@ -656,7 +662,7 @@ def attachment_log():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT trip_code, original_filename, detected_type, detected_amount, detected_date, detected_vendor, analysis_status, file_path
+        SELECT trip_code, original_filename, detected_type, detected_amount, detected_date, detected_vendor, analysis_status, storage_key
         FROM mail_attachments
         ORDER BY id DESC
         LIMIT 100
@@ -693,7 +699,7 @@ def attachment_log():
                 <th>Datum</th>
                 <th>Anbieter</th>
                 <th>Status</th>
-                <th>Pfad</th>
+                <th>Storage Key</th>
             </tr>
             {html}
         </table>
