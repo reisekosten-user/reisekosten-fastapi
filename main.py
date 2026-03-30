@@ -34,55 +34,239 @@ def ensure_dirs():
     os.makedirs(MAIL_ATTACHMENT_DIR, exist_ok=True)
 
 
-def extract_text_from_file(path):
+def extract_trip_code(text: str):
+    match = re.search(r"\b\d{2}-\d{3}\b", text)
+    return match.group(0) if match else None
+
+
+def decode_mime_header(value):
+    if not value:
+        return ""
+    decoded_parts = decode_header(value)
+    result = []
+    for part, encoding in decoded_parts:
+        if isinstance(part, bytes):
+            result.append(part.decode(encoding or "utf-8", errors="ignore"))
+        else:
+            result.append(part)
+    return "".join(result)
+
+
+def detect_mail_type(text: str):
+    t = text.lower()
+
+    if any(x in t for x in ["flug", "flight", "boarding", "boardingpass", "boarding pass", "pnr", "ticket", "airline"]):
+        return "Flug"
+    if any(x in t for x in ["hotel", "booking.com", "check-in", "check out", "check-out", "reservation", "zimmer"]):
+        return "Hotel"
+    if any(x in t for x in ["taxi", "uber", "cab"]):
+        return "Taxi"
+    if any(x in t for x in ["bahn", "zug", "train", "ice", "db "]):
+        return "Bahn"
+    if any(x in t for x in ["meal", "restaurant", "verpflegung", "essen", "dinner", "lunch", "breakfast"]):
+        return "Verpflegung"
+    if any(x in t for x in ["mietwagen", "rental car", "car rental", "hertz", "sixt", "avis"]):
+        return "Mietwagen"
+
+    return "Unbekannt"
+
+
+def detect_destination(text: str):
+    t = text.lower()
+
+    places = [
+        "delhi", "mumbai", "bangalore", "new york", "london", "paris",
+        "dubai", "shanghai", "beijing", "tokyo", "singapore", "mexico city",
+        "lyon", "frankfurt", "zaq"
+    ]
+
+    for place in places:
+        if place in t:
+            return place.title()
+
+    return ""
+
+
+def sanitize_filename(name: str):
+    name = name.replace("\\", "_").replace("/", "_").strip()
+    name = re.sub(r"[^A-Za-z0-9._ -]", "_", name)
+    return name[:180] if name else "attachment.bin"
+
+
+def detect_attachment_type(filename: str, subject: str, body: str):
+    text = f"{filename} {subject} {body}".lower()
+
+    if filename.lower().endswith(".ics"):
+        return "Kalendereintrag"
+    if filename.lower().endswith(".emz"):
+        return "Inline-Grafik"
+
+    if any(x in text for x in ["boarding", "boardingpass", "boarding pass", "eticket", "e-ticket", "flight", "flug", "ticket", "pnr"]):
+        return "Flug"
+    if any(x in text for x in ["hotel", "booking", "reservation", "zimmer", "check-in", "check-out"]):
+        return "Hotel"
+    if any(x in text for x in ["taxi", "uber", "cab"]):
+        return "Taxi"
+    if any(x in text for x in ["bahn", "zug", "train", "ice", "db"]):
+        return "Bahn"
+    if any(x in text for x in ["meal", "restaurant", "essen", "verpflegung", "breakfast", "lunch", "dinner"]):
+        return "Verpflegung"
+    if any(x in text for x in ["mietwagen", "rental", "car rental", "hertz", "sixt", "avis"]):
+        return "Mietwagen"
+
+    return "Unbekannt"
+
+
+def is_supported_analysis_file(path: str):
+    p = path.lower()
+    return p.endswith(".pdf") or p.endswith(".png") or p.endswith(".jpg") or p.endswith(".jpeg") or p.endswith(".webp")
+
+
+def extract_text_from_file(path: str):
+    if not os.path.exists(path):
+        return "DATEI_FEHLT_AUF_SERVER"
+
     text = ""
 
     try:
         if path.lower().endswith(".pdf"):
             with pdfplumber.open(path) as pdf:
                 for page in pdf.pages:
-                    text += page.extract_text() or ""
+                    text += (page.extract_text() or "") + "\n"
 
-        elif path.lower().endswith((".png", ".jpg", ".jpeg")):
+        elif path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
             img = Image.open(path)
             text = pytesseract.image_to_string(img)
 
+        else:
+            return "NICHT_ANALYSIERBAR"
+
     except Exception as e:
-        text = f"ERROR: {e}"
+        return f"ERROR: {e}"
 
-    return text[:10000]
+    text = text.strip()
+    return text[:10000] if text else "KEIN_TEXT_GEFUNDEN"
 
 
-def extract_amount(text):
+def extract_amount(text: str):
+    if not text:
+        return ""
     match = re.search(r"(\d+[.,]\d{2})\s?(€|eur)?", text.lower())
     return match.group(1) if match else ""
 
 
-def extract_date(text):
+def extract_date(text: str):
+    if not text:
+        return ""
     match = re.search(r"\d{2}[./]\d{2}[./]\d{4}", text)
     return match.group(0) if match else ""
 
 
-def extract_vendor(text):
+def extract_vendor(text: str):
+    if not text:
+        return ""
     lines = text.split("\n")
-    for l in lines[:5]:
-        if len(l.strip()) > 3:
-            return l.strip()
+    for line in lines[:8]:
+        cleaned = line.strip()
+        if len(cleaned) > 3 and "error:" not in cleaned.lower():
+            return cleaned[:200]
     return ""
 
 
-def page_shell(title, content):
+def page_shell(title: str, content: str):
     return f"""
     <html>
     <head>
         <meta charset="utf-8">
         <title>{title}</title>
+        <style>
+            body {{
+                font-family: Arial;
+                margin: 0;
+                background: #eef4fb;
+            }}
+            .topbar {{
+                background: #12365f;
+                color: white;
+                padding: 20px;
+                display: flex;
+                align-items: center;
+                gap: 15px;
+            }}
+            .topbar .logo-wrap {{
+                background: rgba(255,255,255,0.55);
+                padding: 10px 14px;
+                border-radius: 12px;
+                display: inline-flex;
+                align-items: center;
+            }}
+            .topbar img {{
+                height: 60px;
+                display: block;
+            }}
+            .wrap {{
+                padding: 20px;
+            }}
+            .card {{
+                background: white;
+                padding: 20px;
+                border-radius: 10px;
+                margin-bottom: 20px;
+            }}
+            .btn {{
+                background: #2a6ab1;
+                color: white;
+                padding: 10px 12px;
+                border: none;
+                border-radius: 6px;
+                text-decoration: none;
+                display: inline-block;
+            }}
+            .btn-light {{
+                background: white;
+                color: #2a6ab1;
+                padding: 10px 12px;
+                border: 1px solid #b8cbe0;
+                border-radius: 6px;
+                text-decoration: none;
+                display: inline-block;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                background: white;
+            }}
+            th, td {{
+                border: 1px solid #d9e2ec;
+                padding: 8px;
+                text-align: left;
+                vertical-align: top;
+            }}
+            th {{
+                background: #f4f7fb;
+            }}
+            .ok {{
+                color: #177245;
+                font-weight: bold;
+            }}
+            .warn {{
+                color: #b46b00;
+                font-weight: bold;
+            }}
+            .code {{
+                font-weight: bold;
+                color: #12365f;
+            }}
+        </style>
     </head>
-    <body style="font-family:Arial;background:#eef4fb">
-        <div style="padding:20px;background:#12365f;color:white;">
-            Herrhammer Reisekosten
+    <body>
+        <div class="topbar">
+            <div class="logo-wrap">
+                <img src="/static/herrhammer-logo.png" alt="Herrhammer Logo">
+            </div>
+            <h2>Herrhammer Reisekosten</h2>
         </div>
-        <div style="padding:20px;">
+        <div class="wrap">
             {content}
         </div>
     </body>
@@ -90,57 +274,322 @@ def page_shell(title, content):
     """
 
 
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return page_shell("Start", """
+    <div class="card">
+        <h2>Aktionen</h2>
+        <a class="btn" href="/init">Init / Migration</a><br><br>
+        <a class="btn" href="/fetch-mails">Mails abrufen</a><br><br>
+        <a class="btn" href="/mail-log">Mail Log</a><br><br>
+        <a class="btn" href="/attachment-log">Anhang Log</a><br><br>
+        <a class="btn" href="/analyze-attachments">Anhänge analysieren</a><br><br>
+        <a class="btn-light" href="/reset-mail-log">Mail Log löschen</a>
+    </div>
+    """)
+
+
 @app.get("/init")
 def init():
     ensure_dirs()
+
     conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS mail_attachments (
-            id SERIAL PRIMARY KEY
+        CREATE TABLE IF NOT EXISTS mail_messages (
+            id SERIAL PRIMARY KEY,
+            mail_uid TEXT UNIQUE
         )
     """)
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS sender TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS subject TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS body TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS trip_code TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_type TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_destination TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
 
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS file_path TEXT")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mail_attachments (
+            id SERIAL PRIMARY KEY,
+            mail_uid TEXT
+        )
+    """)
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS trip_code TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS original_filename TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS saved_filename TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS content_type TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS file_path TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_type TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS extracted_text TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_amount TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_date TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_vendor TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS analysis_status TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
 
     conn.commit()
     cur.close()
     conn.close()
 
-    return {"status": "init ok"}
+    return {"status": "ok"}
+
+
+@app.get("/reset-mail-log")
+def reset_mail_log():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("TRUNCATE TABLE mail_attachments RESTART IDENTITY")
+    cur.execute("TRUNCATE TABLE mail_messages RESTART IDENTITY")
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    ensure_dirs()
+    for path in Path(MAIL_ATTACHMENT_DIR).glob("*"):
+        if path.is_file():
+            path.unlink()
+
+    return {"status": "mail log und anhaenge geloescht"}
+
+
+@app.get("/fetch-mails", response_class=HTMLResponse)
+def fetch_mails():
+    try:
+        ensure_dirs()
+
+        mail = imaplib.IMAP4_SSL(IMAP_HOST)
+        mail.login(IMAP_USER, IMAP_PASS)
+        mail.select("INBOX")
+
+        status, data = mail.search(None, "ALL")
+        ids = data[0].split()[-20:]
+
+        conn = get_conn()
+        cur = conn.cursor()
+
+        imported = 0
+        skipped = 0
+        attachment_count = 0
+
+        for i in ids:
+            uid = i.decode()
+
+            cur.execute("SELECT id FROM mail_messages WHERE mail_uid=%s", (uid,))
+            if cur.fetchone():
+                skipped += 1
+                continue
+
+            _, msg_data = mail.fetch(i, "(RFC822)")
+            msg = email.message_from_bytes(msg_data[0][1])
+
+            subject = decode_mime_header(msg.get("Subject", ""))
+            sender = decode_mime_header(msg.get("From", ""))
+            body = ""
+
+            if msg.is_multipart():
+                for part in msg.walk():
+                    content_type = part.get_content_type()
+                    content_disposition = str(part.get("Content-Disposition") or "")
+
+                    if content_type == "text/plain" and "attachment" not in content_disposition.lower():
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            body = payload.decode(errors="ignore")
+                            break
+            else:
+                payload = msg.get_payload(decode=True)
+                if payload:
+                    body = payload.decode(errors="ignore")
+
+            full_text = subject + "\n" + body
+            code = extract_trip_code(full_text)
+            detected_type = detect_mail_type(full_text)
+            detected_destination = detect_destination(full_text)
+
+            cur.execute("""
+                INSERT INTO mail_messages
+                (mail_uid, sender, subject, body, trip_code, detected_type, detected_destination)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """, (uid, sender, subject, body, code, detected_type, detected_destination))
+
+            if msg.is_multipart():
+                for part in msg.walk():
+                    filename = part.get_filename()
+                    content_disposition = str(part.get("Content-Disposition") or "")
+                    if not filename and "attachment" not in content_disposition.lower():
+                        continue
+
+                    if filename:
+                        decoded_filename = decode_mime_header(filename)
+                    else:
+                        ext = ""
+                        content_type = part.get_content_type()
+                        if content_type == "application/pdf":
+                            ext = ".pdf"
+                        elif content_type.startswith("image/jpeg"):
+                            ext = ".jpg"
+                        elif content_type.startswith("image/png"):
+                            ext = ".png"
+                        elif content_type.startswith("image/webp"):
+                            ext = ".webp"
+                        elif content_type == "text/calendar":
+                            ext = ".ics"
+                        else:
+                            ext = ".bin"
+                        decoded_filename = f"attachment{ext}"
+
+                    payload = part.get_payload(decode=True)
+                    if not payload:
+                        continue
+
+                    safe_original = sanitize_filename(decoded_filename)
+                    saved_filename = f"{uid}_{safe_original}"
+                    file_path = os.path.join(MAIL_ATTACHMENT_DIR, saved_filename)
+
+                    with open(file_path, "wb") as f:
+                        f.write(payload)
+
+                    attachment_type = detect_attachment_type(
+                        safe_original,
+                        subject,
+                        body
+                    )
+
+                    cur.execute("""
+                        INSERT INTO mail_attachments
+                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path, detected_type, analysis_status)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, (
+                        uid,
+                        code,
+                        safe_original,
+                        saved_filename,
+                        part.get_content_type(),
+                        file_path,
+                        attachment_type,
+                        "neu"
+                    ))
+
+                    attachment_count += 1
+
+            imported += 1
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        mail.logout()
+
+        return page_shell("Mails importiert", f"""
+        <div class="card">
+            <h2 class="ok">Mailabruf erfolgreich</h2>
+            <p><b>Neu importierte Mails:</b> {imported}</p>
+            <p><b>Übersprungen (schon vorhanden):</b> {skipped}</p>
+            <p><b>Gespeicherte Anhänge:</b> {attachment_count}</p>
+            <a class="btn" href="/mail-log">Zum Mail Log</a>
+            <a class="btn-light" href="/attachment-log">Zum Anhang Log</a>
+        </div>
+        """)
+
+    except Exception as e:
+        return page_shell("Fehler", f"""
+        <div class="card">
+            <h2 class="warn">Fehler beim Mailabruf</h2>
+            <p>{e}</p>
+        </div>
+        """)
 
 
 @app.get("/analyze-attachments", response_class=HTMLResponse)
-def analyze():
+def analyze_attachments():
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("SELECT id, file_path FROM mail_attachments")
+    cur.execute("""
+        SELECT id, file_path
+        FROM mail_attachments
+        ORDER BY id
+    """)
     rows = cur.fetchall()
 
     processed = 0
 
-    for r in rows:
-        text = extract_text_from_file(r[1])
+    for row in rows:
+        attachment_id = row[0]
+        file_path = row[1] or ""
 
+        if not os.path.exists(file_path):
+            cur.execute("""
+                UPDATE mail_attachments
+                SET extracted_text=%s,
+                    detected_amount=%s,
+                    detected_date=%s,
+                    detected_vendor=%s,
+                    analysis_status=%s
+                WHERE id=%s
+            """, (
+                "DATEI_FEHLT_AUF_SERVER",
+                "",
+                "",
+                "",
+                "datei fehlt",
+                attachment_id
+            ))
+            processed += 1
+            continue
+
+        if not is_supported_analysis_file(file_path):
+            cur.execute("""
+                UPDATE mail_attachments
+                SET extracted_text=%s,
+                    detected_amount=%s,
+                    detected_date=%s,
+                    detected_vendor=%s,
+                    analysis_status=%s
+                WHERE id=%s
+            """, (
+                "NICHT_ANALYSIERBAR",
+                "",
+                "",
+                "",
+                "nicht analysierbar",
+                attachment_id
+            ))
+            processed += 1
+            continue
+
+        text = extract_text_from_file(file_path)
         amount = extract_amount(text)
         date = extract_date(text)
         vendor = extract_vendor(text)
+
+        status = "ok"
+        if text == "DATEI_FEHLT_AUF_SERVER":
+            status = "datei fehlt"
+        elif text == "NICHT_ANALYSIERBAR":
+            status = "nicht analysierbar"
+        elif text.startswith("ERROR:"):
+            status = "analysefehler"
+        elif text == "KEIN_TEXT_GEFUNDEN":
+            status = "kein text"
 
         cur.execute("""
             UPDATE mail_attachments
             SET extracted_text=%s,
                 detected_amount=%s,
                 detected_date=%s,
-                detected_vendor=%s
+                detected_vendor=%s,
+                analysis_status=%s
             WHERE id=%s
-        """, (text, amount, date, vendor, r[0]))
+        """, (
+            text,
+            amount,
+            date,
+            vendor,
+            status,
+            attachment_id
+        ))
 
         processed += 1
 
@@ -148,37 +597,105 @@ def analyze():
     cur.close()
     conn.close()
 
-    return page_shell("Analyse", f"<h2>{processed} Anhänge analysiert</h2>")
+    return page_shell("Analyse", f"""
+    <div class="card">
+        <h2 class="ok">{processed} Anhänge analysiert</h2>
+        <a class="btn" href="/attachment-log">Zum Anhang Log</a>
+    </div>
+    """)
 
 
-@app.get("/attachment-log", response_class=HTMLResponse)
-def log():
+@app.get("/mail-log", response_class=HTMLResponse)
+def mail_log():
     conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT original_filename, detected_amount, detected_date, detected_vendor
-        FROM mail_attachments
+        SELECT sender, subject, trip_code, detected_type, detected_destination
+        FROM mail_messages
         ORDER BY id DESC
         LIMIT 50
     """)
-
     rows = cur.fetchall()
 
     html = ""
     for r in rows:
         html += f"""
         <tr>
-            <td>{r[0]}</td>
-            <td>{r[1]}</td>
-            <td>{r[2]}</td>
-            <td>{r[3]}</td>
+            <td>{r[0] or ''}</td>
+            <td>{r[1] or ''}</td>
+            <td class="code">{r[2] or ''}</td>
+            <td>{r[3] or ''}</td>
+            <td>{r[4] or ''}</td>
         </tr>
         """
 
-    return page_shell("Log", f"""
-    <table border=1>
-        <tr><th>Datei</th><th>Betrag</th><th>Datum</th><th>Anbieter</th></tr>
-        {html}
-    </table>
+    cur.close()
+    conn.close()
+
+    return page_shell("Mail Log", f"""
+    <div class="card">
+        <h2>Mail Log mit Erkennung</h2>
+        <table>
+            <tr>
+                <th>Von</th>
+                <th>Betreff</th>
+                <th>Code</th>
+                <th>Typ erkannt</th>
+                <th>Ziel erkannt</th>
+            </tr>
+            {html}
+        </table>
+    </div>
+    """)
+
+
+@app.get("/attachment-log", response_class=HTMLResponse)
+def attachment_log():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT trip_code, original_filename, detected_type, detected_amount, detected_date, detected_vendor, analysis_status, file_path
+        FROM mail_attachments
+        ORDER BY id DESC
+        LIMIT 100
+    """)
+    rows = cur.fetchall()
+
+    html = ""
+    for r in rows:
+        html += f"""
+        <tr>
+            <td class="code">{r[0] or ''}</td>
+            <td>{r[1] or ''}</td>
+            <td>{r[2] or ''}</td>
+            <td>{r[3] or ''}</td>
+            <td>{r[4] or ''}</td>
+            <td>{r[5] or ''}</td>
+            <td>{r[6] or ''}</td>
+            <td>{r[7] or ''}</td>
+        </tr>
+        """
+
+    cur.close()
+    conn.close()
+
+    return page_shell("Anhang Log", f"""
+    <div class="card">
+        <h2>Anhang Log mit Analyse</h2>
+        <table>
+            <tr>
+                <th>Code</th>
+                <th>Datei</th>
+                <th>Typ erkannt</th>
+                <th>Betrag</th>
+                <th>Datum</th>
+                <th>Anbieter</th>
+                <th>Status</th>
+                <th>Pfad</th>
+            </tr>
+            {html}
+        </table>
+    </div>
     """)
