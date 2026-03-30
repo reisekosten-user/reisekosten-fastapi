@@ -7,7 +7,6 @@ import imaplib
 import email
 from email.header import decode_header
 import re
-import shutil
 from pathlib import Path
 
 app = FastAPI()
@@ -88,6 +87,30 @@ def sanitize_filename(name: str):
     name = name.replace("\\", "_").replace("/", "_").strip()
     name = re.sub(r"[^A-Za-z0-9._ -]", "_", name)
     return name[:180] if name else "attachment.bin"
+
+
+def detect_attachment_type(filename: str, subject: str, body: str):
+    text = f"{filename} {subject} {body}".lower()
+
+    if any(x in text for x in ["boarding", "boardingpass", "boarding pass", "eticket", "e-ticket", "flight", "flug", "ticket", "pnr"]):
+        return "Flug"
+
+    if any(x in text for x in ["hotel", "booking", "reservation", "zimmer", "check-in", "check-out"]):
+        return "Hotel"
+
+    if any(x in text for x in ["taxi", "uber", "cab"]):
+        return "Taxi"
+
+    if any(x in text for x in ["bahn", "zug", "train", "ice", "db"]):
+        return "Bahn"
+
+    if any(x in text for x in ["meal", "restaurant", "essen", "verpflegung", "breakfast", "lunch", "dinner"]):
+        return "Verpflegung"
+
+    if any(x in text for x in ["mietwagen", "rental", "car rental", "hertz", "sixt", "avis"]):
+        return "Mietwagen"
+
+    return "Unbekannt"
 
 
 def page_shell(title: str, content: str):
@@ -229,15 +252,16 @@ def init():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS mail_attachments (
             id SERIAL PRIMARY KEY,
-            mail_uid TEXT,
-            trip_code TEXT,
-            original_filename TEXT,
-            saved_filename TEXT,
-            content_type TEXT,
-            file_path TEXT,
-            created_at TIMESTAMP DEFAULT now()
+            mail_uid TEXT
         )
     """)
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS trip_code TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS original_filename TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS saved_filename TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS content_type TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS file_path TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_type TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
 
     conn.commit()
     cur.close()
@@ -256,7 +280,6 @@ def reset_mail_log():
     cur.close()
     conn.close()
 
-    # Dateien optional mit löschen
     ensure_dirs()
     for path in Path(MAIL_ATTACHMENT_DIR).glob("*"):
         if path.is_file():
@@ -325,7 +348,6 @@ def fetch_mails():
                 VALUES (%s,%s,%s,%s,%s,%s,%s)
             """, (uid, sender, subject, body, code, detected_type, detected_destination))
 
-            # Anhänge speichern
             if msg.is_multipart():
                 for part in msg.walk():
                     filename = part.get_filename()
@@ -359,17 +381,24 @@ def fetch_mails():
                     with open(file_path, "wb") as f:
                         f.write(payload)
 
+                    attachment_type = detect_attachment_type(
+                        safe_original,
+                        subject,
+                        body
+                    )
+
                     cur.execute("""
                         INSERT INTO mail_attachments
-                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path)
-                        VALUES (%s,%s,%s,%s,%s,%s)
+                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path, detected_type)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s)
                     """, (
                         uid,
                         code,
                         safe_original,
                         saved_filename,
                         part.get_content_type(),
-                        file_path
+                        file_path,
+                        attachment_type
                     ))
 
                     attachment_count += 1
@@ -452,7 +481,7 @@ def attachment_log():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT trip_code, original_filename, content_type, file_path, created_at
+        SELECT trip_code, original_filename, detected_type, content_type, file_path, created_at
         FROM mail_attachments
         ORDER BY id DESC
         LIMIT 100
@@ -468,6 +497,7 @@ def attachment_log():
             <td>{r[2] or ''}</td>
             <td>{r[3] or ''}</td>
             <td>{r[4] or ''}</td>
+            <td>{r[5] or ''}</td>
         </tr>
         """
 
@@ -476,12 +506,13 @@ def attachment_log():
 
     return page_shell("Anhang Log", f"""
     <div class="card">
-        <h2>Mail-Anhänge</h2>
+        <h2>Anhang Log mit Typ-Erkennung</h2>
         <table>
             <tr>
                 <th>Code</th>
                 <th>Datei</th>
-                <th>Typ</th>
+                <th>Typ erkannt</th>
+                <th>Content-Type</th>
                 <th>Pfad</th>
                 <th>Zeitpunkt</th>
             </tr>
@@ -489,16 +520,3 @@ def attachment_log():
         </table>
     </div>
     """)
-@app.get("/reset-mail-log")
-def reset_mail_log():
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("TRUNCATE TABLE mail_attachments RESTART IDENTITY")
-    cur.execute("TRUNCATE TABLE mail_messages RESTART IDENTITY")
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    return {"status": "mail log und anhaenge geloescht"}
