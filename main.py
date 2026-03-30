@@ -7,6 +7,8 @@ import imaplib
 import email
 from email.header import decode_header
 import re
+import shutil
+from pathlib import Path
 
 app = FastAPI()
 
@@ -15,11 +17,19 @@ IMAP_HOST = os.getenv("IMAP_HOST")
 IMAP_USER = os.getenv("IMAP_USER")
 IMAP_PASS = os.getenv("IMAP_PASS")
 
+UPLOAD_DIR = "uploads"
+MAIL_ATTACHMENT_DIR = os.path.join(UPLOAD_DIR, "mail_attachments")
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
+
+
+def ensure_dirs():
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(MAIL_ATTACHMENT_DIR, exist_ok=True)
 
 
 def extract_trip_code(text: str):
@@ -72,6 +82,12 @@ def detect_destination(text: str):
             return place.title()
 
     return ""
+
+
+def sanitize_filename(name: str):
+    name = name.replace("\\", "_").replace("/", "_").strip()
+    name = re.sub(r"[^A-Za-z0-9._ -]", "_", name)
+    return name[:180] if name else "attachment.bin"
 
 
 def page_shell(title: str, content: str):
@@ -154,6 +170,10 @@ def page_shell(title: str, content: str):
                 color: #b46b00;
                 font-weight: bold;
             }}
+            .code {{
+                font-weight: bold;
+                color: #12365f;
+            }}
         </style>
     </head>
     <body>
@@ -179,13 +199,16 @@ def home():
         <a class="btn" href="/init">Init / Migration</a><br><br>
         <a class="btn" href="/fetch-mails">Mails abrufen</a><br><br>
         <a class="btn" href="/mail-log">Mail Log</a><br><br>
-        <a class="btn-light" href="/reset-mail-log">Nur Mail-Log löschen</a>
+        <a class="btn" href="/attachment-log">Anhang Log</a><br><br>
+        <a class="btn-light" href="/reset-mail-log">Mail Log löschen</a>
     </div>
     """)
 
 
 @app.get("/init")
 def init():
+    ensure_dirs()
+
     conn = get_conn()
     cur = conn.cursor()
 
@@ -195,7 +218,6 @@ def init():
             mail_uid TEXT UNIQUE
         )
     """)
-
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS sender TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS subject TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS body TEXT")
@@ -203,6 +225,19 @@ def init():
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_type TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_destination TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mail_attachments (
+            id SERIAL PRIMARY KEY,
+            mail_uid TEXT,
+            trip_code TEXT,
+            original_filename TEXT,
+            saved_filename TEXT,
+            content_type TEXT,
+            file_path TEXT,
+            created_at TIMESTAMP DEFAULT now()
+        )
+    """)
 
     conn.commit()
     cur.close()
@@ -215,19 +250,26 @@ def init():
 def reset_mail_log():
     conn = get_conn()
     cur = conn.cursor()
-
+    cur.execute("TRUNCATE TABLE mail_attachments RESTART IDENTITY")
     cur.execute("TRUNCATE TABLE mail_messages RESTART IDENTITY")
-
     conn.commit()
     cur.close()
     conn.close()
 
-    return {"status": "mail log gelöscht"}
+    # Dateien optional mit löschen
+    ensure_dirs()
+    for path in Path(MAIL_ATTACHMENT_DIR).glob("*"):
+        if path.is_file():
+            path.unlink()
+
+    return {"status": "mail log und anhaenge geloescht"}
 
 
 @app.get("/fetch-mails", response_class=HTMLResponse)
 def fetch_mails():
     try:
+        ensure_dirs()
+
         mail = imaplib.IMAP4_SSL(IMAP_HOST)
         mail.login(IMAP_USER, IMAP_PASS)
         mail.select("INBOX")
@@ -240,6 +282,7 @@ def fetch_mails():
 
         imported = 0
         skipped = 0
+        attachment_count = 0
 
         for i in ids:
             uid = i.decode()
@@ -258,7 +301,10 @@ def fetch_mails():
 
             if msg.is_multipart():
                 for part in msg.walk():
-                    if part.get_content_type() == "text/plain":
+                    content_type = part.get_content_type()
+                    content_disposition = str(part.get("Content-Disposition") or "")
+
+                    if content_type == "text/plain" and "attachment" not in content_disposition.lower():
                         payload = part.get_payload(decode=True)
                         if payload:
                             body = payload.decode(errors="ignore")
@@ -279,6 +325,55 @@ def fetch_mails():
                 VALUES (%s,%s,%s,%s,%s,%s,%s)
             """, (uid, sender, subject, body, code, detected_type, detected_destination))
 
+            # Anhänge speichern
+            if msg.is_multipart():
+                for part in msg.walk():
+                    filename = part.get_filename()
+                    content_disposition = str(part.get("Content-Disposition") or "")
+                    if not filename and "attachment" not in content_disposition.lower():
+                        continue
+
+                    if filename:
+                        decoded_filename = decode_mime_header(filename)
+                    else:
+                        ext = ""
+                        content_type = part.get_content_type()
+                        if content_type == "application/pdf":
+                            ext = ".pdf"
+                        elif content_type.startswith("image/jpeg"):
+                            ext = ".jpg"
+                        elif content_type.startswith("image/png"):
+                            ext = ".png"
+                        elif content_type.startswith("image/webp"):
+                            ext = ".webp"
+                        decoded_filename = f"attachment{ext}"
+
+                    payload = part.get_payload(decode=True)
+                    if not payload:
+                        continue
+
+                    safe_original = sanitize_filename(decoded_filename)
+                    saved_filename = f"{uid}_{safe_original}"
+                    file_path = os.path.join(MAIL_ATTACHMENT_DIR, saved_filename)
+
+                    with open(file_path, "wb") as f:
+                        f.write(payload)
+
+                    cur.execute("""
+                        INSERT INTO mail_attachments
+                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path)
+                        VALUES (%s,%s,%s,%s,%s,%s)
+                    """, (
+                        uid,
+                        code,
+                        safe_original,
+                        saved_filename,
+                        part.get_content_type(),
+                        file_path
+                    ))
+
+                    attachment_count += 1
+
             imported += 1
 
         conn.commit()
@@ -289,9 +384,11 @@ def fetch_mails():
         return page_shell("Mails importiert", f"""
         <div class="card">
             <h2 class="ok">Mailabruf erfolgreich</h2>
-            <p><b>Neu importiert:</b> {imported}</p>
+            <p><b>Neu importierte Mails:</b> {imported}</p>
             <p><b>Übersprungen (schon vorhanden):</b> {skipped}</p>
+            <p><b>Gespeicherte Anhänge:</b> {attachment_count}</p>
             <a class="btn" href="/mail-log">Zum Mail Log</a>
+            <a class="btn-light" href="/attachment-log">Zum Anhang Log</a>
         </div>
         """)
 
@@ -323,7 +420,7 @@ def mail_log():
         <tr>
             <td>{r[0] or ''}</td>
             <td>{r[1] or ''}</td>
-            <td>{r[2] or ''}</td>
+            <td class="code">{r[2] or ''}</td>
             <td>{r[3] or ''}</td>
             <td>{r[4] or ''}</td>
         </tr>
@@ -342,6 +439,51 @@ def mail_log():
                 <th>Code</th>
                 <th>Typ erkannt</th>
                 <th>Ziel erkannt</th>
+            </tr>
+            {html}
+        </table>
+    </div>
+    """)
+
+
+@app.get("/attachment-log", response_class=HTMLResponse)
+def attachment_log():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT trip_code, original_filename, content_type, file_path, created_at
+        FROM mail_attachments
+        ORDER BY id DESC
+        LIMIT 100
+    """)
+    rows = cur.fetchall()
+
+    html = ""
+    for r in rows:
+        html += f"""
+        <tr>
+            <td class="code">{r[0] or ''}</td>
+            <td>{r[1] or ''}</td>
+            <td>{r[2] or ''}</td>
+            <td>{r[3] or ''}</td>
+            <td>{r[4] or ''}</td>
+        </tr>
+        """
+
+    cur.close()
+    conn.close()
+
+    return page_shell("Anhang Log", f"""
+    <div class="card">
+        <h2>Mail-Anhänge</h2>
+        <table>
+            <tr>
+                <th>Code</th>
+                <th>Datei</th>
+                <th>Typ</th>
+                <th>Pfad</th>
+                <th>Zeitpunkt</th>
             </tr>
             {html}
         </table>
