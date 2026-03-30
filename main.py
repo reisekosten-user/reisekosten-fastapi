@@ -9,8 +9,6 @@ from email.header import decode_header
 import re
 import boto3
 import pdfplumber
-from PIL import Image
-import pytesseract
 from io import BytesIO
 
 app = FastAPI()
@@ -134,8 +132,13 @@ def is_supported_analysis_file(filename: str):
 def extract_amount(text: str):
     if not text:
         return ""
-    match = re.search(r"(\d+[.,]\d{2})\s?(€|eur)?", text.lower())
-    return match.group(1) if match else ""
+
+    matches = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", text)
+
+    if matches:
+        return matches[0]
+
+    return ""
 
 
 def extract_date(text: str):
@@ -148,18 +151,31 @@ def extract_date(text: str):
 def extract_vendor(text: str):
     if not text:
         return ""
-    lines = text.split("\n")
-    for line in lines[:8]:
-        cleaned = line.strip()
-        if len(cleaned) > 3 and "error:" not in cleaned.lower():
-            return cleaned[:200]
+
+    keywords = [
+        "lufthansa", "air france", "klm", "ryanair",
+        "uber", "taxi", "bolt",
+        "hotel", "marriott", "hilton", "booking"
+    ]
+
+    lower = text.lower()
+
+    for k in keywords:
+        if k in lower:
+            return k.title()
+
+    for line in text.split("\n")[:10]:
+        l = line.strip()
+        if len(l) > 5 and not l.lower().startswith("ihre"):
+            return l[:100]
+
     return ""
 
 
-def extract_text_from_s3_object(object_key: str, filename: str):
+def extract_text_from_s3_object(storage_key: str, filename: str):
     try:
         s3 = get_s3()
-        response = s3.get_object(Bucket=S3_BUCKET, Key=object_key)
+        response = s3.get_object(Bucket=S3_BUCKET, Key=storage_key)
         file_bytes = response["Body"].read()
 
         if filename.lower().endswith(".pdf"):
@@ -171,9 +187,7 @@ def extract_text_from_s3_object(object_key: str, filename: str):
             return text[:10000] if text else "KEIN_TEXT_GEFUNDEN"
 
         if filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-            img = Image.open(BytesIO(file_bytes))
-            text = pytesseract.image_to_string(img).strip()
-            return text[:10000] if text else "KEIN_TEXT_GEFUNDEN"
+            return "BILD_OHNE_OCR"
 
         return "NICHT_ANALYSIERBAR"
 
@@ -575,6 +589,8 @@ def analyze_attachments():
         status = "ok"
         if text == "NICHT_ANALYSIERBAR":
             status = "nicht analysierbar"
+        elif text == "BILD_OHNE_OCR":
+            status = "ocr fehlt"
         elif text.startswith("ERROR:"):
             status = "analysefehler"
         elif text == "KEIN_TEXT_GEFUNDEN":
