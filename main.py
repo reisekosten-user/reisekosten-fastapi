@@ -489,3 +489,16 @@ def attachment_log():
         </table>
     </div>
     """)
+@app.get("/reset-mail-log")
+def reset_mail_log():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("TRUNCATE TABLE mail_attachments RESTART IDENTITY")
+    cur.execute("TRUNCATE TABLE mail_messages RESTART IDENTITY")
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"status": "mail log und anhaenge geloescht"}
