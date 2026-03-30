@@ -10,6 +10,8 @@ import re
 import boto3
 import pdfplumber
 from io import BytesIO
+from PIL import Image, ImageOps, ImageFilter
+import pytesseract
 
 app = FastAPI()
 
@@ -224,6 +226,26 @@ def extract_vendor(text: str, detected_type: str):
     return ""
 
 
+def preprocess_image_for_ocr(image: Image.Image) -> Image.Image:
+    img = image.convert("L")
+    img = ImageOps.autocontrast(img)
+    img = img.filter(ImageFilter.SHARPEN)
+    img = img.point(lambda x: 0 if x < 160 else 255, mode="1")
+    return img
+
+
+def run_ocr_on_image(image: Image.Image) -> str:
+    try:
+        processed = preprocess_image_for_ocr(image)
+        text = pytesseract.image_to_string(processed, lang="eng")
+        text = (text or "").strip()
+        return text[:10000] if text else "KEIN_TEXT_GEFUNDEN"
+    except pytesseract.TesseractNotFoundError:
+        return "OCR_NICHT_VERFUEGBAR"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
 def extract_text_from_s3_object(storage_key: str, filename: str):
     try:
         s3 = get_s3()
@@ -234,12 +256,19 @@ def extract_text_from_s3_object(storage_key: str, filename: str):
             text = ""
             with pdfplumber.open(BytesIO(file_bytes)) as pdf:
                 for page in pdf.pages:
-                    text += (page.extract_text() or "") + "\n"
+                    page_text = page.extract_text() or ""
+                    text += page_text + "\n"
+
             text = text.strip()
-            return text[:10000] if text else "KEIN_TEXT_GEFUNDEN"
+            if text:
+                return text[:10000]
+
+            # Falls PDF keinen eingebetteten Text hat, OCR auf erste Seitenbilder wäre später Stufe 2.
+            return "KEIN_TEXT_GEFUNDEN"
 
         if filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-            return "BILD_OHNE_OCR"
+            img = Image.open(BytesIO(file_bytes))
+            return run_ocr_on_image(img)
 
         return "NICHT_ANALYSIERBAR"
 
@@ -269,7 +298,7 @@ def compute_confidence(detected_type: str, amount: str, date: str, vendor: str, 
 
 
 def compute_review_flag(confidence: str, status: str):
-    if status in ["analysefehler", "ocr fehlt", "datei fehlt", "kein text"]:
+    if status in ["analysefehler", "ocr fehlt", "ocr nicht verfuegbar", "datei fehlt", "kein text"]:
         return "pruefen"
     if confidence == "niedrig":
         return "pruefen"
@@ -699,6 +728,8 @@ def analyze_attachments():
             status = "nicht analysierbar"
         elif text == "BILD_OHNE_OCR":
             status = "ocr fehlt"
+        elif text == "OCR_NICHT_VERFUEGBAR":
+            status = "ocr nicht verfuegbar"
         elif text.startswith("ERROR:"):
             status = "analysefehler"
         elif text == "KEIN_TEXT_GEFUNDEN":
@@ -775,9 +806,9 @@ def trip_review():
 
         if trip_code == "":
             errors.append("Einträge ohne Reisecode")
-
-        if has_flight and not has_hotel:
-            warnings.append("Hotel fehlt")
+        else:
+            if has_flight and not has_hotel:
+                warnings.append("Hotel fehlt")
 
         if errors:
             badge = '<span class="badge-bad">Fehler</span>'
