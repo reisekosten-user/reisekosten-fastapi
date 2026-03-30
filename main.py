@@ -80,17 +80,14 @@ def detect_mail_type(text: str):
 
 def detect_destination(text: str):
     t = text.lower()
-
     places = [
         "delhi", "mumbai", "bangalore", "new york", "london", "paris",
         "dubai", "shanghai", "beijing", "tokyo", "singapore", "mexico city",
         "lyon", "frankfurt", "zaq"
     ]
-
     for place in places:
         if place in t:
             return place.title()
-
     return ""
 
 
@@ -108,11 +105,11 @@ def detect_attachment_type(filename: str, subject: str, body: str):
     if filename.lower().endswith(".emz"):
         return "Inline-Grafik"
 
-    if any(x in text for x in ["boarding", "boardingpass", "boarding pass", "eticket", "e-ticket", "flight", "flug", "ticket", "pnr"]):
+    if any(x in text for x in ["boarding", "boardingpass", "boarding pass", "eticket", "e-ticket", "flight", "flug", "ticket", "pnr", "itinerary"]):
         return "Flug"
     if any(x in text for x in ["hotel", "booking", "reservation", "zimmer", "check-in", "check-out"]):
         return "Hotel"
-    if any(x in text for x in ["taxi", "uber", "cab"]):
+    if any(x in text for x in ["taxi", "uber", "cab", "receipt_"]):
         return "Taxi"
     if any(x in text for x in ["bahn", "zug", "train", "ice", "db"]):
         return "Bahn"
@@ -129,45 +126,114 @@ def is_supported_analysis_file(filename: str):
     return f.endswith(".pdf") or f.endswith(".png") or f.endswith(".jpg") or f.endswith(".jpeg") or f.endswith(".webp")
 
 
-def extract_amount(text: str):
+def extract_amount(text: str, detected_type: str):
     if not text:
         return ""
 
-    matches = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", text)
+    candidates = re.findall(r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b", text)
 
-    if matches:
-        return matches[0]
+    cleaned = []
+    for c in candidates:
+        if re.match(r"\b\d{2},\d{2}\b", c):
+            cleaned.append(c)
+        elif re.match(r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b", c):
+            cleaned.append(c)
 
-    return ""
+    if not cleaned:
+        return ""
+
+    def to_float(v):
+        return float(v.replace(".", "").replace(",", "."))
+
+    values = []
+    for c in cleaned:
+        try:
+            values.append((c, to_float(c)))
+        except Exception:
+            pass
+
+    if not values:
+        return ""
+
+    # Typ-spezifische Plausibilität
+    if detected_type == "Taxi":
+        plausible = [x for x in values if 2 <= x[1] <= 300]
+        if plausible:
+            return plausible[-1][0]
+
+    if detected_type == "Hotel":
+        plausible = [x for x in values if 20 <= x[1] <= 5000]
+        if plausible:
+            return plausible[-1][0]
+
+    if detected_type == "Flug":
+        plausible = [x for x in values if 20 <= x[1] <= 5000]
+        if plausible:
+            return plausible[-1][0]
+
+    return values[-1][0]
 
 
 def extract_date(text: str):
     if not text:
         return ""
-    match = re.search(r"\d{2}[./]\d{2}[./]\d{4}", text)
-    return match.group(0) if match else ""
+
+    patterns = [
+        r"\b\d{2}[./]\d{2}[./]\d{4}\b",
+        r"\b\d{1,2}\s+[A-Za-zäöüÄÖÜ]+\s+\d{4}\b"
+    ]
+
+    for p in patterns:
+        match = re.search(p, text)
+        if match:
+            return match.group(0)
+
+    return ""
 
 
-def extract_vendor(text: str):
+def extract_vendor(text: str, detected_type: str):
     if not text:
         return ""
 
-    keywords = [
-        "lufthansa", "air france", "klm", "ryanair",
-        "uber", "taxi", "bolt",
-        "hotel", "marriott", "hilton", "booking"
-    ]
-
     lower = text.lower()
 
+    vendor_groups = {
+        "Flug": [
+            "lufthansa", "air france", "klm", "ryanair", "austrian",
+            "azerbaijan airlines", "azal", "turkish airlines", "emirates",
+            "qatar airways", "air india"
+        ],
+        "Taxi": [
+            "uber", "bolt", "taxi", "free now", "lyft"
+        ],
+        "Hotel": [
+            "marriott", "hilton", "booking", "novotel", "ibis",
+            "hyatt", "radisson", "holiday inn", "hotel"
+        ],
+        "Bahn": [
+            "deutsche bahn", "db", "sncf", "trenitalia", "rail"
+        ],
+        "Mietwagen": [
+            "hertz", "sixt", "avis", "europcar", "enterprise"
+        ]
+    }
+
+    keywords = vendor_groups.get(detected_type, [])
     for k in keywords:
         if k in lower:
             return k.title()
 
-    for line in text.split("\n")[:10]:
+    # fallback: erste brauchbare Zeile, aber offensichtliche Systemzeilen überspringen
+    bad_starts = ["ihre", "booking reference", "buchungsreferenz", "receipt", "invoice number", "datum", "date"]
+    for line in text.split("\n")[:15]:
         l = line.strip()
-        if len(l) > 5 and not l.lower().startswith("ihre"):
-            return l[:100]
+        if len(l) < 4:
+            continue
+        if any(l.lower().startswith(x) for x in bad_starts):
+            continue
+        if re.search(r"\d{2}[./]\d{2}[./]\d{4}", l):
+            continue
+        return l[:100]
 
     return ""
 
@@ -193,6 +259,35 @@ def extract_text_from_s3_object(storage_key: str, filename: str):
 
     except Exception as e:
         return f"ERROR: {e}"
+
+
+def compute_confidence(detected_type: str, amount: str, date: str, vendor: str, status: str):
+    if status != "ok":
+        return "niedrig"
+
+    score = 0
+    if detected_type and detected_type != "Unbekannt":
+        score += 1
+    if amount:
+        score += 1
+    if date:
+        score += 1
+    if vendor:
+        score += 1
+
+    if score >= 4:
+        return "hoch"
+    if score >= 2:
+        return "mittel"
+    return "niedrig"
+
+
+def compute_review_flag(confidence: str, status: str):
+    if status in ["analysefehler", "ocr fehlt", "datei fehlt", "kein text"]:
+        return "pruefen"
+    if confidence == "niedrig":
+        return "pruefen"
+    return "ok"
 
 
 def page_shell(title: str, content: str):
@@ -348,6 +443,8 @@ def init():
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_vendor TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS analysis_status TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS storage_key TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS confidence TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS review_flag TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
 
     conn.commit()
@@ -479,8 +576,8 @@ def fetch_mails():
 
                     cur.execute("""
                         INSERT INTO mail_attachments
-                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path, detected_type, analysis_status, storage_key)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path, detected_type, analysis_status, storage_key, confidence, review_flag)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (
                         uid,
                         code,
@@ -490,7 +587,9 @@ def fetch_mails():
                         storage_key,
                         attachment_type,
                         "neu",
-                        storage_key
+                        storage_key,
+                        "niedrig",
+                        "pruefen"
                     ))
 
                     attachment_count += 1
@@ -528,7 +627,7 @@ def analyze_attachments():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT id, storage_key, original_filename
+        SELECT id, storage_key, original_filename, detected_type
         FROM mail_attachments
         ORDER BY id
     """)
@@ -540,51 +639,52 @@ def analyze_attachments():
         attachment_id = row[0]
         storage_key = row[1] or ""
         original_filename = row[2] or ""
+        detected_type = row[3] or "Unbekannt"
 
         if not storage_key:
+            status = "kein storage key"
+            confidence = "niedrig"
+            review_flag = "pruefen"
             cur.execute("""
                 UPDATE mail_attachments
                 SET extracted_text=%s,
                     detected_amount=%s,
                     detected_date=%s,
                     detected_vendor=%s,
-                    analysis_status=%s
+                    analysis_status=%s,
+                    confidence=%s,
+                    review_flag=%s
                 WHERE id=%s
             """, (
-                "KEIN_STORAGE_KEY",
-                "",
-                "",
-                "",
-                "kein storage key",
-                attachment_id
+                "KEIN_STORAGE_KEY", "", "", "", status, confidence, review_flag, attachment_id
             ))
             processed += 1
             continue
 
         if not is_supported_analysis_file(original_filename):
+            status = "nicht analysierbar"
+            confidence = "niedrig"
+            review_flag = "pruefen"
             cur.execute("""
                 UPDATE mail_attachments
                 SET extracted_text=%s,
                     detected_amount=%s,
                     detected_date=%s,
                     detected_vendor=%s,
-                    analysis_status=%s
+                    analysis_status=%s,
+                    confidence=%s,
+                    review_flag=%s
                 WHERE id=%s
             """, (
-                "NICHT_ANALYSIERBAR",
-                "",
-                "",
-                "",
-                "nicht analysierbar",
-                attachment_id
+                "NICHT_ANALYSIERBAR", "", "", "", status, confidence, review_flag, attachment_id
             ))
             processed += 1
             continue
 
         text = extract_text_from_s3_object(storage_key, original_filename)
-        amount = extract_amount(text)
+        amount = extract_amount(text, detected_type)
         date = extract_date(text)
-        vendor = extract_vendor(text)
+        vendor = extract_vendor(text, detected_type)
 
         status = "ok"
         if text == "NICHT_ANALYSIERBAR":
@@ -596,13 +696,18 @@ def analyze_attachments():
         elif text == "KEIN_TEXT_GEFUNDEN":
             status = "kein text"
 
+        confidence = compute_confidence(detected_type, amount, date, vendor, status)
+        review_flag = compute_review_flag(confidence, status)
+
         cur.execute("""
             UPDATE mail_attachments
             SET extracted_text=%s,
                 detected_amount=%s,
                 detected_date=%s,
                 detected_vendor=%s,
-                analysis_status=%s
+                analysis_status=%s,
+                confidence=%s,
+                review_flag=%s
             WHERE id=%s
         """, (
             text,
@@ -610,6 +715,8 @@ def analyze_attachments():
             date,
             vendor,
             status,
+            confidence,
+            review_flag,
             attachment_id
         ))
 
@@ -678,7 +785,7 @@ def attachment_log():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT trip_code, original_filename, detected_type, detected_amount, detected_date, detected_vendor, analysis_status, storage_key
+        SELECT trip_code, original_filename, detected_type, detected_amount, detected_date, detected_vendor, analysis_status, confidence, review_flag, storage_key
         FROM mail_attachments
         ORDER BY id DESC
         LIMIT 100
@@ -697,6 +804,8 @@ def attachment_log():
             <td>{r[5] or ''}</td>
             <td>{r[6] or ''}</td>
             <td>{r[7] or ''}</td>
+            <td>{r[8] or ''}</td>
+            <td>{r[9] or ''}</td>
         </tr>
         """
 
@@ -705,7 +814,7 @@ def attachment_log():
 
     return page_shell("Anhang Log", f"""
     <div class="card">
-        <h2>Anhang Log mit Analyse</h2>
+        <h2>Anhang Log mit Analyse v3</h2>
         <table>
             <tr>
                 <th>Code</th>
@@ -715,6 +824,8 @@ def attachment_log():
                 <th>Datum</th>
                 <th>Anbieter</th>
                 <th>Status</th>
+                <th>Confidence</th>
+                <th>Review</th>
                 <th>Storage Key</th>
             </tr>
             {html}
