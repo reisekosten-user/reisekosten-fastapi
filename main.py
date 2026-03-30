@@ -132,30 +132,17 @@ def extract_amount(text: str, detected_type: str):
 
     candidates = re.findall(r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b", text)
 
-    cleaned = []
-    for c in candidates:
-        if re.match(r"\b\d{2},\d{2}\b", c):
-            cleaned.append(c)
-        elif re.match(r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b", c):
-            cleaned.append(c)
-
-    if not cleaned:
-        return ""
-
-    def to_float(v):
-        return float(v.replace(".", "").replace(",", "."))
-
     values = []
-    for c in cleaned:
+    for c in candidates:
         try:
-            values.append((c, to_float(c)))
+            v = float(c.replace(".", "").replace(",", "."))
+            values.append((c, v))
         except Exception:
             pass
 
     if not values:
         return ""
 
-    # Typ-spezifische Plausibilität
     if detected_type == "Taxi":
         plausible = [x for x in values if 2 <= x[1] <= 300]
         if plausible:
@@ -223,7 +210,6 @@ def extract_vendor(text: str, detected_type: str):
         if k in lower:
             return k.title()
 
-    # fallback: erste brauchbare Zeile, aber offensichtliche Systemzeilen überspringen
     bad_starts = ["ihre", "booking reference", "buchungsreferenz", "receipt", "invoice number", "datum", "date"]
     for line in text.split("\n")[:15]:
         l = line.strip()
@@ -374,6 +360,27 @@ def page_shell(title: str, content: str):
                 font-weight: bold;
                 color: #12365f;
             }}
+            .badge-ok {{
+                color: white;
+                background: #177245;
+                padding: 4px 8px;
+                border-radius: 999px;
+                font-size: 12px;
+            }}
+            .badge-warn {{
+                color: white;
+                background: #b46b00;
+                padding: 4px 8px;
+                border-radius: 999px;
+                font-size: 12px;
+            }}
+            .badge-bad {{
+                color: white;
+                background: #b3261e;
+                padding: 4px 8px;
+                border-radius: 999px;
+                font-size: 12px;
+            }}
         </style>
     </head>
     <body>
@@ -401,6 +408,7 @@ def home():
         <a class="btn" href="/mail-log">Mail Log</a><br><br>
         <a class="btn" href="/attachment-log">Anhang Log</a><br><br>
         <a class="btn" href="/analyze-attachments">Anhänge analysieren</a><br><br>
+        <a class="btn" href="/trip-review">Reisebewertung</a><br><br>
         <a class="btn-light" href="/reset-mail-log">Mail Log löschen</a>
     </div>
     """)
@@ -730,6 +738,76 @@ def analyze_attachments():
     <div class="card">
         <h2 class="ok">{processed} Anhänge analysiert</h2>
         <a class="btn" href="/attachment-log">Zum Anhang Log</a>
+    </div>
+    """)
+
+
+@app.get("/trip-review", response_class=HTMLResponse)
+def trip_review():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT COALESCE(trip_code, '') AS trip_code
+        FROM mail_attachments
+        GROUP BY COALESCE(trip_code, '')
+        ORDER BY COALESCE(trip_code, '')
+    """)
+    trip_codes = [r[0] for r in cur.fetchall()]
+
+    rows_html = ""
+
+    for trip_code in trip_codes:
+        cur.execute("""
+            SELECT detected_type, analysis_status, review_flag
+            FROM mail_attachments
+            WHERE COALESCE(trip_code, '') = %s
+        """, (trip_code,))
+        items = cur.fetchall()
+
+        has_flight = any(x[0] == "Flug" for x in items)
+        has_hotel = any(x[0] == "Hotel" for x in items)
+        has_taxi = any(x[0] == "Taxi" for x in items)
+        open_reviews = sum(1 for x in items if x[2] == "pruefen")
+
+        if has_flight and open_reviews == 0:
+            overall = "vollständig"
+            badge = '<span class="badge-ok">vollständig</span>'
+        elif open_reviews > 0:
+            overall = "prüfen"
+            badge = '<span class="badge-warn">prüfen</span>'
+        else:
+            overall = "unvollständig"
+            badge = '<span class="badge-bad">unvollständig</span>'
+
+        rows_html += f"""
+        <tr>
+            <td class="code">{trip_code or '(ohne Code)'}</td>
+            <td>{"ja" if has_flight else "nein"}</td>
+            <td>{"ja" if has_hotel else "nein"}</td>
+            <td>{"ja" if has_taxi else "nein"}</td>
+            <td>{open_reviews}</td>
+            <td>{badge}</td>
+        </tr>
+        """
+
+    cur.close()
+    conn.close()
+
+    return page_shell("Reisebewertung", f"""
+    <div class="card">
+        <h2>Reisebewertung v1</h2>
+        <table>
+            <tr>
+                <th>Code</th>
+                <th>Flug</th>
+                <th>Hotel</th>
+                <th>Taxi</th>
+                <th>Offene Prüfungen</th>
+                <th>Status</th>
+            </tr>
+            {rows_html}
+        </table>
     </div>
     """)
 
