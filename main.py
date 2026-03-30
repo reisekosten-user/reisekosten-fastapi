@@ -45,19 +45,14 @@ def detect_mail_type(text: str):
 
     if any(x in t for x in ["flug", "flight", "boarding", "boardingpass", "boarding pass", "pnr", "ticket", "airline"]):
         return "Flug"
-
     if any(x in t for x in ["hotel", "booking.com", "check-in", "check out", "check-out", "reservation", "zimmer"]):
         return "Hotel"
-
     if any(x in t for x in ["taxi", "uber", "cab"]):
         return "Taxi"
-
     if any(x in t for x in ["bahn", "zug", "train", "ice", "db "]):
         return "Bahn"
-
     if any(x in t for x in ["meal", "restaurant", "verpflegung", "essen", "dinner", "lunch", "breakfast"]):
         return "Verpflegung"
-
     if any(x in t for x in ["mietwagen", "rental car", "car rental", "hertz", "sixt", "avis"]):
         return "Mietwagen"
 
@@ -128,6 +123,15 @@ def page_shell(title: str, content: str):
                 text-decoration: none;
                 display: inline-block;
             }}
+            .btn-light {{
+                background: white;
+                color: #2a6ab1;
+                padding: 10px 12px;
+                border: 1px solid #b8cbe0;
+                border-radius: 6px;
+                text-decoration: none;
+                display: inline-block;
+            }}
             table {{
                 width: 100%;
                 border-collapse: collapse;
@@ -141,6 +145,14 @@ def page_shell(title: str, content: str):
             }}
             th {{
                 background: #f4f7fb;
+            }}
+            .ok {{
+                color: #177245;
+                font-weight: bold;
+            }}
+            .warn {{
+                color: #b46b00;
+                font-weight: bold;
             }}
         </style>
     </head>
@@ -164,9 +176,10 @@ def home():
     return page_shell("Start", """
     <div class="card">
         <h2>Aktionen</h2>
-        <a class="btn" href="/init">Init</a><br><br>
+        <a class="btn" href="/init">Init / Migration</a><br><br>
         <a class="btn" href="/fetch-mails">Mails abrufen</a><br><br>
-        <a class="btn" href="/mail-log">Mail Log</a>
+        <a class="btn" href="/mail-log">Mail Log</a><br><br>
+        <a class="btn-light" href="/reset-mail-log">Nur Mail-Log löschen</a>
     </div>
     """)
 
@@ -179,21 +192,37 @@ def init():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS mail_messages (
             id SERIAL PRIMARY KEY,
-            mail_uid TEXT UNIQUE,
-            sender TEXT,
-            subject TEXT,
-            body TEXT,
-            trip_code TEXT,
-            detected_type TEXT,
-            detected_destination TEXT
+            mail_uid TEXT UNIQUE
         )
     """)
+
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS sender TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS subject TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS body TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS trip_code TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_type TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_destination TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
 
     conn.commit()
     cur.close()
     conn.close()
 
     return {"status": "ok"}
+
+
+@app.get("/reset-mail-log")
+def reset_mail_log():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("TRUNCATE TABLE mail_messages RESTART IDENTITY")
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"status": "mail log gelöscht"}
 
 
 @app.get("/fetch-mails", response_class=HTMLResponse)
@@ -209,13 +238,15 @@ def fetch_mails():
         conn = get_conn()
         cur = conn.cursor()
 
-        count = 0
+        imported = 0
+        skipped = 0
 
         for i in ids:
             uid = i.decode()
 
             cur.execute("SELECT id FROM mail_messages WHERE mail_uid=%s", (uid,))
             if cur.fetchone():
+                skipped += 1
                 continue
 
             _, msg_data = mail.fetch(i, "(RFC822)")
@@ -248,17 +279,29 @@ def fetch_mails():
                 VALUES (%s,%s,%s,%s,%s,%s,%s)
             """, (uid, sender, subject, body, code, detected_type, detected_destination))
 
-            count += 1
+            imported += 1
 
         conn.commit()
         cur.close()
         conn.close()
         mail.logout()
 
-        return page_shell("OK", f"<div class='card'><h2>Mails importiert</h2><p>Importiert: <b>{count}</b></p></div>")
+        return page_shell("Mails importiert", f"""
+        <div class="card">
+            <h2 class="ok">Mailabruf erfolgreich</h2>
+            <p><b>Neu importiert:</b> {imported}</p>
+            <p><b>Übersprungen (schon vorhanden):</b> {skipped}</p>
+            <a class="btn" href="/mail-log">Zum Mail Log</a>
+        </div>
+        """)
 
     except Exception as e:
-        return page_shell("Fehler", f"<div class='card'><h2>Fehler beim Mailabruf</h2><p>{e}</p></div>")
+        return page_shell("Fehler", f"""
+        <div class="card">
+            <h2 class="warn">Fehler beim Mailabruf</h2>
+            <p>{e}</p>
+        </div>
+        """)
 
 
 @app.get("/mail-log", response_class=HTMLResponse)
