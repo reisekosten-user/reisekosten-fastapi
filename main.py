@@ -11,7 +11,7 @@ import boto3
 import pdfplumber
 from io import BytesIO
 
-APP_VERSION = "5.2"
+APP_VERSION = "5.3"
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -176,10 +176,19 @@ def extract_text_from_s3_object(storage_key: str, filename: str):
         return f"ERROR: {e}"
 
 
-def detect_currency(text: str):
+def detect_currency(text: str, detected_type: str):
     t = (text or "").lower()
 
-    # Reihenfolge wichtig: konkrete Codes zuerst
+    # Für Taxi/Uber standardmäßig EUR, außer starker Hinweis
+    if detected_type == "Taxi":
+        if "₹" in t or " inr" in t or "inr " in t:
+            return "INR"
+        if "$" in t or " usd" in t or "usd " in t:
+            return "USD"
+        if "£" in t or " gbp" in t or "gbp " in t:
+            return "GBP"
+        return "EUR"
+
     if " inr" in t or "inr " in t or "₹" in t:
         return "INR"
     if " usd" in t or "usd " in t or "$" in t:
@@ -282,10 +291,6 @@ def extract_vendor(text: str, detected_type: str):
 
 
 def find_best_amount_and_currency(text: str, detected_type: str):
-    """
-    Sucht zuerst nach Endsummen in Zeilen mit total/paid/fare/gesamt.
-    Fallback danach auf die allgemeine Betragserkennung.
-    """
     if not text:
         return "", ""
 
@@ -306,7 +311,7 @@ def find_best_amount_and_currency(text: str, detected_type: str):
         if not amounts:
             continue
 
-        currency = detect_currency(line)
+        currency = detect_currency(line, detected_type)
         for amount in amounts:
             try:
                 value = float(amount.replace(".", "").replace(",", "."))
@@ -337,7 +342,6 @@ def find_best_amount_and_currency(text: str, detected_type: str):
         elif detected_type == "Flug":
             hits = [h for h in hits if 20 <= h["value"] <= 5000] or hits
 
-        # Meist ist die letzte priorisierte Zeile die Endsumme
         chosen = hits[-1]
         return chosen["amount"], chosen["currency"]
 
@@ -376,6 +380,20 @@ def compute_review_flag(confidence: str, status: str):
     if confidence == "niedrig":
         return "pruefen"
     return "ok"
+
+
+def duplicate_count_for_attachment(cur, trip_code, detected_type, detected_amount, detected_date, detected_vendor, attachment_id):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM mail_attachments
+        WHERE COALESCE(trip_code, '') = COALESCE(%s, '')
+          AND COALESCE(detected_type, '') = COALESCE(%s, '')
+          AND COALESCE(detected_amount, '') = COALESCE(%s, '')
+          AND COALESCE(detected_date, '') = COALESCE(%s, '')
+          AND COALESCE(detected_vendor, '') = COALESCE(%s, '')
+          AND id <> %s
+    """, (trip_code, detected_type, detected_amount, detected_date, detected_vendor, attachment_id))
+    return cur.fetchone()[0]
 
 
 def page_shell(title: str, content: str):
@@ -563,6 +581,7 @@ def init():
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS storage_key TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS confidence TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS review_flag TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS duplicate_flag TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
 
     cur.execute("""
@@ -588,7 +607,8 @@ def home():
         SELECT COALESCE(trip_code, '') AS trip_code,
                detected_type,
                COALESCE(detected_amount_eur, ''),
-               review_flag
+               review_flag,
+               duplicate_flag
         FROM mail_attachments
         ORDER BY COALESCE(trip_code, '')
     """)
@@ -599,7 +619,7 @@ def home():
 
     trips = {}
 
-    for trip_code, detected_type, amount_eur, review_flag in rows:
+    for trip_code, detected_type, amount_eur, review_flag, duplicate_flag in rows:
         code = trip_code or "(ohne Code)"
         if code not in trips:
             trips[code] = {
@@ -608,7 +628,8 @@ def home():
                 "taxi": False,
                 "essen": False,
                 "sum_eur": 0.0,
-                "review_count": 0
+                "review_count": 0,
+                "duplicate_count": 0
             }
 
         if detected_type == "Flug":
@@ -623,6 +644,9 @@ def home():
         if review_flag == "pruefen":
             trips[code]["review_count"] += 1
 
+        if duplicate_flag == "ja":
+            trips[code]["duplicate_count"] += 1
+
         if amount_eur:
             try:
                 trips[code]["sum_eur"] += float(amount_eur.replace(".", "").replace(",", "."))
@@ -635,14 +659,23 @@ def home():
         warnings = []
         errors = []
 
+        hotel_note = ""
+
         if code == "(ohne Code)":
             errors.append("Einträge ohne Reisecode")
         else:
             hotel_mode = hotel_meta.get(code, "")
             if hotel_mode == "customer":
                 has_hotel = True
+                hotel_note = "Kundenhotel"
+            elif hotel_mode == "own":
+                hotel_note = "Hotel selbst"
+
             if data["flight"] and not has_hotel:
                 warnings.append("Hotel fehlt")
+
+        if data["duplicate_count"] > 0:
+            warnings.append(f"{data['duplicate_count']} mögliche Dublette(n)")
 
         if errors:
             status = '<span class="badge-bad">Fehler</span>'
@@ -662,7 +695,7 @@ def home():
         <tr>
             <td class="code">{code}</td>
             <td>{"ja" if data["flight"] else "nein"}</td>
-            <td>{"ja" if has_hotel else "nein"}</td>
+            <td>{"ja" if has_hotel else "nein"} {hotel_note}</td>
             <td>{"ja" if data["taxi"] else "nein"}</td>
             <td>{"ja" if data["essen"] else "nein"}</td>
             <td>{data["review_count"]}</td>
@@ -679,8 +712,8 @@ def home():
 
     return page_shell("Dashboard", f"""
     <div class="card">
-        <h2>Dashboard 5.2</h2>
-        <div class="sub">Mit Summen, Warnungen und Hotel-Override.</div>
+        <h2>Dashboard 5.3</h2>
+        <div class="sub">Mit Summen, Warnungen, Dublettenhinweis und sichtbarem Hotel-Override.</div>
         <p>
             <a class="btn" href="/fetch-mails">Mails abrufen</a>
             <a class="btn" href="/analyze-attachments">Anhänge analysieren</a>
@@ -849,8 +882,8 @@ def fetch_mails():
 
                     cur.execute("""
                         INSERT INTO mail_attachments
-                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path, detected_type, analysis_status, storage_key, confidence, review_flag)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path, detected_type, analysis_status, storage_key, confidence, review_flag, duplicate_flag)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (
                         uid,
                         code,
@@ -862,7 +895,8 @@ def fetch_mails():
                         "neu",
                         storage_key,
                         "niedrig",
-                        "pruefen"
+                        "pruefen",
+                        ""
                     ))
 
                     attachment_count += 1
@@ -900,7 +934,7 @@ def analyze_attachments():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT id, storage_key, original_filename, detected_type
+        SELECT id, trip_code, storage_key, original_filename, detected_type
         FROM mail_attachments
         ORDER BY id
     """)
@@ -910,14 +944,16 @@ def analyze_attachments():
 
     for row in rows:
         attachment_id = row[0]
-        storage_key = row[1] or ""
-        original_filename = row[2] or ""
-        detected_type = row[3] or "Unbekannt"
+        trip_code = row[1]
+        storage_key = row[2] or ""
+        original_filename = row[3] or ""
+        detected_type = row[4] or "Unbekannt"
 
         if not storage_key:
             status = "kein storage key"
             confidence = "niedrig"
             review_flag = "pruefen"
+            duplicate_flag = ""
             cur.execute("""
                 UPDATE mail_attachments
                 SET extracted_text=%s,
@@ -928,10 +964,11 @@ def analyze_attachments():
                     detected_vendor=%s,
                     analysis_status=%s,
                     confidence=%s,
-                    review_flag=%s
+                    review_flag=%s,
+                    duplicate_flag=%s
                 WHERE id=%s
             """, (
-                "KEIN_STORAGE_KEY", "", "", "", "", "", status, confidence, review_flag, attachment_id
+                "KEIN_STORAGE_KEY", "", "", "", "", "", status, confidence, review_flag, duplicate_flag, attachment_id
             ))
             processed += 1
             continue
@@ -940,6 +977,7 @@ def analyze_attachments():
             status = "nicht analysierbar"
             confidence = "niedrig"
             review_flag = "pruefen"
+            duplicate_flag = ""
             cur.execute("""
                 UPDATE mail_attachments
                 SET extracted_text=%s,
@@ -950,10 +988,11 @@ def analyze_attachments():
                     detected_vendor=%s,
                     analysis_status=%s,
                     confidence=%s,
-                    review_flag=%s
+                    review_flag=%s,
+                    duplicate_flag=%s
                 WHERE id=%s
             """, (
-                "NICHT_ANALYSIERBAR", "", "", "", "", "", status, confidence, review_flag, attachment_id
+                "NICHT_ANALYSIERBAR", "", "", "", "", "", status, confidence, review_flag, duplicate_flag, attachment_id
             ))
             processed += 1
             continue
@@ -962,7 +1001,7 @@ def analyze_attachments():
 
         amount, currency = find_best_amount_and_currency(text, detected_type)
         if not currency:
-            currency = detect_currency(text)
+            currency = detect_currency(text, detected_type)
         amount_eur = convert_to_eur(amount, currency)
 
         date = extract_date(text)
@@ -979,6 +1018,11 @@ def analyze_attachments():
         confidence = compute_confidence(detected_type, amount, date, vendor, status)
         review_flag = compute_review_flag(confidence, status)
 
+        duplicate_hits = duplicate_count_for_attachment(
+            cur, trip_code, detected_type, amount, date, vendor, attachment_id
+        )
+        duplicate_flag = "ja" if duplicate_hits > 0 and amount and date and vendor else ""
+
         cur.execute("""
             UPDATE mail_attachments
             SET extracted_text=%s,
@@ -989,7 +1033,8 @@ def analyze_attachments():
                 detected_vendor=%s,
                 analysis_status=%s,
                 confidence=%s,
-                review_flag=%s
+                review_flag=%s,
+                duplicate_flag=%s
             WHERE id=%s
         """, (
             text,
@@ -1001,6 +1046,7 @@ def analyze_attachments():
             status,
             confidence,
             review_flag,
+            duplicate_flag,
             attachment_id
         ))
 
@@ -1039,7 +1085,7 @@ def trip_review():
 
     for trip_code in trip_codes:
         cur.execute("""
-            SELECT detected_type, analysis_status, review_flag
+            SELECT detected_type, analysis_status, review_flag, duplicate_flag
             FROM mail_attachments
             WHERE COALESCE(trip_code, '') = %s
         """, (trip_code,))
@@ -1049,6 +1095,7 @@ def trip_review():
         has_hotel = any(x[0] == "Hotel" for x in items)
         has_taxi = any(x[0] == "Taxi" for x in items)
         open_reviews = sum(1 for x in items if x[2] == "pruefen")
+        duplicates = sum(1 for x in items if x[3] == "ja")
 
         warnings = []
         errors = []
@@ -1061,6 +1108,9 @@ def trip_review():
                 has_hotel = True
             if has_flight and not has_hotel:
                 warnings.append("Hotel fehlt")
+
+        if duplicates > 0:
+            warnings.append(f"{duplicates} mögliche Dublette(n)")
 
         if errors:
             badge = '<span class="badge-bad">Fehler</span>'
@@ -1087,7 +1137,7 @@ def trip_review():
 
     return page_shell("Reisebewertung", f"""
     <div class="card">
-        <h2>Reisebewertung v5.2</h2>
+        <h2>Reisebewertung v5.3</h2>
         <table>
             <tr>
                 <th>Code</th>
@@ -1156,7 +1206,7 @@ def attachment_log():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT trip_code, original_filename, detected_type, detected_amount, detected_amount_eur, detected_currency, detected_date, detected_vendor, analysis_status, confidence, review_flag, storage_key
+        SELECT trip_code, original_filename, detected_type, detected_amount, detected_amount_eur, detected_currency, detected_date, detected_vendor, analysis_status, confidence, review_flag, duplicate_flag, storage_key
         FROM mail_attachments
         ORDER BY id DESC
         LIMIT 100
@@ -1179,6 +1229,7 @@ def attachment_log():
             <td>{r[9] or ''}</td>
             <td>{r[10] or ''}</td>
             <td>{r[11] or ''}</td>
+            <td>{r[12] or ''}</td>
         </tr>
         """
 
@@ -1187,7 +1238,7 @@ def attachment_log():
 
     return page_shell("Anhang Log", f"""
     <div class="card">
-        <h2>Anhang Log mit Analyse v5.2</h2>
+        <h2>Anhang Log mit Analyse v5.3</h2>
         <table>
             <tr>
                 <th>Code</th>
@@ -1201,6 +1252,7 @@ def attachment_log():
                 <th>Status</th>
                 <th>Confidence</th>
                 <th>Review</th>
+                <th>Dublette</th>
                 <th>Storage Key</th>
             </tr>
             {html}
