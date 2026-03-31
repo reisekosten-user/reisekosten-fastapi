@@ -2,6 +2,3 @@ boto3
 fastapi[all]
 psycopg2-binary
 pdfplumber
-pytesseract
-Pillow
-requests
