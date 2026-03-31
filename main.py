@@ -11,7 +11,7 @@ import boto3
 import pdfplumber
 from io import BytesIO
 
-APP_VERSION = "5.1"
+APP_VERSION = "5.2"
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -63,16 +63,30 @@ def decode_mime_header(value):
 def detect_mail_type(text: str):
     t = (text or "").lower()
 
-    if any(x in t for x in ["flug", "flight", "boarding", "boardingpass", "boarding pass", "pnr", "ticket", "airline", "itinerary"]):
+    if any(x in t for x in [
+        "flug", "flight", "boarding", "boardingpass", "boarding pass",
+        "pnr", "ticket", "airline", "itinerary", "e-ticket", "eticket"
+    ]):
         return "Flug"
-    if any(x in t for x in ["hotel", "booking.com", "check-in", "check out", "check-out", "reservation", "zimmer"]):
+
+    if any(x in t for x in [
+        "hotel", "booking.com", "check-in", "check out", "check-out",
+        "reservation", "zimmer", "accommodation"
+    ]):
         return "Hotel"
-    if any(x in t for x in ["taxi", "uber", "cab"]):
+
+    if any(x in t for x in ["taxi", "uber", "cab", "ride"]):
         return "Taxi"
+
     if any(x in t for x in ["bahn", "zug", "train", "ice", "db "]):
         return "Bahn"
-    if any(x in t for x in ["meal", "restaurant", "verpflegung", "essen", "dinner", "lunch", "breakfast"]):
+
+    if any(x in t for x in [
+        "meal", "restaurant", "verpflegung", "essen",
+        "dinner", "lunch", "breakfast", "food"
+    ]):
         return "Essen"
+
     if any(x in t for x in ["mietwagen", "rental car", "car rental", "hertz", "sixt", "avis"]):
         return "Mietwagen"
 
@@ -107,16 +121,29 @@ def detect_attachment_type(filename: str, subject: str, body: str):
     if filename.lower().endswith(".emz"):
         return "Inline-Grafik"
 
-    if any(x in text for x in ["boarding", "boardingpass", "boarding pass", "eticket", "e-ticket", "flight", "flug", "ticket", "pnr", "itinerary"]):
+    if any(x in text for x in [
+        "boarding", "boardingpass", "boarding pass", "eticket",
+        "e-ticket", "flight", "flug", "ticket", "pnr", "itinerary"
+    ]):
         return "Flug"
-    if any(x in text for x in ["hotel", "booking", "reservation", "zimmer", "check-in", "check-out"]):
+
+    if any(x in text for x in [
+        "hotel", "booking", "reservation", "zimmer", "check-in", "check-out"
+    ]):
         return "Hotel"
-    if any(x in text for x in ["taxi", "uber", "cab", "receipt_"]):
+
+    if any(x in text for x in ["taxi", "uber", "cab", "receipt_", "ride"]):
         return "Taxi"
+
     if any(x in text for x in ["bahn", "zug", "train", "ice", "db"]):
         return "Bahn"
-    if any(x in text for x in ["meal", "restaurant", "essen", "verpflegung", "breakfast", "lunch", "dinner"]):
+
+    if any(x in text for x in [
+        "meal", "restaurant", "essen", "verpflegung",
+        "breakfast", "lunch", "dinner", "food"
+    ]):
         return "Essen"
+
     if any(x in text for x in ["mietwagen", "rental", "car rental", "hertz", "sixt", "avis"]):
         return "Mietwagen"
 
@@ -128,55 +155,41 @@ def is_supported_analysis_file(filename: str):
     return f.endswith(".pdf")
 
 
+def extract_text_from_s3_object(storage_key: str, filename: str):
+    try:
+        s3 = get_s3()
+        response = s3.get_object(Bucket=S3_BUCKET, Key=storage_key)
+        file_bytes = response["Body"].read()
+
+        if filename.lower().endswith(".pdf"):
+            text = ""
+            with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text() or ""
+                    text += page_text + "\n"
+            text = text.strip()
+            return text[:15000] if text else "KEIN_TEXT_GEFUNDEN"
+
+        return "NICHT_ANALYSIERBAR"
+
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
 def detect_currency(text: str):
     t = (text or "").lower()
-    if "$" in t or " usd" in t or "usd " in t:
-        return "USD"
-    if "£" in t or " gbp" in t or "gbp " in t:
-        return "GBP"
-    if "₹" in t or " inr" in t or "inr " in t:
+
+    # Reihenfolge wichtig: konkrete Codes zuerst
+    if " inr" in t or "inr " in t or "₹" in t:
         return "INR"
+    if " usd" in t or "usd " in t or "$" in t:
+        return "USD"
+    if " gbp" in t or "gbp " in t or "£" in t:
+        return "GBP"
+    if " eur" in t or "eur " in t or "€" in t:
+        return "EUR"
+
     return "EUR"
-
-
-def extract_amount(text: str, detected_type: str):
-    if not text:
-        return ""
-
-    candidates = re.findall(r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b", text)
-
-    values = []
-    for c in candidates:
-        try:
-            v = float(c.replace(".", "").replace(",", "."))
-            values.append((c, v))
-        except Exception:
-            pass
-
-    if not values:
-        return ""
-
-    if detected_type == "Taxi":
-        plausible = [x for x in values if 2 <= x[1] <= 300]
-        if plausible:
-            return plausible[-1][0]
-
-    if detected_type == "Hotel":
-        plausible = [x for x in values if 20 <= x[1] <= 5000]
-        if plausible:
-            return plausible[-1][0]
-
-    if detected_type == "Flug":
-        plausible = [x for x in values if 20 <= x[1] <= 5000]
-        if plausible:
-            return plausible[-1][0]
-
-    if detected_type == "Essen":
-        plausible = [x for x in values if 2 <= x[1] <= 300]
-        if plausible:
-            return plausible[-1][0]
-
-    return values[-1][0]
 
 
 def convert_to_eur(amount_str: str, currency: str):
@@ -251,7 +264,10 @@ def extract_vendor(text: str, detected_type: str):
         if k in lower:
             return k.title()
 
-    bad_starts = ["ihre", "booking reference", "buchungsreferenz", "receipt", "invoice number", "datum", "date"]
+    bad_starts = [
+        "ihre", "booking reference", "buchungsreferenz",
+        "receipt", "invoice number", "datum", "date"
+    ]
     for line in text.split("\n")[:15]:
         l = line.strip()
         if len(l) < 4:
@@ -265,25 +281,72 @@ def extract_vendor(text: str, detected_type: str):
     return ""
 
 
-def extract_text_from_s3_object(storage_key: str, filename: str):
-    try:
-        s3 = get_s3()
-        response = s3.get_object(Bucket=S3_BUCKET, Key=storage_key)
-        file_bytes = response["Body"].read()
+def find_best_amount_and_currency(text: str, detected_type: str):
+    """
+    Sucht zuerst nach Endsummen in Zeilen mit total/paid/fare/gesamt.
+    Fallback danach auf die allgemeine Betragserkennung.
+    """
+    if not text:
+        return "", ""
 
-        if filename.lower().endswith(".pdf"):
-            text = ""
-            with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text() or ""
-                    text += page_text + "\n"
-            text = text.strip()
-            return text[:10000] if text else "KEIN_TEXT_GEFUNDEN"
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-        return "NICHT_ANALYSIERBAR"
+    priority_markers = [
+        "total", "gesamt", "summe", "amount paid", "paid",
+        "you paid", "fare", "trip fare", "grand total", "total due"
+    ]
 
-    except Exception as e:
-        return f"ERROR: {e}"
+    amount_pattern = r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b"
+
+    prioritized_hits = []
+    all_hits = []
+
+    for line in lines:
+        amounts = re.findall(amount_pattern, line)
+        if not amounts:
+            continue
+
+        currency = detect_currency(line)
+        for amount in amounts:
+            try:
+                value = float(amount.replace(".", "").replace(",", "."))
+            except Exception:
+                continue
+
+            hit = {
+                "amount": amount,
+                "currency": currency,
+                "value": value,
+                "line": line.lower()
+            }
+            all_hits.append(hit)
+
+            if any(marker in line.lower() for marker in priority_markers):
+                prioritized_hits.append(hit)
+
+    def pick_by_type(hits):
+        if not hits:
+            return "", ""
+
+        if detected_type == "Taxi":
+            hits = [h for h in hits if 2 <= h["value"] <= 300] or hits
+        elif detected_type == "Essen":
+            hits = [h for h in hits if 2 <= h["value"] <= 300] or hits
+        elif detected_type == "Hotel":
+            hits = [h for h in hits if 20 <= h["value"] <= 5000] or hits
+        elif detected_type == "Flug":
+            hits = [h for h in hits if 20 <= h["value"] <= 5000] or hits
+
+        # Meist ist die letzte priorisierte Zeile die Endsumme
+        chosen = hits[-1]
+        return chosen["amount"], chosen["currency"]
+
+    amount, currency = pick_by_type(prioritized_hits)
+    if amount:
+        return amount, currency
+
+    amount, currency = pick_by_type(all_hits)
+    return amount, currency
 
 
 def compute_confidence(detected_type: str, amount: str, date: str, vendor: str, status: str):
@@ -430,6 +493,10 @@ def page_shell(title: str, content: str):
                 border-radius: 999px;
                 font-size: 12px;
             }}
+            .sub {{
+                color: #567;
+                font-size: 14px;
+            }}
         </style>
     </head>
     <body>
@@ -455,18 +522,188 @@ def version():
     return {"version": APP_VERSION}
 
 
+@app.get("/init")
+def init():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mail_messages (
+            id SERIAL PRIMARY KEY,
+            mail_uid TEXT UNIQUE
+        )
+    """)
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS sender TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS subject TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS body TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS trip_code TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_type TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_destination TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mail_attachments (
+            id SERIAL PRIMARY KEY,
+            mail_uid TEXT
+        )
+    """)
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS trip_code TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS original_filename TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS saved_filename TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS content_type TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS file_path TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_type TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS extracted_text TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_amount TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_amount_eur TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_currency TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_date TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_vendor TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS analysis_status TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS storage_key TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS confidence TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS review_flag TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trip_meta (
+            trip_code TEXT PRIMARY KEY,
+            hotel_mode TEXT
+        )
+    """)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"status": "ok", "version": APP_VERSION}
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return page_shell("Start", """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT COALESCE(trip_code, '') AS trip_code,
+               detected_type,
+               COALESCE(detected_amount_eur, ''),
+               review_flag
+        FROM mail_attachments
+        ORDER BY COALESCE(trip_code, '')
+    """)
+    rows = cur.fetchall()
+
+    cur.execute("SELECT trip_code, hotel_mode FROM trip_meta")
+    hotel_meta = dict(cur.fetchall())
+
+    trips = {}
+
+    for trip_code, detected_type, amount_eur, review_flag in rows:
+        code = trip_code or "(ohne Code)"
+        if code not in trips:
+            trips[code] = {
+                "flight": False,
+                "hotel": False,
+                "taxi": False,
+                "essen": False,
+                "sum_eur": 0.0,
+                "review_count": 0
+            }
+
+        if detected_type == "Flug":
+            trips[code]["flight"] = True
+        elif detected_type == "Hotel":
+            trips[code]["hotel"] = True
+        elif detected_type == "Taxi":
+            trips[code]["taxi"] = True
+        elif detected_type == "Essen":
+            trips[code]["essen"] = True
+
+        if review_flag == "pruefen":
+            trips[code]["review_count"] += 1
+
+        if amount_eur:
+            try:
+                trips[code]["sum_eur"] += float(amount_eur.replace(".", "").replace(",", "."))
+            except Exception:
+                pass
+
+    table_rows = ""
+    for code, data in trips.items():
+        has_hotel = data["hotel"]
+        warnings = []
+        errors = []
+
+        if code == "(ohne Code)":
+            errors.append("Einträge ohne Reisecode")
+        else:
+            hotel_mode = hotel_meta.get(code, "")
+            if hotel_mode == "customer":
+                has_hotel = True
+            if data["flight"] and not has_hotel:
+                warnings.append("Hotel fehlt")
+
+        if errors:
+            status = '<span class="badge-bad">Fehler</span>'
+        elif warnings or data["review_count"] > 0:
+            status = '<span class="badge-warn">prüfen</span>'
+        else:
+            status = '<span class="badge-ok">vollständig</span>'
+
+        actions = ""
+        if code != "(ohne Code)":
+            actions = (
+                f'<a class="btn-light" href="/set-hotel?code={code}&mode=customer">Hotel Kunde</a> '
+                f'<a class="btn-light" href="/set-hotel?code={code}&mode=own">Hotel selbst</a>'
+            )
+
+        table_rows += f"""
+        <tr>
+            <td class="code">{code}</td>
+            <td>{"ja" if data["flight"] else "nein"}</td>
+            <td>{"ja" if has_hotel else "nein"}</td>
+            <td>{"ja" if data["taxi"] else "nein"}</td>
+            <td>{"ja" if data["essen"] else "nein"}</td>
+            <td>{data["review_count"]}</td>
+            <td>{format(data["sum_eur"], ".2f").replace(".", ",")} €</td>
+            <td>{", ".join(warnings)}</td>
+            <td>{", ".join(errors)}</td>
+            <td>{status}</td>
+            <td>{actions}</td>
+        </tr>
+        """
+
+    cur.close()
+    conn.close()
+
+    return page_shell("Dashboard", f"""
     <div class="card">
-        <h2>Aktionen</h2>
-        <a class="btn" href="/init">Init / Migration</a><br><br>
-        <a class="btn" href="/fetch-mails">Mails abrufen</a><br><br>
-        <a class="btn" href="/mail-log">Mail Log</a><br><br>
-        <a class="btn" href="/attachment-log">Anhang Log</a><br><br>
-        <a class="btn" href="/analyze-attachments">Anhänge analysieren</a><br><br>
-        <a class="btn" href="/trip-review">Reisebewertung</a><br><br>
-        <a class="btn-light" href="/reset-mail-log">Mail Log löschen</a>
+        <h2>Dashboard 5.2</h2>
+        <div class="sub">Mit Summen, Warnungen und Hotel-Override.</div>
+        <p>
+            <a class="btn" href="/fetch-mails">Mails abrufen</a>
+            <a class="btn" href="/analyze-attachments">Anhänge analysieren</a>
+            <a class="btn-light" href="/attachment-log">Anhang Log</a>
+            <a class="btn-light" href="/mail-log">Mail Log</a>
+            <a class="btn-light" href="/trip-review">Reisebewertung</a>
+        </p>
+        <table>
+            <tr>
+                <th>Code</th>
+                <th>Flug</th>
+                <th>Hotel</th>
+                <th>Taxi</th>
+                <th>Essen</th>
+                <th>Offen</th>
+                <th>Summe EUR</th>
+                <th>Warnungen</th>
+                <th>Fehler</th>
+                <th>Status</th>
+                <th>Aktion</th>
+            </tr>
+            {table_rows}
+        </table>
     </div>
     """)
 
@@ -475,13 +712,6 @@ def home():
 def set_hotel(code: str, mode: str):
     conn = get_conn()
     cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS trip_meta (
-            trip_code TEXT PRIMARY KEY,
-            hotel_mode TEXT
-        )
-    """)
 
     cur.execute("""
         INSERT INTO trip_meta (trip_code, hotel_mode)
@@ -494,7 +724,7 @@ def set_hotel(code: str, mode: str):
     cur.close()
     conn.close()
 
-    return {"status": "ok", "code": code, "mode": mode}
+    return {"status": "ok", "code": code, "mode": mode, "version": APP_VERSION}
 
 
 @app.get("/reset-mail-log")
@@ -507,7 +737,7 @@ def reset_mail_log():
     cur.close()
     conn.close()
 
-    return {"status": "mail log und anhaenge geloescht"}
+    return {"status": "mail log und anhaenge geloescht", "version": APP_VERSION}
 
 
 @app.get("/fetch-mails", response_class=HTMLResponse)
@@ -650,7 +880,7 @@ def fetch_mails():
             <p><b>Neu importierte Mails:</b> {imported}</p>
             <p><b>Übersprungen (schon vorhanden):</b> {skipped}</p>
             <p><b>Gespeicherte Anhänge im Bucket:</b> {attachment_count}</p>
-            <a class="btn" href="/mail-log">Zum Mail Log</a>
+            <a class="btn" href="/">Zum Dashboard</a>
             <a class="btn-light" href="/attachment-log">Zum Anhang Log</a>
         </div>
         """)
@@ -729,9 +959,12 @@ def analyze_attachments():
             continue
 
         text = extract_text_from_s3_object(storage_key, original_filename)
-        amount = extract_amount(text, detected_type)
-        currency = detect_currency(text)
+
+        amount, currency = find_best_amount_and_currency(text, detected_type)
+        if not currency:
+            currency = detect_currency(text)
         amount_eur = convert_to_eur(amount, currency)
+
         date = extract_date(text)
         vendor = extract_vendor(text, detected_type)
 
@@ -778,11 +1011,12 @@ def analyze_attachments():
     conn.close()
 
     return page_shell("Analyse", f"""
-        <div class="card">
-            <h2 class="ok">{processed} Anhänge analysiert</h2>
-            <a class="btn" href="/attachment-log">Zum Anhang Log</a>
-        </div>
-        """)
+    <div class="card">
+        <h2 class="ok">{processed} Anhänge analysiert</h2>
+        <a class="btn" href="/">Zum Dashboard</a>
+        <a class="btn-light" href="/attachment-log">Zum Anhang Log</a>
+    </div>
+    """)
 
 
 @app.get("/trip-review", response_class=HTMLResponse)
@@ -852,23 +1086,23 @@ def trip_review():
     conn.close()
 
     return page_shell("Reisebewertung", f"""
-        <div class="card">
-            <h2>Reisebewertung v2</h2>
-            <table>
-                <tr>
-                    <th>Code</th>
-                    <th>Flug</th>
-                    <th>Hotel</th>
-                    <th>Taxi</th>
-                    <th>Offene Prüfungen</th>
-                    <th>Warnungen</th>
-                    <th>Fehler</th>
-                    <th>Status</th>
-                </tr>
-                {rows_html}
-            </table>
-        </div>
-        """)
+    <div class="card">
+        <h2>Reisebewertung v5.2</h2>
+        <table>
+            <tr>
+                <th>Code</th>
+                <th>Flug</th>
+                <th>Hotel</th>
+                <th>Taxi</th>
+                <th>Offene Prüfungen</th>
+                <th>Warnungen</th>
+                <th>Fehler</th>
+                <th>Status</th>
+            </tr>
+            {rows_html}
+        </table>
+    </div>
+    """)
 
 
 @app.get("/mail-log", response_class=HTMLResponse)
@@ -900,20 +1134,20 @@ def mail_log():
     conn.close()
 
     return page_shell("Mail Log", f"""
-        <div class="card">
-            <h2>Mail Log mit Erkennung</h2>
-            <table>
-                <tr>
-                    <th>Von</th>
-                    <th>Betreff</th>
-                    <th>Code</th>
-                    <th>Typ erkannt</th>
-                    <th>Ziel erkannt</th>
-                </tr>
-                {html}
-            </table>
-        </div>
-        """)
+    <div class="card">
+        <h2>Mail Log</h2>
+        <table>
+            <tr>
+                <th>Von</th>
+                <th>Betreff</th>
+                <th>Code</th>
+                <th>Typ erkannt</th>
+                <th>Ziel erkannt</th>
+            </tr>
+            {html}
+        </table>
+    </div>
+    """)
 
 
 @app.get("/attachment-log", response_class=HTMLResponse)
@@ -952,24 +1186,24 @@ def attachment_log():
     conn.close()
 
     return page_shell("Anhang Log", f"""
-        <div class="card">
-            <h2>Anhang Log mit Analyse v5.1</h2>
-            <table>
-                <tr>
-                    <th>Code</th>
-                    <th>Datei</th>
-                    <th>Typ erkannt</th>
-                    <th>Betrag</th>
-                    <th>Betrag EUR</th>
-                    <th>Währung</th>
-                    <th>Datum</th>
-                    <th>Anbieter</th>
-                    <th>Status</th>
-                    <th>Confidence</th>
-                    <th>Review</th>
-                    <th>Storage Key</th>
-                </tr>
-                {html}
-            </table>
-        </div>
-        """)
+    <div class="card">
+        <h2>Anhang Log mit Analyse v5.2</h2>
+        <table>
+            <tr>
+                <th>Code</th>
+                <th>Datei</th>
+                <th>Typ erkannt</th>
+                <th>Betrag</th>
+                <th>Betrag EUR</th>
+                <th>Währung</th>
+                <th>Datum</th>
+                <th>Anbieter</th>
+                <th>Status</th>
+                <th>Confidence</th>
+                <th>Review</th>
+                <th>Storage Key</th>
+            </tr>
+            {html}
+        </table>
+    </div>
+    """)
