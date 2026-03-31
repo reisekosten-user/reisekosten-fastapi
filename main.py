@@ -11,11 +11,9 @@ import boto3
 import pdfplumber
 from io import BytesIO
 
-APP_VERSION = "5.0a"
+APP_VERSION = "5.1"
 
 app = FastAPI()
-
-# WICHTIG: static-Ordner muss im Repo existieren
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -452,48 +450,31 @@ def page_shell(title: str, content: str):
     """
 
 
-@app.get("/init")
-def init():
+@app.get("/version")
+def version():
+    return {"version": APP_VERSION}
+
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return page_shell("Start", """
+    <div class="card">
+        <h2>Aktionen</h2>
+        <a class="btn" href="/init">Init / Migration</a><br><br>
+        <a class="btn" href="/fetch-mails">Mails abrufen</a><br><br>
+        <a class="btn" href="/mail-log">Mail Log</a><br><br>
+        <a class="btn" href="/attachment-log">Anhang Log</a><br><br>
+        <a class="btn" href="/analyze-attachments">Anhänge analysieren</a><br><br>
+        <a class="btn" href="/trip-review">Reisebewertung</a><br><br>
+        <a class="btn-light" href="/reset-mail-log">Mail Log löschen</a>
+    </div>
+    """)
+
+
+@app.get("/set-hotel")
+def set_hotel(code: str, mode: str):
     conn = get_conn()
     cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS mail_messages (
-            id SERIAL PRIMARY KEY,
-            mail_uid TEXT UNIQUE
-        )
-    """)
-    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS sender TEXT")
-    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS subject TEXT")
-    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS body TEXT")
-    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS trip_code TEXT")
-    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_type TEXT")
-    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_destination TEXT")
-    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS mail_attachments (
-            id SERIAL PRIMARY KEY,
-            mail_uid TEXT
-        )
-    """)
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS trip_code TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS original_filename TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS saved_filename TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS content_type TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS file_path TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_type TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS extracted_text TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_amount TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_amount_eur TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_currency TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_date TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_vendor TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS analysis_status TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS storage_key TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS confidence TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS review_flag TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS trip_meta (
@@ -502,11 +483,306 @@ def init():
         )
     """)
 
+    cur.execute("""
+        INSERT INTO trip_meta (trip_code, hotel_mode)
+        VALUES (%s,%s)
+        ON CONFLICT (trip_code)
+        DO UPDATE SET hotel_mode=%s
+    """, (code, mode, mode))
+
     conn.commit()
     cur.close()
     conn.close()
 
-    return {"status": "ok", "version": APP_VERSION}
+    return {"status": "ok", "code": code, "mode": mode}
+
+
+@app.get("/reset-mail-log")
+def reset_mail_log():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("TRUNCATE TABLE mail_attachments RESTART IDENTITY")
+    cur.execute("TRUNCATE TABLE mail_messages RESTART IDENTITY")
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"status": "mail log und anhaenge geloescht"}
+
+
+@app.get("/fetch-mails", response_class=HTMLResponse)
+def fetch_mails():
+    try:
+        s3 = get_s3()
+
+        mail = imaplib.IMAP4_SSL(IMAP_HOST)
+        mail.login(IMAP_USER, IMAP_PASS)
+        mail.select("INBOX")
+
+        status, data = mail.search(None, "ALL")
+        ids = data[0].split()[-20:]
+
+        conn = get_conn()
+        cur = conn.cursor()
+
+        imported = 0
+        skipped = 0
+        attachment_count = 0
+
+        for i in ids:
+            uid = i.decode()
+
+            cur.execute("SELECT id FROM mail_messages WHERE mail_uid=%s", (uid,))
+            if cur.fetchone():
+                skipped += 1
+                continue
+
+            _, msg_data = mail.fetch(i, "(RFC822)")
+            msg = email.message_from_bytes(msg_data[0][1])
+
+            subject = decode_mime_header(msg.get("Subject", ""))
+            sender = decode_mime_header(msg.get("From", ""))
+            body = ""
+
+            if msg.is_multipart():
+                for part in msg.walk():
+                    content_type = part.get_content_type()
+                    content_disposition = str(part.get("Content-Disposition") or "")
+
+                    if content_type == "text/plain" and "attachment" not in content_disposition.lower():
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            body = payload.decode(errors="ignore")
+                            break
+            else:
+                payload = msg.get_payload(decode=True)
+                if payload:
+                    body = payload.decode(errors="ignore")
+
+            full_text = subject + "\n" + body
+            code = extract_trip_code(full_text)
+            detected_type = detect_mail_type(full_text)
+            detected_destination = detect_destination(full_text)
+
+            cur.execute("""
+                INSERT INTO mail_messages
+                (mail_uid, sender, subject, body, trip_code, detected_type, detected_destination)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """, (uid, sender, subject, body, code, detected_type, detected_destination))
+
+            if msg.is_multipart():
+                for part in msg.walk():
+                    filename = part.get_filename()
+                    content_disposition = str(part.get("Content-Disposition") or "")
+                    if not filename and "attachment" not in content_disposition.lower():
+                        continue
+
+                    if filename:
+                        decoded_filename = decode_mime_header(filename)
+                    else:
+                        ext = ""
+                        content_type = part.get_content_type()
+                        if content_type == "application/pdf":
+                            ext = ".pdf"
+                        elif content_type.startswith("image/jpeg"):
+                            ext = ".jpg"
+                        elif content_type.startswith("image/png"):
+                            ext = ".png"
+                        elif content_type.startswith("image/webp"):
+                            ext = ".webp"
+                        elif content_type == "text/calendar":
+                            ext = ".ics"
+                        else:
+                            ext = ".bin"
+                        decoded_filename = f"attachment{ext}"
+
+                    payload = part.get_payload(decode=True)
+                    if not payload:
+                        continue
+
+                    safe_original = sanitize_filename(decoded_filename)
+                    saved_filename = f"{uid}_{safe_original}"
+                    storage_key = f"mail_attachments/{saved_filename}"
+
+                    s3.put_object(
+                        Bucket=S3_BUCKET,
+                        Key=storage_key,
+                        Body=payload,
+                        ContentType=part.get_content_type() or "application/octet-stream"
+                    )
+
+                    attachment_type = detect_attachment_type(
+                        safe_original,
+                        subject,
+                        body
+                    )
+
+                    cur.execute("""
+                        INSERT INTO mail_attachments
+                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path, detected_type, analysis_status, storage_key, confidence, review_flag)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, (
+                        uid,
+                        code,
+                        safe_original,
+                        saved_filename,
+                        part.get_content_type(),
+                        storage_key,
+                        attachment_type,
+                        "neu",
+                        storage_key,
+                        "niedrig",
+                        "pruefen"
+                    ))
+
+                    attachment_count += 1
+
+            imported += 1
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        mail.logout()
+
+        return page_shell("Mails importiert", f"""
+        <div class="card">
+            <h2 class="ok">Mailabruf erfolgreich</h2>
+            <p><b>Neu importierte Mails:</b> {imported}</p>
+            <p><b>Übersprungen (schon vorhanden):</b> {skipped}</p>
+            <p><b>Gespeicherte Anhänge im Bucket:</b> {attachment_count}</p>
+            <a class="btn" href="/mail-log">Zum Mail Log</a>
+            <a class="btn-light" href="/attachment-log">Zum Anhang Log</a>
+        </div>
+        """)
+
+    except Exception as e:
+        return page_shell("Fehler", f"""
+        <div class="card">
+            <h2 class="warn">Fehler beim Mailabruf</h2>
+            <p>{e}</p>
+        </div>
+        """)
+
+
+@app.get("/analyze-attachments", response_class=HTMLResponse)
+def analyze_attachments():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, storage_key, original_filename, detected_type
+        FROM mail_attachments
+        ORDER BY id
+    """)
+    rows = cur.fetchall()
+
+    processed = 0
+
+    for row in rows:
+        attachment_id = row[0]
+        storage_key = row[1] or ""
+        original_filename = row[2] or ""
+        detected_type = row[3] or "Unbekannt"
+
+        if not storage_key:
+            status = "kein storage key"
+            confidence = "niedrig"
+            review_flag = "pruefen"
+            cur.execute("""
+                UPDATE mail_attachments
+                SET extracted_text=%s,
+                    detected_amount=%s,
+                    detected_amount_eur=%s,
+                    detected_currency=%s,
+                    detected_date=%s,
+                    detected_vendor=%s,
+                    analysis_status=%s,
+                    confidence=%s,
+                    review_flag=%s
+                WHERE id=%s
+            """, (
+                "KEIN_STORAGE_KEY", "", "", "", "", "", status, confidence, review_flag, attachment_id
+            ))
+            processed += 1
+            continue
+
+        if not is_supported_analysis_file(original_filename):
+            status = "nicht analysierbar"
+            confidence = "niedrig"
+            review_flag = "pruefen"
+            cur.execute("""
+                UPDATE mail_attachments
+                SET extracted_text=%s,
+                    detected_amount=%s,
+                    detected_amount_eur=%s,
+                    detected_currency=%s,
+                    detected_date=%s,
+                    detected_vendor=%s,
+                    analysis_status=%s,
+                    confidence=%s,
+                    review_flag=%s
+                WHERE id=%s
+            """, (
+                "NICHT_ANALYSIERBAR", "", "", "", "", "", status, confidence, review_flag, attachment_id
+            ))
+            processed += 1
+            continue
+
+        text = extract_text_from_s3_object(storage_key, original_filename)
+        amount = extract_amount(text, detected_type)
+        currency = detect_currency(text)
+        amount_eur = convert_to_eur(amount, currency)
+        date = extract_date(text)
+        vendor = extract_vendor(text, detected_type)
+
+        status = "ok"
+        if text == "NICHT_ANALYSIERBAR":
+            status = "nicht analysierbar"
+        elif text.startswith("ERROR:"):
+            status = "analysefehler"
+        elif text == "KEIN_TEXT_GEFUNDEN":
+            status = "kein text"
+
+        confidence = compute_confidence(detected_type, amount, date, vendor, status)
+        review_flag = compute_review_flag(confidence, status)
+
+        cur.execute("""
+            UPDATE mail_attachments
+            SET extracted_text=%s,
+                detected_amount=%s,
+                detected_amount_eur=%s,
+                detected_currency=%s,
+                detected_date=%s,
+                detected_vendor=%s,
+                analysis_status=%s,
+                confidence=%s,
+                review_flag=%s
+            WHERE id=%s
+        """, (
+            text,
+            amount,
+            amount_eur,
+            currency,
+            date,
+            vendor,
+            status,
+            confidence,
+            review_flag,
+            attachment_id
+        ))
+
+        processed += 1
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return page_shell("Analyse", f"""
+        <div class="card">
+            <h2 class="ok">{processed} Anhänge analysiert</h2>
+            <a class="btn" href="/attachment-log">Zum Anhang Log</a>
+        </div>
+        """)
 
 
 @app.get("/trip-review", response_class=HTMLResponse)
@@ -677,7 +953,7 @@ def attachment_log():
 
     return page_shell("Anhang Log", f"""
         <div class="card">
-            <h2>Anhang Log mit Analyse v5.0</h2>
+            <h2>Anhang Log mit Analyse v5.1</h2>
             <table>
                 <tr>
                     <th>Code</th>
