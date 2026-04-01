@@ -1060,14 +1060,17 @@ def attachment_log():
     try:
         conn=get_conn();cur=conn.cursor()
         cur.execute("""SELECT trip_code,original_filename,detected_type,detected_amount,detected_amount_eur,
-            detected_currency,detected_date,detected_vendor,analysis_status,confidence,review_flag,ki_bemerkung
+            detected_currency,detected_date,detected_vendor,analysis_status,confidence,review_flag,ki_bemerkung,id
             FROM mail_attachments ORDER BY id DESC LIMIT 100""")
         rows=cur.fetchall();cur.close();conn.close()
         def b(s,good="ok"):
             if s==good: return f'<span class="bdg bdg-ok">{s}</span>'
             if s in ("niedrig","pruefen","mittel"): return f'<span class="bdg bdg-w">{s}</span>'
             return f'<span class="bdg bdg-e">{s}</span>'
-        html="".join(f"""<tr><td class="cc">{r[0] or ''}</td><td>{r[1] or ''}</td><td>{r[2] or ''}</td>
+        def flink(att_id, fname):
+            if not fname: return "–"
+            return f'<a href="/beleg/{att_id}" target="_blank" title="Original öffnen" style="color:var(--b600);text-decoration:none;font-weight:500">📄 {fname}</a>'
+        html="".join(f"""<tr><td class="cc">{r[0] or ''}</td><td>{flink(r[12], r[1])}</td><td>{r[2] or ''}</td>
             <td>{r[3] or ''}</td><td><b>{r[4] or ''}</b></td><td>{r[5] or ''}</td>
             <td>{r[6] or ''}</td><td>{r[7] or ''}</td>
             <td>{b(r[8] or '')}</td><td>{b(r[9] or '',"hoch")}</td><td>{b(r[10] or '')}</td>
@@ -1104,10 +1107,12 @@ def trip_detail(tc: str):
     try:
         conn=get_conn();cur=conn.cursor()
         cur.execute("""SELECT original_filename,detected_type,detected_amount_eur,detected_currency,
-            detected_date,detected_vendor,analysis_status,confidence,ki_bemerkung
+            detected_date,detected_vendor,analysis_status,confidence,ki_bemerkung,id
             FROM mail_attachments WHERE trip_code=%s ORDER BY id DESC""",(tc,))
         atts=cur.fetchall();cur.close();conn.close()
-        rows="".join(f"""<tr><td>{a[0] or ''}</td><td>{a[1] or ''}</td>
+        rows="".join(f"""<tr>
+            <td><a href="/beleg/{a[9]}" target="_blank" style="color:var(--b600);text-decoration:none;font-weight:500">📄 {a[0] or '–'}</a></td>
+            <td>{a[1] or ''}</td>
             <td style="font-family:'DM Mono',monospace"><b>{a[2] or ''}</b> {a[3] or ''}</td>
             <td>{a[4] or ''}</td><td>{a[5] or ''}</td>
             <td><span class="bdg {"bdg-ok" if a[6]=="ok" else "bdg-w"}">{a[6] or ''}</span></td>
@@ -1250,3 +1255,91 @@ def set_hotel(code: str, mode: str):
         return {"status":"ok","code":code,"mode":mode}
     except Exception as e:
         return {"status":"fehler","detail":str(e)}
+
+
+# =========================================================
+# /reset-all  – komplette DB leeren (Testdaten)
+# =========================================================
+
+@app.get("/reset-all", response_class=HTMLResponse)
+def reset_all(confirm: str = ""):
+    """
+    Loescht ALLE Daten: Anhaenge, Mails, Reisen, Flug-Alerts.
+    Aufruf: /reset-all?confirm=ja
+    Ohne Parameter: Bestaetigunsseite anzeigen.
+    """
+    if confirm != "ja":
+        return page_shell("Reset", """
+        <div class="page-card" style="max-width:500px">
+          <h2 class="err-t">⚠ Alle Daten löschen?</h2>
+          <p style="margin:12px 0 20px;color:var(--t500)">
+            Dies löscht <b>alle Reisen, Mails, Anhänge und Flug-Alerts</b> unwiderruflich.
+            Die Tabellenstruktur bleibt erhalten.
+          </p>
+          <div class="acts">
+            <a class="btn" style="background:var(--re6)" href="/reset-all?confirm=ja">Ja, alles löschen</a>
+            <a class="btn-l" href="/">Abbrechen</a>
+          </div>
+        </div>""")
+
+    try:
+        conn=get_conn(); cur=conn.cursor()
+        cur.execute("TRUNCATE TABLE mail_attachments RESTART IDENTITY CASCADE")
+        cur.execute("TRUNCATE TABLE mail_messages    RESTART IDENTITY CASCADE")
+        cur.execute("TRUNCATE TABLE trip_meta        RESTART IDENTITY CASCADE")
+        cur.execute("TRUNCATE TABLE flight_alerts    RESTART IDENTITY CASCADE")
+        conn.commit(); cur.close(); conn.close()
+        return page_shell("Reset", """
+        <div class="page-card" style="max-width:500px">
+          <h2 class="ok-t">✓ Datenbank geleert</h2>
+          <p style="margin:12px 0 20px;color:var(--t500)">
+            Alle Reisen, Mails, Anhänge und Alerts wurden gelöscht.<br>
+            Tabellenstruktur ist intakt – bereit für Echtdaten.
+          </p>
+          <div class="acts">
+            <a class="btn" href="/">Dashboard</a>
+            <a class="btn-l" href="/init">DB prüfen</a>
+          </div>
+        </div>""")
+    except Exception as e:
+        return page_shell("Fehler", f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p></div>')
+
+
+# =========================================================
+# /beleg/{id}  – Original-Dokument aus S3 im Browser öffnen
+# =========================================================
+
+@app.get("/beleg/{att_id}")
+def beleg_vorschau(att_id: int):
+    """
+    Erzeugt eine temporaere signed URL fuer den Beleg im Hetzner Bucket
+    und leitet den Browser direkt zum Dokument weiter (60 Sek. gueltig).
+    """
+    try:
+        conn=get_conn(); cur=conn.cursor()
+        cur.execute("SELECT storage_key, original_filename, content_type FROM mail_attachments WHERE id=%s", (att_id,))
+        row=cur.fetchone(); cur.close(); conn.close()
+
+        if not row:
+            return HTMLResponse("Beleg nicht gefunden", status_code=404)
+
+        storage_key, filename, content_type = row
+
+        if not storage_key or storage_key.startswith("S3-FEHLER"):
+            return HTMLResponse(f"Datei nicht im Bucket verfügbar: {storage_key}", status_code=404)
+
+        s3 = get_s3()
+        signed_url = s3.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": S3_BUCKET,
+                "Key":    storage_key,
+                "ResponseContentDisposition": f'inline; filename="{filename or "beleg"}"',
+                "ResponseContentType": content_type or "application/octet-stream",
+            },
+            ExpiresIn=300,  # 5 Minuten gueltig
+        )
+        return RedirectResponse(url=signed_url)
+
+    except Exception as e:
+        return HTMLResponse(f"Fehler beim Erzeugen der Vorschau: {e}", status_code=500)
