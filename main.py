@@ -10,7 +10,7 @@ Neu in 6.3:
   - trip_meta: neues Feld trip_title + customer_code
 """
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import os, re, base64, json, httpx, imaplib, email, hashlib, threading, time
@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "6.3"
+APP_VERSION = "6.4"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -284,6 +284,9 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
             ]))
             ics_flight_m = re.search(r"\b([A-Z]{2}\d{3,4})\b", ics_full)
             ics_flight_nr = ics_flight_m.group(1) if ics_flight_m else ""
+            # Zugnummern: ICE 597, IC 1234, RE 42, RB 65 etc.
+            ics_train_m = re.search(r"\b(ICE|IC|EC|RE|RB|S)\s*(\d{1,4})\b", ics_full, re.IGNORECASE)
+            ics_train_nr = f"{ics_train_m.group(1).upper()} {ics_train_m.group(2)}" if ics_train_m else ""
             raw_date = ics_dtstart.group(1).strip()[:8] if ics_dtstart else ""
             ics_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}" if len(raw_date)==8 else ""
             ics_bemerkung = " | ".join(filter(None,[
@@ -291,26 +294,40 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
                 f"Datum: {ics_date}" if ics_date else "",
                 f"Ort: {ics_loc.group(1).strip()}" if ics_loc else "",
                 f"Flug: {ics_flight_nr}" if ics_flight_nr else "",
+                f"Zug: {ics_train_nr}" if ics_train_nr else "",
             ]))
             cur.execute("""UPDATE mail_attachments SET
                 analysis_status='ok', confidence='hoch', review_flag='ok',
                 detected_date=%s, detected_flight_numbers=%s,
+                detected_train_numbers=%s,
                 ki_bemerkung=%s, detected_type='Kalendereintrag'
                 WHERE id=%s""",
-                (ics_date or None, ics_flight_nr or None, ics_bemerkung or None, att_id))
+                (ics_date or None, ics_flight_nr or None,
+                 ics_train_nr or None, ics_bemerkung or None, att_id))
             # Flugnummer in trip_meta übernehmen
-            if ics_flight_nr:
+            if ics_flight_nr or ics_train_nr:
                 cur.execute("SELECT trip_code FROM mail_attachments WHERE id=%s",(att_id,))
                 row_tc = cur.fetchone()
                 if row_tc and row_tc[0]:
                     tc = row_tc[0]
-                    cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code=%s",(tc,))
-                    row_fn = cur.fetchone()
-                    if row_fn:
-                        existing = (row_fn[0] or "")
-                        if ics_flight_nr not in existing:
-                            cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",
-                                (f"{existing},{ics_flight_nr}".strip(","), tc))
+                    if ics_flight_nr:
+                        cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code=%s",(tc,))
+                        row_fn = cur.fetchone()
+                        if row_fn:
+                            existing = (row_fn[0] or "")
+                            if ics_flight_nr not in existing:
+                                cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",
+                                    (f"{existing},{ics_flight_nr}".strip(","), tc))
+                                print(f"[ICS] Flugnummer {ics_flight_nr} → trip {tc}")
+                    if ics_train_nr:
+                        cur.execute("SELECT train_numbers FROM trip_meta WHERE trip_code=%s",(tc,))
+                        row_tn = cur.fetchone()
+                        if row_tn:
+                            existing = (row_tn[0] or "")
+                            if ics_train_nr not in existing:
+                                cur.execute("UPDATE trip_meta SET train_numbers=%s WHERE trip_code=%s",
+                                    (f"{existing},{ics_train_nr}".strip(","), tc))
+                                print(f"[ICS] Zugnummer {ics_train_nr} → trip {tc}")
             conn.commit(); cur.close(); return
         except Exception as e:
             cur.execute("UPDATE mail_attachments SET analysis_status=%s WHERE id=%s",
@@ -971,21 +988,23 @@ def page_shell(title, content, active_tab=""):
   <div class="modal" onclick="event.stopPropagation()">
     <div class="m-hdr"><span class="m-title">Beleg hochladen</span><button class="m-close" onclick="closeM('upload')">×</button></div>
     <div class="m-body">
-      <div class="fgrid" style="margin-bottom:14px">
-        <div class="fgrp ff"><label class="flbl">Reise zuordnen (optional)</label>
-          <select class="fsel" id="up-code"><option value="">– KI zuordnen lassen –</option></select></div>
-      </div>
-      <div style="border:2px dashed var(--bd);border-radius:var(--r);padding:28px 20px;text-align:center;color:var(--t300);cursor:pointer;background:var(--page)" id="uz"
-           ondragover="event.preventDefault();this.style.borderColor='var(--b400)'" ondragleave="this.style.borderColor='var(--bd)'"
-           ondrop="dropFile(event)" onclick="document.getElementById('fi').click()">
-        <div style="font-size:26px;margin-bottom:6px">📎</div>
-        <div style="font-size:13px;font-weight:500">Datei hierher ziehen oder klicken</div>
-        <div style="font-size:11px;margin-top:3px">PDF, JPG, PNG – Mistral OCR 3 analysiert automatisch</div>
-      </div>
-      <input type="file" id="fi" style="display:none" accept=".pdf,.jpg,.jpeg,.png" onchange="showFile(this)">
-      <div id="fname" style="font-size:12px;color:var(--t500);margin-top:8px;min-height:18px"></div>
-      <div style="font-size:11px;color:var(--t300);margin-top:6px">🔒 DSGVO: Mistral EU-API (Paris). Keine Datenspeicherung nach Analyse.</div>
-      <div class="mfooter"><button class="btn-mc" onclick="closeM('upload')">Abbrechen</button><button class="btn-mp">Hochladen &amp; KI-Analyse</button></div>
+      <form id="upload-form" method="post" action="/upload-beleg" enctype="multipart/form-data">
+        <div class="fgrid" style="margin-bottom:14px">
+          <div class="fgrp ff"><label class="flbl">Reise zuordnen (optional)</label>
+            <select class="fsel" id="up-code" name="trip_code"><option value="">– KI zuordnen lassen –</option></select></div>
+        </div>
+        <div style="border:2px dashed var(--bd);border-radius:var(--r);padding:28px 20px;text-align:center;color:var(--t300);cursor:pointer;background:var(--page)" id="uz"
+             ondragover="event.preventDefault();this.style.borderColor='var(--b400)'" ondragleave="this.style.borderColor='var(--bd)'"
+             ondrop="dropFile(event)" onclick="document.getElementById('fi').click()">
+          <div style="font-size:26px;margin-bottom:6px">📎</div>
+          <div style="font-size:13px;font-weight:500">Datei hierher ziehen oder klicken</div>
+          <div style="font-size:11px;margin-top:3px">PDF, JPG, PNG, ICS – Mistral OCR analysiert automatisch</div>
+        </div>
+        <input type="file" id="fi" name="file" style="display:none" accept=".pdf,.jpg,.jpeg,.png,.ics" onchange="showFile(this)">
+        <div id="fname" style="font-size:12px;color:var(--t500);margin-top:8px;min-height:18px"></div>
+        <div style="font-size:11px;color:var(--t300);margin-top:6px">🔒 DSGVO: Mistral EU-API (Paris). Keine Datenspeicherung nach Analyse.</div>
+        <div class="mfooter"><button type="button" class="btn-mc" onclick="closeM('upload')">Abbrechen</button><button type="submit" class="btn-mp">Hochladen &amp; KI-Analyse</button></div>
+      </form>
     </div>
   </div>
 </div>
@@ -1366,12 +1385,14 @@ def edit_trip_form(tc: str):
         cur.execute("""SELECT traveler_name,colleagues,departure_date,return_date,
             departure_time_home,arrival_time_home,destinations,country_code,
             flight_numbers,train_numbers,nights_planned,nights_booked,
-            car_rental_info,meals_reimbursed,notes,hotel_mode,pnr_code
+            car_rental_info,meals_reimbursed,notes,hotel_mode,pnr_code,
+            trip_title,customer_code
             FROM trip_meta WHERE trip_code=%s""",(tc,))
         row=cur.fetchone();cur.close();conn.close()
         if not row: return HTMLResponse("Nicht gefunden",404)
         (traveler,colleagues,dep,ret,dep_t,ret_t,destinations,cc,
-         fns,trains,nights_p,nights_b,car,meals,notes,hm,pnr)=row
+         fns,trains,nights_p,nights_b,car,meals,notes,hm,pnr,
+         trip_title,customer_code)=row
         dep_v=str(dep) if dep else ""; ret_v=str(ret) if ret else ""
         cc_opts="".join(f'<option value="{c}" {"selected" if cc==c else ""}>{c} – {l}</option>' for c,l in [
             ("DE","Deutschland"),("AZ","Aserbaidschan"),("AE","VAE/Dubai"),("FR","Frankreich"),
@@ -1386,6 +1407,8 @@ def edit_trip_form(tc: str):
             <div class="fgrid">
               <div class="fgrp ff"><label class="flbl">Reisender</label><input class="finp" name="traveler_name" value="{traveler or ''}"></div>
               <div class="fgrp ff"><label class="flbl">Kollegen</label><input class="finp" name="colleagues" value="{colleagues or ''}"></div>
+              <div class="fgrp"><label class="flbl">Reisetitel (z.B. Indien)</label><input class="finp" name="trip_title" value="{trip_title or ''}" placeholder="z.B. Indien, Messe Frankfurt, Kundenprojekt"></div>
+              <div class="fgrp"><label class="flbl">Kundenkürzel (z.B. BMW)</label><input class="finp" name="customer_code" value="{customer_code or ''}" placeholder="z.B. BMW, KD, intern"></div>
               <div class="fgrp"><label class="flbl">Abreise (Datum)</label><input class="finp" type="date" name="departure_date" value="{dep_v}"></div>
               <div class="fgrp"><label class="flbl">Uhrzeit Abreise von Hause</label><input class="finp" type="time" name="departure_time_home" value="{dep_t or '08:00'}"></div>
               <div class="fgrp"><label class="flbl">Rückkehr (Datum)</label><input class="finp" type="date" name="return_date" value="{ret_v}"></div>
@@ -1423,7 +1446,8 @@ async def edit_trip_save(tc: str, request: Request):
             departure_time_home=%s,arrival_time_home=%s,destinations=%s,country_code=%s,
             flight_numbers=%s,train_numbers=%s,pnr_code=%s,
             nights_planned=%s,nights_booked=%s,car_rental_info=%s,
-            hotel_mode=%s,meals_reimbursed=%s,notes=%s WHERE trip_code=%s""",
+            hotel_mode=%s,meals_reimbursed=%s,notes=%s,
+            trip_title=%s,customer_code=%s WHERE trip_code=%s""",
             (form.get("traveler_name") or None,form.get("colleagues") or None,
              form.get("departure_date") or None,form.get("return_date") or None,
              form.get("departure_time_home") or "08:00",form.get("arrival_time_home") or "18:00",
@@ -1432,7 +1456,9 @@ async def edit_trip_save(tc: str, request: Request):
              form.get("pnr_code") or None,
              int(form.get("nights_planned") or 0),int(form.get("nights_booked") or 0),
              form.get("car_rental_info") or None,form.get("hotel_mode") or None,
-             meals or None,form.get("notes") or None,tc))
+             meals or None,form.get("notes") or None,
+             form.get("trip_title") or None,form.get("customer_code") or None,
+             tc))
         conn.commit();cur.close();conn.close()
         return RedirectResponse(url="/",status_code=303)
     except Exception as e:
@@ -1870,6 +1896,78 @@ async def check_trains(tc: str):
         </div>""",active_tab="active")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+
+
+# =========================================================
+# BELEG MANUELL HOCHLADEN
+# =========================================================
+
+@app.post("/upload-beleg", response_class=HTMLResponse)
+async def upload_beleg(
+    request: Request,
+    file: UploadFile = File(...),
+    trip_code: str = Form(default="")
+):
+    try:
+        if not file or not file.filename:
+            return page_shell("Upload",f'<div class="page-card"><h2 class="err-t">Keine Datei</h2><a class="btn-l" href="/">Zurück</a></div>')
+
+        ext = (file.filename or "").lower().split(".")[-1]
+        if ext not in ("pdf","jpg","jpeg","png","webp","ics"):
+            return page_shell("Upload",f'<div class="page-card"><h2 class="err-t">Dateityp .{ext} nicht unterstützt</h2><p class="sub">Erlaubt: PDF, JPG, PNG, WEBP, ICS</p><a class="btn-l" href="/">Zurück</a></div>')
+
+        file_bytes = await file.read()
+        h = file_hash(file_bytes)
+
+        conn=get_conn();cur=conn.cursor()
+
+        # Duplikat-Check
+        cur.execute("SELECT id,trip_code FROM mail_attachments WHERE file_hash=%s",(h,))
+        existing = cur.fetchone()
+        if existing:
+            cur.close();conn.close()
+            return page_shell("Upload",f'<div class="page-card"><h2 class="warn-t">⚠ Duplikat</h2><p>Diese Datei wurde bereits als Anhang ID {existing[0]} gespeichert (Reise {existing[1] or "–"}).</p><a class="btn-l" href="/">Zurück</a></div>')
+
+        # Reisecode aus Dateiname / Formular ermitteln
+        code = trip_code.strip() or extract_trip_code(file.filename)
+        if code:
+            cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(code,))
+
+        safe_fn = sanitize_filename(file.filename)
+        uid = f"manual_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        storage_key = f"mail_attachments/{uid}_{safe_fn}"
+
+        try:
+            s3 = get_s3()
+            s3.put_object(Bucket=S3_BUCKET, Key=storage_key, Body=file_bytes,
+                          ContentType=file.content_type or "application/octet-stream")
+        except Exception as s3e:
+            storage_key = f"S3-FEHLER:{s3e}"
+
+        cur.execute("""INSERT INTO mail_attachments
+            (mail_uid,trip_code,original_filename,saved_filename,content_type,
+             storage_key,detected_type,analysis_status,confidence,review_flag,file_hash)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (uid,code,safe_fn,f"{uid}_{safe_fn}",file.content_type,
+             storage_key,detect_attachment_type(safe_fn,"",""),
+             "ausstehend","niedrig","pruefen",h))
+
+        conn.commit();cur.close();conn.close()
+
+        return page_shell("Upload",f"""
+        <div class="page-card">
+          <h2 class="ok-t">✓ {safe_fn} hochgeladen</h2>
+          <p style="margin-bottom:16px">Reise: <b>{code or '– noch nicht zugeordnet –'}</b> · Jetzt KI-Analyse starten.</p>
+          <div class="acts">
+            <a class="btn" href="/analyze-attachments">KI-Analyse starten</a>
+            <a class="btn-l" href="/">Dashboard</a>
+            {f'<a class="btn-l" href="/trip/{code}">Reise {code}</a>' if code else ''}
+          </div>
+        </div>""")
+    except Exception as e:
+        return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Upload-Fehler</h2><p>{e}</p><a class="btn-l" href="/">Zurück</a></div>')
+
+
 def reset_mail_log():
     try:
         conn=get_conn();cur=conn.cursor()
