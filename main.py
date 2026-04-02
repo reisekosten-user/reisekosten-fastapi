@@ -406,7 +406,7 @@ def _auto_fetch():
         time.sleep(300)  # 5 Minuten
 
 def _fetch_mails_internal():
-    """Kern-Logik Mail-Import mit Duplikat-Check und gelesen-Markierung."""
+    """Kern-Logik Mail-Import mit robustem Duplikat-Check (UID + Message-ID) und Löschen nach Import."""
     s3   = get_s3()
     conn = get_conn()
     cur  = conn.cursor()
@@ -414,22 +414,40 @@ def _fetch_mails_internal():
     mail = imaplib.IMAP4_SSL(IMAP_HOST)
     mail.login(IMAP_USER, IMAP_PASS)
     mail.select("INBOX")
-    _, data = mail.search(None, "UNSEEN")  # Nur UNGELESENE
+    _, data = mail.search(None, "ALL")  # Alle Mails – Duplikate via Message-ID gefiltert
     ids = data[0].split()
     if not ids:
         cur.close(); conn.close(); mail.logout(); return
 
-    imported = att_count = dupl = 0
+    imported = att_count = dupl = deleted = 0
+    ids_to_delete = []  # UIDs erfolgreich importierter Mails → werden danach gelöscht
+
     for i in ids:
         uid = i.decode()
+
+        # Duplikat-Check 1: IMAP-UID
         cur.execute("SELECT id FROM mail_messages WHERE mail_uid=%s",(uid,))
-        if cur.fetchone(): continue
+        if cur.fetchone():
+            # Mail war schon importiert → löschen (falls noch im Postfach)
+            ids_to_delete.append(i)
+            dupl += 1
+            continue
 
         _, msg_data = mail.fetch(i,"(RFC822)")
         msg      = email.message_from_bytes(msg_data[0][1])
         subject  = decode_mime_header(msg.get("Subject",""))
         sender   = decode_mime_header(msg.get("From",""))
-        body     = ""
+        msg_id   = (msg.get("Message-ID","") or "").strip()
+
+        # Duplikat-Check 2: Message-ID Header (robuster als UID)
+        if msg_id:
+            cur.execute("SELECT id FROM mail_messages WHERE message_id=%s",(msg_id,))
+            if cur.fetchone():
+                ids_to_delete.append(i)
+                dupl += 1
+                continue
+
+        body = ""
         if msg.is_multipart():
             for part in msg.walk():
                 if part.get_content_type()=="text/plain" and "attachment" not in str(part.get("Content-Disposition") or "").lower():
@@ -444,9 +462,9 @@ def _fetch_mails_internal():
         pnr   = extract_pnr(full)
 
         cur.execute("""INSERT INTO mail_messages
-            (mail_uid,sender,subject,body,trip_code,detected_type,pnr_code)
-            VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-            (uid,sender,subject,body,code,detect_mail_type(full),pnr))
+            (mail_uid,message_id,sender,subject,body,trip_code,detected_type,pnr_code)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (uid,msg_id,sender,subject,body,code,detect_mail_type(full),pnr))
 
         if code:
             cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(code,))
@@ -493,13 +511,65 @@ def _fetch_mails_internal():
                      "ausstehend","niedrig","pruefen",h))
                 att_count += 1
 
-        # Mail als gelesen markieren (l: keine Doppelten)
-        mail.store(i,"+FLAGS","\\Seen")
+                # ICS-Datei direkt parsen (Flugdaten ohne KI)
+                if safe_fn.lower().endswith(".ics") and pl:
+                    try:
+                        ics_text = pl.decode(errors="ignore")
+                        ics_summary = re.search(r"SUMMARY[^:]*:(.*)", ics_text)
+                        ics_dtstart = re.search(r"DTSTART[^:]*:([\d T]+)", ics_text)
+                        ics_loc     = re.search(r"LOCATION[^:]*:(.*)", ics_text)
+                        ics_desc    = re.search(r"DESCRIPTION[^:]*:(.*)", ics_text)
+                        # Flugnummer aus Summary oder Description extrahieren
+                        ics_full = " ".join(filter(None,[
+                            ics_summary.group(1) if ics_summary else "",
+                            ics_desc.group(1) if ics_desc else "",
+                        ]))
+                        ics_flight = re.search(r"\b([A-Z]{2}\d{3,4})\b", ics_full)
+                        ics_date   = ics_dtstart.group(1).strip()[:8] if ics_dtstart else ""
+                        if ics_date and len(ics_date)==8:
+                            ics_date = f"{ics_date[:4]}-{ics_date[4:6]}-{ics_date[6:8]}"
+                        # ICS-Infos in mail_attachments als KI-Bemerkung speichern
+                        ics_bemerkung = " | ".join(filter(None,[
+                            f"Termin: {ics_summary.group(1).strip()}" if ics_summary else "",
+                            f"Datum: {ics_date}" if ics_date else "",
+                            f"Ort: {ics_loc.group(1).strip()}" if ics_loc else "",
+                            f"Flug: {ics_flight.group(1)}" if ics_flight else "",
+                        ]))
+                        # Flugnummer direkt in trip_meta übernehmen
+                        if code and ics_flight:
+                            fn_nr = ics_flight.group(1)
+                            cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code=%s",(code,))
+                            row_fn = cur.fetchone()
+                            if row_fn:
+                                existing_fns = (row_fn[0] or "")
+                                if fn_nr not in existing_fns:
+                                    new_fns = f"{existing_fns},{fn_nr}".strip(",")
+                                    cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",(new_fns,code))
+                        # ICS-Bemerkung in Anhang speichern
+                        cur.execute("UPDATE mail_attachments SET ki_bemerkung=%s, analysis_status='ok', confidence='hoch' WHERE mail_uid=%s AND original_filename=%s",
+                            (ics_bemerkung, uid, safe_fn))
+                    except Exception as ics_err:
+                        print(f"[ICS] Fehler beim Parsen: {ics_err}")
+
+        # Mail erfolgreich importiert → für Löschung vormerken
+        ids_to_delete.append(i)
         imported += 1
 
-    conn.commit(); cur.close(); conn.close(); mail.logout()
+    conn.commit(); cur.close(); conn.close()
+
+    # Mails löschen (nach commit, damit Daten sicher in DB)
+    for i in ids_to_delete:
+        try:
+            mail.store(i, "+FLAGS", "\\Deleted")
+            deleted += 1
+        except Exception:
+            pass
+    if ids_to_delete:
+        mail.expunge()
+
+    mail.logout()
     if imported or dupl:
-        print(f"[AutoIMAP] {imported} neu, {att_count} Anhaenge, {dupl} Duplikate")
+        print(f"[AutoIMAP] {imported} neu, {att_count} Anhänge, {dupl} Duplikate, {deleted} gelöscht")
 
 # Thread starten
 _t = threading.Thread(target=_auto_fetch, daemon=True)
@@ -858,9 +928,11 @@ def init():
     try:
         conn=get_conn();cur=conn.cursor()
         cur.execute("CREATE TABLE IF NOT EXISTS mail_messages (id SERIAL PRIMARY KEY, mail_uid TEXT UNIQUE)")
-        for col in ["sender TEXT","subject TEXT","body TEXT","trip_code TEXT","detected_type TEXT",
-                    "pnr_code TEXT","created_at TIMESTAMP DEFAULT now()"]:
+        for col in ["message_id TEXT","sender TEXT","subject TEXT","body TEXT","trip_code TEXT",
+                    "detected_type TEXT","pnr_code TEXT","created_at TIMESTAMP DEFAULT now()"]:
             cur.execute(f"ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS {col}")
+        # Index für schnellen Duplikat-Check per Message-ID
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_mail_message_id ON mail_messages(message_id)")
 
         cur.execute("CREATE TABLE IF NOT EXISTS mail_attachments (id SERIAL PRIMARY KEY, mail_uid TEXT)")
         for col in ["trip_code TEXT","original_filename TEXT","saved_filename TEXT","content_type TEXT",
