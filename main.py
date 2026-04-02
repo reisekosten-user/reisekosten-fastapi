@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "6.8"
+APP_VERSION = "6.9"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -100,6 +100,59 @@ def get_vma(cc, day_type, meals):
     base  = r["full"] if day_type == "full" else r["partial"]
     abzug = sum(MEAL_DED.get(m,0) for m in (meals or []))
     return max(0.0, round(base - abzug, 2))
+
+def parse_vma_destinations(vma_dest_str: str) -> dict:
+    """
+    Parst 'vma_destinations' Feld in ein Dict {date: country_code}.
+    Format: '2025-03-10:IN,2025-03-14:AE,2025-03-17:DE'
+    Datum ist der erste Tag IN diesem Land (bis zum nächsten Eintrag).
+    """
+    if not vma_dest_str or not vma_dest_str.strip():
+        return {}
+    result = {}
+    for part in vma_dest_str.split(","):
+        part = part.strip()
+        if ":" in part:
+            try:
+                d_str, cc = part.split(":", 1)
+                result[date.fromisoformat(d_str.strip())] = cc.strip().upper()
+            except ValueError:
+                pass
+    return result
+
+def get_country_for_day(day: date, vma_dest: dict, default_cc: str) -> str:
+    """Gibt das Land für einen bestimmten Tag zurück (letzter Eintrag <= day)."""
+    if not vma_dest:
+        return default_cc or "DE"
+    applicable = [d for d in vma_dest if d <= day]
+    if not applicable:
+        return default_cc or "DE"
+    return vma_dest[max(applicable)]
+
+def calc_vma_multi(dep_d, ret_d, meals: list, vma_dest: dict, default_cc: str) -> tuple:
+    """
+    Berechnet VMA für Multidestination-Reisen.
+    Gibt (total, rows) zurück wobei rows Liste von (lbl, cc, meals_str, betrag) ist.
+    """
+    if not dep_d or not ret_d:
+        return 0.0, []
+    days = (ret_d - dep_d).days + 1
+    total = 0.0
+    rows = []
+    tag_list = (
+        [("Anreisetag","partial")] +
+        [("Reisetag","full")] * max(0, days-2) +
+        [("Abreisetag","partial")]
+    ) if days > 1 else [("Eintägig","partial")]
+
+    for i, (lbl, dtype) in enumerate(tag_list):
+        current_day = dep_d + timedelta(days=i)
+        cc = get_country_for_day(current_day, vma_dest, default_cc)
+        ml_abz = meals if (dtype=="partial" and i==len(tag_list)-1) else []
+        v = get_vma(cc, dtype, ml_abz)
+        total += v
+        rows.append((lbl, cc, ", ".join(ml_abz) or "–", v))
+    return total, rows
 
 def trennungspauschale(dep_date, ret_date, dep_time_str="", ret_time_str=""):
     """
@@ -290,6 +343,9 @@ Felder:
 - datum: "DD.MM.YYYY" oder ""
 - anbieter: Firmenname z.B. "Lufthansa", "Deutsche Bahn", "Uber", oder ""
 - beleg_typ: eines von: Flug, Hotel, Taxi, Bahn, Mietwagen, Essen, Sonstiges
+  Regeln: Uber/Bolt/FreeNow/Lyft → Taxi | Hertz/Sixt/Avis/Europcar → Mietwagen
+  Lufthansa/Swiss/Ryanair/Emirates/Boarding Pass → Flug | DB/ICE/Eurostar → Bahn
+  Marriott/Hilton/Accor/Booking.com → Hotel | Restaurant/Café/Bewirtung → Essen
 - reisecode: Format YY-NNN z.B. "26-001" falls im Text, sonst ""
 - pnr_code: AMADEUS PNR/Buchungscode (6-stellig alphanumerisch) z.B. "XY3K7M", oder ""
 - flight_numbers: kommagetrennte Flugnummern z.B. "LH123, AZ770", oder ""
@@ -432,6 +488,13 @@ async def _apply_fields(cur, att_id, fields, ocr_text=""):
     confidence = fields.get("confidence","niedrig") or "niedrig"
     bemerkung  = fields.get("bemerkung","") or ""
 
+    # Custom Rules: wenn KI "Sonstiges" oder kein Typ → eigene Regeln prüfen
+    if beleg_typ in ("Sonstiges","") and anbieter:
+        custom = load_custom_rules()
+        ruled  = detect_type_with_rules(anbieter, "", "", custom)
+        if ruled not in ("Unbekannt",""):
+            beleg_typ = ruled
+
     betrag_eur=""; kurs_info=""
     if betrag:
         try:
@@ -493,16 +556,66 @@ def detect_mail_type(text):
     if any(x in t for x in ["mietwagen","rental","hertz","sixt","avis"]): return "Mietwagen"
     return "Unbekannt"
 
+def load_custom_rules() -> dict:
+    """Lädt benutzerdefinierte Kategorie-Regeln aus der DB."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("SELECT keyword,category FROM category_rules ORDER BY id")
+        rows=cur.fetchall();cur.close();conn.close()
+        rules: dict = {}
+        for kw,cat in rows:
+            rules.setdefault(cat,[]).append(kw.lower().strip())
+        return rules
+    except Exception:
+        return {}
+
+def detect_type_with_rules(filename, subject, body, custom_rules: dict = None) -> str:
+    """Wie detect_attachment_type aber mit zusätzlichen benutzerdefinierten Regeln."""
+    text=f"{filename or ''} {subject or ''} {body or ''}".lower()
+    if (filename or "").lower().endswith(".ics"): return "Kalendereintrag"
+    if (filename or "").lower().endswith(".emz"): return "Inline-Grafik"
+    # Benutzerdefinierte Regeln zuerst
+    if custom_rules:
+        for typ, keywords in custom_rules.items():
+            if any(kw in text for kw in keywords if kw):
+                return typ
+    # Standard-Regeln
+    return detect_attachment_type(filename, subject, body)
+
+
 def detect_attachment_type(filename,subject,body):
     text=f"{filename or ''} {subject or ''} {body or ''}".lower()
     if (filename or "").lower().endswith(".ics"): return "Kalendereintrag"
     if (filename or "").lower().endswith(".emz"): return "Inline-Grafik"
-    if any(x in text for x in ["boarding","eticket","flight","flug","ticket","pnr","itinerary"]): return "Flug"
-    if any(x in text for x in ["hotel","booking","reservation","zimmer","check-in"]): return "Hotel"
-    if any(x in text for x in ["taxi","uber","cab","receipt_","ride"]): return "Taxi"
-    if any(x in text for x in ["bahn","zug","train","ice"]): return "Bahn"
-    if any(x in text for x in ["restaurant","essen","verpflegung","breakfast","lunch","dinner"]): return "Essen"
-    if any(x in text for x in ["mietwagen","rental","hertz","sixt","avis"]): return "Mietwagen"
+    # Bekannte Anbieter → feste Kategorie (Regel vor allgemeinem Keyword-Check)
+    VENDOR_RULES = {
+        "Taxi":     ["uber","bolt","free now","freenow","mytaxi","cabify","lyft","gett","taxi"],
+        "Bahn":     ["deutsche bahn","db bahn","eurostar","thalys","railjet","westbahn",
+                     "oebb","sbb","trenitalia","renfe","ice ","" ],
+        "Flug":     ["lufthansa","lh ","swiss","austrian","ryanair","easyjet","wizz",
+                     "eurowings","condor","tuifly","air berlin","transavia","vueling",
+                     "iberia","klm","air france","british airways","alitalia","ita airways",
+                     "turkish","emirates","qatar","etihad","flydubai","oman air",
+                     "air india","indigo","jet2","norwegian","wizzair","boarding pass",
+                     "eticket","e-ticket","itinerary","booking reference"],
+        "Hotel":    ["marriott","hilton","accor","novotel","ibis","mercure","sofitel",
+                     "hyatt","sheraton","radisson","holiday inn","intercontinental",
+                     "booking.com","hotels.com","expedia","hrs","hotel reservation",
+                     "check-in","check in","zimmerrechnung"],
+        "Mietwagen":["hertz","sixt","avis","europcar","enterprise","budget","national",
+                     "alamo","buchbinder","rental car","mietwagen"],
+        "Essen":    ["restaurant","bistro","café","cafe","mcdonalds","starbucks",
+                     "subway","vapiano","nordsee","burgerking","burger king","dean & david",
+                     "lieferando","delivery","foodora","lunch","dinner","breakfast",
+                     "verpflegung","bewirtung"],
+    }
+    for typ, keywords in VENDOR_RULES.items():
+        if any(kw in text for kw in keywords if kw):
+            return typ
+    # Allgemeine Fallbacks
+    if any(x in text for x in ["boarding","eticket","flight","flug","pnr","itinerary"]): return "Flug"
+    if any(x in text for x in ["bahn","zug","train"]): return "Bahn"
+    if any(x in text for x in ["cab","ride","fahrkosten"]): return "Taxi"
     return "Unbekannt"
 
 def sanitize_filename(name):
@@ -663,7 +776,7 @@ def _fetch_mails_internal():
                      file_hash,ki_bemerkung,detected_date,detected_flight_numbers)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (uid,code,safe_fn,f"{uid}_{safe_fn}",part.get_content_type(),
-                     storage_key,detect_attachment_type(safe_fn,subject,body),
+                     storage_key,detect_type_with_rules(safe_fn,subject,body,load_custom_rules()),
                      "ok" if ics_bemerkung else "ausstehend",
                      "hoch" if ics_bemerkung else "niedrig",
                      "ok" if ics_bemerkung else "pruefen",
@@ -1472,14 +1585,21 @@ def init():
                     "meals_reimbursed TEXT DEFAULT ''","notes TEXT",
                     "hotel_mode TEXT","departure_date DATE","return_date DATE",
                     "trip_title TEXT","customer_code TEXT",
+                    "vma_destinations TEXT",
                     "created_at TIMESTAMP DEFAULT now()"]:
-            cur.execute(f"ALTER TABLE trip_meta ADD COLUMN IF NOT EXISTS {col}")
             cur.execute(f"ALTER TABLE trip_meta ADD COLUMN IF NOT EXISTS {col}")
 
         cur.execute("""CREATE TABLE IF NOT EXISTS flight_alerts (
             id SERIAL PRIMARY KEY, trip_code TEXT, flight_number TEXT,
             flight_date TEXT, alert_type TEXT, message TEXT,
             source TEXT, delay_min INTEGER, checked_at TIMESTAMP DEFAULT now())""")
+
+        # Benutzerdefinierte Kategorie-Regeln
+        cur.execute("""CREATE TABLE IF NOT EXISTS category_rules (
+            id SERIAL PRIMARY KEY,
+            keyword TEXT NOT NULL,
+            category TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT now())""")
 
         conn.commit();cur.close();conn.close()
         return {"status":"ok","version":APP_VERSION}
@@ -1751,6 +1871,7 @@ async def _dashboard(request: Request, focus: str):
             <a class="btn" href="/analyze-attachments">🔍 KI-Analyse starten</a>
             <a class="btn-l" href="/attachment-log">Anhang-Log</a>
             <a class="btn-l" href="/mail-log">Mail-Log</a>
+            <a class="btn-l" href="/rules">⚙ Kategorie-Regeln</a>
             <a class="btn-l" href="/reset-all" style="color:var(--re6)">Reset</a>
             <a class="btn-l" href="/init" style="color:var(--t300)">DB Init</a>
           </div>
@@ -1798,13 +1919,13 @@ def edit_trip_form(tc: str):
             departure_time_home,arrival_time_home,destinations,country_code,
             flight_numbers,train_numbers,nights_planned,nights_booked,
             car_rental_info,meals_reimbursed,notes,hotel_mode,pnr_code,
-            trip_title,customer_code
+            trip_title,customer_code,vma_destinations
             FROM trip_meta WHERE trip_code=%s""",(tc,))
         row=cur.fetchone();cur.close();conn.close()
         if not row: return HTMLResponse("Nicht gefunden",404)
         (traveler,colleagues,dep,ret,dep_t,ret_t,destinations,cc,
          fns,trains,nights_p,nights_b,car,meals,notes,hm,pnr,
-         trip_title,customer_code)=row
+         trip_title,customer_code,vma_dest_str)=row
         dep_v=str(dep) if dep else ""; ret_v=str(ret) if ret else ""
         cc_opts="".join(f'<option value="{c}" {"selected" if cc==c else ""}>{c} – {l}</option>' for c,l in [
             ("DE","Deutschland"),("AZ","Aserbaidschan"),("AE","VAE/Dubai"),("FR","Frankreich"),
@@ -1840,6 +1961,12 @@ def edit_trip_form(tc: str):
               <div class="fgrp ff"><label class="flbl">Hotel-Status</label><select class="fsel" name="hotel_mode">{hm_opts}</select></div>
               <div class="fgrp ff"><label class="flbl">Erstattete Mahlzeiten</label><div style="padding:6px 0">{meal_chks}</div></div>
               <div class="fgrp ff"><label class="flbl">Notizen</label><input class="finp" name="notes" value="{notes or ''}"></div>
+              <div class="fgrp ff">
+                <label class="flbl">🌍 Multidestination VMA (optional)</label>
+                <input class="finp" name="vma_destinations" value="{vma_dest_str or ''}"
+                  placeholder="2026-03-10:IN,2026-03-14:AE,2026-03-17:DE">
+                <div class="hint" style="font-size:11px;color:var(--t300);margin-top:3px">Format: YYYY-MM-DD:ISO, … – erster Tag im jeweiligen Land. Leer = Hauptland für alle Tage.</div>
+              </div>
             </div>
             <div class="mfooter"><a class="btn-mc" href="/">Abbrechen</a><button type="submit" class="btn-mp">Speichern</button></div>
           </form>
@@ -1859,7 +1986,7 @@ async def edit_trip_save(tc: str, request: Request):
             flight_numbers=%s,train_numbers=%s,pnr_code=%s,
             nights_planned=%s,nights_booked=%s,car_rental_info=%s,
             hotel_mode=%s,meals_reimbursed=%s,notes=%s,
-            trip_title=%s,customer_code=%s WHERE trip_code=%s""",
+            trip_title=%s,customer_code=%s,vma_destinations=%s WHERE trip_code=%s""",
             (form.get("traveler_name") or None,form.get("colleagues") or None,
              form.get("departure_date") or None,form.get("return_date") or None,
              form.get("departure_time_home") or "08:00",form.get("arrival_time_home") or "18:00",
@@ -1870,6 +1997,7 @@ async def edit_trip_save(tc: str, request: Request):
              form.get("car_rental_info") or None,form.get("hotel_mode") or None,
              meals or None,form.get("notes") or None,
              form.get("trip_title") or None,form.get("customer_code") or None,
+             form.get("vma_destinations") or None,
              tc))
         conn.commit();cur.close();conn.close()
         return RedirectResponse(url="/",status_code=303)
@@ -2210,12 +2338,13 @@ def report(tc: str):
         conn=get_conn();cur=conn.cursor()
         cur.execute("""SELECT traveler_name,departure_date,return_date,country_code,
             departure_time_home,arrival_time_home,destinations,meals_reimbursed,
-            flight_numbers,train_numbers,colleagues,notes,pnr_code,nights_planned,nights_booked
+            flight_numbers,train_numbers,colleagues,notes,pnr_code,nights_planned,nights_booked,
+            vma_destinations
             FROM trip_meta WHERE trip_code=%s""",(tc,))
         meta=cur.fetchone()
         if not meta: return HTMLResponse("Nicht gefunden",404)
         (traveler,dep,ret,cc,dep_t,ret_t,destinations,meals_reimb,
-         fns,trains,colleagues,notes,pnr,nights_p,nights_b)=meta
+         fns,trains,colleagues,notes,pnr,nights_p,nights_b,vma_dest_str)=meta
 
         cur.execute("""SELECT original_filename,detected_type,detected_amount,detected_amount_eur,
             detected_currency,detected_date,detected_vendor,analysis_status,detected_flight_numbers,id
@@ -2227,14 +2356,14 @@ def report(tc: str):
         days=(ret_d-dep_d).days+1 if dep_d and ret_d else 0
         ml=[m.strip() for m in (meals_reimb or "").split(",") if m.strip()]
 
-        # VMA
-        vma_total=0.0; vma_rows=""
-        if days>0:
-            tag_list=([("Anreisetag","partial")]+[("Reisetag","full")]*max(0,days-2)+[("Abreisetag","partial")]) if days>1 else [("Eintägig","partial")]
-            for i,(lbl,dtype) in enumerate(tag_list):
-                ml_abz=ml if(dtype=="partial" and i==len(tag_list)-1) else []
-                v=get_vma(cc or "DE",dtype,ml_abz); vma_total+=v
-                vma_rows+=f"<tr><td>{lbl}</td><td>{cc or 'DE'}</td><td>{', '.join(ml_abz) or '–'}</td><td>{v:.2f} €</td></tr>"
+        # VMA – Multidestination wenn vma_destinations gesetzt, sonst Standard
+        vma_dest = parse_vma_destinations(vma_dest_str or "")
+        if days > 0:
+            vma_total, vma_tag_rows = calc_vma_multi(dep_d, ret_d, ml, vma_dest, cc)
+            vma_rows = "".join(f"<tr><td>{lbl}</td><td>{c_}</td><td>{m}</td><td>{v:.2f} €</td></tr>"
+                               for lbl,c_,m,v in vma_tag_rows)
+        else:
+            vma_total = 0.0; vma_rows = ""
 
         # k) Trennungspauschale
         trenn_total,trenn_details=trennungspauschale(dep_d,ret_d,dep_t or "08:00",ret_t or "18:00")
@@ -2312,13 +2441,13 @@ def report_pdf(tc: str):
         cur.execute("""SELECT traveler_name,departure_date,return_date,country_code,
             departure_time_home,arrival_time_home,destinations,meals_reimbursed,
             flight_numbers,train_numbers,colleagues,notes,pnr_code,
-            nights_planned,nights_booked,trip_title,customer_code
+            nights_planned,nights_booked,trip_title,customer_code,vma_destinations
             FROM trip_meta WHERE trip_code=%s""",(tc,))
         meta=cur.fetchone()
         if not meta: return HTMLResponse("Nicht gefunden",404)
         (traveler,dep,ret,cc,dep_t,ret_t,destinations,meals_reimb,
          fns,trains,colleagues,notes,pnr,nights_p,nights_b,
-         trip_title,customer_code)=meta
+         trip_title,customer_code,vma_dest_str)=meta
 
         cur.execute("""SELECT original_filename,detected_type,detected_amount,
             detected_amount_eur,detected_currency,detected_date,detected_vendor,
@@ -2331,16 +2460,14 @@ def report_pdf(tc: str):
         days=(ret_d-dep_d).days+1 if dep_d and ret_d else 0
         ml=[m.strip() for m in (meals_reimb or "").split(",") if m.strip()]
 
-        # VMA
-        vma_total=0.0; vma_rows=""
-        if days>0:
-            tag_list=(([("Anreisetag","partial")]+[("Reisetag","full")]*max(0,days-2)+[("Abreisetag","partial")]) if days>1
-                      else [("Eintägig","partial")])
-            for i,(lbl,dtype) in enumerate(tag_list):
-                ml_abz=ml if(dtype=="partial" and i==len(tag_list)-1) else []
-                v=get_vma(cc or "DE",dtype,ml_abz); vma_total+=v
-                vma_rows+=f"<tr><td>{lbl}</td><td>{cc or 'DE'}</td><td>{', '.join(ml_abz) or '–'}</td><td style='text-align:right'>{v:.2f} €</td></tr>"
-
+        # VMA – Multidestination
+        vma_dest = parse_vma_destinations(vma_dest_str or "")
+        if days > 0:
+            vma_total, vma_tag_rows = calc_vma_multi(dep_d, ret_d, ml, vma_dest, cc)
+            vma_rows = "".join(f"<tr><td>{lbl}</td><td>{c_}</td><td>{m}</td><td style='text-align:right'>{v:.2f} €</td></tr>"
+                               for lbl,c_,m,v in vma_tag_rows)
+        else:
+            vma_total=0.0; vma_rows=""
         trenn_total,trenn_details=trennungspauschale(dep_d,ret_d,dep_t or "08:00",ret_t or "18:00")
         trenn_rows="".join(f"<tr><td>{d}</td><td>{lbl}</td><td style='text-align:right'>{amt:.2f} €</td></tr>" for d,lbl,amt in trenn_details)
 
@@ -2770,7 +2897,7 @@ async def upload_beleg(
              storage_key,detected_type,analysis_status,confidence,review_flag,file_hash)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (uid,code,safe_fn,f"{uid}_{safe_fn}",file.content_type,
-             storage_key,detect_attachment_type(safe_fn,"",""),
+             storage_key,detect_type_with_rules(safe_fn,"","",load_custom_rules()),
              "ausstehend","niedrig","pruefen",h))
 
         conn.commit();cur.close();conn.close()
@@ -2876,6 +3003,120 @@ def stats():
               {tbl(by_type,["Typ","Anzahl","EUR"])}</div>
           </div>
           <div><a class="btn-l" href="/">\u2190 Dashboard</a></div>
+        </div>""")
+    except Exception as e:
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+
+
+# =========================================================
+# KATEGORIE-REGELN ADMIN
+# =========================================================
+
+@app.get("/rules", response_class=HTMLResponse)
+def rules_page():
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("SELECT id,keyword,category,created_at FROM category_rules ORDER BY category,keyword")
+        rows=cur.fetchall();cur.close();conn.close()
+        categories=["Flug","Hotel","Taxi","Bahn","Mietwagen","Essen","Sonstiges"]
+        cat_opts="".join(f'<option>{c}</option>' for c in categories)
+        rule_rows="".join(f"""<tr>
+            <td style="font-family:DM Mono,monospace">{r[1]}</td>
+            <td><span class="bdg bdg-w">{r[2]}</span></td>
+            <td style="font-size:11px;color:var(--t300)">{str(r[3] or '')[:10]}</td>
+            <td><a href="/rules/delete/{r[0]}" onclick="return confirm('Regel löschen?')"
+               style="color:var(--re6);font-size:12px;text-decoration:none">✕ löschen</a></td>
+            </tr>""" for r in rows)
+        # Standard-Regeln zur Ansicht
+        std_html=""
+        std_rules={"Taxi":["uber","bolt","free now","mytaxi"],"Flug":["lufthansa","ryanair","boarding pass"],
+                   "Hotel":["marriott","booking.com","hilton"],"Bahn":["deutsche bahn","eurostar"],
+                   "Mietwagen":["hertz","sixt","avis"],"Essen":["restaurant","starbucks","lieferando"]}
+        for cat,kws in std_rules.items():
+            std_html+=f'<div style="margin-bottom:4px"><span class="bdg bdg-ok" style="font-size:10px">{cat}</span> <span style="font-size:11px;color:var(--t300)">{", ".join(kws[:4])} …</span></div>'
+        return page_shell("Kategorie-Regeln",f"""
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;max-width:1000px">
+          <div class="page-card">
+            <h2 style="margin-bottom:4px">Eigene Regeln</h2>
+            <p class="sub" style="margin-bottom:14px">Schlüsselwort → Kategorie. Groß-/Kleinschreibung egal. Wird VOR Standard-Regeln geprüft.</p>
+            <form method="post" action="/rules/add">
+              <div class="fgrid" style="margin-bottom:12px">
+                <div class="fgrp"><label class="flbl">Schlüsselwort</label>
+                  <input class="finp" name="keyword" placeholder="z.B. taxifahrt münchen" required></div>
+                <div class="fgrp"><label class="flbl">Kategorie</label>
+                  <select class="fsel" name="category">{cat_opts}</select></div>
+              </div>
+              <button type="submit" class="btn-mp" style="width:100%">+ Regel hinzufügen</button>
+            </form>
+            <div style="margin-top:20px">
+              {"<table><tr><th>Schlüsselwort</th><th>Kategorie</th><th>Erstellt</th><th></th></tr>"+rule_rows+"</table>" if rows else "<p class='sub'>Noch keine eigenen Regeln.</p>"}
+            </div>
+            <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--bds)">
+              <a class="btn" href="/reclassify">🔄 Alle «Unbekannt»-Belege neu klassifizieren</a>
+            </div>
+          </div>
+          <div class="page-card">
+            <h2 style="margin-bottom:12px">Standard-Regeln (integriert)</h2>
+            <p class="sub" style="margin-bottom:12px">Diese Regeln sind fest eingebaut und können nicht gelöscht werden. Eigene Regeln haben Vorrang.</p>
+            {std_html}
+          </div>
+        </div>
+        <div style="margin-top:12px"><a class="btn-l" href="/">← Dashboard</a></div>
+        """)
+    except Exception as e:
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+
+@app.post("/rules/add")
+async def rules_add(request: Request):
+    try:
+        form=await request.form()
+        kw=(form.get("keyword") or "").strip().lower()
+        cat=(form.get("category") or "").strip()
+        if not kw or not cat:
+            return RedirectResponse(url="/rules",status_code=303)
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("INSERT INTO category_rules (keyword,category) VALUES (%s,%s)",(kw,cat))
+        conn.commit();cur.close();conn.close()
+        return RedirectResponse(url="/rules",status_code=303)
+    except Exception as e:
+        return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
+
+@app.get("/rules/delete/{rule_id}")
+def rules_delete(rule_id: int):
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("DELETE FROM category_rules WHERE id=%s",(rule_id,))
+        conn.commit();cur.close();conn.close()
+        return RedirectResponse(url="/rules",status_code=303)
+    except Exception as e:
+        return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
+
+@app.get("/reclassify", response_class=HTMLResponse)
+def reclassify():
+    """Klassifiziert alle 'Unbekannt' Belege neu mit Standard + eigenen Regeln."""
+    try:
+        custom_rules=load_custom_rules()
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""SELECT id,original_filename,detected_type,extracted_text,ki_bemerkung
+            FROM mail_attachments
+            WHERE detected_type IN ('Unbekannt','') OR detected_type IS NULL""")
+        rows=cur.fetchall()
+        updated=0
+        for att_id,fname,old_type,extext,bemerk in rows:
+            new_type=detect_type_with_rules(fname,"",extext or "",custom_rules)
+            if new_type and new_type!=old_type:
+                cur.execute("UPDATE mail_attachments SET detected_type=%s WHERE id=%s",(new_type,att_id))
+                updated+=1
+        conn.commit();cur.close();conn.close()
+        return page_shell("Nachklassifizierung",f"""
+        <div class="page-card">
+          <h2 class="ok-t">✓ {updated} Belege neu klassifiziert</h2>
+          <p class="sub" style="margin-bottom:16px">{len(rows)} «Unbekannt»-Belege geprüft · {updated} Kategorien aktualisiert</p>
+          <div class="acts">
+            <a class="btn" href="/">Dashboard</a>
+            <a class="btn-l" href="/rules">Regeln verwalten</a>
+            <a class="btn-l" href="/attachment-log">Anhang-Log</a>
+          </div>
         </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
