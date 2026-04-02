@@ -1,19 +1,13 @@
 """
-Herrhammer Reisekosten – Version 6.2
+Herrhammer Reisekosten – Version 6.3
 =====================================
-Neu in 6.2:
-  b) Logo klickbar → Dashboard
-  c) Neue Reise: vereinfacht, multi-Land (Freitext)
-  d) /reset-all loescht alles inkl. Mails korrekt
-  e) KI analysiert Mail-Body + Anhang; AMADEUS-PNR-Erkennung
-  f) Abreisedatum/-zeit von Hause + Ankunft zu Hause
-  g) Bahn.de Puenktlichkeit (DB API)
-  h) Hotel X/Y Naechte in Karte
-  i) "Belege gesamt" aus Summary entfernt
-  j) Fluganzahl in Abrechnung (Bonus)
-  k) Trennungspauschale (Sa/So/Feiertag 80€ / halbtags 40€)
-  l) Auto-IMAP per Hintergrund-Thread (alle 5 Min.)
-  m) Duplikat-Check per SHA256-Hash
+Neu in 6.3:
+  - ICS-Parsing: detected_date Spalte fix, ICS korrekt in analyse erkannt
+  - Dashboard: Reisetitel + Kundenkürzel neben Reisecode
+  - DB Bahn API: echte Verbindungsprüfung mit Client-ID/Secret
+  - Analyse: Fehlerursachen klarer, alle Anhänge werden verarbeitet
+  - /init: alle fehlenden Spalten zuverlässig nachgerüstet
+  - trip_meta: neues Feld trip_title + customer_code
 """
 
 from fastapi import FastAPI, Request
@@ -26,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "6.2"
+APP_VERSION = "6.3"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -44,7 +38,8 @@ S3_REGION             = os.getenv("S3_REGION")
 MISTRAL_API_KEY       = os.getenv("MISTRAL_API_KEY", "")
 AMADEUS_CLIENT_ID     = os.getenv("AMADEUS_CLIENT_ID", "")
 AMADEUS_CLIENT_SECRET = os.getenv("AMADEUS_CLIENT_SECRET", "")
-DB_API_KEY            = os.getenv("DB_API_KEY", "")  # Bahn.de / DB API
+DB_CLIENT_ID          = os.getenv("DB_CLIENT_ID", "")    # DB Timetables API
+DB_CLIENT_SECRET      = os.getenv("DB_CLIENT_SECRET", "") # DB Timetables API
 
 MISTRAL_BASE          = "https://api.mistral.ai/v1"
 MISTRAL_OCR_MODEL     = "mistral-ocr-2512"
@@ -269,6 +264,59 @@ WICHTIG: INR/USD/GBP nur wenn explizites Symbol/Code im Text, sonst immer EUR.""
 async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
     ext = (filename or "").lower().split(".")[-1]
     cur = conn.cursor()
+
+    # ICS-Dateien direkt parsen (kein OCR nötig)
+    if ext == "ics":
+        try:
+            s3  = get_s3()
+            obj = s3.get_object(Bucket=S3_BUCKET, Key=storage_key)
+            ics_bytes = obj["Body"].read()
+            ics_text  = ics_bytes.decode(errors="ignore")
+            # ICS Zeilenfortsetzungen auflösen
+            ics_text  = re.sub(r"\r?\n[ \t]", "", ics_text)
+            ics_summary = re.search(r"^SUMMARY[^:]*:(.*)", ics_text, re.MULTILINE)
+            ics_dtstart = re.search(r"^DTSTART[^:]*:([\dTZ]+)", ics_text, re.MULTILINE)
+            ics_loc     = re.search(r"^LOCATION[^:]*:(.*)", ics_text, re.MULTILINE)
+            ics_desc    = re.search(r"^DESCRIPTION[^:]*:(.*)", ics_text, re.MULTILINE)
+            ics_full = " ".join(filter(None,[
+                ics_summary.group(1).strip() if ics_summary else "",
+                ics_desc.group(1).strip() if ics_desc else "",
+            ]))
+            ics_flight_m = re.search(r"\b([A-Z]{2}\d{3,4})\b", ics_full)
+            ics_flight_nr = ics_flight_m.group(1) if ics_flight_m else ""
+            raw_date = ics_dtstart.group(1).strip()[:8] if ics_dtstart else ""
+            ics_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}" if len(raw_date)==8 else ""
+            ics_bemerkung = " | ".join(filter(None,[
+                f"Termin: {ics_summary.group(1).strip()}" if ics_summary else "",
+                f"Datum: {ics_date}" if ics_date else "",
+                f"Ort: {ics_loc.group(1).strip()}" if ics_loc else "",
+                f"Flug: {ics_flight_nr}" if ics_flight_nr else "",
+            ]))
+            cur.execute("""UPDATE mail_attachments SET
+                analysis_status='ok', confidence='hoch', review_flag='ok',
+                detected_date=%s, detected_flight_numbers=%s,
+                ki_bemerkung=%s, detected_type='Kalendereintrag'
+                WHERE id=%s""",
+                (ics_date or None, ics_flight_nr or None, ics_bemerkung or None, att_id))
+            # Flugnummer in trip_meta übernehmen
+            if ics_flight_nr:
+                cur.execute("SELECT trip_code FROM mail_attachments WHERE id=%s",(att_id,))
+                row_tc = cur.fetchone()
+                if row_tc and row_tc[0]:
+                    tc = row_tc[0]
+                    cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code=%s",(tc,))
+                    row_fn = cur.fetchone()
+                    if row_fn:
+                        existing = (row_fn[0] or "")
+                        if ics_flight_nr not in existing:
+                            cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",
+                                (f"{existing},{ics_flight_nr}".strip(","), tc))
+            conn.commit(); cur.close(); return
+        except Exception as e:
+            cur.execute("UPDATE mail_attachments SET analysis_status=%s WHERE id=%s",
+                        (f"ics-fehler:{str(e)[:80]}", att_id))
+            conn.commit(); cur.close(); return
+
     if ext not in ("pdf","jpg","jpeg","png","webp"):
         cur.execute("UPDATE mail_attachments SET analysis_status=%s,confidence=%s,review_flag=%s WHERE id=%s",
                     ("nicht analysierbar","niedrig","pruefen",att_id))
@@ -494,62 +542,59 @@ def _fetch_mails_internal():
                     mail.store(i,"+FLAGS","\\Seen")
                     continue
 
-                safe_fn     = sanitize_filename(decoded_fn)
-                storage_key = f"mail_attachments/{uid}_{safe_fn}"
-                try:
-                    s3.put_object(Bucket=S3_BUCKET,Key=storage_key,Body=pl,
-                                  ContentType=part.get_content_type() or "application/octet-stream")
-                except Exception as s3e:
-                    storage_key = f"S3-FEHLER:{s3e}"
-
-                cur.execute("""INSERT INTO mail_attachments
-                    (mail_uid,trip_code,original_filename,saved_filename,content_type,
-                     storage_key,detected_type,analysis_status,confidence,review_flag,file_hash)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (uid,code,safe_fn,f"{uid}_{safe_fn}",part.get_content_type(),
-                     storage_key,detect_attachment_type(safe_fn,subject,body),
-                     "ausstehend","niedrig","pruefen",h))
-                att_count += 1
-
                 # ICS-Datei direkt parsen (Flugdaten ohne KI)
+                ics_bemerkung = ""
+                ics_detected_date = ""
+                ics_flight_nr = ""
                 if safe_fn.lower().endswith(".ics") and pl:
                     try:
                         ics_text = pl.decode(errors="ignore")
-                        ics_summary = re.search(r"SUMMARY[^:]*:(.*)", ics_text)
-                        ics_dtstart = re.search(r"DTSTART[^:]*:([\d T]+)", ics_text)
-                        ics_loc     = re.search(r"LOCATION[^:]*:(.*)", ics_text)
-                        ics_desc    = re.search(r"DESCRIPTION[^:]*:(.*)", ics_text)
-                        # Flugnummer aus Summary oder Description extrahieren
+                        # ICS kann Zeilenfortsetzungen haben (Leerzeichen/Tab am Zeilenanfang)
+                        ics_text = re.sub(r"\r?\n[ \t]", "", ics_text)
+                        ics_summary = re.search(r"^SUMMARY[^:]*:(.*)", ics_text, re.MULTILINE)
+                        ics_dtstart = re.search(r"^DTSTART[^:]*:([\dTZ]+)", ics_text, re.MULTILINE)
+                        ics_loc     = re.search(r"^LOCATION[^:]*:(.*)", ics_text, re.MULTILINE)
+                        ics_desc    = re.search(r"^DESCRIPTION[^:]*:(.*)", ics_text, re.MULTILINE)
                         ics_full = " ".join(filter(None,[
-                            ics_summary.group(1) if ics_summary else "",
-                            ics_desc.group(1) if ics_desc else "",
+                            ics_summary.group(1).strip() if ics_summary else "",
+                            ics_desc.group(1).strip() if ics_desc else "",
                         ]))
-                        ics_flight = re.search(r"\b([A-Z]{2}\d{3,4})\b", ics_full)
-                        ics_date   = ics_dtstart.group(1).strip()[:8] if ics_dtstart else ""
-                        if ics_date and len(ics_date)==8:
-                            ics_date = f"{ics_date[:4]}-{ics_date[4:6]}-{ics_date[6:8]}"
-                        # ICS-Infos in mail_attachments als KI-Bemerkung speichern
+                        ics_flight_m = re.search(r"\b([A-Z]{2}\d{3,4})\b", ics_full)
+                        ics_flight_nr = ics_flight_m.group(1) if ics_flight_m else ""
+                        raw_date = ics_dtstart.group(1).strip()[:8] if ics_dtstart else ""
+                        if raw_date and len(raw_date) == 8:
+                            ics_detected_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
                         ics_bemerkung = " | ".join(filter(None,[
                             f"Termin: {ics_summary.group(1).strip()}" if ics_summary else "",
-                            f"Datum: {ics_date}" if ics_date else "",
+                            f"Datum: {ics_detected_date}" if ics_detected_date else "",
                             f"Ort: {ics_loc.group(1).strip()}" if ics_loc else "",
-                            f"Flug: {ics_flight.group(1)}" if ics_flight else "",
+                            f"Flug: {ics_flight_nr}" if ics_flight_nr else "",
                         ]))
-                        # Flugnummer direkt in trip_meta übernehmen
-                        if code and ics_flight:
-                            fn_nr = ics_flight.group(1)
+                        # Flugnummer in trip_meta übernehmen
+                        if code and ics_flight_nr:
                             cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code=%s",(code,))
                             row_fn = cur.fetchone()
                             if row_fn:
-                                existing_fns = (row_fn[0] or "")
-                                if fn_nr not in existing_fns:
-                                    new_fns = f"{existing_fns},{fn_nr}".strip(",")
-                                    cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",(new_fns,code))
-                        # ICS-Bemerkung in Anhang speichern
-                        cur.execute("UPDATE mail_attachments SET ki_bemerkung=%s, analysis_status='ok', confidence='hoch' WHERE mail_uid=%s AND original_filename=%s",
-                            (ics_bemerkung, uid, safe_fn))
+                                existing = (row_fn[0] or "")
+                                if ics_flight_nr not in existing:
+                                    cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",
+                                        (f"{existing},{ics_flight_nr}".strip(","), code))
                     except Exception as ics_err:
-                        print(f"[ICS] Fehler beim Parsen: {ics_err}")
+                        print(f"[ICS] Fehler: {ics_err}")
+
+                cur.execute("""INSERT INTO mail_attachments
+                    (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                     storage_key,detected_type,analysis_status,confidence,review_flag,
+                     file_hash,ki_bemerkung,detected_date,detected_flight_numbers)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (uid,code,safe_fn,f"{uid}_{safe_fn}",part.get_content_type(),
+                     storage_key,detect_attachment_type(safe_fn,subject,body),
+                     "ok" if ics_bemerkung else "ausstehend",
+                     "hoch" if ics_bemerkung else "niedrig",
+                     "ok" if ics_bemerkung else "pruefen",
+                     h, ics_bemerkung or None,
+                     ics_detected_date or None,
+                     ics_flight_nr or None))
 
         # Mail erfolgreich importiert → für Löschung vormerken
         ids_to_delete.append(i)
@@ -580,26 +625,84 @@ _t.start()
 # BAHN PUENKTLICHKEIT (DB API)
 # =========================================================
 
-async def check_bahn_puenktlichkeit(zug_nr: str, datum: str) -> dict:
+async def check_bahn_puenktlichkeit(zug_nr: str, datum: str, eva_nr: str = "8000105") -> dict:
     """
-    Prueft Zugspaetung via DB API (api.deutschebahn.com).
-    Benoetigt DB_API_KEY in Render.
+    Prueft Zugverspaetung via DB Timetables API v1.
+    Benoetigt DB_CLIENT_ID + DB_CLIENT_SECRET (developers.deutschebahn.com).
+    eva_nr: EVA-Bahnhofsnummer, Standard Frankfurt Hbf = 8000105
+    Nur Fernverkehr (ICE/IC/EC).
     """
-    if not DB_API_KEY:
-        return {"status":"kein DB_API_KEY","delay_min":None,"source":"–"}
+    if not DB_CLIENT_ID or not DB_CLIENT_SECRET:
+        return {"status": "kein DB_CLIENT_ID/SECRET", "delay_min": None, "source": "DB Timetables"}
+    # Zugnummer normieren: "ICE 597" → "597", "ICE597" → "597"
+    zug_clean = re.sub(r"[^0-9]", "", zug_nr)
+    if not zug_clean:
+        return {"status": "ungültige Zugnummer", "delay_min": None, "source": "DB Timetables"}
     try:
-        async with httpx.AsyncClient(timeout=8.0) as cl:
-            resp = await cl.get(
-                "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/fchg/8000105",
-                headers={"DB-Client-Id": DB_API_KEY,"DB-Api-Key": DB_API_KEY,"accept":"application/xml"})
-        if resp.status_code==200:
-            # Vereinfachte Pruefung – Zugnummer im Response
-            if zug_nr.replace(" ","") in resp.text:
-                return {"status":"gefunden","delay_min":0,"source":"DB API"}
-            return {"status":"nicht gefunden","delay_min":None,"source":"DB API"}
-        return {"status":f"HTTP {resp.status_code}","delay_min":None,"source":"DB API"}
+        # Datum für API: YYMMDD
+        if datum and len(datum) == 10:  # YYYY-MM-DD
+            api_date = datum[2:4] + datum[5:7] + datum[8:10]
+        else:
+            api_date = datetime.now().strftime("%y%m%d")
+        # Stunde für fchg (changes): aktuelle Stunde
+        api_hour = datetime.now().strftime("%H")
+
+        headers = {
+            "DB-Client-Id": DB_CLIENT_ID,
+            "DB-Api-Key": DB_CLIENT_SECRET,
+            "accept": "application/xml"
+        }
+        async with httpx.AsyncClient(timeout=10.0) as cl:
+            # 1. Plan abrufen (planmäßige Abfahrten)
+            plan_url = f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/plan/{eva_nr}/{api_date}/{api_hour}"
+            resp_plan = await cl.get(plan_url, headers=headers)
+
+            # 2. Änderungen abrufen (aktuelle Verspätungen)
+            fchg_url = f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/fchg/{eva_nr}"
+            resp_fchg = await cl.get(fchg_url, headers=headers)
+
+        if resp_plan.status_code != 200:
+            return {"status": f"Plan HTTP {resp_plan.status_code}", "delay_min": None, "source": "DB Timetables", "raw": resp_plan.text[:200]}
+
+        plan_text = resp_plan.text
+        fchg_text = resp_fchg.text if resp_fchg.status_code == 200 else ""
+
+        # Zugnummer im Plan suchen
+        if zug_clean not in plan_text:
+            return {"status": "nicht im Fahrplan", "delay_min": None, "source": "DB Timetables"}
+
+        # Verspätung aus fchg parsen: <dp ct="HHMM"> neben trip-id mit Zugnummer
+        delay_min = None
+        if fchg_text and zug_clean in fchg_text:
+            # Trip-ID Zeilen mit unserer Zugnummer finden
+            # Format: <s id="..."><tl c="ICE" n="597"...><dp ct="1423" ...>
+            # Suche nach n="597" in der Nähe von ct=
+            pattern = rf'n="{zug_clean}"[^>]*>.*?ct="(\d{{4}})"'
+            m = re.search(pattern, fchg_text, re.DOTALL)
+            if m:
+                ct_time = m.group(1)  # aktuell geplante Abfahrt z.B. "1437"
+                # Plan-Abfahrt finden
+                pt_pattern = rf'n="{zug_clean}"[^>]*>.*?pt="(\d{{4}})"'
+                pm = re.search(pt_pattern, plan_text, re.DOTALL)
+                if pm:
+                    pt_time = pm.group(1)
+                    try:
+                        ct_h, ct_m = int(ct_time[:2]), int(ct_time[2:])
+                        pt_h, pt_m = int(pt_time[:2]), int(pt_time[2:])
+                        delay_min = (ct_h * 60 + ct_m) - (pt_h * 60 + pt_m)
+                        if delay_min < 0: delay_min += 1440  # Mitternacht überschritten
+                    except Exception:
+                        delay_min = None
+
+        if delay_min is not None and delay_min > 15:
+            return {"status": "verspätet", "delay_min": delay_min, "source": "DB Timetables"}
+        elif delay_min is not None:
+            return {"status": "pünktlich", "delay_min": delay_min, "source": "DB Timetables"}
+        else:
+            return {"status": "im Fahrplan", "delay_min": 0, "source": "DB Timetables"}
+
     except Exception as e:
-        return {"status":f"Fehler:{e}","delay_min":None,"source":"DB API"}
+        return {"status": f"Fehler: {str(e)[:80]}", "delay_min": None, "source": "DB Timetables"}
 
 
 # =========================================================
@@ -968,6 +1071,7 @@ def init():
                     "car_rental_info TEXT","nights_planned INTEGER DEFAULT 0",
                     "meals_reimbursed TEXT DEFAULT ''","notes TEXT",
                     "hotel_mode TEXT","departure_date DATE","return_date DATE",
+                    "trip_title TEXT","customer_code TEXT",
                     "created_at TIMESTAMP DEFAULT now()"]:
             cur.execute(f"ALTER TABLE trip_meta ADD COLUMN IF NOT EXISTS {col}")
             cur.execute(f"ALTER TABLE trip_meta ADD COLUMN IF NOT EXISTS {col}")
@@ -992,7 +1096,8 @@ def load_trips(conn, filter_status=None):
     cur.execute("""SELECT trip_code,hotel_mode,departure_date,return_date,
                    departure_time_home,arrival_time_home,destinations,country_code,
                    traveler_name,colleagues,flight_numbers,train_numbers,car_rental_info,
-                   nights_planned,nights_booked,meals_reimbursed,pnr_code,notes
+                   nights_planned,nights_booked,meals_reimbursed,pnr_code,notes,
+                   trip_title,customer_code
                    FROM trip_meta ORDER BY trip_code""")
     raw=cur.fetchall()
     cur.execute("""SELECT COALESCE(trip_code,'') tc,detected_type,
@@ -1016,7 +1121,8 @@ def load_trips(conn, filter_status=None):
     trips=[]
     for row in raw:
         (tc,hm,dep,ret,dep_t,ret_t,destinations,cc,traveler,colleagues,
-         fns,trains,car,nights_p,nights_b,meals,pnr,notes) = row
+         fns,trains,car,nights_p,nights_b,meals,pnr,notes,
+         trip_title,customer_code) = row
         status=compute_status(dep,ret)
         if filter_status and status!=filter_status: continue
         a=att.get(tc,{"types":[],"sum":0.0,"review":0,"fns":[],"trains":[],"pnrs":[]})
@@ -1031,6 +1137,7 @@ def load_trips(conn, filter_status=None):
             fns=", ".join(all_fns),trains=", ".join(all_trains),
             car=car or "",nights_p=nights_p or 0,nights_b=nights_b or 0,
             meals=meals or "",pnr=", ".join(all_pnrs),notes=notes or "",
+            trip_title=trip_title or "",customer_code=customer_code or "",
             has_flight="Flug" in types,
             has_hotel="Hotel" in types or hm in ("customer","own"),
             has_car="Mietwagen" in types or bool(car),
@@ -1047,6 +1154,15 @@ def _pills(t):
     dep=str(t["dep"])[:10] if t["dep"] else "–"
     ret=str(t["ret"])[:10] if t["ret"] else "–"
     return p(t["has_flight"],"Flug") + p(t["has_hotel"],"Hotel") + p(t["has_car"],"Mietwagen") + f'<div class="mdate">{dep} – {ret}</div>'
+
+def _code_header(t):
+    """Reisecode + optionaler Titel/Kundenkürzel neben dem Code."""
+    title = t.get("trip_title","")
+    ccode = t.get("customer_code","")
+    label_parts = [x for x in [ccode, title] if x]
+    label = " · ".join(label_parts)
+    label_html = f' <span style="font-family:\'Inter\',sans-serif;font-size:11px;font-weight:400;color:var(--t300);letter-spacing:0">{label}</span>' if label else ""
+    return f'<div class="c-code">{t["tc"]}{label_html}</div>'
 
 def _hotel_badge(t):
     np_=t["nights_p"]; nb=t["nights_b"]
@@ -1108,7 +1224,7 @@ async def _dashboard(request: Request, focus: str):
                 if t["fns"] and t["status"]=="active":
                     live_flight=f'<div style="margin:0 12px 10px;padding:6px 12px;background:#fff8f0;border:1px solid rgba(201,124,10,.25);border-radius:var(--rs);font-size:12px;color:var(--am6);font-weight:500">🛫 Live: {t["fns"]}</div>'
                 cards+=f"""<div class="card {"alert" if ha else ""}" onclick="location.href='/trip/{t["tc"]}'">
-                  <div class="c-top"><div class="c-code">{t["tc"]}</div>
+                  <div class="c-top">{_code_header(t)}
                     <div class="c-info"><div class="c-traveler">{t["traveler"] or "–"}</div>
                       <div class="c-dest">{t["destinations"] or t["cc"]}</div></div>
                     <div class="sbadge sb-active">{"<span class='adot'></span>Alert" if ha else "Aktiv"}</div>
@@ -1133,7 +1249,7 @@ async def _dashboard(request: Request, focus: str):
             for t in trips:
                 dep=str(t["dep"])[:10] if t["dep"] else "–"
                 cards+=f"""<div class="card" onclick="location.href='/trip/{t["tc"]}'">
-                  <div class="c-top"><div class="c-code">{t["tc"]}</div>
+                  <div class="c-top">{_code_header(t)}
                     <div class="c-info"><div class="c-traveler">{t["traveler"] or "–"}</div>
                       <div class="c-dest">Ab {dep} · {t["destinations"] or t["cc"]}</div></div>
                     <div class="sbadge sb-planned">Geplant</div>
@@ -1168,7 +1284,7 @@ async def _dashboard(request: Request, focus: str):
                 gesamt=t["sum_eur"]+vma+trenn
                 trenn_html=f'<span class="trenn-tag">Trenn. {trenn:.0f} €</span>' if trenn>0 else ""
                 cards+=f"""<div class="card" onclick="location.href='/report/{t["tc"]}'">
-                  <div class="c-top"><div class="c-code">{t["tc"]}</div>
+                  <div class="c-top">{_code_header(t)}
                     <div class="c-info"><div class="c-traveler">{t["traveler"] or "–"}</div>
                       <div class="c-dest">{dep_s} · {days} Tage · {t["destinations"] or t["cc"]}</div></div>
                     <div class="sbadge sb-done">Abgerechnet</div>
@@ -1358,9 +1474,11 @@ async def analyze_attachments():
             mail_processed+=1
         conn.commit()
 
-        # Anhaenge analysieren
+        # Anhänge analysieren – ausstehende + ICS ohne detected_date
         cur.execute("""SELECT id,storage_key,original_filename FROM mail_attachments
-            WHERE analysis_status IN ('ausstehend','neu') OR analysis_status IS NULL ORDER BY id""")
+            WHERE analysis_status IN ('ausstehend','neu') OR analysis_status IS NULL
+            OR (original_filename ILIKE '%.ics' AND (detected_date IS NULL OR detected_date = ''))
+            ORDER BY id""")
         rows=cur.fetchall();cur.close()
         att_processed=0
         for row in rows:
@@ -1709,7 +1827,49 @@ def reset_all(confirm: str = ""):
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p></div>')
 
-@app.get("/reset-mail-log")
+
+@app.get("/check-trains/{tc}", response_class=HTMLResponse)
+async def check_trains(tc: str):
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("SELECT train_numbers,departure_date FROM trip_meta WHERE trip_code=%s",(tc,))
+        row=cur.fetchone()
+        if not row or not row[0]:
+            cur.close();conn.close()
+            return page_shell("Bahnprüfung",f'<div class="page-card"><h2>Keine Zugnummern für {tc}</h2><a class="btn-l" href="/edit-trip/{tc}">Bearbeiten</a></div>')
+        trains=[z.strip() for z in (row[0] or "").split(",") if z.strip()]
+        dep_date=str(row[1]) if row[1] else str(date.today())
+        if not DB_CLIENT_ID or not DB_CLIENT_SECRET:
+            cur.close();conn.close()
+            return page_shell("Bahnprüfung",f"""<div class="page-card">
+              <h2 class="warn-t">⚠ DB API nicht konfiguriert</h2>
+              <p class="sub">Bitte DB_CLIENT_ID und DB_CLIENT_SECRET in Render eintragen.</p>
+              <p class="sub">Portal: developers.deutschebahn.com → Timetables 1.0.274 → Anwendung → Keys</p>
+              <a class="btn-l" href="/">Zurück</a></div>""")
+        results_html=""
+        for zug in trains:
+            si = await check_bahn_puenktlichkeit(zug, dep_date)
+            alert = "delay" if (si.get("delay_min") or 0) > 15 else "ok"
+            cur.execute("""INSERT INTO flight_alerts
+                (trip_code,flight_number,flight_date,alert_type,message,source,delay_min)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                (tc,zug,dep_date,alert,si.get("status","–"),si.get("source","DB Timetables"),si.get("delay_min")))
+            cls="bdg-e" if alert=="delay" else "bdg-ok"
+            delay_txt = f'+{si["delay_min"]} Min.' if si.get("delay_min") else "–"
+            results_html+=f"<tr><td class='cc'>{zug}</td><td>{dep_date}</td><td><span class='bdg {cls}'>{si.get('status','–')}</span></td><td>{delay_txt}</td><td>{si.get('source','–')}</td></tr>"
+            if "raw" in si:
+                results_html+=f"<tr><td colspan='5' style='font-size:11px;color:var(--t300)'>API-Antwort: {si['raw'][:200]}</td></tr>"
+        conn.commit();cur.close();conn.close()
+        bahn_status = "✓ DB Timetables API aktiv" if DB_CLIENT_ID else "⚠ Kein API Key"
+        return page_shell("Bahnprüfung",f"""
+        <div class="page-card"><h2>Zugstatus – {tc}</h2>
+          <p class="sub" style="margin-bottom:12px">{bahn_status} · EVA 8000105 (Frankfurt Hbf)</p>
+          <div class="acts"><a class="btn-l" href="/">Zurück</a></div>
+          <table><tr><th>Zug</th><th>Datum</th><th>Status</th><th>Verspätung</th><th>Quelle</th></tr>
+          {results_html or "<tr><td colspan='5'>Keine Ergebnisse</td></tr>"}</table>
+        </div>""",active_tab="active")
+    except Exception as e:
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
 def reset_mail_log():
     try:
         conn=get_conn();cur=conn.cursor()
