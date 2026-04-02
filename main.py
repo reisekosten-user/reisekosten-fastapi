@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "6.4"
+APP_VERSION = "6.6"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -38,7 +38,7 @@ S3_REGION             = os.getenv("S3_REGION")
 MISTRAL_API_KEY       = os.getenv("MISTRAL_API_KEY", "")
 AMADEUS_CLIENT_ID     = os.getenv("AMADEUS_CLIENT_ID", "")
 AMADEUS_CLIENT_SECRET = os.getenv("AMADEUS_CLIENT_SECRET", "")
-DB_CLIENT_ID          = os.getenv("DB_CLIENT_ID", "")    # DB Timetables API
+AVIATIONSTACK_KEY     = os.getenv("AVIATIONSTACK_KEY", "")  # aviationstack.com Free: 100 req/Tag
 DB_CLIENT_SECRET      = os.getenv("DB_CLIENT_SECRET", "") # DB Timetables API
 
 MISTRAL_BASE          = "https://api.mistral.ai/v1"
@@ -636,6 +636,314 @@ def _fetch_mails_internal():
 # Thread starten
 _t = threading.Thread(target=_auto_fetch, daemon=True)
 _t.start()
+
+
+# =========================================================
+# AVIATIONSTACK – Buchungsänderungs-Check (100 req/Tag Free)
+# =========================================================
+
+# Letzter Check-Zeitpunkt pro Flugnummer – verhindert zu viele API-Calls
+_flight_check_cache: dict = {}  # key: "FN_DATUM" → last_checked timestamp
+
+async def check_aviationstack(fn: str, dep_date: str) -> dict:
+    """
+    Prüft Flugstatus via AviationStack API.
+    Erkennt: Routenänderung, Cancellation, Gate-Änderung, Verspätung.
+    Benötigt AVIATIONSTACK_KEY (kostenlos bis 100 req/Tag).
+    """
+    if not AVIATIONSTACK_KEY:
+        return {"status": "kein AVIATIONSTACK_KEY", "source": "AviationStack"}
+
+    carrier = fn[:2].upper()
+    num     = re.sub(r"[^0-9]", "", fn)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cl:
+            resp = await cl.get(
+                "http://api.aviationstack.com/v1/flights",
+                params={
+                    "access_key":   AVIATIONSTACK_KEY,
+                    "airline_iata": carrier,
+                    "flight_number": num,
+                    "flight_date":  dep_date,
+                    "limit": 1,
+                }
+            )
+        if resp.status_code != 200:
+            return {"status": f"HTTP {resp.status_code}", "source": "AviationStack"}
+
+        data = resp.json().get("data", [])
+        if not data:
+            return {"status": "nicht gefunden", "source": "AviationStack"}
+
+        f = data[0]
+        flight_status  = f.get("flight_status", "")   # scheduled/active/landed/cancelled
+        dep_iata       = f.get("departure", {}).get("iata", "")
+        arr_iata       = f.get("arrival", {}).get("iata", "")
+        dep_delay      = f.get("departure", {}).get("delay")   # Minuten
+        arr_delay      = f.get("arrival", {}).get("delay")
+        dep_gate       = f.get("departure", {}).get("gate", "")
+        dep_terminal   = f.get("departure", {}).get("terminal", "")
+        cancelled      = (flight_status == "cancelled")
+
+        route = f"{dep_iata}→{arr_iata}" if dep_iata and arr_iata else ""
+
+        return {
+            "status":        flight_status,
+            "source":        "AviationStack",
+            "route":         route,
+            "dep_delay":     dep_delay,
+            "arr_delay":     arr_delay,
+            "gate":          dep_gate,
+            "terminal":      dep_terminal,
+            "cancelled":     cancelled,
+            "delay_min":     dep_delay,
+        }
+    except Exception as e:
+        return {"status": f"Fehler: {str(e)[:80]}", "source": "AviationStack"}
+
+
+async def auto_check_active_flights():
+    """
+    Prüft alle Flugnummern aktiver Reisen via AviationStack.
+    Nur Flüge heute/morgen, max. 1x pro 3h pro Flugnummer → bleibt unter 100 req/Tag.
+    Schreibt Alerts in flight_alerts wenn Änderungen erkannt.
+    """
+    if not AVIATIONSTACK_KEY:
+        return
+
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        today    = date.today()
+        tomorrow = today + timedelta(days=1)
+
+        # Alle aktiven Reisen mit Flugnummern
+        cur.execute("""SELECT trip_code, flight_numbers, departure_date, return_date
+                       FROM trip_meta
+                       WHERE flight_numbers IS NOT NULL AND flight_numbers != ''
+                       AND departure_date IS NOT NULL""")
+        rows = cur.fetchall()
+
+        checked = 0
+        for tc, fns_raw, dep_d, ret_d in rows:
+            # Nur aktive Reisen
+            status = compute_status(dep_d, ret_d)
+            if status != "active":
+                continue
+
+            fns = [f.strip() for f in (fns_raw or "").split(",") if f.strip()]
+            for fn in fns:
+                # Nur Flüge heute oder morgen
+                flight_date = None
+                if dep_d == today or dep_d == tomorrow:
+                    flight_date = str(dep_d)
+                elif ret_d and (ret_d == today or ret_d == tomorrow):
+                    flight_date = str(ret_d)
+                else:
+                    continue
+
+                # Rate-Limit: max 1x alle 3h pro Flugnummer
+                cache_key = f"{fn}_{flight_date}"
+                last = _flight_check_cache.get(cache_key, 0)
+                if time.time() - last < 10800:  # 3 Stunden
+                    continue
+
+                if checked >= 90:  # Sicherheitspuffer vor 100
+                    break
+
+                result = await check_aviationstack(fn, flight_date)
+                _flight_check_cache[cache_key] = time.time()
+                checked += 1
+
+                flight_status = result.get("status", "")
+                cancelled     = result.get("cancelled", False)
+                dep_delay     = result.get("dep_delay") or 0
+                route         = result.get("route", "")
+                gate          = result.get("gate", "")
+
+                # Alert-Typen bestimmen
+                alert_type = "ok"
+                msg_parts  = []
+
+                if cancelled:
+                    alert_type = "cancelled"
+                    msg_parts.append("⚠ FLUG STORNIERT")
+                elif dep_delay and dep_delay > 30:
+                    alert_type = "delay"
+                    msg_parts.append(f"Verspätung +{dep_delay} Min.")
+                elif flight_status in ("active", "landed"):
+                    msg_parts.append(f"Status: {flight_status}")
+
+                if route:
+                    msg_parts.append(f"Route: {route}")
+                if gate:
+                    msg_parts.append(f"Gate: {gate}")
+
+                message = " · ".join(msg_parts) if msg_parts else flight_status
+
+                # Nur speichern wenn neu / geändert
+                cur.execute("""SELECT message FROM flight_alerts
+                               WHERE trip_code=%s AND flight_number=%s AND flight_date=%s
+                               ORDER BY checked_at DESC LIMIT 1""",
+                            (tc, fn, flight_date))
+                last_alert = cur.fetchone()
+                if not last_alert or last_alert[0] != message:
+                    cur.execute("""INSERT INTO flight_alerts
+                        (trip_code,flight_number,flight_date,alert_type,message,source,delay_min)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                        (tc, fn, flight_date, alert_type, message,
+                         result.get("source","AviationStack"), dep_delay or None))
+                    print(f"[FlightCheck] {fn} {flight_date}: {message}")
+
+        conn.commit(); cur.close(); conn.close()
+        if checked:
+            print(f"[FlightCheck] {checked} Flüge geprüft")
+    except Exception as e:
+        print(f"[FlightCheckFehler] {e}")
+
+
+def _auto_flight_check():
+    """Daemon-Thread: prüft aktive Flüge alle 3 Stunden."""
+    time.sleep(60)  # Startup-Delay
+    while True:
+        try:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(auto_check_active_flights())
+            loop.close()
+        except Exception as e:
+            print(f"[FlightThreadFehler] {e}")
+        time.sleep(10800)  # 3 Stunden
+
+
+# Flight-Check Thread starten
+_ft = threading.Thread(target=_auto_flight_check, daemon=True)
+_ft.start()
+
+# =========================================================
+
+async def check_opensky(callsign: str) -> dict:
+    """
+    Prüft ob ein Flug gerade aktiv ist via OpenSky Network REST API.
+    callsign: ICAO-Callsign z.B. 'DLH123' (Lufthansa LH123)
+    Liefert: on_ground, altitude, velocity, last_seen
+    """
+    # IATA → ICAO Carrier Mapping (häufigste Airlines)
+    iata_to_icao = {
+        "LH":"DLH","AZ":"AZA","LX":"SWR","OS":"AUA","BA":"BAW",
+        "AF":"AFR","KL":"KLM","IB":"IBE","EK":"UAE","EW":"EWG",
+        "FR":"RYR","U2":"EZY","W6":"WZZ","TK":"THY","SK":"SAS",
+        "AY":"FIN","SN":"BEL","VY":"VLG","VU":"VJT","QR":"QTR",
+        "ET":"ETH","MS":"MSR","SV":"SVA","AI":"AIC","9W":"JAI",
+        "6E":"IGO","SG":"SEJ","MH":"MAS","SQ":"SIA","CX":"CPA",
+        "NH":"ANA","JL":"JAL","OZ":"AAR","KE":"KAL","CA":"CCA",
+        "MU":"CES","CZ":"CSN","HU":"CHH","9C":"CQH",
+    }
+    try:
+        # Callsign aus IATA-Flugnummer bauen: LH123 → DLH123
+        m = re.match(r"^([A-Z]{2})(\d{1,4})$", callsign.upper().replace(" ",""))
+        if not m:
+            return {"status":"ungültige Flugnummer","source":"OpenSky","on_ground":None}
+        iata_carrier = m.group(1)
+        flight_num   = m.group(2)
+        icao_carrier = iata_to_icao.get(iata_carrier, iata_carrier + "X")  # Fallback
+        icao_callsign = f"{icao_carrier}{flight_num}"
+
+        async with httpx.AsyncClient(timeout=10.0) as cl:
+            resp = await cl.get(
+                "https://opensky-network.org/api/states/all",
+                params={"callsign": icao_callsign.ljust(8)},  # OpenSky padded auf 8 Zeichen
+            )
+
+        if resp.status_code == 429:
+            return {"status":"Rate Limit (OpenSky)","source":"OpenSky","on_ground":None}
+        if resp.status_code != 200:
+            return {"status":f"HTTP {resp.status_code}","source":"OpenSky","on_ground":None}
+
+        data = resp.json()
+        states = data.get("states") or []
+
+        # Suche nach Callsign (kann padded sein)
+        match = None
+        for s in states:
+            cs = (s[1] or "").strip()
+            if cs.upper() == icao_callsign.upper():
+                match = s; break
+
+        if not match:
+            # Flug nicht live – entweder gelandet oder noch nicht gestartet
+            return {
+                "status": "nicht aktiv (gelandet/nicht gestartet)",
+                "source": "OpenSky",
+                "on_ground": None,
+                "callsign": icao_callsign,
+            }
+
+        on_ground  = match[8]        # bool
+        altitude   = match[7]        # Barometric altitude in m
+        velocity   = match[9]        # m/s
+        lat        = match[6]
+        lon        = match[5]
+        last_seen  = match[4]        # Unix timestamp
+
+        if on_ground:
+            status = "am Boden"
+        else:
+            alt_ft = int((altitude or 0) * 3.281)
+            spd_kmh = int((velocity or 0) * 3.6)
+            status = f"in der Luft · {alt_ft:,} ft · {spd_kmh} km/h"
+
+        return {
+            "status": status,
+            "source": "OpenSky",
+            "on_ground": on_ground,
+            "altitude_m": altitude,
+            "velocity_ms": velocity,
+            "lat": lat,
+            "lon": lon,
+            "callsign": icao_callsign,
+            "delay_min": None,  # OpenSky liefert keine Verspätungsminuten
+        }
+
+    except Exception as e:
+        return {"status":f"Fehler: {str(e)[:80]}","source":"OpenSky","on_ground":None}
+
+
+async def check_flight_status(fn: str, dep_date: str) -> dict:
+    """
+    Kombinierter Flugstatus:
+    1. OpenSky: Live-Position (kostenlos, kein Key)
+    2. Amadeus: Existenzcheck / Fahrplan (falls Key vorhanden)
+    """
+    # OpenSky immer zuerst
+    result = await check_opensky(fn)
+
+    # Amadeus als Ergänzung: Fahrplan-Existenzcheck
+    if AMADEUS_CLIENT_ID and result.get("on_ground") is None:
+        try:
+            async with httpx.AsyncClient(timeout=8) as cl:
+                tr = await cl.post(
+                    "https://test.api.amadeus.com/v1/security/oauth2/token",
+                    data={"grant_type":"client_credentials",
+                          "client_id":AMADEUS_CLIENT_ID,
+                          "client_secret":AMADEUS_CLIENT_SECRET})
+                token = tr.json().get("access_token","")
+                if token:
+                    carrier = fn[:2].upper()
+                    num     = re.sub(r"[^0-9]","",fn)
+                    fr = await cl.get(
+                        "https://test.api.amadeus.com/v2/schedule/flights",
+                        headers={"Authorization":f"Bearer {token}"},
+                        params={"carrierCode":carrier,"flightNumber":num,
+                                "scheduledDepartureDate":dep_date})
+                    if fr.status_code == 200 and fr.json().get("data"):
+                        result["amadeus"] = "im Fahrplan ✓"
+                    else:
+                        result["amadeus"] = "nicht im Fahrplan"
+        except Exception:
+            pass
+
+    return result
 
 
 # =========================================================
@@ -1752,29 +2060,69 @@ async def check_flights(tc: str):
         dep_str=str(dep_date) if dep_date else str(date.today())
         results_html=""
 
-        # Flüge
+        # Flüge: OpenSky (Live-Position) + AviationStack (Buchungsstatus)
         fns=[f.strip() for f in (fns_raw or "").split(",") if f.strip()]
         for fn in fns:
-            si={"source":"–","status":"kein Amadeus Key","delay_min":None}
-            if AMADEUS_CLIENT_ID:
-                try:
-                    async with httpx.AsyncClient(timeout=8) as cl:
-                        tr=await cl.post("https://test.api.amadeus.com/v1/security/oauth2/token",
-                            data={"grant_type":"client_credentials","client_id":AMADEUS_CLIENT_ID,"client_secret":AMADEUS_CLIENT_SECRET})
-                        token=tr.json().get("access_token","")
-                        carrier=fn[:2].upper(); num=re.sub(r"[^0-9]","",fn)
-                        fr=await cl.get("https://test.api.amadeus.com/v2/schedule/flights",
-                            headers={"Authorization":f"Bearer {token}"},
-                            params={"carrierCode":carrier,"flightNumber":num,"scheduledDepartureDate":dep_str})
-                    if fr.status_code==200 and fr.json().get("data"):
-                        si={"source":"Amadeus","status":"pünktlich","delay_min":0}
-                except Exception as e:
-                    si={"source":"Amadeus","status":f"Fehler:{e}","delay_min":None}
-            alert="delay" if (si.get("delay_min") or 0)>15 else "ok"
-            cur.execute("INSERT INTO flight_alerts (trip_code,flight_number,flight_date,alert_type,message,source,delay_min) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                        (tc,fn,dep_str,alert,si.get("status","–"),si.get("source","–"),si.get("delay_min")))
-            cls="bdg-e" if alert=="delay" else "bdg-ok"
-            results_html+=f"<tr><td class='cc'>✈ {fn}</td><td>{dep_str}</td><td><span class='bdg {cls}'>{si.get('status','–')}</span></td><td>{si.get('source','–')}</td><td>{si.get('delay_min','–')}</td></tr>"
+            # OpenSky: Live-Position
+            si      = await check_flight_status(fn, dep_str)
+            on_ground = si.get("on_ground")
+            opensky_status = si.get("status","–")
+
+            # AviationStack: Buchungsstatus (Umbuchung/Stornierung/Verspätung)
+            av = await check_aviationstack(fn, dep_str)
+            av_status   = av.get("status","")
+            av_route    = av.get("route","")
+            av_delay    = av.get("dep_delay") or 0
+            av_gate     = av.get("gate","")
+            av_cancelled = av.get("cancelled", False)
+
+            # Alert-Logik
+            if av_cancelled:
+                alert = "cancelled"
+                display_status = "⚠ STORNIERT"
+                cls = "bdg-e"
+            elif av_delay > 30:
+                alert = "delay"
+                display_status = f"Verspätung +{av_delay} Min."
+                cls = "bdg-e"
+            elif on_ground is False:
+                alert = "ok"
+                display_status = opensky_status
+                cls = "bdg-ok"
+            elif on_ground is True:
+                alert = "ok"
+                display_status = "am Boden"
+                cls = "bdg-w"
+            else:
+                alert = "ok"
+                display_status = av_status or opensky_status or "–"
+                cls = "bdg-w"
+
+            cur.execute("""INSERT INTO flight_alerts
+                (trip_code,flight_number,flight_date,alert_type,message,source,delay_min)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                (tc,fn,dep_str,alert,display_status,"OpenSky+AviationStack",av_delay or si.get("delay_min")))
+
+            # Zusatzinfos zusammenbauen
+            extras = []
+            if av_route:
+                extras.append(f"🛤 {av_route}")
+            if av_gate:
+                extras.append(f"Gate {av_gate}")
+            if si.get("lat") and si.get("lon"):
+                extras.append(f"📍 {si['lat']:.1f}°N {si['lon']:.1f}°E")
+            if av.get("source") == "kein AVIATIONSTACK_KEY":
+                extras.append('<span style="color:var(--am6)">⚠ kein AviationStack Key</span>')
+            extra_html = " · ".join(extras)
+
+            results_html+=f"""<tr>
+                <td class='cc'>✈ {fn}</td>
+                <td>{dep_str}</td>
+                <td><span class='bdg {cls}'>{display_status}</span>
+                    {"<br>" if extra_html else ""}<span style='font-size:11px;color:var(--t500)'>{extra_html}</span></td>
+                <td style='font-size:11px'>OpenSky<br>AviationStack</td>
+                <td>{av_delay or '–'}</td>
+            </tr>"""
 
         # g) Züge
         trains=[t.strip() for t in (trains_raw or "").split(",") if t.strip()]
