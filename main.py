@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.0"
+APP_VERSION = "7.1"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -400,6 +400,8 @@ Felder:
 - flight_numbers: kommagetrennte Flugnummern z.B. "LH123, AZ770", oder ""
 - train_numbers: kommagetrennte Zugnummern z.B. "ICE 1234, IC 578", oder ""
 - nights: Anzahl Uebernachtungen als Zahl z.B. 3, oder 0
+- traveler_name: Vollstaendiger Name des Reisenden falls im Text erkennbar, z.B. "Max Mustermann", sonst ""
+- destination: Hauptreiseziel/-land falls erkennbar z.B. "Lyon", "Indien", "Frankfurt Messe", sonst ""
 - confidence: "hoch" wenn Betrag+Typ+Datum sicher, "mittel" wenn 2 von 3, sonst "niedrig"
 - bemerkung: kurze Notiz auf Deutsch wenn unklar, sonst ""
 
@@ -2091,12 +2093,18 @@ async def analyze_attachments():
                 fns=fields.get("flight_numbers","") or ""
                 trains=fields.get("train_numbers","") or ""
                 rc=fields.get("reisecode","") or tc or ""
+                traveler_ki=fields.get("traveler_name","") or ""
+                dest_ki=fields.get("destination","") or ""
                 if pnr and rc:
                     cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr,rc))
                 if fns and rc:
                     cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns,rc))
                 if trains and rc:
                     cur.execute("UPDATE trip_meta SET train_numbers=%s WHERE trip_code=%s AND (train_numbers IS NULL OR train_numbers='')",(trains,rc))
+                if traveler_ki and rc:
+                    cur.execute("UPDATE trip_meta SET traveler_name=%s WHERE trip_code=%s AND (traveler_name IS NULL OR traveler_name='')",(traveler_ki,rc))
+                if dest_ki and rc:
+                    cur.execute("UPDATE trip_meta SET destinations=%s WHERE trip_code=%s AND (destinations IS NULL OR destinations='')",(dest_ki,rc))
             cur.execute("UPDATE mail_messages SET analysis_status='ok' WHERE id=%s",(mid,))
             mail_processed+=1
         conn.commit()
@@ -2273,13 +2281,244 @@ def mail_detail(mail_id: int):
 def trip_detail(tc: str):
     try:
         conn=get_conn();cur=conn.cursor()
-        # Trip-Meta
         cur.execute("""SELECT traveler_name,colleagues,departure_date,return_date,
             departure_time_home,arrival_time_home,destinations,country_code,
             flight_numbers,train_numbers,car_rental_info,nights_planned,nights_booked,
             meals_reimbursed,pnr_code,notes,hotel_mode,trip_title,customer_code
             FROM trip_meta WHERE trip_code=%s""",(tc,))
         meta=cur.fetchone()
+
+        cur.execute("""SELECT original_filename,detected_type,detected_amount_eur,detected_currency,
+            detected_date,detected_vendor,analysis_status,confidence,ki_bemerkung,id,
+            pnr_code,detected_flight_numbers,detected_train_numbers,detected_amount
+            FROM mail_attachments WHERE trip_code=%s ORDER BY detected_date,id""",(tc,))
+        atts=cur.fetchall()
+
+        cur.execute("""SELECT flight_number,flight_date,alert_type,message,source,checked_at
+            FROM flight_alerts WHERE trip_code=%s ORDER BY checked_at DESC LIMIT 10""",(tc,))
+        alerts=cur.fetchall()
+        cur.close();conn.close()
+
+        if meta:
+            (traveler,colleagues,dep,ret,dep_t,ret_t,destinations,cc,
+             fns,trains,car,nights_p,nights_b,meals,pnr,notes,hm,
+             trip_title,customer_code)=meta
+            dep_d=dep if isinstance(dep,date) else (date.fromisoformat(str(dep)) if dep else None)
+            ret_d=ret if isinstance(ret,date) else (date.fromisoformat(str(ret)) if ret else None)
+            days=(ret_d-dep_d).days+1 if dep_d and ret_d else 0
+            status=compute_status(dep_d,ret_d)
+        else:
+            traveler=colleagues=destinations=cc=fns=trains=car=""
+            nights_p=nights_b=days=0; pnr=notes=hm=trip_title=customer_code=""
+            dep_d=ret_d=dep_t=ret_t=None; status="planned"
+
+        status_badge={"active":"<span class='sbadge sb-active'><span class='adot'></span>Aktiv</span>",
+                      "planned":"<span class='sbadge sb-planned'>Geplant</span>",
+                      "done":"<span class='sbadge sb-done'>Abgeschlossen</span>"}.get(status,"")
+
+        # Reise-Typ automatisch ermitteln
+        if customer_code and customer_code.upper() not in ("INTERN","INT",""):
+            trip_type="👤 Kundenprojekt"
+            trip_type_detail=customer_code
+        elif trip_title and any(w in trip_title.lower() for w in ["messe","expo","forum","congress","kongress","konferenz"]):
+            trip_type="🎪 Messe / Veranstaltung"
+            trip_type_detail=trip_title
+        elif destinations:
+            trip_type="✈ Dienstreise"
+            trip_type_detail=destinations
+        else:
+            trip_type="📋 Reise"
+            trip_type_detail=trip_title or "–"
+
+        # Header-Titel
+        title_parts=list(filter(None,[trip_title, customer_code]))
+        header_title=f"{tc}"
+        if title_parts: header_title+=f" · {' · '.join(title_parts)}"
+
+        # ── CHRONOLOGISCHE TIMELINE ──────────────────────────────
+        # Ereignisse sammeln: Abreise, Belege (nach Datum), Rückkehr
+        timeline_events=[]
+
+        # Abreise
+        if dep_d:
+            timeline_events.append({
+                "date": dep_d,
+                "time": dep_t or "08:00",
+                "icon": "🏠→✈",
+                "label": "Abreise von zu Hause",
+                "detail": f"{dep_t or ''} · {fns.split(',')[0].strip() if fns else '–'}",
+                "type": "journey"
+            })
+
+        # Flugnummern als Ereignisse
+        fn_list=[f.strip() for f in (fns or "").split(",") if f.strip()]
+        for fn in fn_list:
+            timeline_events.append({
+                "date": dep_d or date.today(),
+                "time": "–",
+                "icon": "✈",
+                "label": f"Flug {fn}",
+                "detail": pnr or "",
+                "type": "flight"
+            })
+
+        # Zugnummern
+        tn_list=[t.strip() for t in (trains or "").split(",") if t.strip()]
+        for tn in tn_list:
+            timeline_events.append({
+                "date": dep_d or date.today(),
+                "time": "–",
+                "icon": "🚆",
+                "label": f"Zug {tn}",
+                "detail": "",
+                "type": "train"
+            })
+
+        # Belege als Timeline-Einträge
+        beleg_sum=0.0
+        for a in atts:
+            fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt=a
+            if amt_eur:
+                try: beleg_sum+=float(amt_eur.replace(".","").replace(",","."))
+                except: pass
+            # Datum parsen
+            ev_date=dep_d
+            if ddate:
+                try:
+                    if "." in str(ddate):
+                        parts=str(ddate).split(".")
+                        if len(parts)==3:
+                            ev_date=date(int(parts[2]),int(parts[1]),int(parts[0]))
+                    else:
+                        ev_date=date.fromisoformat(str(ddate)[:10])
+                except: pass
+            type_icons={"Flug":"✈","Hotel":"🏨","Taxi":"🚕","Bahn":"🚆","Mietwagen":"🚗",
+                       "Essen":"🍽","Kalendereintrag":"📅","Sonstiges":"📄"}
+            icon=type_icons.get(dtype,"📄")
+            amount_str=f"{amt_eur} €" if amt_eur else (f"{amt} {curr}" if amt else "–")
+            edit_url=f"/beleg-edit/{att_id}"
+            view_url=f"/beleg/{att_id}"
+            timeline_events.append({
+                "date": ev_date or dep_d or date.today(),
+                "time": "",
+                "icon": icon,
+                "label": f"{vendor or fn_a or dtype or 'Beleg'}",
+                "detail": amount_str,
+                "extra": f'<a href="{view_url}" target="_blank" style="color:var(--b600);margin-right:6px">📄</a><a href="{edit_url}" style="color:var(--t300)">✏</a>',
+                "status": stat,
+                "type": "beleg"
+            })
+
+        # Rückkehr
+        if ret_d:
+            timeline_events.append({
+                "date": ret_d,
+                "time": ret_t or "18:00",
+                "icon": "✈→🏠",
+                "label": "Rückkehr zu Hause",
+                "detail": ret_t or "",
+                "type": "journey"
+            })
+
+        # Chronologisch sortieren
+        timeline_events.sort(key=lambda e: (e["date"] or date.today(), e.get("time",""), e.get("type","") != "journey"))
+
+        # Timeline HTML
+        tl_rows=""
+        prev_date=None
+        for ev in timeline_events:
+            ev_date=ev["date"]
+            # Datums-Trennzeile
+            if ev_date != prev_date:
+                wd=["Mo","Di","Mi","Do","Fr","Sa","So"][ev_date.weekday()] if ev_date else ""
+                wkend=' style="color:var(--b600);font-weight:600"' if ev_date and ev_date.weekday()>=5 else ""
+                tl_rows+=f'<tr><td colspan="5" style="background:var(--page);padding:8px 10px 4px;font-size:11px;color:var(--t300);border-bottom:1px solid var(--bds)"><span{wkend}>{str(ev_date)} {wd}</span></td></tr>'
+                prev_date=ev_date
+
+            type_colors={"journey":"var(--b600)","flight":"var(--b500)","train":"var(--gr6)","beleg":"var(--t700)"}
+            col=type_colors.get(ev.get("type","beleg"),"var(--t700)")
+            stat=ev.get("status","")
+            stat_html=""
+            if stat:
+                sc="bdg-ok" if stat in ("ok","ok (manuell)") else "bdg-w"
+                stat_html=f'<span class="bdg {sc}" style="font-size:10px">{stat}</span>'
+            tl_rows+=f"""<tr>
+                <td style="width:60px;color:var(--t300);font-size:11px;white-space:nowrap">{ev.get('time','')}</td>
+                <td style="width:28px;text-align:center;font-size:16px">{ev['icon']}</td>
+                <td style="font-weight:500;color:{col}">{ev['label']}</td>
+                <td style="font-family:DM Mono,monospace;font-size:12px;color:var(--t500)">{ev.get('detail','')}</td>
+                <td style="white-space:nowrap">{stat_html} {ev.get('extra','')}</td>
+            </tr>"""
+
+        # Header-Info-Leiste
+        info_items=[]
+        if traveler: info_items.append(f"<b>Reisender:</b> {traveler}{' · '+colleagues if colleagues else ''}")
+        if dep_d: info_items.append(f"<b>Zeitraum:</b> {str(dep_d)} – {str(ret_d or '?')} ({days} Tage)")
+        if pnr: info_items.append(f"<b>PNR:</b> <span style='font-family:DM Mono,monospace;color:var(--gr6)'>{pnr}</span>")
+        if hm: info_items.append(f"<b>Hotel:</b> {'Kunde' if hm=='customer' else 'Eigen'} · {nights_b or 0}/{nights_p or 0} Nächte")
+        if notes: info_items.append(f"<b>Notiz:</b> {notes}")
+        info_bar="<br>".join(info_items) if info_items else "<span class='sub'>Keine Metadaten – bitte bearbeiten</span>"
+
+        # Warnung wenn Name/Ziel fehlt
+        missing=[]
+        if not traveler: missing.append("Reisender fehlt")
+        if not destinations and not trip_title: missing.append("Ziel/Titel fehlt")
+        missing_html=f'<div class="alert-bar" style="margin-bottom:12px">⚠ {" · ".join(missing)} – <a href="/edit-trip/{tc}" style="color:var(--re6)">jetzt ergänzen</a></div>' if missing else ""
+
+        # Flight-Alert-Zeilen
+        alert_rows="".join(f"""<tr>
+            <td class="cc">{a[0]}</td><td>{a[1]}</td>
+            <td><span class="bdg {"bdg-e" if a[2]=="cancelled" else "bdg-w"}">{a[2]}</span></td>
+            <td>{a[3]}</td><td style="font-size:11px;color:var(--t300)">{str(a[5])[:16]}</td>
+            </tr>""" for a in alerts)
+
+        return page_shell(f"Detail {tc}",f"""
+        <div class="page-card">
+          <!-- Header -->
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+            <div>
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <h2 style="margin:0">{header_title}</h2>
+                {status_badge}
+                <span style="font-size:12px;color:var(--t300)">{trip_type} · {trip_type_detail}</span>
+              </div>
+              <div style="font-size:12px;color:var(--t500);margin-top:6px;line-height:1.8">{info_bar}</div>
+            </div>
+          </div>
+          {missing_html}
+
+          <!-- Aktions-Buttons -->
+          <div class="acts" style="margin-bottom:16px">
+            <a class="btn" href="/report/{tc}">📊 Abrechnung</a>
+            <a class="btn" href="/report-pdf/{tc}" target="_blank">📄 PDF</a>
+            <a class="btn-l" href="/meals/{tc}">🍽 Mahlzeiten</a>
+            <a class="btn-l" href="/check-flights/{tc}">✈ Flüge</a>
+            {"<a class='btn-l' href='/check-trains/"+tc+"'>🚆 Züge</a>" if trains else ""}
+            <a class="btn-l" href="/edit-trip/{tc}">✏ Bearbeiten</a>
+            <a class="btn-l" href="/">Zurück</a>
+          </div>
+
+          <!-- Chronologische Timeline -->
+          <h3 style="margin-bottom:8px;color:var(--t700)">📅 Reise-Timeline</h3>
+          <div style="overflow-x:auto"><table style="table-layout:fixed;width:100%">
+            <colgroup><col style="width:60px"><col style="width:32px"><col style="width:35%"><col style="width:25%"><col style="width:auto"></colgroup>
+            {tl_rows or '<tr><td colspan="5" class="sub" style="padding:16px">Keine Ereignisse – Reisedaten und Mails zuordnen</td></tr>'}
+          </table></div>
+
+          <!-- Summe -->
+          <div style="margin-top:12px;text-align:right;font-family:DM Mono,monospace;font-size:14px;font-weight:500;color:var(--b600)">
+            Belege gesamt: {beleg_sum:.2f} €
+          </div>
+
+          <!-- Flight Alerts -->
+          {f'''<h3 style="margin:20px 0 8px;color:var(--t700)">⚠ Flight-Alerts</h3>
+          <div style="overflow-x:auto"><table>
+            <tr><th>Flug</th><th>Datum</th><th>Typ</th><th>Meldung</th><th>Zeitpunkt</th></tr>
+            {alert_rows}</table></div>''' if alerts else ""}
+        </div>""")
+    except Exception as e:
+        import traceback
+        return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler in Trip-Detail</h2><pre style="font-size:11px;overflow-x:auto">{traceback.format_exc()}</pre></div>')
         # Anhänge
         cur.execute("""SELECT original_filename,detected_type,detected_amount_eur,detected_currency,
             detected_date,detected_vendor,analysis_status,confidence,ki_bemerkung,id,
