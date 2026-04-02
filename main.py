@@ -414,11 +414,11 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
         conn.commit(); cur.close(); return
 
     fields = await mistral_extract(ocr_text, known_codes, "anhang")
-    _apply_fields(cur, att_id, fields, ocr_text)
+    await _apply_fields(cur, att_id, fields, ocr_text)
     conn.commit(); cur.close()
 
 
-def _apply_fields(cur, att_id, fields, ocr_text=""):
+async def _apply_fields(cur, att_id, fields, ocr_text=""):
     betrag     = fields.get("betrag","") or ""
     waehrung   = fields.get("waehrung","EUR") or "EUR"
     datum      = fields.get("datum","") or ""
