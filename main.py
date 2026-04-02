@@ -929,7 +929,9 @@ def init():
         conn=get_conn();cur=conn.cursor()
         cur.execute("CREATE TABLE IF NOT EXISTS mail_messages (id SERIAL PRIMARY KEY, mail_uid TEXT UNIQUE)")
         for col in ["message_id TEXT","sender TEXT","subject TEXT","body TEXT","trip_code TEXT",
-                    "detected_type TEXT","pnr_code TEXT","created_at TIMESTAMP DEFAULT now()"]:
+                    "detected_type TEXT","pnr_code TEXT",
+                    "analysis_status TEXT DEFAULT 'ausstehend'",
+                    "created_at TIMESTAMP DEFAULT now()"]:
             cur.execute(f"ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS {col}")
         # Index für schnellen Duplikat-Check per Message-ID
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mail_message_id ON mail_messages(message_id)")
@@ -961,7 +963,13 @@ def init():
             created_at TIMESTAMP DEFAULT now())""")
         for col in ["departure_time_home TEXT DEFAULT '08:00'","arrival_time_home TEXT DEFAULT '18:00'",
                     "destinations TEXT","train_numbers TEXT","nights_booked INTEGER DEFAULT 0",
-                    "pnr_code TEXT","country_code TEXT DEFAULT 'DE'"]:
+                    "pnr_code TEXT","country_code TEXT DEFAULT 'DE'",
+                    "traveler_name TEXT","colleagues TEXT","flight_numbers TEXT",
+                    "car_rental_info TEXT","nights_planned INTEGER DEFAULT 0",
+                    "meals_reimbursed TEXT DEFAULT ''","notes TEXT",
+                    "hotel_mode TEXT","departure_date DATE","return_date DATE",
+                    "created_at TIMESTAMP DEFAULT now()"]:
+            cur.execute(f"ALTER TABLE trip_meta ADD COLUMN IF NOT EXISTS {col}")
             cur.execute(f"ALTER TABLE trip_meta ADD COLUMN IF NOT EXISTS {col}")
 
         cur.execute("""CREATE TABLE IF NOT EXISTS flight_alerts (
