@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "6.6"
+APP_VERSION = "6.8"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -175,6 +175,62 @@ def next_trip_code(cur):
 
 def file_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
+
+# =========================================================
+# WÄHRUNGSKURSE – ECB Tageskurs (kostenlos, kein Key)
+# =========================================================
+
+_ecb_rates_cache: dict = {}  # {"USD": 1.08, ...}
+_ecb_rates_ts: float = 0.0
+
+async def get_ecb_rates() -> dict:
+    """Holt aktuelle EUR-Wechselkurse von der EZB (täglich aktualisiert)."""
+    global _ecb_rates_cache, _ecb_rates_ts
+    # Cache: 4 Stunden gültig
+    if _ecb_rates_cache and (time.time() - _ecb_rates_ts) < 14400:
+        return _ecb_rates_cache
+    fallback = {"EUR":1.0,"USD":1.08,"GBP":0.86,"INR":89.5,"CHF":0.96,
+                "JPY":161.0,"AED":3.97,"CNY":7.8,"SGD":1.46,"TRY":35.0,
+                "AZN":1.84,"PLN":4.25,"SEK":11.3,"NOK":11.5,"DKK":7.46}
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as cl:
+            resp = await cl.get(
+                "https://data-api.ecb.europa.eu/service/data/EXR/D..EUR.SP00.A"
+                "?lastNObservations=1&format=csvdata",
+                headers={"Accept": "text/csv"})
+        if resp.status_code == 200:
+            rates = {"EUR": 1.0}
+            for line in resp.text.splitlines()[1:]:
+                parts = line.split(",")
+                if len(parts) >= 8:
+                    try:
+                        currency = parts[2].strip()   # CURRENCY column
+                        rate_str = parts[7].strip()   # OBS_VALUE
+                        if currency and rate_str:
+                            rates[currency] = float(rate_str)
+                    except (ValueError, IndexError):
+                        pass
+            if len(rates) > 5:
+                _ecb_rates_cache = rates
+                _ecb_rates_ts = time.time()
+                return rates
+    except Exception as e:
+        print(f"[ECB] Fehler: {e}")
+    return fallback
+
+async def convert_to_eur(amount: float, currency: str) -> tuple[float, str]:
+    """Gibt (eur_betrag, kurs_info) zurück."""
+    currency = (currency or "EUR").upper().strip()
+    if currency == "EUR":
+        return round(amount, 2), ""
+    rates = await get_ecb_rates()
+    # ECB gibt Einheiten pro EUR an → umkehren für EUR-Betrag
+    rate = rates.get(currency)
+    if rate and rate > 0:
+        eur = round(amount / rate, 2)
+        return eur, f"1 EUR = {rate:.4f} {currency}"
+    return round(amount, 2), f"Kurs {currency} unbekannt"
+
 
 # =========================================================
 # MISTRAL KI  (DSGVO-konform, EU)
@@ -376,12 +432,11 @@ def _apply_fields(cur, att_id, fields, ocr_text=""):
     confidence = fields.get("confidence","niedrig") or "niedrig"
     bemerkung  = fields.get("bemerkung","") or ""
 
-    betrag_eur=""
+    betrag_eur=""; kurs_info=""
     if betrag:
         try:
-            val   = float(betrag.replace(",","."))
-            rates = {"EUR":1.0,"USD":0.93,"GBP":1.17,"INR":0.011,"CHF":1.04}
-            eur   = round(val*rates.get(waehrung.upper(),1.0),2)
+            val = float(betrag.replace(",","."))
+            eur, kurs_info = await convert_to_eur(val, waehrung)
             betrag_eur = f"{eur:.2f}".replace(".",",")
         except: pass
 
@@ -394,6 +449,9 @@ def _apply_fields(cur, att_id, fields, ocr_text=""):
 
     review = "ok" if confidence=="hoch" else "pruefen"
     status = "ok" if fields and "fehler" not in fields else "analysefehler"
+    # Kurs-Info in Bemerkung aufnehmen wenn Fremdwährung
+    if kurs_info:
+        bemerkung = f"{bemerkung} [{kurs_info}]".strip() if bemerkung else f"[{kurs_info}]"
     cur.execute("""UPDATE mail_attachments SET
         extracted_text=%s,detected_amount=%s,detected_amount_eur=%s,detected_currency=%s,
         detected_date=%s,detected_vendor=%s,detected_type=%s,
@@ -1198,8 +1256,8 @@ function openM(t){
 function closeM(t){document.getElementById('m-'+t).classList.remove('open');document.body.style.overflow='';}
 function submitTrip(){
   const f=new FormData();
-  ['traveler_name','colleagues','departure_date','return_date','departure_time_home',
-   'arrival_time_home','destinations','nights_planned','notes'].forEach(k=>{
+  ['traveler_name','colleagues','trip_title','customer_code','departure_date','return_date',
+   'departure_time_home','arrival_time_home','destinations','nights_planned','notes'].forEach(k=>{
     const el=document.getElementById('fi-'+k.replace(/_/g,'-'));
     if(el)f.append(k,el.value);
   });
@@ -1211,7 +1269,7 @@ function dropFile(e){e.preventDefault();document.getElementById('uz').classList.
 """
 
 def page_shell(title, content, active_tab=""):
-    tabs=[("active","Laufende Reisen","/"),("planned","Vorplanung","/planned"),("done","Abgeschlossen","/done")]
+    tabs=[("active","Laufende Reisen","/"),("planned","Vorplanung","/planned"),("done","Abgeschlossen","/done"),("stats","Statistik","/stats")]
     tab_html="".join(f'<a href="{href}" class="nav-tab{" active" if active_tab==k else ""}">{lbl}</a>' for k,lbl,href in tabs)
     ki_ok=bool(MISTRAL_API_KEY)
     ki_txt="✓ Mistral KI" if ki_ok else "⚠ Kein KI-Key"
@@ -1255,13 +1313,28 @@ def page_shell(title, content, active_tab=""):
       <div class="fgrid">
         <div class="fgrp ff"><label class="flbl">Reisender *</label><input class="finp" id="fi-traveler-name" type="text" placeholder="Vor- und Nachname"></div>
         <div class="fgrp ff"><label class="flbl">Mitreisende Kollegen</label><input class="finp" id="fi-colleagues" type="text" placeholder="z.B. T. Moser, K. Brenner"></div>
+        <div class="fgrp"><label class="flbl">Reisetitel (z.B. Indien)</label><input class="finp" id="fi-trip-title" type="text" placeholder="z.B. Indien, Messe München"></div>
+        <div class="fgrp"><label class="flbl">Kundenkürzel (z.B. BMW)</label><input class="finp" id="fi-customer-code" type="text" placeholder="z.B. BMW, intern"></div>
         <div class="fgrp"><label class="flbl">Abreise von zu Hause *</label><input class="finp" id="fi-departure-date" type="date"></div>
         <div class="fgrp"><label class="flbl">Uhrzeit Abreise</label><input class="finp" id="fi-departure-time-home" type="time" value="08:00"></div>
         <div class="fgrp"><label class="flbl">Rückkehr zu Hause *</label><input class="finp" id="fi-return-date" type="date"></div>
         <div class="fgrp"><label class="flbl">Uhrzeit Ankunft</label><input class="finp" id="fi-arrival-time-home" type="time" value="18:00"></div>
         <div class="fgrp ff">
           <label class="flbl">Reiseziel(e) / Länder</label>
-          <input class="finp" id="fi-destinations" type="text" placeholder="z.B. Baku (AZ) → Dubai (AE) → Los Angeles (US/CA)">
+          <input class="finp" id="fi-destinations" type="text" list="country-list" placeholder="z.B. Indien, Dubai, Frankfurt Messe">
+          <datalist id="country-list">
+            <option value="Deutschland (DE)"><option value="Frankreich (FR)"><option value="Großbritannien (GB)">
+            <option value="USA (US)"><option value="Indien (IN)"><option value="VAE / Dubai (AE)">
+            <option value="Aserbaidschan / Baku (AZ)"><option value="China (CN)"><option value="Japan (JP)">
+            <option value="Singapur (SG)"><option value="Schweiz (CH)"><option value="Österreich (AT)">
+            <option value="Italien (IT)"><option value="Spanien (ES)"><option value="Türkei (TR)">
+            <option value="Niederlande (NL)"><option value="Polen (PL)"><option value="Schweden (SE)">
+            <option value="Norwegen (NO)"><option value="Dänemark (DK)"><option value="Belgien (BE)">
+            <option value="Portugal (PT)"><option value="Tschechien (CZ)"><option value="Ungarn (HU)">
+            <option value="Rumänien (RO)"><option value="Saudi-Arabien (SA)"><option value="Katar (QR)">
+            <option value="Südkorea (KR)"><option value="Australien (AU)"><option value="Kanada (CA)">
+            <option value="Brasilien (BR)"><option value="Mexiko (MX)"><option value="Indonesien (ID)">
+          </datalist>
           <div class="hint">Freitext – mehrere Länder möglich, Zeitzone in Klammern</div>
         </div>
         <div class="fgrp"><label class="flbl">Geplante Nächte</label><input class="finp" id="fi-nights-planned" type="number" min="0" value="0"></div>
@@ -1431,7 +1504,24 @@ def load_trips(conn, filter_status=None):
                    COALESCE(detected_amount_eur,'') eur,review_flag,
                    detected_flight_numbers,detected_train_numbers,pnr_code
                    FROM mail_attachments""")
-    att_rows=cur.fetchall();cur.close()
+    att_rows=cur.fetchall()
+
+    # Aktuelle Flight-Alerts (letzte 48h, nur kritische)
+    cur.execute("""SELECT trip_code,flight_number,alert_type,message
+                   FROM flight_alerts
+                   WHERE checked_at > now() - interval '48 hours'
+                   AND alert_type IN ('cancelled','delay')
+                   ORDER BY checked_at DESC""")
+    alert_rows=cur.fetchall()
+    cur.close()
+
+    flight_alerts_by_trip: dict = {}
+    for tc,fn,atype,msg in alert_rows:
+        if tc not in flight_alerts_by_trip:
+            flight_alerts_by_trip[tc] = []
+        label = f"{'⚠ ' if atype=='cancelled' else '⏱ '}{fn}: {msg}"
+        if label not in flight_alerts_by_trip[tc]:
+            flight_alerts_by_trip[tc].append(label)
 
     att={}
     for tc,dt,eur,rf,fns,trains,pnr in att_rows:
@@ -1470,10 +1560,11 @@ def load_trips(conn, filter_status=None):
             has_car="Mietwagen" in types or bool(car),
             sum_eur=round(a["sum"],2),review=a["review"],
             flight_count=len(all_fns),
+            flight_alerts=flight_alerts_by_trip.get(tc,[]),
             warnings=[w for w in [
                 None if "Flug" in types else "Kein Flugbeleg",
                 None if ("Hotel" in types or hm in ("customer","own")) or status=="done" else "Hotel fehlt",
-            ] if w]))
+            ] + flight_alerts_by_trip.get(tc,[]) if w]))
     return trips
 
 def _pills(t):
@@ -1546,24 +1637,35 @@ async def _dashboard(request: Request, focus: str):
             cards=""
             for t in trips:
                 ha=bool(t["warnings"])
+                fa=t.get("flight_alerts",[])
                 pnr_bar=f'<div class="pnr-bar">✈ PNR: {t["pnr"]}</div>' if t["pnr"] else ""
-                live_flight=""
-                if t["fns"] and t["status"]=="active":
-                    live_flight=f'<div style="margin:0 12px 10px;padding:6px 12px;background:#fff8f0;border:1px solid rgba(201,124,10,.25);border-radius:var(--rs);font-size:12px;color:var(--am6);font-weight:500">🛫 Live: {t["fns"]}</div>'
+                # Flight-Alert-Bar (rot, prominent) separat von Belege-Warnungen
+                flight_alert_bar=""
+                if fa:
+                    for fal in fa[:2]:  # max 2 anzeigen
+                        is_cancel = "STORNIERT" in fal.upper()
+                        bg = "#fff0f0" if is_cancel else "#fff8f0"
+                        bc = "rgba(220,38,38,.25)" if is_cancel else "rgba(201,124,10,.25)"
+                        fc = "var(--re6)" if is_cancel else "var(--am6)"
+                        flight_alert_bar += f'<div style="margin:0 12px 6px;padding:6px 12px;background:{bg};border:1px solid {bc};border-radius:var(--rs);font-size:12px;color:{fc};font-weight:500">{fal}</div>'
+                # Normale Warnungen (Kein Flugbeleg / Hotel fehlt)
+                doc_warnings=[w for w in t["warnings"] if w not in fa]
                 cards+=f"""<div class="card {"alert" if ha else ""}" onclick="location.href='/trip/{t["tc"]}'">
                   <div class="c-top">{_code_header(t)}
                     <div class="c-info"><div class="c-traveler">{t["traveler"] or "–"}</div>
                       <div class="c-dest">{t["destinations"] or t["cc"]}</div></div>
                     <div class="sbadge sb-active">{"<span class='adot'></span>Alert" if ha else "Aktiv"}</div>
                   </div>
-                  {"<div class='alert-bar'>⚠ " + " · ".join(t["warnings"]) + "</div>" if ha else ""}
-                  {pnr_bar}{live_flight}
+                  {flight_alert_bar}
+                  {"<div class='alert-bar'>⚠ " + " · ".join(doc_warnings) + "</div>" if doc_warnings else ""}
+                  {pnr_bar}
                   <div class="c-div"></div>
                   <div class="c-meta">{_pills(t)}{_hotel_badge(t)}</div>
                   <div class="c-foot">
                     <div><div class="c-amt">{t["sum_eur"]:,.2f} €</div><div class="c-amt-sub">{t["flight_count"]} Flüge erfasst</div></div>
                     <div class="c-acts">
-                      <button class="{"btn-dg" if ha else "btn-g"}" onclick="event.stopPropagation();location.href='/check-flights/{t["tc"]}'">Flüge</button>
+                      <button class="{"btn-dg" if ha else "btn-g"}" onclick="event.stopPropagation();location.href='/check-flights/{t["tc"]}'">✈ Flüge</button>
+                      {"<button class='btn-g' onclick='event.stopPropagation();location.href=\"/check-trains/"+t["tc"]+"\"'>🚆 Bahn</button>" if t["trains"] else ""}
                       <button class="btn-s" onclick="event.stopPropagation();location.href='/trip/{t["tc"]}'">Detail</button>
                     </div>
                   </div>
@@ -1672,15 +1774,17 @@ async def new_trip(request: Request):
         cur.execute("""INSERT INTO trip_meta
             (trip_code,traveler_name,colleagues,departure_date,return_date,
              departure_time_home,arrival_time_home,destinations,
-             nights_planned,notes)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (trip_code) DO NOTHING""",
+             nights_planned,notes,trip_title,customer_code)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (trip_code) DO NOTHING""",
             (tc,form.get("traveler_name") or None,form.get("colleagues") or None,
              form.get("departure_date") or None,form.get("return_date") or None,
              form.get("departure_time_home") or "08:00",
              form.get("arrival_time_home") or "18:00",
              form.get("destinations") or None,
              int(form.get("nights_planned") or 0),
-             form.get("notes") or None))
+             form.get("notes") or None,
+             form.get("trip_title") or None,
+             form.get("customer_code") or None))
         conn.commit();cur.close();conn.close()
         return RedirectResponse(url="/",status_code=303)
     except Exception as e:
@@ -1882,7 +1986,8 @@ def attachment_log():
             return f'<span class="bdg bdg-e">{s}</span>'
         html="".join(f"""<tr>
             <td class="cc">{r[0] or ''}</td>
-            <td><a href="/beleg/{r[12]}" target="_blank" style="color:var(--b600);text-decoration:none;font-weight:500">📄 {r[1] or '–'}</a></td>
+            <td><a href="/beleg/{r[12]}" target="_blank" style="color:var(--b600);text-decoration:none;font-weight:500">📄 {r[1] or '–'}</a>
+                <a href="/beleg-edit/{r[12]}" style="margin-left:6px;font-size:11px;color:var(--t300);text-decoration:none" title="Bearbeiten">✏</a></td>
             <td>{r[2] or ''}</td><td>{r[3] or ''}</td><td><b>{r[4] or ''}</b></td>
             <td>{r[5] or ''}</td><td>{r[6] or ''}</td><td>{r[7] or ''}</td>
             <td>{b(r[8] or '')}</td><td>{b(r[9] or '',"hoch")}</td><td>{b(r[10] or '')}</td>
@@ -1906,17 +2011,71 @@ def attachment_log():
 def mail_log():
     try:
         conn=get_conn();cur=conn.cursor()
-        cur.execute("SELECT sender,subject,trip_code,detected_type,pnr_code,analysis_status FROM mail_messages ORDER BY id DESC LIMIT 100")
+        cur.execute("""SELECT id,sender,subject,trip_code,detected_type,pnr_code,
+            analysis_status,created_at FROM mail_messages ORDER BY id DESC LIMIT 100""")
         rows=cur.fetchall();cur.close();conn.close()
-        html="".join(f"""<tr><td>{r[0] or ''}</td><td>{r[1] or ''}</td>
-            <td class="cc">{r[2] or ''}</td><td>{r[3] or ''}</td>
-            <td style="font-family:'DM Mono',monospace;color:var(--gr6)">{r[4] or ''}</td>
-            <td><span class="bdg {"bdg-ok" if r[5]=="ok" else "bdg-w"}">{r[5] or 'ausstehend'}</span></td>
+        html="".join(f"""<tr>
+            <td style="font-size:11px;color:var(--t300)">{str(r[7] or '')[:16]}</td>
+            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{r[1] or ''}</td>
+            <td><a href="/mail-detail/{r[0]}" style="color:var(--b600);text-decoration:none;font-weight:500">{r[2] or '–'}</a></td>
+            <td class="cc">{r[3] or ''}</td><td>{r[4] or ''}</td>
+            <td style="font-family:'DM Mono',monospace;color:var(--gr6)">{r[5] or ''}</td>
+            <td><span class="bdg {"bdg-ok" if r[6]=="ok" else "bdg-w"}">{r[6] or 'ausstehend'}</span></td>
             </tr>""" for r in rows)
         return page_shell("Mail-Log",f"""
-        <div class="page-card"><h2>Mail-Log</h2>
+        <div class="page-card"><h2>Mail-Log ({len(rows)} Einträge)</h2>
           <div class="acts"><a class="btn-l" href="/">Zurück</a><a class="btn" href="/analyze-attachments">KI-Analyse</a></div>
-          <table><tr><th>Von</th><th>Betreff</th><th>Code</th><th>Typ</th><th>PNR</th><th>KI-Status</th></tr>{html}</table>
+          <div style="overflow-x:auto"><table>
+            <tr><th>Zeit</th><th>Von</th><th>Betreff</th><th>Code</th><th>Typ</th><th>PNR</th><th>Status</th></tr>
+            {html or '<tr><td colspan="7">Keine Mails</td></tr>'}
+          </table></div>
+        </div>""")
+    except Exception as e:
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+
+
+@app.get("/mail-detail/{mail_id}", response_class=HTMLResponse)
+def mail_detail(mail_id: int):
+    """Zeigt den vollständigen Mail-Body als Vorschau."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""SELECT sender,subject,body,trip_code,detected_type,
+            pnr_code,analysis_status,created_at FROM mail_messages WHERE id=%s""",(mail_id,))
+        row=cur.fetchone()
+        # Anhänge dieser Mail
+        cur.execute("""SELECT original_filename,detected_type,detected_amount_eur,
+            analysis_status,id FROM mail_attachments WHERE mail_uid=(
+                SELECT mail_uid FROM mail_messages WHERE id=%s)""",(mail_id,))
+        att_rows=cur.fetchall()
+        cur.close();conn.close()
+        if not row: return HTMLResponse("Mail nicht gefunden",404)
+        sender,subject,body,tc,dtype,pnr,astatus,created=row
+        # Body sicher escapen für Vorschau
+        import html as htmllib
+        body_safe=htmllib.escape(body or "").replace("\n","<br>")
+        att_html="".join(f"""<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--bds)">
+            <a href="/beleg/{a[4]}" target="_blank" style="color:var(--b600);text-decoration:none">📄 {a[0]}</a>
+            <span class="bdg bdg-w" style="font-size:10px">{a[1] or ''}</span>
+            {"<span style='font-family:DM Mono,monospace;font-size:12px'>"+a[2]+" €</span>" if a[2] else ""}
+        </div>""" for a in att_rows) if att_rows else "<p class='sub'>Keine Anhänge</p>"
+        return page_shell(f"Mail: {subject[:40]}",f"""
+        <div class="page-card" style="max-width:800px">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px">
+            <div>
+              <h2 style="margin-bottom:4px">{subject or '(kein Betreff)'}</h2>
+              <p style="font-size:12px;color:var(--t500)">Von: {sender or '–'} · {str(created or '')[:16]}</p>
+            </div>
+            {"<span class='sbadge sb-active' style='font-family:DM Mono,monospace'>"+tc+"</span>" if tc else ""}
+          </div>
+          {"<div style='margin-bottom:12px'><span class='bdg bdg-ok' style='font-family:DM Mono,monospace'>PNR: "+pnr+"</span></div>" if pnr else ""}
+          <div style="background:var(--page);border:1px solid var(--bd);border-radius:var(--rs);padding:16px;font-size:12px;line-height:1.7;max-height:400px;overflow-y:auto;margin-bottom:16px">
+            {body_safe or '<span style="color:var(--t300)">Kein Body</span>'}
+          </div>
+          {"<h3 style='margin-bottom:8px;color:var(--t700)'>Anhänge</h3>"+att_html if att_rows else ""}
+          <div class="acts" style="margin-top:16px">
+            <a class="btn-l" href="/mail-log">← Zurück</a>
+            {"<a class='btn' href='/trip/"+tc+"'>Reise "+tc+"</a>" if tc else ""}
+          </div>
         </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
@@ -1925,28 +2084,122 @@ def mail_log():
 def trip_detail(tc: str):
     try:
         conn=get_conn();cur=conn.cursor()
+        # Trip-Meta
+        cur.execute("""SELECT traveler_name,colleagues,departure_date,return_date,
+            departure_time_home,arrival_time_home,destinations,country_code,
+            flight_numbers,train_numbers,car_rental_info,nights_planned,nights_booked,
+            meals_reimbursed,pnr_code,notes,hotel_mode,trip_title,customer_code
+            FROM trip_meta WHERE trip_code=%s""",(tc,))
+        meta=cur.fetchone()
+        # Anhänge
         cur.execute("""SELECT original_filename,detected_type,detected_amount_eur,detected_currency,
             detected_date,detected_vendor,analysis_status,confidence,ki_bemerkung,id,
-            pnr_code,detected_flight_numbers,detected_train_numbers
-            FROM mail_attachments WHERE trip_code=%s ORDER BY id DESC""",(tc,))
-        atts=cur.fetchall();cur.close();conn.close()
-        rows="".join(f"""<tr>
-            <td><a href="/beleg/{a[9]}" target="_blank" style="color:var(--b600);text-decoration:none;font-weight:500">📄 {a[0] or '–'}</a></td>
+            pnr_code,detected_flight_numbers,detected_train_numbers,detected_amount
+            FROM mail_attachments WHERE trip_code=%s ORDER BY detected_date,id""",(tc,))
+        atts=cur.fetchall()
+        # Letzte Flight-Alerts
+        cur.execute("""SELECT flight_number,flight_date,alert_type,message,source,checked_at
+            FROM flight_alerts WHERE trip_code=%s ORDER BY checked_at DESC LIMIT 10""",(tc,))
+        alerts=cur.fetchall()
+        cur.close();conn.close()
+
+        # Meta-Bereich
+        if meta:
+            (traveler,colleagues,dep,ret,dep_t,ret_t,destinations,cc,
+             fns,trains,car,nights_p,nights_b,meals,pnr,notes,hm,
+             trip_title,customer_code)=meta
+            dep_d=dep if isinstance(dep,date) else (date.fromisoformat(str(dep)) if dep else None)
+            ret_d=ret if isinstance(ret,date) else (date.fromisoformat(str(ret)) if ret else None)
+            days=(ret_d-dep_d).days+1 if dep_d and ret_d else 0
+            status=compute_status(dep_d,ret_d)
+            status_badge={"active":"<span class='sbadge sb-active'><span class='adot'></span>Aktiv</span>",
+                          "planned":"<span class='sbadge sb-planned'>Geplant</span>",
+                          "done":"<span class='sbadge sb-done'>Abgeschlossen</span>"}.get(status,"")
+            title_line=" · ".join(filter(None,[customer_code,trip_title]))
+            meta_html=f"""
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;margin-bottom:16px;font-size:13px">
+              <div><span style="color:var(--t300);font-size:11px">Reisender</span><br><b>{traveler or '–'}</b>{f' · {colleagues}' if colleagues else ''}</div>
+              <div><span style="color:var(--t300);font-size:11px">Zeitraum</span><br><b>{str(dep_d or '–')}</b> {dep_t or ''} – <b>{str(ret_d or '–')}</b> {ret_t or ''} · {days} Tage</div>
+              <div><span style="color:var(--t300);font-size:11px">Reiseziel</span><br>{destinations or cc or '–'}</div>
+              <div><span style="color:var(--t300);font-size:11px">Hotel</span><br>{'Kunde stellt' if hm=='customer' else 'Eigenes Hotel' if hm=='own' else '–'} · {nights_b or 0}/{nights_p or 0} Nächte</div>
+              {"<div><span style='color:var(--t300);font-size:11px'>Flugnummern</span><br><span style='font-family:DM Mono,monospace'>"+fns+"</span></div>" if fns else ""}
+              {"<div><span style='color:var(--t300);font-size:11px'>Zugnummern</span><br><span style='font-family:DM Mono,monospace'>"+trains+"</span></div>" if trains else ""}
+              {"<div><span style='color:var(--t300);font-size:11px'>Mietwagen</span><br>"+car+"</div>" if car else ""}
+              {"<div><span style='color:var(--t300);font-size:11px'>PNR</span><br><span style='font-family:DM Mono,monospace;color:var(--gr6)'>"+pnr+"</span></div>" if pnr else ""}
+              {"<div><span style='color:var(--t300);font-size:11px'>Notiz</span><br>"+notes+"</div>" if notes else ""}
+            </div>"""
+        else:
+            meta_html="<p class='sub'>Keine Metadaten gespeichert – <a href='/edit-trip/"+tc+"'>jetzt anlegen</a></p>"
+            status_badge=""; title_line=""
+
+        # Anhänge-Tabelle
+        beleg_sum=0.0
+        att_rows="".join(f"""<tr>
+            <td><a href="/beleg/{a[9]}" target="_blank" style="color:var(--b600);text-decoration:none">📄 {a[0] or '–'}</a>
+                <a href="/beleg-edit/{a[9]}" style="margin-left:5px;color:var(--t300);text-decoration:none" title="Korrigieren">✏</a></td>
             <td>{a[1] or ''}</td>
-            <td style="font-family:'DM Mono',monospace"><b>{a[2] or ''}</b> {a[3] or ''}</td>
+            <td style="font-family:'DM Mono',monospace"><b>{a[2] or ''}</b>{' '+a[3] if a[3] and a[3]!='EUR' else ' €'}</td>
             <td>{a[4] or ''}</td><td>{a[5] or ''}</td>
-            <td><span class="bdg {"bdg-ok" if a[6]=="ok" else "bdg-w"}">{a[6] or ''}</span></td>
-            <td><span class="bdg {"bdg-ok" if a[7]=="hoch" else "bdg-w"}">{a[7] or ''}</span></td>
-            <td style="font-family:'DM Mono',monospace;color:var(--gr6)">{a[10] or ''}</td>
-            <td style="font-size:11px;color:var(--t300)">{a[8] or ''}</td>
-            </tr>""" for a in atts)
+            <td><span class="bdg {"bdg-ok" if a[6] in ("ok","ok (manuell)") else "bdg-w"}">{a[6] or ''}</span></td>
+            <td style="font-size:11px;color:var(--t300)">{(a[8] or '')[:60]}</td>
+            </tr>""" + ("" if not a[2] or not (lambda x: beleg_sum.__add__(float(x.replace(".","").replace(",","."))) if x else 0)(a[2]) else "")
+            for a in atts
+            if not (a[2] and [beleg_sum := beleg_sum + float(a[2].replace(".","").replace(",",".")) for _ in [1]])
+        )
+        # beleg_sum sauber berechnen
+        beleg_sum=0.0
+        for a in atts:
+            if a[2]:
+                try: beleg_sum+=float(a[2].replace(".","").replace(",","."))
+                except: pass
+
+        att_html=f"""<div style="overflow-x:auto"><table>
+            <tr><th>Datei</th><th>Typ</th><th>Betrag EUR</th><th>Datum</th><th>Anbieter</th><th>Status</th><th>KI-Notiz</th></tr>
+            {"".join(f'''<tr>
+            <td><a href="/beleg/{a[9]}" target="_blank" style="color:var(--b600);text-decoration:none">📄 {a[0] or "–"}</a>
+                <a href="/beleg-edit/{a[9]}" style="margin-left:5px;color:var(--t300);text-decoration:none" title="Korrigieren">✏</a></td>
+            <td>{a[1] or ""}</td>
+            <td style="font-family:DM Mono,monospace"><b>{a[2] or ""}</b> {a[3] if a[3] and a[3]!="EUR" else "€"}</td>
+            <td>{a[4] or ""}</td><td>{a[5] or ""}</td>
+            <td><span class="bdg {"bdg-ok" if a[6] in ("ok","ok (manuell)") else "bdg-w"}">{a[6] or ""}</span></td>
+            <td style="font-size:11px;color:var(--t300)">{(a[8] or "")[:60]}</td>
+            </tr>''' for a in atts) or '<tr><td colspan="7">Keine Anhänge</td></tr>'}
+            <tr style="background:var(--b50)"><td colspan="2"><b>Summe</b></td><td style="font-family:DM Mono,monospace"><b>{beleg_sum:.2f} €</b></td><td colspan="4"></td></tr>
+        </table></div>"""
+
+        # Flight-Alerts
+        alerts_html=""
+        if alerts:
+            arows="".join(f"""<tr>
+                <td class="cc">{a[0]}</td><td>{a[1]}</td>
+                <td><span class="bdg {"bdg-e" if a[2]=="cancelled" else "bdg-w" if a[2]=="delay" else "bdg-ok"}">{a[2]}</span></td>
+                <td>{a[3]}</td><td style="font-size:11px;color:var(--t300)">{a[4]}</td>
+                <td style="font-size:11px;color:var(--t300)">{str(a[5])[:16]}</td>
+                </tr>""" for a in alerts)
+            alerts_html=f"""<h3 style="margin:20px 0 8px;color:var(--t700)">Flight-Alerts</h3>
+            <div style="overflow-x:auto"><table>
+              <tr><th>Flug</th><th>Datum</th><th>Typ</th><th>Meldung</th><th>Quelle</th><th>Zeitpunkt</th></tr>
+              {arows}</table></div>"""
+
+        title_display=f"{tc}" + (f" · {title_line}" if title_line else "")
         return page_shell(f"Detail {tc}",f"""
-        <div class="page-card"><h2>Reise {tc}</h2>
-          <div class="acts"><a class="btn" href="/report/{tc}">Abrechnung</a><a class="btn-l" href="/edit-trip/{tc}">Bearbeiten</a><a class="btn-l" href="/">Zurück</a></div>
-          <div style="overflow-x:auto"><table>
-            <tr><th>Datei</th><th>Typ</th><th>Betrag EUR</th><th>Datum</th><th>Anbieter</th><th>Status</th><th>Konfidenz</th><th>PNR</th><th>KI-Notiz</th></tr>
-            {rows or '<tr><td colspan="9">Keine Anhänge</td></tr>'}
-          </table></div>
+        <div class="page-card">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+            <h2 style="margin:0">{title_display}</h2>
+            {status_badge}
+          </div>
+          {meta_html}
+          <div class="acts" style="margin-bottom:16px">
+            <a class="btn" href="/report/{tc}">📊 Abrechnung</a>
+            <a class="btn" href="/report-pdf/{tc}" target="_blank">📄 PDF</a>
+            <a class="btn-l" href="/check-flights/{tc}">✈ Flüge prüfen</a>
+            {"<a class='btn-l' href='/check-trains/"+tc+"'>🚆 Züge prüfen</a>" if meta and trains else ""}
+            <a class="btn-l" href="/edit-trip/{tc}">✏ Bearbeiten</a>
+            <a class="btn-l" href="/">Zurück</a>
+          </div>
+          <h3 style="margin-bottom:8px;color:var(--t700)">Anhänge ({len(atts)})</h3>
+          {att_html}
+          {alerts_html}
         </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
@@ -1965,7 +2218,7 @@ def report(tc: str):
          fns,trains,colleagues,notes,pnr,nights_p,nights_b)=meta
 
         cur.execute("""SELECT original_filename,detected_type,detected_amount,detected_amount_eur,
-            detected_currency,detected_date,detected_vendor,analysis_status,detected_flight_numbers
+            detected_currency,detected_date,detected_vendor,analysis_status,detected_flight_numbers,id
             FROM mail_attachments WHERE trip_code=%s ORDER BY id""",(tc,))
         atts=cur.fetchall();cur.close();conn.close()
 
@@ -1991,12 +2244,14 @@ def report(tc: str):
         beleg_sum=0.0; beleg_rows=""
         all_fns_found=[]
         for a in atts:
-            fn,dt,amt,amt_eur,curr,d,vendor,stat,det_fns=a
+            fn,dt,amt,amt_eur,curr,d,vendor,stat,det_fns,att_id=a
             if det_fns: all_fns_found.extend([f.strip() for f in det_fns.split(",") if f.strip()])
             if not amt_eur: continue
             try: beleg_sum+=float(amt_eur.replace(".","").replace(",","."))
             except: pass
-            beleg_rows+=f"<tr><td>{fn}</td><td>{dt or '–'}</td><td>{vendor or '–'}</td><td>{d or '–'}</td><td>{amt or '–'} {curr or ''}</td><td><b>{amt_eur} €</b></td></tr>"
+            preview_link=f'<a href="/beleg/{att_id}" target="_blank" title="Vorschau" style="color:var(--b600);text-decoration:none">📄</a>'
+            edit_link=f'<a href="/beleg-edit/{att_id}" title="Korrigieren" style="color:var(--t300);text-decoration:none;margin-left:6px">✏</a>'
+            beleg_rows+=f"<tr><td>{preview_link}{edit_link} {fn}</td><td>{dt or '–'}</td><td>{vendor or '–'}</td><td>{d or '–'}</td><td>{amt or '–'} {curr or ''}</td><td><b>{amt_eur} €</b></td></tr>"
 
         # j) Fluganzahl
         all_fns_list = list(set(([f.strip() for f in (fns or "").split(",") if f.strip()] + all_fns_found)))
@@ -2039,10 +2294,147 @@ def report(tc: str):
             <div class="sub" style="margin-top:4px">Belege {beleg_sum:.2f} € + VMA {vma_total:.2f} € + Trennungspauschale {trenn_total:.2f} €</div>
           </div>
           <div style="margin-top:16px"><a class="btn-l" href="/">Zurück</a>
-            <span class="sub" style="margin-left:12px">PDF-Export in v6.3</span></div>
+            <a class="btn" href="/report-pdf/{tc}" target="_blank" style="margin-left:8px">📄 PDF exportieren</a></div>
         </div>""",active_tab="done")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+
+
+# =========================================================
+# PDF-EXPORT (druckfertiges HTML → Browser-PDF)
+# =========================================================
+
+@app.get("/report-pdf/{tc}", response_class=HTMLResponse)
+def report_pdf(tc: str):
+    """Druckfertiges HTML – Browser-Druckdialog öffnet sich automatisch."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""SELECT traveler_name,departure_date,return_date,country_code,
+            departure_time_home,arrival_time_home,destinations,meals_reimbursed,
+            flight_numbers,train_numbers,colleagues,notes,pnr_code,
+            nights_planned,nights_booked,trip_title,customer_code
+            FROM trip_meta WHERE trip_code=%s""",(tc,))
+        meta=cur.fetchone()
+        if not meta: return HTMLResponse("Nicht gefunden",404)
+        (traveler,dep,ret,cc,dep_t,ret_t,destinations,meals_reimb,
+         fns,trains,colleagues,notes,pnr,nights_p,nights_b,
+         trip_title,customer_code)=meta
+
+        cur.execute("""SELECT original_filename,detected_type,detected_amount,
+            detected_amount_eur,detected_currency,detected_date,detected_vendor,
+            analysis_status,ki_bemerkung
+            FROM mail_attachments WHERE trip_code=%s ORDER BY detected_date,id""",(tc,))
+        atts=cur.fetchall();cur.close();conn.close()
+
+        dep_d=dep if isinstance(dep,date) else (date.fromisoformat(str(dep)) if dep else None)
+        ret_d=ret if isinstance(ret,date) else (date.fromisoformat(str(ret)) if ret else None)
+        days=(ret_d-dep_d).days+1 if dep_d and ret_d else 0
+        ml=[m.strip() for m in (meals_reimb or "").split(",") if m.strip()]
+
+        # VMA
+        vma_total=0.0; vma_rows=""
+        if days>0:
+            tag_list=(([("Anreisetag","partial")]+[("Reisetag","full")]*max(0,days-2)+[("Abreisetag","partial")]) if days>1
+                      else [("Eintägig","partial")])
+            for i,(lbl,dtype) in enumerate(tag_list):
+                ml_abz=ml if(dtype=="partial" and i==len(tag_list)-1) else []
+                v=get_vma(cc or "DE",dtype,ml_abz); vma_total+=v
+                vma_rows+=f"<tr><td>{lbl}</td><td>{cc or 'DE'}</td><td>{', '.join(ml_abz) or '–'}</td><td style='text-align:right'>{v:.2f} €</td></tr>"
+
+        trenn_total,trenn_details=trennungspauschale(dep_d,ret_d,dep_t or "08:00",ret_t or "18:00")
+        trenn_rows="".join(f"<tr><td>{d}</td><td>{lbl}</td><td style='text-align:right'>{amt:.2f} €</td></tr>" for d,lbl,amt in trenn_details)
+
+        beleg_sum=0.0; beleg_rows=""
+        for a in atts:
+            fn,dt,amt,amt_eur,curr,d,vendor,stat,bemerk=a
+            if not amt_eur: continue
+            try: beleg_sum+=float(amt_eur.replace(".","").replace(",","."))
+            except: pass
+            beleg_rows+=f"<tr><td>{fn}</td><td>{dt or '–'}</td><td>{vendor or '–'}</td><td>{d or '–'}</td><td>{amt or '–'} {curr or ''}</td><td style='text-align:right'><b>{amt_eur} €</b></td></tr>"
+
+        gesamt=beleg_sum+vma_total+trenn_total
+        title_line = " · ".join(filter(None,[trip_title,customer_code])) or ""
+
+        html=f"""<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Abrechnung {tc}</title>
+<style>
+  @page {{ margin: 20mm; }}
+  @media print {{ .no-print {{ display:none }} body {{ font-size:11pt }} }}
+  body {{ font-family: Arial, sans-serif; font-size:12px; color:#1a1a2e; margin:0; padding:20px }}
+  h1 {{ font-size:18px; color:#1a3d96; margin-bottom:4px }}
+  h2 {{ font-size:13px; color:#2c3e5e; margin:18px 0 6px; border-bottom:1px solid #dde4ef; padding-bottom:4px }}
+  .meta-grid {{ display:grid; grid-template-columns:140px 1fr; gap:2px 0; margin-bottom:12px }}
+  .meta-label {{ font-weight:600; color:#5a6e8a; font-size:11px }}
+  .meta-val {{ color:#1a1a2e }}
+  table {{ width:100%; border-collapse:collapse; margin-bottom:8px }}
+  th {{ background:#eef4ff; font-size:11px; padding:5px 8px; text-align:left; border:1px solid #dde4ef }}
+  td {{ padding:4px 8px; border:1px solid #eaeef5; font-size:11px; vertical-align:top }}
+  .sum-row td {{ background:#f0f4f9; font-weight:600 }}
+  .total-box {{ background:#eef4ff; border:1px solid #2152c4; border-radius:6px;
+                padding:12px 16px; margin-top:16px; display:flex; justify-content:space-between }}
+  .total-label {{ font-size:13px; font-weight:600; color:#1a3d96 }}
+  .total-val {{ font-size:16px; font-weight:700; color:#1a3d96 }}
+  .footer {{ margin-top:24px; font-size:10px; color:#9bafc8; border-top:1px solid #dde4ef; padding-top:8px }}
+  .print-btn {{ background:#2152c4; color:white; border:none; padding:8px 20px; border-radius:6px;
+                cursor:pointer; font-size:13px; margin-bottom:16px }}
+</style>
+</head>
+<body>
+<button class="print-btn no-print" onclick="window.print()">🖨 Drucken / Als PDF speichern</button>
+<h1>Reisekostenabrechnung – {tc}{f" · {title_line}" if title_line else ""}</h1>
+<p style="font-size:11px;color:#5a6e8a;margin-bottom:12px">Erstellt: {date.today().strftime('%d.%m.%Y')} · Herrhammer Kürschner Kerzenmaschinen</p>
+
+<h2>Reisedaten</h2>
+<div class="meta-grid">
+  <span class="meta-label">Reisender:</span><span class="meta-val">{traveler or '–'}</span>
+  {"<span class='meta-label'>Kollegen:</span><span class='meta-val'>"+colleagues+"</span>" if colleagues else ""}
+  <span class="meta-label">Zeitraum:</span><span class="meta-val">{str(dep_d or '–')} {dep_t or ''} – {str(ret_d or '–')} {ret_t or ''} ({days} Tage)</span>
+  <span class="meta-label">Reiseziel:</span><span class="meta-val">{destinations or cc or '–'}</span>
+  <span class="meta-label">Land (VMA):</span><span class="meta-val">{cc or 'DE'}</span>
+  {"<span class='meta-label'>PNR:</span><span class='meta-val' style='font-family:monospace'>"+pnr+"</span>" if pnr else ""}
+  {"<span class='meta-label'>Flüge:</span><span class='meta-val'>"+fns+"</span>" if fns else ""}
+  <span class="meta-label">Hotel:</span><span class="meta-val">{nights_b or 0}/{nights_p or 0} Nächte</span>
+</div>
+
+<h2>Belege</h2>
+<table>
+  <tr><th>Datei</th><th>Typ</th><th>Anbieter</th><th>Datum</th><th>Betrag orig.</th><th>Betrag EUR</th></tr>
+  {beleg_rows or '<tr><td colspan="6">Keine analysierten Belege</td></tr>'}
+  <tr class="sum-row"><td colspan="5">Summe Belege</td><td style="text-align:right">{beleg_sum:.2f} €</td></tr>
+</table>
+
+<h2>Verpflegungsmehraufwand §9 EStG</h2>
+<table>
+  <tr><th>Tag</th><th>Land</th><th>Mahlzeiten-Abzug</th><th>VMA</th></tr>
+  {vma_rows or '<tr><td colspan="4">Keine Reisezeit erfasst</td></tr>'}
+  <tr class="sum-row"><td colspan="3">Summe VMA</td><td style="text-align:right">{vma_total:.2f} €</td></tr>
+</table>
+
+{f"""<h2>Trennungspauschale (Herrhammer)</h2>
+<table>
+  <tr><th>Datum</th><th>Grund</th><th>Betrag</th></tr>
+  {trenn_rows}
+  <tr class="sum-row"><td colspan="2">Summe Trennungspauschale</td><td style="text-align:right">{trenn_total:.2f} €</td></tr>
+</table>""" if trenn_total > 0 else ""}
+
+<div class="total-box">
+  <span class="total-label">Gesamtbetrag</span>
+  <span class="total-val">{gesamt:,.2f} €</span>
+</div>
+<p style="font-size:10px;color:#9bafc8;margin-top:6px">Belege {beleg_sum:.2f} € + VMA {vma_total:.2f} € + Trennungspauschale {trenn_total:.2f} €</p>
+
+<div class="footer">
+  Herrhammer Kürschner Kerzenmaschinen · Reisekosten-System v{APP_VERSION} ·
+  Abrechnung {tc} · {date.today().strftime('%d.%m.%Y')}
+</div>
+<script>window.onload=function(){{if(window.location.search!=='?noprint')setTimeout(()=>window.print(),400);}}</script>
+</body></html>"""
+        return HTMLResponse(html)
+    except Exception as e:
+        return HTMLResponse(f"<pre>Fehler: {e}</pre>",status_code=500)
 
 
 # =========================================================
@@ -2169,6 +2561,87 @@ def beleg_vorschau(att_id: int):
         return RedirectResponse(url=signed_url)
     except Exception as e:
         return HTMLResponse(f"Fehler: {e}",status_code=500)
+
+
+@app.get("/beleg-edit/{att_id}", response_class=HTMLResponse)
+def beleg_edit_form(att_id: int):
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""SELECT id,trip_code,original_filename,detected_type,
+            detected_amount,detected_amount_eur,detected_currency,
+            detected_date,detected_vendor,ki_bemerkung,confidence,analysis_status
+            FROM mail_attachments WHERE id=%s""",(att_id,))
+        row=cur.fetchone()
+        cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code")
+        all_codes=[r[0] for r in cur.fetchall()]
+        cur.close();conn.close()
+        if not row: return HTMLResponse("Nicht gefunden",404)
+        _,tc,fname,dtype,amt,amt_eur,curr,ddate,vendor,bemerk,conf,astatus=row
+        type_opts="".join(f'<option {"selected" if dtype==t else ""}>{t}</option>'
+            for t in ["Flug","Hotel","Taxi","Bahn","Mietwagen","Essen","Sonstiges","Kalendereintrag"])
+        code_opts="".join(f'<option value="{c}" {"selected" if tc==c else ""}>{c}</option>'
+            for c in all_codes)
+        return page_shell(f"Beleg bearbeiten #{att_id}",f"""
+        <div class="page-card" style="max-width:600px">
+          <h2>Beleg #{att_id} korrigieren</h2>
+          <p class="sub" style="margin-bottom:16px">{fname or "–"}</p>
+          <form method="post" action="/beleg-edit/{att_id}">
+            <div class="fgrid">
+              <div class="fgrp ff"><label class="flbl">Reisecode</label>
+                <select class="fsel" name="trip_code"><option value="">– nicht zugeordnet –</option>{code_opts}</select></div>
+              <div class="fgrp"><label class="flbl">Belegtyp</label>
+                <select class="fsel" name="detected_type">{type_opts}</select></div>
+              <div class="fgrp"><label class="flbl">Anbieter</label>
+                <input class="finp" name="detected_vendor" value="{vendor or ''}"></div>
+              <div class="fgrp"><label class="flbl">Datum (DD.MM.YYYY)</label>
+                <input class="finp" name="detected_date" value="{ddate or ''}"></div>
+              <div class="fgrp"><label class="flbl">Betrag (Original)</label>
+                <input class="finp" name="detected_amount" value="{amt or ''}"></div>
+              <div class="fgrp"><label class="flbl">Währung (ISO)</label>
+                <input class="finp" name="detected_currency" value="{curr or 'EUR'}" maxlength="3"></div>
+              <div class="fgrp ff"><label class="flbl">Betrag EUR (Komma)</label>
+                <input class="finp" name="detected_amount_eur" value="{amt_eur or ''}"></div>
+              <div class="fgrp ff"><label class="flbl">Notiz / KI-Bemerkung</label>
+                <input class="finp" name="ki_bemerkung" value="{bemerk or ''}"></div>
+            </div>
+            <div class="mfooter">
+              <a class="btn-mc" href="javascript:history.back()">Abbrechen</a>
+              <button type="submit" class="btn-mp">Speichern</button>
+            </div>
+          </form>
+        </div>""")
+    except Exception as e:
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+
+@app.post("/beleg-edit/{att_id}")
+async def beleg_edit_save(att_id: int, request: Request):
+    try:
+        form=await request.form()
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""UPDATE mail_attachments SET
+            trip_code=%s,detected_type=%s,detected_vendor=%s,detected_date=%s,
+            detected_amount=%s,detected_currency=%s,detected_amount_eur=%s,
+            ki_bemerkung=%s,review_flag='ok',analysis_status='ok (manuell)'
+            WHERE id=%s""",
+            (form.get("trip_code") or None,
+             form.get("detected_type") or None,
+             form.get("detected_vendor") or None,
+             form.get("detected_date") or None,
+             form.get("detected_amount") or None,
+             (form.get("detected_currency") or "EUR").upper(),
+             form.get("detected_amount_eur") or None,
+             form.get("ki_bemerkung") or None,
+             att_id))
+        conn.commit()
+        # Reisecode updaten falls gesetzt
+        tc = form.get("trip_code")
+        if tc:
+            cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(tc,))
+            conn.commit()
+        cur.close();conn.close()
+        return RedirectResponse(url=f"/attachment-log",status_code=303)
+    except Exception as e:
+        return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
 
 
 # =========================================================
@@ -2325,6 +2798,88 @@ def reset_mail_log():
         return {"status":"ok"}
     except Exception as e:
         return {"status":"fehler","detail":str(e)}
+
+
+# =========================================================
+# STATISTIK-SEITE
+# =========================================================
+
+@app.get("/stats", response_class=HTMLResponse)
+def stats():
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""SELECT t.traveler_name,COUNT(DISTINCT t.trip_code),
+            COALESCE(SUM(CASE WHEN a.detected_amount_eur IS NOT NULL
+                THEN CAST(REPLACE(REPLACE(a.detected_amount_eur,'.',''),',','.') AS NUMERIC)
+                ELSE 0 END),0)
+            FROM trip_meta t LEFT JOIN mail_attachments a ON a.trip_code=t.trip_code
+            WHERE t.traveler_name IS NOT NULL GROUP BY t.traveler_name ORDER BY 3 DESC LIMIT 20""")
+        by_person=cur.fetchall()
+        cur.execute("""SELECT t.country_code,COUNT(DISTINCT t.trip_code),
+            COALESCE(SUM(CASE WHEN a.detected_amount_eur IS NOT NULL
+                THEN CAST(REPLACE(REPLACE(a.detected_amount_eur,'.',''),',','.') AS NUMERIC)
+                ELSE 0 END),0)
+            FROM trip_meta t LEFT JOIN mail_attachments a ON a.trip_code=t.trip_code
+            WHERE t.country_code IS NOT NULL GROUP BY t.country_code ORDER BY 3 DESC LIMIT 20""")
+        by_country=cur.fetchall()
+        cur.execute("""SELECT TO_CHAR(t.departure_date,'YYYY-MM'),COUNT(DISTINCT t.trip_code),
+            COALESCE(SUM(CASE WHEN a.detected_amount_eur IS NOT NULL
+                THEN CAST(REPLACE(REPLACE(a.detected_amount_eur,'.',''),',','.') AS NUMERIC)
+                ELSE 0 END),0)
+            FROM trip_meta t LEFT JOIN mail_attachments a ON a.trip_code=t.trip_code
+            WHERE t.departure_date >= now()-interval '12 months' AND t.departure_date IS NOT NULL
+            GROUP BY 1 ORDER BY 1 DESC""")
+        by_month=cur.fetchall()
+        cur.execute("""SELECT detected_type,COUNT(*),
+            COALESCE(SUM(CASE WHEN detected_amount_eur IS NOT NULL
+                THEN CAST(REPLACE(REPLACE(detected_amount_eur,'.',''),',','.') AS NUMERIC)
+                ELSE 0 END),0)
+            FROM mail_attachments WHERE detected_type IS NOT NULL AND detected_type!=''
+            GROUP BY detected_type ORDER BY 3 DESC""")
+        by_type=cur.fetchall()
+        cur.execute("""SELECT COUNT(DISTINCT trip_code),
+            COALESCE(SUM(CASE WHEN detected_amount_eur IS NOT NULL
+                THEN CAST(REPLACE(REPLACE(detected_amount_eur,'.',''),',','.') AS NUMERIC)
+                ELSE 0 END),0) FROM mail_attachments""")
+        total=cur.fetchone()
+        cur.close();conn.close()
+
+        def tbl(rows, headers):
+            ths="".join(f"<th>{h}</th>" for h in headers)
+            trs=""
+            for r in rows:
+                cells=[]
+                for i,v in enumerate(r):
+                    if i==2:
+                        cells.append(f"<td style='text-align:right;font-family:DM Mono,monospace'>{float(v or 0):,.2f} \u20ac</td>")
+                    else:
+                        cells.append(f"<td>{v or '\u2013'}</td>")
+                trs+=f"<tr>{'  '.join(cells)}</tr>"
+            return f"<div style='overflow-x:auto'><table><tr>{ths}</tr>{trs or '<tr><td colspan=3>Keine Daten</td></tr>'}</table></div>"
+
+        return page_shell("Statistik",f"""
+        <div style="display:flex;flex-direction:column;gap:20px;max-width:1100px">
+          <div class="sum-bar sb">
+            <div class="sum-item"><div class="sum-val blue">{total[0] if total else 0}</div><div class="sum-lbl">Reisen gesamt</div></div>
+            <div class="sum-item"><div class="sum-val">{float(total[1] if total else 0):,.2f} \u20ac</div><div class="sum-lbl">Gesamtkosten (Belege)</div></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+            <div class="page-card"><h2 style="margin-bottom:12px">\U0001f4bc Nach Mitarbeiter</h2>
+              {tbl(by_person,["Mitarbeiter","Reisen","EUR"])}</div>
+            <div class="page-card"><h2 style="margin-bottom:12px">\U0001f30d Nach Land</h2>
+              {tbl(by_country,["Land","Reisen","EUR"])}</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+            <div class="page-card"><h2 style="margin-bottom:12px">\U0001f4c5 Nach Monat (12 Mon.)</h2>
+              {tbl(by_month,["Monat","Reisen","EUR"])}</div>
+            <div class="page-card"><h2 style="margin-bottom:12px">\U0001f9fe Nach Belegtyp</h2>
+              {tbl(by_type,["Typ","Anzahl","EUR"])}</div>
+          </div>
+          <div><a class="btn-l" href="/">\u2190 Dashboard</a></div>
+        </div>""")
+    except Exception as e:
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+
 
 @app.get("/set-hotel")
 def set_hotel(code: str, mode: str):
