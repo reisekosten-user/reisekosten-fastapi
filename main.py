@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.9.7"
+APP_VERSION = "7.9.9"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -382,56 +382,54 @@ async def mistral_extract(text: str, known_codes: list, source: str = "anhang") 
     if not MISTRAL_API_KEY or not text or text.startswith(("KEIN","ERROR","OCR_","NICHT")):
         return {}
     codes_str = ", ".join(known_codes) if known_codes else "keine"
-    system = f"""Du bist Spezialist fuer Reisekostenbelege und Reisebestatigungen in deutschen Unternehmen.
-Analysiere den {'E-Mail-Text' if source=='mail' else 'OCR-Text eines Belegs'} und extrahiere Felder als JSON.
-Antworte NUR mit einem gueltigen JSON-Objekt ohne Markdown-Backticks.
+    system = f"""Du bist Experte fuer Reisekostenabrechnungen. Analysiere den Text und gib NUR ein JSON-Objekt zurueck, keine Erklaerungen.
 
-Felder:
-- betrag: Dezimalzahl als String z.B. "142.50" (Punkt), oder ""
-  FLUGBUCHUNG: Nimm den GESAMTBETRAG der Buchung (inkl. Steuern/Gebuehren).
-  Suche nach: "Gesamtpreis", "Total", "Gesamtbetrag", "zu zahlen", "charged", "Ticketpreis gesamt".
-  NICHT nehmen: Einzelpreise pro Segment, Steuern allein, oder "pro Person" wenn mehrere Personen.
-  Bei mehreren Personen: Gesamtbetrag durch Personenanzahl teilen falls erkennbar.
-- waehrung: ISO-Code. Standard: "EUR" wenn kein Fremdwaehrungs-Symbol explizit im Text
-- datum: Buchungsdatum oder Abflugdatum "DD.MM.YYYY" oder ""
-- anbieter: Airline oder Reiseanbieter z.B. "Lufthansa", "Booking.com", "Expedia", oder ""
-- beleg_typ: eines von: Flug, Hotel, Taxi, Bahn, Mietwagen, Essen, Sonstiges
-  Regeln: Uber/Bolt/FreeNow/Lyft → Taxi | Hertz/Sixt/Avis/Europcar → Mietwagen
-  Lufthansa/Swiss/Ryanair/Emirates/Air France/KLM/Alitalia/ITA/Turkish/Boarding Pass/eTicket → Flug
-  DB/ICE/IC/Eurostar/Thalys/Trenitalia → Bahn
-  Marriott/Hilton/Accor/Novotel/Booking.com/Hotels.com/HRS → Hotel
-  Restaurant/Café/Bewirtung/Dinner/Lunch → Essen
-- reisecode: Format YY-NNN z.B. "26-001" falls im Text, sonst ""
-- pnr_code: AMADEUS PNR/Buchungscode (6-stellig alphanumerisch) z.B. "XY3K7M", oder ""
-- flight_numbers: alle Flugnummern kommagetrennt z.B. "LH1234, LH4321", auch Rückflüge
-  Format: Airline-IATA-Code (2 Buchstaben) + Zahl, z.B. "LH", "AZ", "AF", "EK"
-- train_numbers: kommagetrennte Zugnummern z.B. "ICE 1234, IC 578", oder ""
-- nights: Anzahl Uebernachtungen als Zahl. WICHTIG: Berechne aus Check-in und Check-out falls nicht explizit angegeben.
-  z.B. Check-in 22.04. Check-out 25.04. = 3 Naechte
-- checkin_date: Hotel Check-in Datum "DD.MM.YYYY".
-  Suche nach: "Check-in", "Anreise", "Arrival", "ab", "von", "Einzug"
-  Beispiel: "Anreise: Dienstag, 22. April 2026" → "22.04.2026"
-- checkout_date: Hotel Check-out Datum "DD.MM.YYYY".
-  Suche nach: "Check-out", "Abreise", "Departure", "bis", "Auszug"
-  Beispiel: "Abreise: Freitag, 25. April 2026" → "25.04.2026"
-- checkin_time: Hotel Check-in Uhrzeit z.B. "15:00" oder "" (Standard wenn nicht angegeben: "")
-- checkout_time: Hotel Check-out Uhrzeit z.B. "11:00" oder "" (Standard wenn nicht angegeben: "")
-- flight_segments: ALLE Flug-Segmente als String.
-  Format pro Segment: "FLUGNR|ABFLUGHAFEN|ANKUNFTHAFEN|DATUM_AB|UHRZEIT_AB|DATUM_AN|UHRZEIT_AN"
-  Mehrere Segmente getrennt durch Semikolon.
-  Beispiel: "LH3463|NUE|FRA|20.04.2026|06:30|20.04.2026|07:35;LH1078|FRA|LYS|20.04.2026|09:15|20.04.2026|10:20"
-  Flughafen-Codes: 3-Buchstaben IATA z.B. FRA, MUC, NUE, LYS, CDG, ZRH, VIE
-  Suche nach: "Flug", "Flight", "Abflug", "Ankunft", "Departure", "Arrival", Flugnummer + Uhrzeit
-  WICHTIG: Auch Rueckfluege erfassen! Alle Segmente einer Reise eintragen.
-- traveler_name: Vollstaendiger Name des Reisenden.
-  Suche nach: "Passagier", "Passenger", "Reisender", "Gebucht fuer", "Name:", "Gast", "Buchung fuer"
-- destination: Hauptreiseziel z.B. "Lyon", "Paris", "Frankfurt". Bei Flug: Ankunftsstadt des Hinflugs. Bei Hotel: Hotelstadt.
-- confidence: "hoch" wenn Betrag+Typ+Datum sicher, "mittel" wenn 2 von 3, sonst "niedrig"
-- bemerkung: Kurze Zusammenfassung z.B. "Hinflug NUE→FRA→LYS, Rueckflug LYS→FRA→NUE", "3 Naechte Marriott Lyon 22.-25.04."
+PFLICHTFELDER:
+- beleg_typ: "Flug" | "Hotel" | "Taxi" | "Bahn" | "Mietwagen" | "Essen" | "Sonstiges"
+- betrag: Gesamtbetrag als "142.50" (Punkt als Dezimaltrennzeichen), oder ""
+- waehrung: "EUR" (Standard), oder expliziter Code wie "USD", "GBP", "CHF"
+- datum: NUR das Buchungsdatum als "DD.MM.YYYY" - NICHT das Reisedatum!
+  Buchungsdatum = wann die Buchung gemacht wurde (oft "Buchung vom", "Bestelldatum")
+- anbieter: Firmenname z.B. "Lufthansa", "Marriott", "Booking.com"
+- reisecode: "YY-NNN" falls im Text z.B. "26-001", sonst ""
+- pnr_code: 6-stelliger Buchungscode z.B. "83WPJT", oder ""
+- confidence: "hoch" | "mittel" | "niedrig"
+- bemerkung: Kurze Zusammenfassung auf Deutsch
 
-WICHTIG: INR/USD/GBP nur wenn explizites Symbol/Code im Text, sonst immer EUR.
-WICHTIG: Bei Hotelbuchungen IMMER checkin_date UND checkout_date UND nights ausfuellen!
-WICHTIG: Bei Flugbuchungen IMMER alle Segmente in flight_segments eintragen!"""
+FLUG-FELDER (nur bei beleg_typ=Flug):
+- flight_numbers: alle Flugnummern kommagetrennt z.B. "LH3463,LH1078,LH1077,LH3464"
+- flight_segments: Jedes Flug-Segment im Format "FN|VON|NACH|DATUM|ABF|DATUM|ANK"
+  Trennzeichen zwischen Segmenten: Semikolon
+  Beispiel 4 Segmente Nuernberg-Lyon und zurueck:
+  "LH3463|NUE|FRA|20.04.2026|06:30|20.04.2026|07:35;LH1078|FRA|LYS|20.04.2026|09:15|20.04.2026|10:20;LH1077|LYS|FRA|24.04.2026|19:00|24.04.2026|20:15;LH3464|FRA|NUE|24.04.2026|21:00|24.04.2026|21:55"
+  Alle Felder: Flugnummer | Abflughafen-IATA | Ankunfthafen-IATA | Abflugdatum | Abflugzeit | Ankunftdatum | Ankunftzeit
+  IATA-Codes: NUE=Nuernberg FRA=Frankfurt LYS=Lyon MUC=Muenchen BER=Berlin CDG=Paris ZRH=Zuerich VIE=Wien
+  Wenn Uhrzeit fehlt: leeres Feld lassen z.B. "LH3463|NUE|FRA|20.04.2026||20.04.2026|"
+  WICHTIG: Hin- UND Rueckfluege erfassen!
+- traveler_name: Name des Passagiers z.B. "Max Mustermann"
+- destination: Zielstadt des Hinflugs z.B. "Lyon"
+
+HOTEL-FELDER (nur bei beleg_typ=Hotel):
+- checkin_date: Check-in Datum "DD.MM.YYYY" - das ist das ANREISEDATUM nicht das Buchungsdatum!
+  Suche nach: "Anreise", "Check-in", "Arrival", "ab dem"
+  NIEMALS das Buchungsdatum hier eintragen!
+- checkout_date: Check-out Datum "DD.MM.YYYY" - das ABREISEDATUM
+  Suche nach: "Abreise", "Check-out", "Departure", "bis zum"
+- nights: Anzahl Naechte als Zahl (checkout - checkin in Tagen)
+- checkin_time: Uhrzeit z.B. "15:00" oder ""
+- checkout_time: Uhrzeit z.B. "11:00" oder ""
+- destination: Hotelstadt z.B. "Lyon"
+- traveler_name: Name des Gastes
+
+SONSTIGE FELDER:
+- train_numbers: Zugnummern z.B. "ICE 597", oder ""
+
+STRENGE REGELN:
+1. datum = IMMER Buchungsdatum, NIEMALS Reise- oder Check-in-Datum
+2. checkin_date = IMMER Anreisedatum, NIEMALS Buchungsdatum
+3. Betrag = Gesamtbetrag inkl. Steuern, NICHT Teilbetraege
+4. Alle Felder die nicht relevant sind: leer lassen ("")
+5. Nur EUR wenn kein anderes Symbol im Text"""
 
     user = f"Bekannte Reisecodes: {codes_str}\n\nText:\n---\n{text[:8000]}\n---\nJSON:"
     try:
@@ -440,7 +438,7 @@ WICHTIG: Bei Flugbuchungen IMMER alle Segmente in flight_segments eintragen!"""
                 headers={"Authorization":f"Bearer {MISTRAL_API_KEY}","Content-Type":"application/json"},
                 json={"model":MISTRAL_EXTRACT_MODEL,
                       "messages":[{"role":"system","content":system},{"role":"user","content":user}],
-                      "temperature":0.0,"max_tokens":500,
+                      "temperature":0.0,"max_tokens":1500,
                       "response_format":{"type":"json_object"}})
         if resp.status_code!=200: return {}
         content = resp.json()["choices"][0]["message"]["content"]
@@ -1835,15 +1833,6 @@ def load_trips(conn, filter_status=None):
                    FROM mail_attachments""")
     att_rows=cur.fetchall()
 
-    # Fallback: Reisender + Ziel aus Mail-Analyse wenn trip_meta leer
-    cur.execute("""SELECT trip_code,
-                   MAX(CASE WHEN traveler_name IS NOT NULL AND traveler_name!='' THEN traveler_name END),
-                   MAX(CASE WHEN destination IS NOT NULL AND destination!='' THEN destination END)
-                   FROM (
-                     SELECT mm.trip_code,
-                       NULL::text as traveler_name, NULL::text as destination
-                     FROM mail_messages mm WHERE mm.trip_code IS NOT NULL
-                   ) sub GROUP BY trip_code""")
     # Simpler Fallback: subject der ersten Mail als Hinweis
     cur.execute("""SELECT trip_code, subject FROM mail_messages
                    WHERE trip_code IS NOT NULL ORDER BY id""")
@@ -2757,7 +2746,12 @@ def trip_detail(tc: str):
             if dtype == "Hotel":
                 hotel_name = vendor or "Hotel"
                 # Check-in Tag
-                cin_d  = checkin_d or ev_date or dep_d or date.today()
+                # checkin_d aus explizitem Feld – NICHT aus detected_date (=Buchungsdatum)
+                # Wenn kein explizites checkin_date: auf dep_d der Reise zurückfallen
+                cin_d = checkin_d or dep_d or date.today()
+                if not checkin_d:
+                    # Keine explizite Check-in-Info → Warnung in bemerkung
+                    pass
                 cin_t  = checkin_t_s or "15:00"
                 # Check-out Tag: bevorzuge explizites Datum, dann cin + nights
                 n_nights = int(det_nights or 0)
@@ -3182,6 +3176,10 @@ def trip_detail(tc: str):
 
         # Anhänge-Tabelle
         beleg_sum=0.0
+        for a in atts:
+            if a[2]:
+                try: beleg_sum+=float(a[2].replace(".","").replace(",","."))
+                except: pass
         att_rows="".join(f"""<tr>
             <td><a href="/beleg/{a[9]}" target="_blank" style="color:var(--b600);text-decoration:none">📄 {a[0] or '–'}</a>
                 <a href="/beleg-edit/{a[9]}" style="margin-left:5px;color:var(--t300);text-decoration:none" title="Korrigieren">✏</a></td>
@@ -3190,10 +3188,7 @@ def trip_detail(tc: str):
             <td>{a[4] or ''}</td><td>{a[5] or ''}</td>
             <td><span class="bdg {"bdg-ok" if a[6] in ("ok","ok (manuell)") else "bdg-w"}">{a[6] or ''}</span></td>
             <td style="font-size:11px;color:var(--t300)">{(a[8] or '')[:60]}</td>
-            </tr>""" + ("" if not a[2] or not (lambda x: beleg_sum.__add__(float(x.replace(".","").replace(",","."))) if x else 0)(a[2]) else "")
-            for a in atts
-            if not (a[2] and [beleg_sum := beleg_sum + float(a[2].replace(".","").replace(",",".")) for _ in [1]])
-        )
+            </tr>""" for a in atts)
         # beleg_sum sauber berechnen
         beleg_sum=0.0
         for a in atts:
