@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.4"
+APP_VERSION = "7.5"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2904,14 +2904,26 @@ def report_pdf(tc: str):
         days=(ret_d-dep_d).days+1 if dep_d and ret_d else 0
         ml=[m.strip() for m in (meals_reimb or "").split(",") if m.strip()]
 
-        # VMA – Multidestination
+        # VMA – tagesbasiert (daily_meals) wenn vorhanden, sonst Multidest.
         vma_dest = parse_vma_destinations(vma_dest_str or "")
+        daily = load_daily_meals(tc)
         if days > 0:
-            vma_total, vma_tag_rows = calc_vma_multi(dep_d, ret_d, ml, vma_dest, cc)
-            vma_rows = "".join(f"<tr><td>{lbl}</td><td>{c_}</td><td>{m}</td><td style='text-align:right'>{v:.2f} €</td></tr>"
-                               for lbl,c_,m,v in vma_tag_rows)
+            if daily:
+                vma_total, vma_tag_rows = calc_vma_from_daily(dep_d, ret_d, daily, vma_dest, cc)
+                vma_rows = "".join(
+                    f"<tr><td>{d}</td><td>{lbl}</td><td>{c_}</td><td>{m}</td><td style='text-align:right'>{v:.2f} €</td></tr>"
+                    for d,lbl,c_,m,v in vma_tag_rows)
+                vma_header = "<tr><th>Datum</th><th>Tag</th><th>Land</th><th>Erstattete Mahlzeiten</th><th>VMA</th></tr>"
+                vma_source_note = f"Tagesgenaue Erfassung ({len(daily)} Tage)"
+            else:
+                vma_total, vma_tag_rows = calc_vma_multi(dep_d, ret_d, ml, vma_dest, cc)
+                vma_rows = "".join(
+                    f"<tr><td>{lbl}</td><td>{c_}</td><td>{m}</td><td style='text-align:right'>{v:.2f} €</td></tr>"
+                    for lbl,c_,m,v in vma_tag_rows)
+                vma_header = "<tr><th>Tag</th><th>Land</th><th>Mahlzeiten-Abzug</th><th>VMA</th></tr>"
+                vma_source_note = "Pauschale (keine Tageserfassung)"
         else:
-            vma_total=0.0; vma_rows=""
+            vma_total=0.0; vma_rows=""; vma_header=""; vma_source_note=""
         trenn_total,trenn_details=trennungspauschale(dep_d,ret_d,dep_t or "08:00",ret_t or "18:00")
         trenn_rows="".join(f"<tr><td>{d}</td><td>{lbl}</td><td style='text-align:right'>{amt:.2f} €</td></tr>" for d,lbl,amt in trenn_details)
 
@@ -2978,10 +2990,11 @@ def report_pdf(tc: str):
 </table>
 
 <h2>Verpflegungsmehraufwand §9 EStG</h2>
+<p style="font-size:10px;color:#9bafc8;margin-bottom:4px">{vma_source_note}</p>
 <table>
-  <tr><th>Tag</th><th>Land</th><th>Mahlzeiten-Abzug</th><th>VMA</th></tr>
-  {vma_rows or '<tr><td colspan="4">Keine Reisezeit erfasst</td></tr>'}
-  <tr class="sum-row"><td colspan="3">Summe VMA</td><td style="text-align:right">{vma_total:.2f} €</td></tr>
+  {vma_header}
+  {vma_rows or '<tr><td colspan="5">Keine Reisezeit erfasst</td></tr>'}
+  <tr class="sum-row"><td colspan="{4 if not daily else 4}"><b>Summe VMA</b></td><td style="text-align:right">{vma_total:.2f} €</td></tr>
 </table>
 
 {f"""<h2>Trennungspauschale (Herrhammer)</h2>
