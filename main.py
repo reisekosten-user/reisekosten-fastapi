@@ -15,12 +15,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import os, re, base64, json, httpx, imaplib, email, hashlib, threading, time
 from email.header import decode_header
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.8"
+APP_VERSION = "7.9"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -444,62 +444,161 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
             obj = s3.get_object(Bucket=S3_BUCKET, Key=storage_key)
             ics_bytes = obj["Body"].read()
             ics_text  = ics_bytes.decode(errors="ignore")
-            # ICS Zeilenfortsetzungen auflösen
+            # ICS Zeilenfortsetzungen auflösen (RFC 5545)
             ics_text  = re.sub(r"\r?\n[ \t]", "", ics_text)
-            ics_summary = re.search(r"^SUMMARY[^:]*:(.*)", ics_text, re.MULTILINE)
-            ics_dtstart = re.search(r"^DTSTART[^:]*:([\dTZ]+)", ics_text, re.MULTILINE)
-            ics_loc     = re.search(r"^LOCATION[^:]*:(.*)", ics_text, re.MULTILINE)
-            ics_desc    = re.search(r"^DESCRIPTION[^:]*:(.*)", ics_text, re.MULTILINE)
-            ics_full = " ".join(filter(None,[
-                ics_summary.group(1).strip() if ics_summary else "",
-                ics_desc.group(1).strip() if ics_desc else "",
-            ]))
-            ics_flight_m = re.search(r"\b([A-Z]{2}\d{3,4})\b", ics_full)
-            ics_flight_nr = ics_flight_m.group(1) if ics_flight_m else ""
-            # Zugnummern: ICE 597, IC 1234, RE 42, RB 65 etc.
-            ics_train_m = re.search(r"\b(ICE|IC|EC|RE|RB|S)\s*(\d{1,4})\b", ics_full, re.IGNORECASE)
-            ics_train_nr = f"{ics_train_m.group(1).upper()} {ics_train_m.group(2)}" if ics_train_m else ""
-            raw_date = ics_dtstart.group(1).strip()[:8] if ics_dtstart else ""
-            ics_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}" if len(raw_date)==8 else ""
-            ics_bemerkung = " | ".join(filter(None,[
-                f"Termin: {ics_summary.group(1).strip()}" if ics_summary else "",
-                f"Datum: {ics_date}" if ics_date else "",
-                f"Ort: {ics_loc.group(1).strip()}" if ics_loc else "",
-                f"Flug: {ics_flight_nr}" if ics_flight_nr else "",
-                f"Zug: {ics_train_nr}" if ics_train_nr else "",
-            ]))
+
+            def ics_get(field):
+                """Liest einen ICS-Feldwert inkl. TZID-Parameter."""
+                m = re.search(rf"^{field}(?:;[^:]*)?:(.*)", ics_text, re.MULTILINE)
+                return m.group(1).strip() if m else ""
+
+            def ics_get_tzid(field):
+                """Gibt (wert, tzid) zurück."""
+                m = re.search(rf"^{field}(?:;TZID=([^:;]+))?(?:;[^:]*)?:(.*)", ics_text, re.MULTILINE)
+                if m: return m.group(2).strip(), (m.group(1) or "UTC").strip()
+                return "", "UTC"
+
+            def parse_ics_dt(raw, tzid="UTC"):
+                """Parst ICS-Datetime → (date_obj, time_utc_str, time_local_str, tzid)"""
+                raw = raw.strip().rstrip("Z")
+                try:
+                    if "T" in raw:
+                        dt = datetime.strptime(raw[:15], "%Y%m%dT%H%M%S")
+                        utc_str  = dt.strftime("%H:%M UTC") if tzid in ("UTC","") else dt.strftime("%H:%M")
+                        local_str = dt.strftime("%H:%M")
+                        return dt.date(), utc_str, local_str, tzid
+                    else:
+                        return date(int(raw[:4]),int(raw[4:6]),int(raw[6:8])), "", "", ""
+                except:
+                    return None, "", "", ""
+
+            # Alle VEVENT-Blöcke extrahieren (ICS kann mehrere haben)
+            vevents = re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", ics_text, re.DOTALL)
+
+            # Für Flüge: oft mehrere VEVENTs (Hinflug + Rückflug)
+            all_flights = []
+            all_trains  = []
+            first_date  = None
+            ki_parts    = []
+            betrag_ics  = ""
+
+            for vevent in vevents:
+                # Felder aus diesem VEVENT
+                def ev_get(f):
+                    m=re.search(rf"^{f}(?:;[^:]*)?:(.*)", vevent, re.MULTILINE)
+                    return m.group(1).strip() if m else ""
+                def ev_tzid(f):
+                    m=re.search(rf"^{f}(?:;TZID=([^:;]+))?(?:;[^:]*)?:(.*)", vevent, re.MULTILINE)
+                    if m: return m.group(2).strip(), (m.group(1) or "UTC").strip()
+                    return "", "UTC"
+
+                summary   = ev_get("SUMMARY")
+                location  = ev_get("LOCATION")
+                desc      = ev_get("DESCRIPTION")
+                dtstart_raw, tz_start = ev_tzid("DTSTART")
+                dtend_raw,   tz_end   = ev_tzid("DTEND")
+
+                start_d, start_utc, start_local, _ = parse_ics_dt(dtstart_raw, tz_start)
+                end_d,   end_utc,   end_local,   _ = parse_ics_dt(dtend_raw,   tz_end)
+
+                if first_date is None and start_d:
+                    first_date = start_d
+
+                ev_text = f"{summary} {location} {desc}"
+
+                # Flugnummer aus Summary/Description extrahieren
+                fn_m = re.search(r"\b([A-Z]{2}\d{3,4})\b", ev_text)
+                fn   = fn_m.group(1) if fn_m else ""
+
+                # Zugnummer
+                tn_m = re.search(r"\b(ICE|IC|EC|RE|RB|S)\s*(\d{1,4})\b", ev_text, re.IGNORECASE)
+                tn   = f"{tn_m.group(1).upper()} {tn_m.group(2)}" if tn_m else ""
+
+                # Abflug/Ankunft-Flughafen aus LOCATION (oft "FRA - Frankfurt" oder "FRA" oder "Frankfurt (FRA)")
+                airports = re.findall(r"\b([A-Z]{3})\b", location)
+                dep_apt = airports[0] if len(airports)>0 else ""
+                arr_apt = airports[1] if len(airports)>1 else ""
+
+                # Alternativ aus Summary: "FRA → CDG" oder "FRA-CDG"
+                if not dep_apt or not arr_apt:
+                    rt_m = re.search(r"\b([A-Z]{3})\s*[-→>]\s*([A-Z]{3})\b", summary+desc)
+                    if rt_m:
+                        dep_apt=rt_m.group(1)
+                        arr_apt=rt_m.group(2)
+
+                # Preis aus Description
+                price_m = re.search(r"(?:EUR|€|CHF|USD|GBP)\s*([\d,.]+)|([\d,.]+)\s*(?:EUR|€)", desc)
+                if price_m and not betrag_ics:
+                    betrag_ics = (price_m.group(1) or price_m.group(2) or "").replace(",",".")
+
+                if fn:
+                    all_flights.append(fn)
+                    route = f"{dep_apt}→{arr_apt}" if dep_apt and arr_apt else (dep_apt or arr_apt or "")
+                    time_info = ""
+                    if start_utc and end_utc:
+                        time_info = f"{start_local} ({tz_start}) – {end_local} ({tz_end})"
+                    elif start_utc:
+                        time_info = f"Ab {start_local} ({tz_start})"
+                    ki_parts.append(f"✈ {fn} {route} {time_info}".strip())
+                elif tn:
+                    all_trains.append(tn)
+                    ki_parts.append(f"🚆 {tn}")
+                elif summary:
+                    ki_parts.append(f"{summary[:60]}")
+
+                # Datum/Zeit in ki_bemerkung
+                if start_d and start_utc:
+                    ki_parts.append(f"Abflug: {start_d} {start_utc}")
+                if end_d and end_utc:
+                    ki_parts.append(f"Ankunft: {end_d} {end_utc}")
+
+            flight_str = ", ".join(list(dict.fromkeys(all_flights)))  # dedupliziert
+            train_str  = ", ".join(list(dict.fromkeys(all_trains)))
+            ics_date   = str(first_date) if first_date else ""
+            ki_bemerkung = " | ".join(ki_parts) if ki_parts else "ICS ohne verwertbare Daten"
+
+            # Zeitinfo für Speicherung extrahieren
+            flight_time_info = " | ".join(p for p in ki_parts if "Abflug:" in p or "Ankunft:" in p) or None
+
             cur.execute("""UPDATE mail_attachments SET
                 analysis_status='ok', confidence='hoch', review_flag='ok',
                 detected_date=%s, detected_flight_numbers=%s,
                 detected_train_numbers=%s,
-                ki_bemerkung=%s, detected_type='Kalendereintrag'
+                ki_bemerkung=%s, detected_type='Kalendereintrag',
+                flight_time_info=%s
                 WHERE id=%s""",
-                (ics_date or None, ics_flight_nr or None,
-                 ics_train_nr or None, ics_bemerkung or None, att_id))
-            # Flugnummer in trip_meta übernehmen
-            if ics_flight_nr or ics_train_nr:
-                cur.execute("SELECT trip_code FROM mail_attachments WHERE id=%s",(att_id,))
-                row_tc = cur.fetchone()
-                if row_tc and row_tc[0]:
-                    tc = row_tc[0]
-                    if ics_flight_nr:
-                        cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code=%s",(tc,))
-                        row_fn = cur.fetchone()
-                        if row_fn:
-                            existing = (row_fn[0] or "")
-                            if ics_flight_nr not in existing:
-                                cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",
-                                    (f"{existing},{ics_flight_nr}".strip(","), tc))
-                                print(f"[ICS] Flugnummer {ics_flight_nr} → trip {tc}")
-                    if ics_train_nr:
-                        cur.execute("SELECT train_numbers FROM trip_meta WHERE trip_code=%s",(tc,))
-                        row_tn = cur.fetchone()
-                        if row_tn:
-                            existing = (row_tn[0] or "")
-                            if ics_train_nr not in existing:
-                                cur.execute("UPDATE trip_meta SET train_numbers=%s WHERE trip_code=%s",
-                                    (f"{existing},{ics_train_nr}".strip(","), tc))
-                                print(f"[ICS] Zugnummer {ics_train_nr} → trip {tc}")
+                (ics_date or None, flight_str or None,
+                 train_str or None, ki_bemerkung,
+                 flight_time_info, att_id))
+
+            # Flugnummern + Zugnummern in trip_meta übernehmen
+            cur.execute("SELECT trip_code FROM mail_attachments WHERE id=%s",(att_id,))
+            row_tc = cur.fetchone()
+            if row_tc and row_tc[0]:
+                tc_val = row_tc[0]
+                if flight_str:
+                    cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code=%s",(tc_val,))
+                    row_fn = cur.fetchone()
+                    if row_fn:
+                        existing = row_fn[0] or ""
+                        new_fns = existing
+                        for fn in all_flights:
+                            if fn not in new_fns:
+                                new_fns = f"{new_fns},{fn}".strip(",")
+                        if new_fns != existing:
+                            cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",(new_fns, tc_val))
+                if train_str:
+                    cur.execute("SELECT train_numbers FROM trip_meta WHERE trip_code=%s",(tc_val,))
+                    row_tn = cur.fetchone()
+                    if row_tn:
+                        existing = row_tn[0] or ""
+                        new_tns = existing
+                        for tn in all_trains:
+                            if tn not in new_tns:
+                                new_tns = f"{new_tns},{tn}".strip(",")
+                        if new_tns != existing:
+                            cur.execute("UPDATE trip_meta SET train_numbers=%s WHERE trip_code=%s",(new_tns, tc_val))
+
             conn.commit(); cur.close(); return
         except Exception as e:
             cur.execute("UPDATE mail_attachments SET analysis_status=%s WHERE id=%s",
@@ -1643,6 +1742,7 @@ def init():
                     "detected_amount TEXT","detected_amount_eur TEXT","detected_currency TEXT",
                     "detected_date TEXT","detected_vendor TEXT","pnr_code TEXT",
                     "detected_flight_numbers TEXT","detected_train_numbers TEXT","detected_nights INTEGER DEFAULT 0",
+                    "flight_time_info TEXT",
                     "analysis_status TEXT DEFAULT 'ausstehend'","confidence TEXT DEFAULT 'niedrig'",
                     "review_flag TEXT DEFAULT 'pruefen'","ki_bemerkung TEXT",
                     "file_hash TEXT","created_at TIMESTAMP DEFAULT now()"]:
@@ -2527,7 +2627,8 @@ def trip_detail(tc: str):
 
         cur.execute("""SELECT original_filename,detected_type,detected_amount_eur,detected_currency,
             detected_date,detected_vendor,analysis_status,confidence,ki_bemerkung,id,
-            pnr_code,detected_flight_numbers,detected_train_numbers,detected_amount,detected_nights
+            pnr_code,detected_flight_numbers,detected_train_numbers,detected_amount,detected_nights,
+            COALESCE(flight_time_info,'')
             FROM mail_attachments WHERE trip_code=%s ORDER BY detected_date,id""",(tc,))
         atts=cur.fetchall()
 
@@ -2614,7 +2715,7 @@ def trip_detail(tc: str):
         # Belege als Timeline-Einträge
         beleg_sum=0.0
         for a in atts:
-            fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt,det_nights=a
+            fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt,det_nights,ft_info=a
             if amt_eur:
                 try: beleg_sum+=float(amt_eur.replace(".","").replace(",","."))
                 except: pass
@@ -2656,12 +2757,37 @@ def trip_detail(tc: str):
                         "hidden": False,
                     })
             else:
+                # Zeiten: aus flight_time_info für ICS/Flüge, sonst leer
+                ev_time = ""
+                ev_detail_extra = ""
+                if dtype in ("Flug","Kalendereintrag") and ft_info:
+                    # Extrahiere erste Abflugszeit aus ki_bemerkung oder flight_time_info
+                    tm = re.search(r"(\d{2}:\d{2})\s*(?:UTC|\([^)]+\))?", ft_info)
+                    if tm: ev_time = tm.group(1)
+                    # Zeige Route aus ki_bemerkung (FRA→CDG)
+                    route_m = re.search(r"([A-Z]{3}→[A-Z]{3})", bemerk or "")
+                    if route_m: ev_detail_extra = f' <span style="font-family:DM Mono,monospace;font-size:11px;color:var(--b600)">{route_m.group(1)}</span>'
+                # Label: für ICS die Flugnummer prominent zeigen
+                if dtype == "Kalendereintrag" and afns:
+                    label = f"✈ {afns}"
+                    if vendor: label += f" · {vendor}"
+                else:
+                    label = f"{vendor or fn_a or dtype or 'Beleg'}"
+                # Detail: Betrag + Zeitinfo
+                detail_str = amount_str
+                if ft_info and dtype in ("Flug","Kalendereintrag"):
+                    # Kompakte Zeitanzeige
+                    time_parts = re.findall(r"(\d{2}:\d{2})\s*\(([^)]+)\)", ft_info)
+                    if len(time_parts)>=2:
+                        detail_str = f"{time_parts[0][0]} {time_parts[0][1]} → {time_parts[1][0]} {time_parts[1][1]}"
+                    elif amount_str and amount_str != "–":
+                        detail_str = amount_str
                 timeline_events.append({
                     "date": ev_date or dep_d or date.today(),
-                    "time": "",
+                    "time": ev_time,
                     "icon": icon,
-                    "label": f"{vendor or fn_a or dtype or 'Beleg'}",
-                    "detail": amount_str,
+                    "label": label + ev_detail_extra,
+                    "detail": detail_str,
                     "extra": (f'<a href="{view_url}" target="_blank" style="color:var(--b600);margin-right:6px" title="Beleg anzeigen">📄</a>'
                              f'<a href="{edit_url}" style="color:var(--t300)" title="KI-Ergebnis korrigieren">✏</a>'),
                     "status": stat,
