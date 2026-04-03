@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.3"
+APP_VERSION = "7.4"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -388,22 +388,31 @@ Antworte NUR mit einem gueltigen JSON-Objekt ohne Markdown-Backticks.
 
 Felder:
 - betrag: Dezimalzahl als String z.B. "142.50" (Punkt), oder ""
+  FLUGBUCHUNG: Nimm den GESAMTBETRAG der Buchung (inkl. Steuern/Gebuehren).
+  Suche nach: "Gesamtpreis", "Total", "Gesamtbetrag", "zu zahlen", "charged", "Ticketpreis gesamt".
+  NICHT nehmen: Einzelpreise pro Segment, Steuern allein, oder "pro Person" wenn mehrere Personen.
+  Bei mehreren Personen: Gesamtbetrag durch Personenanzahl teilen falls erkennbar.
 - waehrung: ISO-Code. Standard: "EUR" wenn kein Fremdwaehrungs-Symbol explizit im Text
-- datum: "DD.MM.YYYY" oder ""
-- anbieter: Firmenname z.B. "Lufthansa", "Deutsche Bahn", "Uber", oder ""
+- datum: Buchungsdatum oder Abflugdatum "DD.MM.YYYY" oder ""
+- anbieter: Airline oder Reiseanbieter z.B. "Lufthansa", "Booking.com", "Expedia", oder ""
 - beleg_typ: eines von: Flug, Hotel, Taxi, Bahn, Mietwagen, Essen, Sonstiges
   Regeln: Uber/Bolt/FreeNow/Lyft → Taxi | Hertz/Sixt/Avis/Europcar → Mietwagen
-  Lufthansa/Swiss/Ryanair/Emirates/Boarding Pass → Flug | DB/ICE/Eurostar → Bahn
-  Marriott/Hilton/Accor/Booking.com → Hotel | Restaurant/Café/Bewirtung → Essen
+  Lufthansa/Swiss/Ryanair/Emirates/Air France/KLM/Alitalia/ITA/Turkish/Boarding Pass/eTicket → Flug
+  DB/ICE/IC/Eurostar/Thalys/Trenitalia → Bahn
+  Marriott/Hilton/Accor/Novotel/Booking.com/Hotels.com/HRS → Hotel
+  Restaurant/Café/Bewirtung/Dinner/Lunch → Essen
 - reisecode: Format YY-NNN z.B. "26-001" falls im Text, sonst ""
 - pnr_code: AMADEUS PNR/Buchungscode (6-stellig alphanumerisch) z.B. "XY3K7M", oder ""
-- flight_numbers: kommagetrennte Flugnummern z.B. "LH123, AZ770", oder ""
+- flight_numbers: alle Flugnummern kommagetrennt z.B. "LH1234, LH4321", auch Rückflüge
+  Format: Airline-IATA-Code (2 Buchstaben) + Zahl, z.B. "LH", "AZ", "AF", "EK"
 - train_numbers: kommagetrennte Zugnummern z.B. "ICE 1234, IC 578", oder ""
 - nights: Anzahl Uebernachtungen als Zahl z.B. 3, oder 0
-- traveler_name: Vollstaendiger Name des Reisenden falls im Text erkennbar, z.B. "Max Mustermann", sonst ""
-- destination: Hauptreiseziel/-land falls erkennbar z.B. "Lyon", "Indien", "Frankfurt Messe", sonst ""
+- traveler_name: Vollstaendiger Name des Reisenden z.B. "Max Mustermann", sonst ""
+  Suche nach: "Passagier", "Passenger", "Reisender", "Gebucht fuer", "Name:"
+- destination: Hauptreiseziel z.B. "Lyon", "Mumbai", "Frankfurt Messe", sonst ""
+  Bei Flug: Zielort des Hinflugs nehmen.
 - confidence: "hoch" wenn Betrag+Typ+Datum sicher, "mittel" wenn 2 von 3, sonst "niedrig"
-- bemerkung: kurze Notiz auf Deutsch wenn unklar, sonst ""
+- bemerkung: kurze Notiz auf Deutsch, z.B. "Hin+Rueckflug", "2 Personen geteilt", sonst ""
 
 WICHTIG: INR/USD/GBP nur wenn explizites Symbol/Code im Text, sonst immer EUR."""
 
@@ -2348,7 +2357,8 @@ def trip_detail(tc: str):
         cur.execute("""SELECT traveler_name,colleagues,departure_date,return_date,
             departure_time_home,arrival_time_home,destinations,country_code,
             flight_numbers,train_numbers,car_rental_info,nights_planned,nights_booked,
-            meals_reimbursed,pnr_code,notes,hotel_mode,trip_title,customer_code
+            meals_reimbursed,pnr_code,notes,hotel_mode,trip_title,customer_code,
+            employee_code,vma_destinations
             FROM trip_meta WHERE trip_code=%s""",(tc,))
         meta=cur.fetchone()
 
@@ -2366,14 +2376,14 @@ def trip_detail(tc: str):
         if meta:
             (traveler,colleagues,dep,ret,dep_t,ret_t,destinations,cc,
              fns,trains,car,nights_p,nights_b,meals,pnr,notes,hm,
-             trip_title,customer_code)=meta
+             trip_title,customer_code,employee_code,vma_dest_str)=meta
             dep_d=dep if isinstance(dep,date) else (date.fromisoformat(str(dep)) if dep else None)
             ret_d=ret if isinstance(ret,date) else (date.fromisoformat(str(ret)) if ret else None)
             days=(ret_d-dep_d).days+1 if dep_d and ret_d else 0
             status=compute_status(dep_d,ret_d)
         else:
             traveler=colleagues=destinations=cc=fns=trains=car=""
-            nights_p=nights_b=days=0; pnr=notes=hm=trip_title=customer_code=""
+            nights_p=nights_b=days=0; pnr=notes=hm=trip_title=customer_code=employee_code=vma_dest_str=""
             dep_d=ret_d=dep_t=ret_t=None; status="planned"
 
         status_badge={"active":"<span class='sbadge sb-active'><span class='adot'></span>Aktiv</span>",
@@ -2794,25 +2804,47 @@ def report(tc: str):
         # j) Fluganzahl
         all_fns_list = list(set(([f.strip() for f in (fns or "").split(",") if f.strip()] + all_fns_found)))
         flight_count = len(all_fns_list)
-        flight_bonus_html=""
-        if flight_count>0:
-            flight_bonus_html=f"""
-            <div style="margin-top:16px;padding:14px;background:var(--am1);border-radius:var(--r);border:1px solid rgba(201,124,10,.2)">
-              <b style="color:var(--am6)">✈ Flug-Bonus: {flight_count} Flüge erfasst</b><br>
-              <span class="sub">{', '.join(all_fns_list)}</span>
+
+        # ── Fehlende Belege ermitteln ──────────────────────────────────────────
+        belegte_typen = set(a[1] for a in atts if a[1])
+        fehlende_belege = []
+
+        # Flug: Bordkarte oder E-Ticket
+        if all_fns_list and "Flug" not in belegte_typen and "Kalendereintrag" not in belegte_typen:
+            fehlende_belege.append(f"✈ Flugbeleg / Bordkarte fehlt ({', '.join(all_fns_list)})")
+        # Hotel: Rechnung
+        hotel_beleg = "Hotel" in belegte_typen
+        hotel_geplant = nights_p and nights_p > 0
+        if hotel_geplant and not hotel_beleg:
+            fehlende_belege.append(f"🏨 Hotel-Rechnung fehlt ({nights_b or nights_p} Nächte geplant)")
+        # Mietwagen
+        if trains and "Bahn" not in belegte_typen:
+            fehlende_belege.append("🚆 Zugticket fehlt")
+
+        fehlende_html = ""
+        if fehlende_belege:
+            items = "".join(f'<div style="padding:4px 0;border-bottom:1px solid rgba(220,38,38,.1)">'
+                           f'<span style="color:var(--re6)">⚠</span> {b}</div>'
+                           for b in fehlende_belege)
+            fehlende_html = f"""
+            <div style="margin-bottom:16px;padding:12px 16px;background:#fff5f5;border:1px solid rgba(220,38,38,.2);border-radius:var(--r)">
+              <div style="font-weight:600;color:var(--re6);margin-bottom:6px">Fehlende Belege ({len(fehlende_belege)})</div>
+              {items}
+              <div style="font-size:11px;color:var(--t300);margin-top:6px">Bitte Belege hochladen oder per Mail einreichen vor Einreichung der Abrechnung.</div>
             </div>"""
 
         gesamt=beleg_sum+vma_total+trenn_total
         return page_shell(f"Abrechnung {tc}",f"""
         <div class="page-card" style="max-width:920px">
           <h2>Reisekostenabrechnung – {tc}</h2>
-          <table style="width:auto;border:none;margin-bottom:20px">
+          <table style="width:auto;border:none;margin-bottom:16px">
             <tr style="border:none"><td style="border:none;padding:2px 12px 2px 0;font-weight:500">Reisender:</td><td style="border:none">{traveler or '–'}</td></tr>
             <tr style="border:none"><td style="border:none;padding:2px 12px 2px 0;font-weight:500">Zeitraum:</td><td style="border:none">{dep or '–'} {dep_t or ''} – {ret or '–'} {ret_t or ''} ({days} Tage)</td></tr>
             <tr style="border:none"><td style="border:none;padding:2px 12px 2px 0;font-weight:500">Reiseziel:</td><td style="border:none">{destinations or cc or '–'}</td></tr>
             <tr style="border:none"><td style="border:none;padding:2px 12px 2px 0;font-weight:500">Hotel:</td><td style="border:none">{nights_b or 0}/{nights_p or 0} Nächte gebucht</td></tr>
             {"<tr style='border:none'><td style='border:none;padding:2px 12px 2px 0;font-weight:500'>PNR:</td><td style='border:none;font-family:DM Mono,monospace;color:var(--gr6)'>"+pnr+"</td></tr>" if pnr else ""}
           </table>
+          {fehlende_html}
           <h3 style="margin-bottom:10px;color:var(--t700)">Belege</h3>
           <table>
             <tr><th>Datei</th><th>Typ</th><th>Anbieter</th><th>Datum</th><th>Betrag orig.</th><th>Betrag EUR</th></tr>
@@ -2830,7 +2862,6 @@ def report(tc: str):
             <tr><td colspan="4"><b>Summe VMA</b></td><td><b>{vma_total:.2f} €</b></td></tr>
           </table>
           {"<h3 style='margin:20px 0 10px;color:var(--t700)'>Trennungspauschale (Herrhammer)</h3><table><tr><th>Datum</th><th>Grund</th><th>Betrag</th></tr>" + trenn_rows + f"<tr><td colspan='2'><b>Summe Trennungspauschale</b></td><td><b>{trenn_total:.2f} €</b></td></tr></table>" if trenn_total>0 else ""}
-          {flight_bonus_html}
           <div style="margin-top:20px;padding:18px;background:var(--b50);border-radius:var(--r);border:1px solid var(--b100)">
             <div style="font-size:1.15rem;font-weight:600">Gesamtbetrag: {gesamt:,.2f} €</div>
             <div class="sub" style="margin-top:4px">Belege {beleg_sum:.2f} € + VMA {vma_total:.2f} € + Trennungspauschale {trenn_total:.2f} €</div>
