@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.9.9"
+APP_VERSION = "8.0"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -619,6 +619,13 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
             cur.execute("UPDATE mail_attachments SET analysis_status=%s WHERE id=%s",
                         (f"ics-fehler:{str(e)[:80]}", att_id))
             conn.commit(); cur.close(); return
+
+    # Inline-Bilder aus HTML-Mails direkt als irrelevant markieren
+    fn_lower = (filename or "").lower()
+    if re.match(r"image\d+\.(png|jpg|jpeg|gif|bmp|emz|wmz)$", fn_lower) or fn_lower.endswith(".emz") or fn_lower.endswith(".wmz"):
+        cur.execute("UPDATE mail_attachments SET analysis_status=%s,confidence=%s,review_flag=%s WHERE id=%s",
+                    ("Inline-Grafik","niedrig","ok",att_id))
+        cur.close(); return
 
     if ext not in ("pdf","jpg","jpeg","png","webp"):
         cur.execute("UPDATE mail_attachments SET analysis_status=%s,confidence=%s,review_flag=%s WHERE id=%s",
@@ -2335,12 +2342,13 @@ async def analyze_attachments():
                 if dest_ki and rc:
                     cur.execute("UPDATE trip_meta SET destinations=%s WHERE trip_code=%s AND (destinations IS NULL OR destinations='')",(dest_ki,rc))
 
-                # ── NEU: Mail-Body als Beleg anlegen wenn Betrag + Typ erkannt ──
-                if betrag_ki and typ_ki and typ_ki != "Sonstiges" and rc:
-                    # Prüfen ob bereits ein identischer Beleg aus dieser Mail existiert
+                # ── Mail-Body als Beleg anlegen wenn Betrag + Typ erkannt ──
+                if betrag_ki and typ_ki and typ_ki not in ("Sonstiges","") and rc:
+                    # Duplikat-Prüfung: gleicher Typ + gleiche Mail (mail_uid) reicht
                     cur.execute("""SELECT id FROM mail_attachments
-                        WHERE mail_uid=(SELECT mail_uid FROM mail_messages WHERE id=%s)
-                        AND detected_type=%s AND detected_amount=%s""",(mid,typ_ki,betrag_ki))
+                        WHERE trip_code=%s AND detected_type=%s
+                        AND storage_key LIKE 'mail_body_%'
+                        AND detected_vendor=%s""",(rc,typ_ki,vendor_ki or ""))
                     if not cur.fetchone():
                         betrag_eur_ki=""
                         try:
@@ -2352,15 +2360,28 @@ async def analyze_attachments():
                         mail_uid_row=cur.fetchone()
                         mail_uid_val=mail_uid_row[0] if mail_uid_row else f"mail_{mid}"
                         safe_name=f"Mail: {(subj or 'Buchungsbestätigung')[:60]}"
+                        # Neue Felder aus Extraktion
+                        seg_ki     = fields.get("flight_segments","") or ""
+                        checkin_ki = fields.get("checkin_date","") or ""
+                        checkout_ki= fields.get("checkout_date","") or ""
+                        cin_t_ki   = fields.get("checkin_time","") or ""
+                        cout_t_ki  = fields.get("checkout_time","") or ""
+                        nights_ki  = int(fields.get("nights",0) or 0)
                         cur.execute("""INSERT INTO mail_attachments
                             (mail_uid,trip_code,original_filename,saved_filename,content_type,
                              storage_key,detected_type,detected_amount,detected_amount_eur,
                              detected_currency,detected_date,detected_vendor,
+                             detected_nights,detected_checkin,detected_checkout,
+                             detected_checkin_time,detected_checkout_time,flight_segments,
+                             detected_flight_numbers,
                              analysis_status,confidence,review_flag,ki_bemerkung)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                             (mail_uid_val,rc,safe_name,safe_name,"text/plain",
                              f"mail_body_{mid}",typ_ki,betrag_ki,betrag_eur_ki,
                              waehrung_ki,datum_ki,vendor_ki,
+                             nights_ki,checkin_ki or None,checkout_ki or None,
+                             cin_t_ki or None,cout_t_ki or None,seg_ki or None,
+                             fns or None,
                              "ok (Mail-Body)",conf_ki,
                              "ok" if conf_ki=="hoch" else "pruefen",
                              f"Aus Mail-Text extrahiert · {subj or ''}"))
@@ -2446,10 +2467,12 @@ async def analyze_attachments():
             mail_processed+=1
         conn.commit()
 
-        # Anhänge analysieren – ausstehende + ICS ohne detected_date
+        # Anhänge analysieren – ausstehende, aber keine Inline-Bilder/ICS
         cur.execute("""SELECT id,storage_key,original_filename FROM mail_attachments
-            WHERE analysis_status IN ('ausstehend','neu') OR analysis_status IS NULL
-            OR (original_filename ILIKE '%.ics' AND (detected_date IS NULL OR detected_date = ''))
+            WHERE (analysis_status IN ('ausstehend','neu') OR analysis_status IS NULL)
+            AND original_filename NOT SIMILAR TO 'image[0-9]+[.](png|jpg|jpeg|gif|bmp|emz|wmz)'
+            AND original_filename NOT ILIKE '%.ics'
+            AND storage_key NOT LIKE 'mail_body_%'
             ORDER BY id""")
         rows=cur.fetchall();cur.close()
         att_processed=0
@@ -2702,16 +2725,16 @@ def trip_detail(tc: str):
         for a in atts:
             fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt,det_nights,ft_info,checkin_s,checkout_s,checkin_t_s,checkout_t_s,seg_s=a
 
-            # ── Filter: Inline-Bilder, ICS-Reste und nicht-analysierbare ──
+            # ── Filter: Inline-Bilder, ICS-Reste, Irrelevantes ──
             fn_lower=(fn_a or "").lower()
-            # Inline-Bilder aus HTML-Mails
-            if re.match(r"image\d+\.(png|jpg|jpeg|gif|bmp|emz|wmz)$", fn_lower):
+            # Inline-Bilder + EMZ/WMZ
+            if re.match(r"image\d+\.", fn_lower) or fn_lower.endswith(".emz") or fn_lower.endswith(".wmz"):
                 continue
-            # ICS-Dateien (alte Einträge in DB) – jetzt aus Mail-Body
+            # ICS-Dateien
             if fn_lower.endswith(".ics") or dtype == "Kalendereintrag":
                 continue
             # Nicht analysierbare ohne Betrag/Flugnummer
-            if stat in ("nicht analysierbar",) and not amt_eur and not afns:
+            if stat in ("nicht analysierbar","Inline-Grafik") and not amt_eur and not afns:
                 continue
 
             if amt_eur:
@@ -3882,15 +3905,39 @@ async def upload_beleg(
 
 @app.get("/reanalyze-mails")
 def reanalyze_mails():
-    """Setzt Status aller Mail-Bodies zurück → werden beim nächsten Analyze neu verarbeitet."""
+    """Setzt Mail-Status zurück UND löscht alte Mail-Body-Belege → sauber neu analysieren."""
     try:
         conn=get_conn();cur=conn.cursor()
+        # Mail-Status zurücksetzen
         cur.execute("UPDATE mail_messages SET analysis_status='ausstehend' WHERE analysis_status='ok'")
-        n=cur.rowcount
+        n_mails=cur.rowcount
+        # Alte Mail-Body-Belege löschen (werden neu erstellt)
+        cur.execute("DELETE FROM mail_attachments WHERE storage_key LIKE 'mail_body_%'")
+        n_belege=cur.rowcount
         conn.commit();cur.close();conn.close()
-        return {"status":"ok","reset":n,"hinweis":"Bitte /analyze-attachments aufrufen"}
+        return {"status":"ok","mails_reset":n_mails,"mailbody_belege_geloescht":n_belege,
+                "hinweis":"Bitte /analyze-attachments aufrufen"}
     except Exception as e:
         return {"status":"fehler","detail":str(e)}
+
+@app.get("/cleanup-duplicates")
+def cleanup_duplicates():
+    """Entfernt doppelte Mail-Body-Belege – behält jeweils den neuesten pro Typ+Reise."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        # Duplikate: gleiche trip_code + detected_type + storage_key LIKE mail_body_%
+        # Behalte den mit der höchsten ID (neuesten)
+        cur.execute("""DELETE FROM mail_attachments WHERE id NOT IN (
+            SELECT MAX(id) FROM mail_attachments
+            WHERE storage_key LIKE 'mail_body_%'
+            GROUP BY trip_code, detected_type, detected_vendor
+        ) AND storage_key LIKE 'mail_body_%'""")
+        n=cur.rowcount
+        conn.commit();cur.close();conn.close()
+        return {"status":"ok","geloescht":n}
+    except Exception as e:
+        return {"status":"fehler","detail":str(e)}
+
 
 
 def reset_mail_log():
