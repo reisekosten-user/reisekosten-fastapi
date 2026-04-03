@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.9.3"
+APP_VERSION = "7.9.4"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2715,8 +2715,10 @@ def trip_detail(tc: str):
                 "date": dep_d,
                 "time": dep_t or "08:00",
                 "icon": "🏠→✈",
-                "label": "Abreise von zu Hause",
-                "detail": f"{dep_t or ''} · {fns.split(',')[0].strip() if fns else '–'}",
+                "task": "Abreise",
+                "route": destinations or cc or "",
+                "timerange": dep_t or "08:00",
+                "detail": fns.split(',')[0].strip() if fns else "",
                 "type": "journey"
             })
 
@@ -2727,7 +2729,9 @@ def trip_detail(tc: str):
                 "date": dep_d or date.today(),
                 "time": "–",
                 "icon": "✈",
-                "label": f"Flug {fn}",
+                "task": f"Flug {fn}",
+                "route": "",
+                "timerange": "",
                 "detail": pnr or "",
                 "type": "flight"
             })
@@ -2739,7 +2743,9 @@ def trip_detail(tc: str):
                 "date": dep_d or date.today(),
                 "time": "–",
                 "icon": "🚆",
-                "label": f"Zug {tn}",
+                "task": f"Zug {tn}",
+                "route": "",
+                "timerange": "",
                 "detail": "",
                 "type": "train"
             })
@@ -2797,7 +2803,9 @@ def trip_detail(tc: str):
                 timeline_events.append({
                     "date": cin_d, "time": cin_t,
                     "icon": "🏨", "type": "beleg",
-                    "label": f"{hotel_name} · Check-in",
+                    "task": f"Check-in {hotel_name}",
+                    "route": checkout_s or (str(cout_d) if cout_d else ""),
+                    "timerange": f"ab {cin_t}",
                     "detail": f"{amount_str}{f' · {n_nights} Nächte' if n_nights else ''}",
                     "extra": actions, "status": stat, "att_id": att_id,
                 })
@@ -2808,15 +2816,17 @@ def trip_detail(tc: str):
                         timeline_events.append({
                             "date": nd, "time": "",
                             "icon": "🏨", "type": "beleg",
-                            "label": f"{hotel_name} · Nacht {ni+1}/{n_nights}",
-                            "detail": "→ übernächtig", "extra": "", "status": "", "att_id": att_id,
+                            "task": f"{hotel_name}",
+                            "route": "", "timerange": f"Nacht {ni+1}/{n_nights}",
+                            "detail": "", "extra": "", "status": "", "att_id": att_id,
                         })
                 # Check-out Zeile
                 if cout_d:
                     timeline_events.append({
                         "date": cout_d, "time": cout_t,
                         "icon": "🏨", "type": "beleg",
-                        "label": f"{hotel_name} · Check-out",
+                        "task": f"Check-out {hotel_name}",
+                        "route": "", "timerange": f"bis {cout_t}",
                         "detail": "", "extra": "", "status": "", "att_id": att_id,
                     })
 
@@ -2847,31 +2857,36 @@ def trip_detail(tc: str):
                                 "date": dep_dt or ev_date or dep_d or date.today(),
                                 "time": dep_tm or "",
                                 "icon": "✈", "type": "beleg",
-                                "label": label,
-                                "detail": detail,
+                                "task": f"Flug {fn_seg}",
+                                "route": route,
+                                "timerange": f"{dep_tm} → {arr_tm}" if dep_tm and arr_tm else (f"ab {dep_tm}" if dep_tm else ""),
+                                "detail": amount_str if not segs_added else "",
                                 "extra": actions if not segs_added else "",
                                 "status": stat if not segs_added else "",
                                 "att_id": att_id,
                             })
                             segs_added = True
                 if not segs_added:
-                    # Fallback: einfacher Eintrag mit ft_info
                     ev_time = ""
                     if ft_info:
                         tm = re.search(r"(\d{2}:\d{2})", ft_info)
                         if tm: ev_time = tm.group(1)
                     route_m = re.search(r"([A-Z]{3}→[A-Z]{3})", bemerk or ft_info or "")
-                    route_str = f" {route_m.group(1)}" if route_m else ""
+                    route_str = route_m.group(1) if route_m else ""
                     fn_label = afns or fn_a or "Flug"
+                    # Zeiten aus ft_info
+                    time_parts = re.findall(r"(\d{2}:\d{2})\s*\(([^)]+)\)", ft_info) if ft_info else []
+                    tr_str = f"{time_parts[0][0]} ({time_parts[0][1]}) → {time_parts[1][0]} ({time_parts[1][1]})" if len(time_parts)>=2 else ev_time
                     timeline_events.append({
                         "date": ev_date or dep_d or date.today(),
                         "time": ev_time, "icon": "✈", "type": "beleg",
-                        "label": f"✈ {fn_label}{route_str}",
+                        "task": f"Flug {fn_label}",
+                        "route": route_str,
+                        "timerange": tr_str,
                         "detail": amount_str,
                         "extra": actions, "status": stat, "att_id": att_id,
                     })
 
-            # ── ALLE ANDEREN TYPEN ─────────────────────────────────────
             else:
                 ev_time = ""
                 if dtype == "Taxi" and bemerk:
@@ -2880,7 +2895,8 @@ def trip_detail(tc: str):
                 timeline_events.append({
                     "date": ev_date or dep_d or date.today(),
                     "time": ev_time, "icon": icon, "type": "beleg",
-                    "label": f"{vendor or fn_a or dtype or 'Beleg'}",
+                    "task": f"{vendor or fn_a or dtype or 'Beleg'}",
+                    "route": "", "timerange": "",
                     "detail": amount_str,
                     "extra": actions, "status": stat, "att_id": att_id,
                 })
@@ -2902,7 +2918,9 @@ def trip_detail(tc: str):
                     "date": d,
                     "time": "",
                     "icon": "🍽",
-                    "label": f"Verpflegung",
+                    "task": "Verpflegung",
+                    "route": "",
+                    "timerange": "🍳🥗🍽",
                     "detail": f"{b_chk} Frühstück &nbsp; {l_chk} Mittag &nbsp; {d_chk} Abend",
                     "extra": f'<span style="font-family:DM Mono,monospace;color:var(--b600);font-size:11px">{vma_day:.2f} € VMA</span> <a href="/meals/{tc}" style="margin-left:8px;font-size:11px;color:var(--t300)">✏</a>',
                     "type": "meal"
@@ -2914,8 +2932,10 @@ def trip_detail(tc: str):
                 "date": ret_d,
                 "time": ret_t or "18:00",
                 "icon": "✈→🏠",
-                "label": "Rückkehr zu Hause",
-                "detail": ret_t or "",
+                "task": "Rückkehr",
+                "route": "Heimreise",
+                "timerange": ret_t or "18:00",
+                "detail": "",
                 "type": "journey"
             })
 
@@ -2929,48 +2949,77 @@ def trip_detail(tc: str):
         ))
 
         # Timeline HTML mit Ein/Ausblenden
-        # Separate: sichtbare und ausgeblendete Zeilen (aus localStorage)
         tl_rows=""
-        hidden_rows=""
         prev_date=None
         row_idx=0
         for ev in timeline_events:
             ev_date=ev["date"]
             row_id=f"tlrow_{tc}_{row_idx}"
             row_idx+=1
+
             # Datums-Trennzeile
             if ev_date != prev_date:
                 wd=["Mo","Di","Mi","Do","Fr","Sa","So"][ev_date.weekday()] if ev_date else ""
-                wkend=' style="color:var(--b600);font-weight:600"' if ev_date and ev_date.weekday()>=5 else ""
-                tl_rows+=f'<tr class="tl-date-row"><td colspan="6" style="background:var(--page);padding:8px 10px 4px;font-size:11px;color:var(--t300);border-bottom:1px solid var(--bds)"><span{wkend}>{str(ev_date)} {wd}</span></td></tr>'
+                wkend_bg="background:#eef4ff" if ev_date and ev_date.weekday()>=5 else "background:var(--page)"
+                wkend_c="color:var(--b600);font-weight:700" if ev_date and ev_date.weekday()>=5 else "color:var(--t300)"
+                tl_rows+=f'<tr class="tl-date-row"><td colspan="7" style="{wkend_bg};padding:6px 12px 4px;font-size:11px;{wkend_c};border-bottom:2px solid var(--bd);letter-spacing:.04em">{str(ev_date)} {wd}</td></tr>'
                 prev_date=ev_date
 
-            type_colors={"journey":"var(--b600)","flight":"var(--b500)","train":"var(--gr6)","beleg":"var(--t700)","meal":"var(--t500)"}
-            col=type_colors.get(ev.get("type","beleg"),"var(--t700)")
+            ev_type=ev.get("type","beleg")
+            type_colors={"journey":"var(--b700)","flight":"var(--b600)","train":"var(--gr6)","beleg":"var(--t900)","meal":"var(--t500)"}
+            col=type_colors.get(ev_type,"var(--t900)")
+
             stat=ev.get("status","")
             stat_html=""
             if stat:
                 sc="bdg-ok" if stat in ("ok","ok (manuell)","ok (Mail-Body)") else "bdg-w"
                 stat_html=f'<span class="bdg {sc}" style="font-size:10px">{stat}</span>'
 
-            # Toggle-Button
-            toggle_btn=f'<button onclick="toggleTLRow(\'{row_id}\')" title="Ausblenden" style="background:none;border:none;cursor:pointer;color:var(--t300);padding:0 4px;font-size:12px">👁</button>'
+            # Spalte 1: Icon
+            icon_cell=f'<td style="width:32px;text-align:center;font-size:16px;padding:8px 4px">{ev["icon"]}</td>'
 
-            tl_rows+=f"""<tr id="{row_id}" data-tl-type="{ev.get('type','')}">
-                <td style="width:50px;color:var(--t300);font-size:11px;white-space:nowrap">{ev.get('time','')}</td>
-                <td style="width:24px;text-align:center;font-size:15px">{ev['icon']}</td>
-                <td style="font-weight:500;color:{col}">{ev['label']}</td>
-                <td style="font-family:DM Mono,monospace;font-size:12px;color:var(--t500)">{ev.get('detail','')}</td>
-                <td style="white-space:nowrap">{stat_html} {ev.get('extra','')}</td>
-                <td style="width:28px;text-align:right">{toggle_btn}</td>
-            </tr>"""
+            # Spalte 2: Task (Flug LH1234 / Check-in Marriott / Verpflegung)
+            task=ev.get("task","")
+            task_cell=f'<td style="font-weight:600;color:{col};padding:8px 6px;font-size:13px">{task}</td>'
+
+            # Spalte 3: Route / Ort (FRA→LYS / Lyon / –)
+            route=ev.get("route","") or "–"
+            route_style="font-family:DM Mono,monospace;font-size:12px;color:var(--b600)" if "→" in route else "font-size:12px;color:var(--t500)"
+            route_cell=f'<td style="{route_style};padding:8px 6px;white-space:nowrap">{route}</td>'
+
+            # Spalte 4: Zeitraum (06:30→08:15 / ab 15:00 / Nacht 2/3)
+            timerange=ev.get("timerange","") or ""
+            if not timerange and ev.get("time"):
+                timerange=ev.get("time","")
+            tr_cell=f'<td style="font-family:DM Mono,monospace;font-size:11px;color:var(--t500);padding:8px 6px;white-space:nowrap">{timerange}</td>'
+
+            # Spalte 5: Betrag / Info
+            detail=ev.get("detail","") or ""
+            detail_cell=f'<td style="font-family:DM Mono,monospace;font-size:12px;color:var(--t700);padding:8px 6px;text-align:right;white-space:nowrap">{detail}</td>'
+
+            # Spalte 6: Status + Aktionen
+            extra=ev.get("extra","") or ""
+            act_cell=f'<td style="padding:8px 6px;white-space:nowrap;text-align:right">{stat_html} {extra}</td>'
+
+            # Spalte 7: Toggle
+            toggle_btn=f'<button onclick="toggleTLRow(\'{row_id}\')" title="Ausblenden" style="background:none;border:none;cursor:pointer;color:var(--t300);padding:0 4px;font-size:11px">👁</button>'
+            tog_cell=f'<td style="width:26px;padding:4px 2px;text-align:right">{toggle_btn}</td>'
+
+            # Zeilenhintergrund je Typ
+            row_bg=""
+            if ev_type=="journey": row_bg=' style="background:var(--b50)"'
+            elif ev_type=="meal":  row_bg=' style="background:#f9fdf9"'
+            elif ev.get("task","").startswith("Check-in"): row_bg=' style="background:#f0fdf4"'
+            elif ev.get("task","").startswith("Check-out"): row_bg=' style="background:#fff9f0"'
+
+            tl_rows+=f'<tr id="{row_id}" data-tl-type="{ev_type}"{row_bg}>{icon_cell}{task_cell}{route_cell}{tr_cell}{detail_cell}{act_cell}{tog_cell}</tr>'
 
         # Ausgeblendete Zeilen Sektion
         hidden_section=f"""
         <div id="tl-hidden" style="display:none">
           <h4 style="color:var(--t300);font-size:11px;margin:12px 0 6px;text-transform:uppercase;letter-spacing:.06em">Ausgeblendete Einträge</h4>
-          <table id="tl-hidden-table" style="opacity:.6">
-            <colgroup><col style="width:50px"><col style="width:24px"><col><col style="width:25%"><col style="width:auto"><col style="width:28px"></colgroup>
+          <table id="tl-hidden-table" style="opacity:.6;width:100%">
+            <colgroup><col style="width:32px"><col style="width:22%"><col style="width:18%"><col style="width:16%"><col style="width:12%"><col style="width:auto"><col style="width:26px"></colgroup>
           </table>
         </div>"""
 
@@ -3057,9 +3106,18 @@ def trip_detail(tc: str):
           <h3 style="margin-bottom:8px;color:var(--t700)">📅 Reise-Timeline
             <span style="font-size:11px;font-weight:400;color:var(--t300);margin-left:8px">👁 = Zeile ausblenden</span>
           </h3>
-          <div style="overflow-x:auto"><table style="table-layout:fixed;width:100%">
-            <colgroup><col style="width:50px"><col style="width:24px"><col style="width:33%"><col style="width:22%"><col style="width:auto"><col style="width:28px"></colgroup>
-            {tl_rows or '<tr><td colspan="6" class="sub" style="padding:16px">Keine Ereignisse – Reisedaten und Mails zuordnen</td></tr>'}
+          <div style="overflow-x:auto"><table style="width:100%">
+            <colgroup><col style="width:32px"><col style="width:22%"><col style="width:18%"><col style="width:16%"><col style="width:12%"><col style="width:auto"><col style="width:26px"></colgroup>
+            <tr style="background:linear-gradient(180deg,var(--b50),#e8f0fe)">
+              <th style="text-align:center">  </th>
+              <th>Vorgang</th>
+              <th>Route / Ort</th>
+              <th>Zeitraum</th>
+              <th style="text-align:right">Betrag</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+            {tl_rows or '<tr><td colspan="7" class="sub" style="padding:16px">Keine Ereignisse – Reisedaten und Mails zuordnen</td></tr>'}
           </table></div>
           {hidden_section}
 
