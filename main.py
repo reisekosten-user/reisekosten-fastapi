@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.2"
+APP_VERSION = "7.3"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -1419,9 +1419,21 @@ function openM(t){
 }
 function closeM(t){document.getElementById('m-'+t).classList.remove('open');document.body.style.overflow='';}
 function submitTrip(){
+  const req=['fi-employee-code','fi-trip-title','fi-departure-date','fi-return-date'];
+  for(const id of req){
+    const el=document.getElementById(id);
+    if(!el||!el.value.trim()){
+      el&&el.focus();
+      el&&(el.style.borderColor='var(--re6)');
+      alert('Bitte alle Pflichtfelder (*) ausfüllen: Mitarbeiterkürzel, Reisename, Abreise, Rückkehr');
+      return;
+    }
+    el.style.borderColor='';
+  }
   const f=new FormData();
-  ['traveler_name','colleagues','trip_title','customer_code','departure_date','return_date',
-   'departure_time_home','arrival_time_home','destinations','nights_planned','notes'].forEach(k=>{
+  ['employee_code','trip_title','customer_code','traveler_name','colleagues',
+   'departure_date','return_date','departure_time_home','arrival_time_home',
+   'destinations','nights_planned','notes'].forEach(k=>{
     const el=document.getElementById('fi-'+k.replace(/_/g,'-'));
     if(el)f.append(k,el.value);
   });
@@ -1474,14 +1486,15 @@ def page_shell(title, content, active_tab=""):
     <div class="m-body">
       <div class="code-prev" id="cprev">wird vergeben</div>
       <div class="code-sub">Reisecode automatisch</div>
+      <div style="font-size:11px;color:var(--re6);margin-bottom:8px">* Pflichtfelder</div>
       <div class="fgrid">
-        <div class="fgrp ff"><label class="flbl">Reisender *</label><input class="finp" id="fi-traveler-name" type="text" placeholder="Vor- und Nachname"></div>
-        <div class="fgrp ff"><label class="flbl">Mitreisende Kollegen</label><input class="finp" id="fi-colleagues" type="text" placeholder="z.B. T. Moser, K. Brenner"></div>
-        <div class="fgrp"><label class="flbl">Reisetitel (z.B. Indien)</label><input class="finp" id="fi-trip-title" type="text" placeholder="z.B. Indien, Messe München"></div>
-        <div class="fgrp"><label class="flbl">Kundenkürzel (z.B. BMW)</label><input class="finp" id="fi-customer-code" type="text" placeholder="z.B. BMW, intern"></div>
-        <div class="fgrp"><label class="flbl">Abreise von zu Hause *</label><input class="finp" id="fi-departure-date" type="date"></div>
+        <div class="fgrp"><label class="flbl">Mitarbeiterkürzel * <span style="color:var(--t300);font-weight:400">(z.B. MH)</span></label><input class="finp" id="fi-employee-code" type="text" placeholder="MH" maxlength="5" required></div>
+        <div class="fgrp"><label class="flbl">Reisename / Ziel *</label><input class="finp" id="fi-trip-title" type="text" placeholder="z.B. Lyon, Messe München" required></div>
+        <div class="fgrp"><label class="flbl">Kundenkürzel <span style="color:var(--t300);font-weight:400">(optional)</span></label><input class="finp" id="fi-customer-code" type="text" placeholder="z.B. BMW, intern"></div>
+        <div class="fgrp"><label class="flbl">Reisender (Klarname)</label><input class="finp" id="fi-traveler-name" type="text" placeholder="Vor- und Nachname"></div>
+        <div class="fgrp"><label class="flbl">Abreise *</label><input class="finp" id="fi-departure-date" type="date" required></div>
         <div class="fgrp"><label class="flbl">Uhrzeit Abreise</label><input class="finp" id="fi-departure-time-home" type="time" value="08:00"></div>
-        <div class="fgrp"><label class="flbl">Rückkehr zu Hause *</label><input class="finp" id="fi-return-date" type="date"></div>
+        <div class="fgrp"><label class="flbl">Rückkehr *</label><input class="finp" id="fi-return-date" type="date" required></div>
         <div class="fgrp"><label class="flbl">Uhrzeit Ankunft</label><input class="finp" id="fi-arrival-time-home" type="time" value="18:00"></div>
         <div class="fgrp ff">
           <label class="flbl">Reiseziel(e) / Länder</label>
@@ -1499,10 +1512,10 @@ def page_shell(title, content, active_tab=""):
             <option value="Südkorea (KR)"><option value="Australien (AU)"><option value="Kanada (CA)">
             <option value="Brasilien (BR)"><option value="Mexiko (MX)"><option value="Indonesien (ID)">
           </datalist>
-          <div class="hint">Freitext – mehrere Länder möglich, Zeitzone in Klammern</div>
         </div>
+        <div class="fgrp"><label class="flbl">Kollegen</label><input class="finp" id="fi-colleagues" type="text" placeholder="z.B. T. Moser"></div>
         <div class="fgrp"><label class="flbl">Geplante Nächte</label><input class="finp" id="fi-nights-planned" type="number" min="0" value="0"></div>
-        <div class="fgrp ff"><label class="flbl">Notiz / Zweck der Reise</label><input class="finp" id="fi-notes" type="text" placeholder="z.B. Messebesuch, Kundentermin..."></div>
+        <div class="fgrp ff"><label class="flbl">Notiz</label><input class="finp" id="fi-notes" type="text" placeholder="z.B. Messebesuch, Kundentermin..."></div>
       </div>
       <div class="mfooter"><button class="btn-mc" onclick="closeM('trip')">Abbrechen</button><button class="btn-mp" onclick="submitTrip()">Reise anlegen</button></div>
     </div>
@@ -1635,7 +1648,7 @@ def init():
                     "car_rental_info TEXT","nights_planned INTEGER DEFAULT 0",
                     "meals_reimbursed TEXT DEFAULT ''","notes TEXT",
                     "hotel_mode TEXT","departure_date DATE","return_date DATE",
-                    "trip_title TEXT","customer_code TEXT",
+                    "trip_title TEXT","customer_code TEXT","employee_code TEXT",
                     "vma_destinations TEXT",
                     "created_at TIMESTAMP DEFAULT now()"]:
             cur.execute(f"ALTER TABLE trip_meta ADD COLUMN IF NOT EXISTS {col}")
@@ -1680,7 +1693,7 @@ def load_trips(conn, filter_status=None):
                    departure_time_home,arrival_time_home,destinations,country_code,
                    traveler_name,colleagues,flight_numbers,train_numbers,car_rental_info,
                    nights_planned,nights_booked,meals_reimbursed,pnr_code,notes,
-                   trip_title,customer_code
+                   trip_title,customer_code,employee_code
                    FROM trip_meta ORDER BY trip_code""")
     raw=cur.fetchall()
     cur.execute("""SELECT COALESCE(trip_code,'') tc,detected_type,
@@ -1739,7 +1752,7 @@ def load_trips(conn, filter_status=None):
     for row in raw:
         (tc,hm,dep,ret,dep_t,ret_t,destinations,cc,traveler,colleagues,
          fns,trains,car,nights_p,nights_b,meals,pnr,notes,
-         trip_title,customer_code) = row
+         trip_title,customer_code,employee_code) = row
         status=compute_status(dep,ret)
         if filter_status and status!=filter_status: continue
         a=att.get(tc,{"types":[],"sum":0.0,"review":0,"fns":[],"trains":[],"pnrs":[]})
@@ -1759,6 +1772,7 @@ def load_trips(conn, filter_status=None):
             car=car or "",nights_p=nights_p or 0,nights_b=nights_b or 0,
             meals=meals or "",pnr=", ".join(all_pnrs),notes=notes or "",
             trip_title=trip_title or "",customer_code=customer_code or "",
+            employee_code=employee_code or "",
             mail_hint=mail_hint,
             has_flight="Flug" in types,
             has_hotel="Hotel" in types or hm in ("customer","own"),
@@ -1779,12 +1793,17 @@ def _pills(t):
     return p(t["has_flight"],"Flug") + p(t["has_hotel"],"Hotel") + p(t["has_car"],"Mietwagen") + f'<div class="mdate">{dep} – {ret}</div>'
 
 def _code_header(t):
-    """Reisecode + optionaler Titel/Kundenkürzel neben dem Code."""
+    """Reisecode-Badge + Mitarbeiterkürzel · Reisename als Haupttitel der Karte."""
+    emp   = t.get("employee_code","")
     title = t.get("trip_title","")
     ccode = t.get("customer_code","")
-    label_parts = [x for x in [ccode, title] if x]
-    label = " · ".join(label_parts)
-    label_html = f' <span style="font-family:\'Inter\',sans-serif;font-size:11px;font-weight:400;color:var(--t300);letter-spacing:0">{label}</span>' if label else ""
+    # Hauptzeile: Kürzel · Reisename (oder Ziel als Fallback)
+    main_parts = [x for x in [emp, title or t.get("destinations","")] if x]
+    main_label = " · ".join(main_parts) if main_parts else ""
+    # Kundencode klein dahinter
+    ccode_html = f' <span style="font-size:10px;color:var(--t300);font-weight:400">{ccode}</span>' if ccode else ""
+    label_html = (f' <span style="font-family:\'Inter\',sans-serif;font-size:12px;'
+                  f'font-weight:500;color:var(--t700);letter-spacing:0">{main_label}</span>{ccode_html}') if main_label else ""
     return f'<div class="c-code">{t["tc"]}{label_html}</div>'
 
 def _hotel_badge(t):
@@ -1864,8 +1883,8 @@ async def _dashboard(request: Request, focus: str):
                 cards+=f"""<div class="card {"alert" if ha else ""}" onclick="location.href='/trip/{t["tc"]}'">
                   <div class="c-top">{_code_header(t)}
                     <div class="c-info">
-                      <div class="c-traveler">{t["traveler"] or '<span style="color:var(--am6)">⚠ Reisender?</span>'}</div>
-                      <div class="c-dest">{dest_show} · {date_range}{pnr_inline}</div>
+                      <div class="c-traveler">{dest_show}</div>
+                      <div class="c-dest">{date_range}{pnr_inline}</div>
                       {fn_line}
                     </div>
                     <div class="sbadge sb-active">{"<span class='adot'></span>Alert" if ha else "Aktiv"}</div>
@@ -1892,24 +1911,15 @@ async def _dashboard(request: Request, focus: str):
                 dep=str(t["dep"])[:10] if t["dep"] else None
                 ret=str(t["ret"])[:10] if t["ret"] else None
                 # Kopfzeile: was wir wissen
-                traveler_line = t["traveler"] or '<span style="color:var(--am6);font-size:12px">⚠ Reisender fehlt</span>'
-                dest_line = t["destinations"] or t["cc"] or ""
-                if not t["destinations"] and not t["trip_title"]:
-                    dest_line = '<span style="color:var(--am6);font-size:11px">⚠ Ziel fehlt – bitte ergänzen</span>'
-                # Datum-Anzeige
-                date_line=""
-                if dep and ret: date_line=f"{dep} – {ret}"
-                elif dep: date_line=f"Ab {dep}"
-                else: date_line='<span style="color:var(--am6);font-size:11px">⚠ Datum fehlt</span>'
-                # Flugnummern / PNR wenn vorhanden
+                dest_show = t["destinations"] or t["trip_title"] or t["cc"] or '<span style="color:var(--am6);font-size:11px">⚠ Ziel fehlt</span>'
+                date_line = f"{dep} – {ret}" if dep and ret else (f"Ab {dep}" if dep else '<span style="color:var(--am6);font-size:11px">⚠ Datum fehlt</span>')
                 fn_line=f'<div style="font-family:DM Mono,monospace;font-size:11px;color:var(--b600);margin-top:3px">✈ {t["fns"]}</div>' if t["fns"] else ""
                 pnr_line=f'<div style="font-family:DM Mono,monospace;font-size:11px;color:var(--gr6)">PNR: {t["pnr"]}</div>' if t["pnr"] else ""
                 cards+=f"""<div class="card" onclick="location.href='/trip/{t["tc"]}'">
                   <div class="c-top">{_code_header(t)}
                     <div class="c-info">
-                      <div class="c-traveler">{traveler_line}</div>
-                      <div class="c-dest">{dest_line}</div>
-                      <div style="font-size:11px;color:var(--t500);margin-top:2px">{date_line}</div>
+                      <div class="c-traveler">{dest_show}</div>
+                      <div class="c-dest">{date_line}</div>
                       {fn_line}{pnr_line}
                     </div>
                     <div class="sbadge sb-planned">Geplant</div>
@@ -2009,8 +2019,8 @@ async def new_trip(request: Request):
         cur.execute("""INSERT INTO trip_meta
             (trip_code,traveler_name,colleagues,departure_date,return_date,
              departure_time_home,arrival_time_home,destinations,
-             nights_planned,notes,trip_title,customer_code)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (trip_code) DO NOTHING""",
+             nights_planned,notes,trip_title,customer_code,employee_code)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (trip_code) DO NOTHING""",
             (tc,form.get("traveler_name") or None,form.get("colleagues") or None,
              form.get("departure_date") or None,form.get("return_date") or None,
              form.get("departure_time_home") or "08:00",
@@ -2019,7 +2029,8 @@ async def new_trip(request: Request):
              int(form.get("nights_planned") or 0),
              form.get("notes") or None,
              form.get("trip_title") or None,
-             form.get("customer_code") or None))
+             form.get("customer_code") or None,
+             form.get("employee_code") or None))
         conn.commit();cur.close();conn.close()
         return RedirectResponse(url="/",status_code=303)
     except Exception as e:
@@ -2033,13 +2044,13 @@ def edit_trip_form(tc: str):
             departure_time_home,arrival_time_home,destinations,country_code,
             flight_numbers,train_numbers,nights_planned,nights_booked,
             car_rental_info,meals_reimbursed,notes,hotel_mode,pnr_code,
-            trip_title,customer_code,vma_destinations
+            trip_title,customer_code,vma_destinations,employee_code
             FROM trip_meta WHERE trip_code=%s""",(tc,))
         row=cur.fetchone();cur.close();conn.close()
         if not row: return HTMLResponse("Nicht gefunden",404)
         (traveler,colleagues,dep,ret,dep_t,ret_t,destinations,cc,
          fns,trains,nights_p,nights_b,car,meals,notes,hm,pnr,
-         trip_title,customer_code,vma_dest_str)=row
+         trip_title,customer_code,vma_dest_str,employee_code)=row
         dep_v=str(dep) if dep else ""; ret_v=str(ret) if ret else ""
         cc_opts="".join(f'<option value="{c}" {"selected" if cc==c else ""}>{c} – {l}</option>' for c,l in [
             ("DE","Deutschland"),("AZ","Aserbaidschan"),("AE","VAE/Dubai"),("FR","Frankreich"),
@@ -2052,10 +2063,11 @@ def edit_trip_form(tc: str):
           <h2>Reise {tc} bearbeiten</h2>
           <form method="post" action="/edit-trip/{tc}">
             <div class="fgrid">
-              <div class="fgrp ff"><label class="flbl">Reisender</label><input class="finp" name="traveler_name" value="{traveler or ''}"></div>
+              <div class="fgrp"><label class="flbl">Mitarbeiterkürzel *</label><input class="finp" name="employee_code" value="{employee_code or ''}" placeholder="z.B. MH"></div>
+              <div class="fgrp"><label class="flbl">Reisetitel / Ziel *</label><input class="finp" name="trip_title" value="{trip_title or ''}" placeholder="z.B. Lyon, Messe München"></div>
+              <div class="fgrp"><label class="flbl">Kundenkürzel</label><input class="finp" name="customer_code" value="{customer_code or ''}" placeholder="z.B. BMW, KD, intern"></div>
+              <div class="fgrp"><label class="flbl">Reisender (Klarname)</label><input class="finp" name="traveler_name" value="{traveler or ''}"></div>
               <div class="fgrp ff"><label class="flbl">Kollegen</label><input class="finp" name="colleagues" value="{colleagues or ''}"></div>
-              <div class="fgrp"><label class="flbl">Reisetitel (z.B. Indien)</label><input class="finp" name="trip_title" value="{trip_title or ''}" placeholder="z.B. Indien, Messe Frankfurt, Kundenprojekt"></div>
-              <div class="fgrp"><label class="flbl">Kundenkürzel (z.B. BMW)</label><input class="finp" name="customer_code" value="{customer_code or ''}" placeholder="z.B. BMW, KD, intern"></div>
               <div class="fgrp"><label class="flbl">Abreise (Datum)</label><input class="finp" type="date" name="departure_date" value="{dep_v}"></div>
               <div class="fgrp"><label class="flbl">Uhrzeit Abreise von Hause</label><input class="finp" type="time" name="departure_time_home" value="{dep_t or '08:00'}"></div>
               <div class="fgrp"><label class="flbl">Rückkehr (Datum)</label><input class="finp" type="date" name="return_date" value="{ret_v}"></div>
@@ -2100,7 +2112,7 @@ async def edit_trip_save(tc: str, request: Request):
             flight_numbers=%s,train_numbers=%s,pnr_code=%s,
             nights_planned=%s,nights_booked=%s,car_rental_info=%s,
             hotel_mode=%s,meals_reimbursed=%s,notes=%s,
-            trip_title=%s,customer_code=%s,vma_destinations=%s WHERE trip_code=%s""",
+            trip_title=%s,customer_code=%s,employee_code=%s,vma_destinations=%s WHERE trip_code=%s""",
             (form.get("traveler_name") or None,form.get("colleagues") or None,
              form.get("departure_date") or None,form.get("return_date") or None,
              form.get("departure_time_home") or "08:00",form.get("arrival_time_home") or "18:00",
@@ -2111,6 +2123,7 @@ async def edit_trip_save(tc: str, request: Request):
              form.get("car_rental_info") or None,form.get("hotel_mode") or None,
              meals or None,form.get("notes") or None,
              form.get("trip_title") or None,form.get("customer_code") or None,
+             form.get("employee_code") or None,
              form.get("vma_destinations") or None,
              tc))
         conn.commit();cur.close();conn.close()
@@ -2460,6 +2473,29 @@ def trip_detail(tc: str):
                 "type": "beleg"
             })
 
+        # Verpflegung pro Tag direkt in Timeline einbauen
+        if dep_d and ret_d:
+            daily = load_daily_meals(tc)
+            days_range = (ret_d - dep_d).days + 1
+            for i in range(days_range):
+                d = dep_d + timedelta(days=i)
+                ml = daily.get(d, [])
+                # Mahlzeiten-Zeile immer zeigen (auch wenn leer → zum Anklicken)
+                b_chk = "✅" if "breakfast" in ml else "☐"
+                l_chk = "✅" if "lunch" in ml else "☐"
+                d_chk = "✅" if "dinner" in ml else "☐"
+                dtype = "partial" if i == 0 or i == days_range - 1 else "full"
+                vma_day = get_vma(cc or "DE", dtype, ml)
+                timeline_events.append({
+                    "date": d,
+                    "time": "",
+                    "icon": "🍽",
+                    "label": f"Verpflegung",
+                    "detail": f"{b_chk} Frühstück &nbsp; {l_chk} Mittag &nbsp; {d_chk} Abend",
+                    "extra": f'<span style="font-family:DM Mono,monospace;color:var(--b600);font-size:11px">{vma_day:.2f} € VMA</span> <a href="/meals/{tc}" style="margin-left:8px;font-size:11px;color:var(--t300)">✏</a>',
+                    "type": "meal"
+                })
+
         # Rückkehr
         if ret_d:
             timeline_events.append({
@@ -2471,8 +2507,14 @@ def trip_detail(tc: str):
                 "type": "journey"
             })
 
-        # Chronologisch sortieren
-        timeline_events.sort(key=lambda e: (e["date"] or date.today(), e.get("time",""), e.get("type","") != "journey"))
+        # Chronologisch sortieren – Mahlzeiten nach Belegen, Journeys an Rand
+        timeline_events.sort(key=lambda e: (
+            e["date"] or date.today(),
+            0 if e.get("type") == "journey" and e.get("icon","").startswith("🏠") else
+            (99 if e.get("type") == "journey" else
+             (50 if e.get("type") == "meal" else 10)),
+            e.get("time","")
+        ))
 
         # Timeline HTML
         tl_rows=""
@@ -2503,16 +2545,21 @@ def trip_detail(tc: str):
 
         # Header-Info-Leiste
         info_items=[]
-        if traveler: info_items.append(f"<b>Reisender:</b> {traveler}{' · '+colleagues if colleagues else ''}")
-        if dep_d: info_items.append(f"<b>Zeitraum:</b> {str(dep_d)} – {str(ret_d or '?')} ({days} Tage)")
+        # Klarname prominent – mit Kürzel
+        emp = employee_code or ""
+        name_line = " · ".join(filter(None,[emp, traveler]))
+        if name_line: info_items.append(f"<b>Reisender:</b> {name_line}{' · '+colleagues if colleagues else ''}")
+        else: info_items.append('<span style="color:var(--am6)">⚠ Kein Reisender/Kürzel – bitte ergänzen</span>')
+        if dep_d: info_items.append(f"<b>Zeitraum:</b> {str(dep_d)} {dep_t or ''} – {str(ret_d or '?')} {ret_t or ''} ({days} Tage)")
         if pnr: info_items.append(f"<b>PNR:</b> <span style='font-family:DM Mono,monospace;color:var(--gr6)'>{pnr}</span>")
-        if hm: info_items.append(f"<b>Hotel:</b> {'Kunde' if hm=='customer' else 'Eigen'} · {nights_b or 0}/{nights_p or 0} Nächte")
+        if hm: info_items.append(f"<b>Hotel:</b> {'Kunde stellt' if hm=='customer' else 'Eigenes Hotel'} · {nights_b or 0}/{nights_p or 0} Nächte")
         if notes: info_items.append(f"<b>Notiz:</b> {notes}")
         info_bar="<br>".join(info_items) if info_items else "<span class='sub'>Keine Metadaten – bitte bearbeiten</span>"
 
         # Warnung wenn Name/Ziel fehlt
         missing=[]
-        if not traveler: missing.append("Reisender fehlt")
+        if not employee_code: missing.append("Mitarbeiterkürzel fehlt")
+        if not traveler: missing.append("Klarname fehlt")
         if not destinations and not trip_title: missing.append("Ziel/Titel fehlt")
         missing_html=f'<div class="alert-bar" style="margin-bottom:12px">⚠ {" · ".join(missing)} – <a href="/edit-trip/{tc}" style="color:var(--re6)">jetzt ergänzen</a></div>' if missing else ""
 
