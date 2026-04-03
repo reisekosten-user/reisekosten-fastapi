@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.7"
+APP_VERSION = "7.8"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2527,7 +2527,7 @@ def trip_detail(tc: str):
 
         cur.execute("""SELECT original_filename,detected_type,detected_amount_eur,detected_currency,
             detected_date,detected_vendor,analysis_status,confidence,ki_bemerkung,id,
-            pnr_code,detected_flight_numbers,detected_train_numbers,detected_amount
+            pnr_code,detected_flight_numbers,detected_train_numbers,detected_amount,detected_nights
             FROM mail_attachments WHERE trip_code=%s ORDER BY detected_date,id""",(tc,))
         atts=cur.fetchall()
 
@@ -2614,7 +2614,7 @@ def trip_detail(tc: str):
         # Belege als Timeline-Einträge
         beleg_sum=0.0
         for a in atts:
-            fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt=a
+            fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt,det_nights=a
             if amt_eur:
                 try: beleg_sum+=float(amt_eur.replace(".","").replace(",","."))
                 except: pass
@@ -2634,17 +2634,41 @@ def trip_detail(tc: str):
             icon=type_icons.get(dtype,"📄")
             amount_str=f"{amt_eur} €" if amt_eur else (f"{amt} {curr}" if amt else "–")
             edit_url=f"/beleg-edit/{att_id}"
+            # Vorschau: nur wenn echter S3-Key (kein mail_body_)
             view_url=f"/beleg/{att_id}"
-            timeline_events.append({
-                "date": ev_date or dep_d or date.today(),
-                "time": "",
-                "icon": icon,
-                "label": f"{vendor or fn_a or dtype or 'Beleg'}",
-                "detail": amount_str,
-                "extra": f'<a href="{view_url}" target="_blank" style="color:var(--b600);margin-right:6px">📄</a><a href="{edit_url}" style="color:var(--t300)">✏</a>',
-                "status": stat,
-                "type": "beleg"
-            })
+            # Hotel: für jeden gebuchten Tag eine Zeile
+            n_nights=int(det_nights or 0)
+            if dtype=="Hotel" and n_nights>1 and ev_date:
+                for night_i in range(n_nights):
+                    night_date=ev_date+timedelta(days=night_i)
+                    night_label=f"{vendor or 'Hotel'} · Nacht {night_i+1}/{n_nights}"
+                    timeline_events.append({
+                        "date": night_date,
+                        "time": "",
+                        "icon": "🏨",
+                        "label": night_label,
+                        "detail": f"{amount_str}" if night_i==0 else "→ Folgenacht",
+                        "extra": (f'<a href="{view_url}" target="_blank" style="color:var(--b600);margin-right:6px" title="Beleg anzeigen">📄</a>'
+                                 f'<a href="{edit_url}" style="color:var(--t300)" title="Korrigieren">✏</a>') if night_i==0 else "",
+                        "status": stat if night_i==0 else "",
+                        "type": "beleg",
+                        "att_id": att_id,
+                        "hidden": False,
+                    })
+            else:
+                timeline_events.append({
+                    "date": ev_date or dep_d or date.today(),
+                    "time": "",
+                    "icon": icon,
+                    "label": f"{vendor or fn_a or dtype or 'Beleg'}",
+                    "detail": amount_str,
+                    "extra": (f'<a href="{view_url}" target="_blank" style="color:var(--b600);margin-right:6px" title="Beleg anzeigen">📄</a>'
+                             f'<a href="{edit_url}" style="color:var(--t300)" title="KI-Ergebnis korrigieren">✏</a>'),
+                    "status": stat,
+                    "type": "beleg",
+                    "att_id": att_id,
+                    "hidden": False,
+                })
 
         # Verpflegung pro Tag direkt in Timeline einbauen
         if dep_d and ret_d:
@@ -2689,32 +2713,77 @@ def trip_detail(tc: str):
             e.get("time","")
         ))
 
-        # Timeline HTML
+        # Timeline HTML mit Ein/Ausblenden
+        # Separate: sichtbare und ausgeblendete Zeilen (aus localStorage)
         tl_rows=""
+        hidden_rows=""
         prev_date=None
+        row_idx=0
         for ev in timeline_events:
             ev_date=ev["date"]
+            row_id=f"tlrow_{tc}_{row_idx}"
+            row_idx+=1
             # Datums-Trennzeile
             if ev_date != prev_date:
                 wd=["Mo","Di","Mi","Do","Fr","Sa","So"][ev_date.weekday()] if ev_date else ""
                 wkend=' style="color:var(--b600);font-weight:600"' if ev_date and ev_date.weekday()>=5 else ""
-                tl_rows+=f'<tr><td colspan="5" style="background:var(--page);padding:8px 10px 4px;font-size:11px;color:var(--t300);border-bottom:1px solid var(--bds)"><span{wkend}>{str(ev_date)} {wd}</span></td></tr>'
+                tl_rows+=f'<tr class="tl-date-row"><td colspan="6" style="background:var(--page);padding:8px 10px 4px;font-size:11px;color:var(--t300);border-bottom:1px solid var(--bds)"><span{wkend}>{str(ev_date)} {wd}</span></td></tr>'
                 prev_date=ev_date
 
-            type_colors={"journey":"var(--b600)","flight":"var(--b500)","train":"var(--gr6)","beleg":"var(--t700)"}
+            type_colors={"journey":"var(--b600)","flight":"var(--b500)","train":"var(--gr6)","beleg":"var(--t700)","meal":"var(--t500)"}
             col=type_colors.get(ev.get("type","beleg"),"var(--t700)")
             stat=ev.get("status","")
             stat_html=""
             if stat:
-                sc="bdg-ok" if stat in ("ok","ok (manuell)") else "bdg-w"
+                sc="bdg-ok" if stat in ("ok","ok (manuell)","ok (Mail-Body)") else "bdg-w"
                 stat_html=f'<span class="bdg {sc}" style="font-size:10px">{stat}</span>'
-            tl_rows+=f"""<tr>
-                <td style="width:60px;color:var(--t300);font-size:11px;white-space:nowrap">{ev.get('time','')}</td>
-                <td style="width:28px;text-align:center;font-size:16px">{ev['icon']}</td>
+
+            # Toggle-Button
+            toggle_btn=f'<button onclick="toggleTLRow(\'{row_id}\')" title="Ausblenden" style="background:none;border:none;cursor:pointer;color:var(--t300);padding:0 4px;font-size:12px">👁</button>'
+
+            tl_rows+=f"""<tr id="{row_id}" data-tl-type="{ev.get('type','')}">
+                <td style="width:50px;color:var(--t300);font-size:11px;white-space:nowrap">{ev.get('time','')}</td>
+                <td style="width:24px;text-align:center;font-size:15px">{ev['icon']}</td>
                 <td style="font-weight:500;color:{col}">{ev['label']}</td>
                 <td style="font-family:DM Mono,monospace;font-size:12px;color:var(--t500)">{ev.get('detail','')}</td>
                 <td style="white-space:nowrap">{stat_html} {ev.get('extra','')}</td>
+                <td style="width:28px;text-align:right">{toggle_btn}</td>
             </tr>"""
+
+        # Ausgeblendete Zeilen Sektion
+        hidden_section=f"""
+        <div id="tl-hidden" style="display:none">
+          <h4 style="color:var(--t300);font-size:11px;margin:12px 0 6px;text-transform:uppercase;letter-spacing:.06em">Ausgeblendete Einträge</h4>
+          <table id="tl-hidden-table" style="opacity:.6">
+            <colgroup><col style="width:50px"><col style="width:24px"><col><col style="width:25%"><col style="width:auto"><col style="width:28px"></colgroup>
+          </table>
+        </div>"""
+
+        tl_js=f"""
+        <script>
+        function toggleTLRow(id){{
+          const row=document.getElementById(id);
+          if(!row)return;
+          row.style.display='none';
+          // Clone to hidden table
+          const clone=row.cloneNode(true);
+          clone.id=id+'_hidden';
+          clone.style.display='';
+          // Change toggle button to "einblenden"
+          const btn=clone.querySelector('button');
+          if(btn){{btn.title='Einblenden';btn.textContent='↩';btn.onclick=function(){{showTLRow(id,clone.id)}};}}
+          document.getElementById('tl-hidden-table').appendChild(clone);
+          document.getElementById('tl-hidden').style.display='block';
+        }}
+        function showTLRow(origId,cloneId){{
+          const orig=document.getElementById(origId);
+          const clone=document.getElementById(cloneId);
+          if(orig)orig.style.display='';
+          if(clone)clone.remove();
+          const ht=document.getElementById('tl-hidden-table');
+          if(ht&&ht.rows.length===0)document.getElementById('tl-hidden').style.display='none';
+        }}
+        </script>"""
 
         # Header-Info-Leiste
         info_items=[]
@@ -2770,11 +2839,14 @@ def trip_detail(tc: str):
           </div>
 
           <!-- Chronologische Timeline -->
-          <h3 style="margin-bottom:8px;color:var(--t700)">📅 Reise-Timeline</h3>
+          <h3 style="margin-bottom:8px;color:var(--t700)">📅 Reise-Timeline
+            <span style="font-size:11px;font-weight:400;color:var(--t300);margin-left:8px">👁 = Zeile ausblenden</span>
+          </h3>
           <div style="overflow-x:auto"><table style="table-layout:fixed;width:100%">
-            <colgroup><col style="width:60px"><col style="width:32px"><col style="width:35%"><col style="width:25%"><col style="width:auto"></colgroup>
-            {tl_rows or '<tr><td colspan="5" class="sub" style="padding:16px">Keine Ereignisse – Reisedaten und Mails zuordnen</td></tr>'}
+            <colgroup><col style="width:50px"><col style="width:24px"><col style="width:33%"><col style="width:22%"><col style="width:auto"><col style="width:28px"></colgroup>
+            {tl_rows or '<tr><td colspan="6" class="sub" style="padding:16px">Keine Ereignisse – Reisedaten und Mails zuordnen</td></tr>'}
           </table></div>
+          {hidden_section}
 
           <!-- Summe -->
           <div style="margin-top:12px;text-align:right;font-family:DM Mono,monospace;font-size:14px;font-weight:500;color:var(--b600)">
@@ -2786,7 +2858,7 @@ def trip_detail(tc: str):
           <div style="overflow-x:auto"><table>
             <tr><th>Flug</th><th>Datum</th><th>Typ</th><th>Meldung</th><th>Zeitpunkt</th></tr>
             {alert_rows}</table></div>''' if alerts else ""}
-        </div>""")
+        </div>{tl_js}""")
     except Exception as e:
         import traceback
         return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler in Trip-Detail</h2><pre style="font-size:11px;overflow-x:auto">{traceback.format_exc()}</pre></div>')
