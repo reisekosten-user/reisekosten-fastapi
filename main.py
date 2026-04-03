@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.9.4"
+APP_VERSION = "7.9.6"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2706,10 +2706,12 @@ def trip_detail(tc: str):
         if title_parts: header_title+=f" · {' · '.join(title_parts)}"
 
         # ── CHRONOLOGISCHE TIMELINE ──────────────────────────────
-        # Ereignisse sammeln: Abreise, Belege (nach Datum), Rückkehr
+        # Ereignisse sammeln
         timeline_events=[]
+        # Flüge die bereits aus ICS/Belegen kommen – damit keine Doppeleinträge
+        fns_from_belege=set()
 
-        # Abreise
+        # Abreise (nur Journeyzeile, ohne Flugnummern – kommen aus ICS)
         if dep_d:
             timeline_events.append({
                 "date": dep_d,
@@ -2718,42 +2720,24 @@ def trip_detail(tc: str):
                 "task": "Abreise",
                 "route": destinations or cc or "",
                 "timerange": dep_t or "08:00",
-                "detail": fns.split(',')[0].strip() if fns else "",
-                "type": "journey"
-            })
-
-        # Flugnummern als Ereignisse
-        fn_list=[f.strip() for f in (fns or "").split(",") if f.strip()]
-        for fn in fn_list:
-            timeline_events.append({
-                "date": dep_d or date.today(),
-                "time": "–",
-                "icon": "✈",
-                "task": f"Flug {fn}",
-                "route": "",
-                "timerange": "",
-                "detail": pnr or "",
-                "type": "flight"
-            })
-
-        # Zugnummern
-        tn_list=[t.strip() for t in (trains or "").split(",") if t.strip()]
-        for tn in tn_list:
-            timeline_events.append({
-                "date": dep_d or date.today(),
-                "time": "–",
-                "icon": "🚆",
-                "task": f"Zug {tn}",
-                "route": "",
-                "timerange": "",
                 "detail": "",
-                "type": "train"
+                "type": "journey"
             })
 
         # Belege als Timeline-Einträge
         beleg_sum=0.0
         for a in atts:
             fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt,det_nights,ft_info,checkin_s,checkout_s,checkin_t_s,checkout_t_s,seg_s=a
+
+            # ── Filter: Inline-Bilder und nicht-analysierbare Dateien überspringen ──
+            fn_lower=(fn_a or "").lower()
+            # Inline-Bilder aus HTML-Mails (image001.png etc., .emz, .wmz)
+            if re.match(r"image\d+\.(png|jpg|jpeg|gif|bmp|emz|wmz)$", fn_lower):
+                continue
+            # Nicht analysierbare Typen ohne Betrag und ohne Flugnummer
+            if stat in ("nicht analysierbar",) and not amt_eur and not afns:
+                continue
+
             if amt_eur:
                 try: beleg_sum+=float(amt_eur.replace(".","").replace(",","."))
                 except: pass
@@ -2790,6 +2774,13 @@ def trip_detail(tc: str):
                 cin_t  = checkin_t_s or "15:00"
                 # Check-out Tag: bevorzuge explizites Datum, dann cin + nights
                 n_nights = int(det_nights or 0)
+                # Nächte aus Check-in/out berechnen wenn nights=0
+                if n_nights == 0 and checkin_d and checkout_d:
+                    n_nights = max(0, (checkout_d - checkin_d).days)
+                # Nächte aus ki_bemerkung parsen: "3 Nächte", "3 nights"
+                if n_nights == 0 and bemerk:
+                    nm = re.search(r"(\d+)\s*(?:Nächte|Naechte|nights?)", bemerk, re.IGNORECASE)
+                    if nm: n_nights = int(nm.group(1))
                 if checkout_d:
                     cout_d = checkout_d
                     n_nights = (cout_d - cin_d).days if cin_d else n_nights
@@ -2833,26 +2824,25 @@ def trip_detail(tc: str):
             # ── FLUG: aus flight_segments oder ft_info ─────────────────
             elif dtype in ("Flug","Kalendereintrag"):
                 segs_added = False
+                # Flugnummern aus diesem Beleg für Deduplizierung merken
+                if afns:
+                    for fn_x in afns.split(","):
+                        fns_from_belege.add(fn_x.strip())
+
                 if seg_s:
+                    # Strukturierte Segmente aus Mistral-Extraktion
                     for seg in seg_s.split(";"):
                         parts = seg.strip().split("|")
-                        if len(parts) >= 2:
-                            fn_seg  = parts[0] if len(parts)>0 else afns or ""
-                            dep_apt = parts[1] if len(parts)>1 else ""
-                            arr_apt = parts[2] if len(parts)>2 else ""
-                            dep_dt  = parse_dd(parts[3]) if len(parts)>3 and parts[3] else ev_date
-                            dep_tm  = parts[4] if len(parts)>4 else ""
-                            arr_dt  = parse_dd(parts[5]) if len(parts)>5 and parts[5] else dep_dt
-                            arr_tm  = parts[6] if len(parts)>6 else ""
+                        if len(parts) >= 2 and parts[0].strip():
+                            fn_seg  = parts[0].strip()
+                            dep_apt = parts[1].strip() if len(parts)>1 else ""
+                            arr_apt = parts[2].strip() if len(parts)>2 else ""
+                            dep_dt  = parse_dd(parts[3]) if len(parts)>3 and parts[3].strip() else ev_date
+                            dep_tm  = parts[4].strip() if len(parts)>4 else ""
+                            arr_dt  = parse_dd(parts[5]) if len(parts)>5 and parts[5].strip() else dep_dt
+                            arr_tm  = parts[6].strip() if len(parts)>6 else ""
                             route   = f"{dep_apt}→{arr_apt}" if dep_apt and arr_apt else (dep_apt or arr_apt or "")
-                            time_detail = ""
-                            if dep_tm and arr_tm:
-                                time_detail = f"{dep_tm} → {arr_tm}"
-                            elif dep_tm:
-                                time_detail = f"ab {dep_tm}"
-                            label = f"✈ {fn_seg}" + (f" {route}" if route else "")
-                            # Betrag nur beim ersten Segment
-                            detail = (amount_str + (f" · {time_detail}" if time_detail else "")) if not segs_added else (time_detail or "")
+                            fns_from_belege.add(fn_seg)
                             timeline_events.append({
                                 "date": dep_dt or ev_date or dep_d or date.today(),
                                 "time": dep_tm or "",
@@ -2866,23 +2856,46 @@ def trip_detail(tc: str):
                                 "att_id": att_id,
                             })
                             segs_added = True
+
+                elif afns or ft_info or dtype == "Kalendereintrag":
+                    # ICS oder Flug-Beleg ohne strukturierte Segmente
+                    # Route aus ki_bemerkung parsen: "✈ LH1234 FRA→LYS | Abflug: 2026-04-20 06:30 UTC"
+                    all_routes = re.findall(r"([A-Z]{3}→[A-Z]{3})", bemerk or ft_info or "")
+                    all_fn_in_bemerk = re.findall(r"\b([A-Z]{2}\d{3,4})\b", bemerk or "")
+                    # Zeitinfo aus ki_bemerkung
+                    dep_time_m = re.search(r"Abflug:[^|]*(\d{2}:\d{2})", bemerk or "")
+                    arr_time_m = re.search(r"Ankunft:[^|]*(\d{2}:\d{2})", bemerk or "")
+                    dep_tm_ics = dep_time_m.group(1) if dep_time_m else ""
+                    arr_tm_ics = arr_time_m.group(1) if arr_time_m else ""
+
+                    fn_list_ics = all_fn_in_bemerk if all_fn_in_bemerk else ([f.strip() for f in (afns or "").split(",") if f.strip()])
+                    if not fn_list_ics:
+                        fn_list_ics = [""]
+
+                    for idx_fn, fn_ics in enumerate(fn_list_ics):
+                        route_ics = all_routes[idx_fn] if idx_fn < len(all_routes) else (all_routes[0] if all_routes else "")
+                        if fn_ics: fns_from_belege.add(fn_ics)
+                        timeline_events.append({
+                            "date": ev_date or dep_d or date.today(),
+                            "time": dep_tm_ics if idx_fn==0 else "",
+                            "icon": "✈", "type": "beleg",
+                            "task": f"Flug {fn_ics}" if fn_ics else f"Flug ({fn_a[:20]})",
+                            "route": route_ics,
+                            "timerange": f"{dep_tm_ics} → {arr_tm_ics}" if dep_tm_ics and arr_tm_ics and idx_fn==0 else "",
+                            "detail": amount_str if idx_fn==0 else "",
+                            "extra": actions if idx_fn==0 else "",
+                            "status": stat if idx_fn==0 else "",
+                            "att_id": att_id,
+                        })
+                        segs_added = True
+
                 if not segs_added:
-                    ev_time = ""
-                    if ft_info:
-                        tm = re.search(r"(\d{2}:\d{2})", ft_info)
-                        if tm: ev_time = tm.group(1)
-                    route_m = re.search(r"([A-Z]{3}→[A-Z]{3})", bemerk or ft_info or "")
-                    route_str = route_m.group(1) if route_m else ""
-                    fn_label = afns or fn_a or "Flug"
-                    # Zeiten aus ft_info
-                    time_parts = re.findall(r"(\d{2}:\d{2})\s*\(([^)]+)\)", ft_info) if ft_info else []
-                    tr_str = f"{time_parts[0][0]} ({time_parts[0][1]}) → {time_parts[1][0]} ({time_parts[1][1]})" if len(time_parts)>=2 else ev_time
+                    # Letzter Fallback
                     timeline_events.append({
                         "date": ev_date or dep_d or date.today(),
-                        "time": ev_time, "icon": "✈", "type": "beleg",
-                        "task": f"Flug {fn_label}",
-                        "route": route_str,
-                        "timerange": tr_str,
+                        "time": "", "icon": "✈", "type": "beleg",
+                        "task": f"Flug {afns or vendor or ''}".strip() or "Flugbeleg",
+                        "route": "", "timerange": "",
                         "detail": amount_str,
                         "extra": actions, "status": stat, "att_id": att_id,
                     })
@@ -2892,15 +2905,19 @@ def trip_detail(tc: str):
                 if dtype == "Taxi" and bemerk:
                     tm = re.search(r"(\d{1,2}:\d{2})", bemerk)
                     if tm: ev_time = tm.group(1)
+                task_label = vendor or dtype or "Beleg"
+                if fn_a and fn_a.startswith("Mail:"):
+                    task_label = vendor or dtype or fn_a[5:35].strip()
+                elif fn_a and not re.match(r"image\d+\.", fn_a.lower()):
+                    task_label = vendor or fn_a[:40]
                 timeline_events.append({
                     "date": ev_date or dep_d or date.today(),
                     "time": ev_time, "icon": icon, "type": "beleg",
-                    "task": f"{vendor or fn_a or dtype or 'Beleg'}",
+                    "task": task_label,
                     "route": "", "timerange": "",
                     "detail": amount_str,
                     "extra": actions, "status": stat, "att_id": att_id,
                 })
-
         # Verpflegung pro Tag direkt in Timeline einbauen
         if dep_d and ret_d:
             daily = load_daily_meals(tc)
