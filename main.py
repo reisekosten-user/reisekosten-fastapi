@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.1"
+APP_VERSION = "7.2"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -1689,6 +1689,23 @@ def load_trips(conn, filter_status=None):
                    FROM mail_attachments""")
     att_rows=cur.fetchall()
 
+    # Fallback: Reisender + Ziel aus Mail-Analyse wenn trip_meta leer
+    cur.execute("""SELECT trip_code,
+                   MAX(CASE WHEN traveler_name IS NOT NULL AND traveler_name!='' THEN traveler_name END),
+                   MAX(CASE WHEN destination IS NOT NULL AND destination!='' THEN destination END)
+                   FROM (
+                     SELECT mm.trip_code,
+                       NULL::text as traveler_name, NULL::text as destination
+                     FROM mail_messages mm WHERE mm.trip_code IS NOT NULL
+                   ) sub GROUP BY trip_code""")
+    # Simpler Fallback: subject der ersten Mail als Hinweis
+    cur.execute("""SELECT trip_code, subject FROM mail_messages
+                   WHERE trip_code IS NOT NULL ORDER BY id""")
+    mail_subjects = {}
+    for tc_m, subj in cur.fetchall():
+        if tc_m not in mail_subjects:
+            mail_subjects[tc_m] = subj or ""
+
     # Aktuelle Flight-Alerts (letzte 48h, nur kritische)
     cur.execute("""SELECT trip_code,flight_number,alert_type,message
                    FROM flight_alerts
@@ -1730,14 +1747,19 @@ def load_trips(conn, filter_status=None):
         all_fns = list(set(([f.strip() for f in (fns or "").split(",") if f.strip()] + a["fns"])))
         all_trains = list(set(([t.strip() for t in (trains or "").split(",") if t.strip()] + a["trains"])))
         all_pnrs = list(set(([pnr] if pnr else []) + a["pnrs"]))
+        # Fallback: Mail-Betreff als Hinweis wenn Ziel/Name fehlt
+        mail_hint = mail_subjects.get(tc,"")
+        display_dest = destinations or trip_title or (mail_hint[:40] if mail_hint else "")
+        display_traveler = traveler or ""
         trips.append(dict(tc=tc,status=status,hm=hm,dep=dep,ret=ret,
             dep_t=dep_t or "08:00",ret_t=ret_t or "18:00",
-            destinations=destinations or "",cc=cc or "DE",
-            traveler=traveler or "",colleagues=colleagues or "",
+            destinations=display_dest,cc=cc or "DE",
+            traveler=display_traveler,colleagues=colleagues or "",
             fns=", ".join(all_fns),trains=", ".join(all_trains),
             car=car or "",nights_p=nights_p or 0,nights_b=nights_b or 0,
             meals=meals or "",pnr=", ".join(all_pnrs),notes=notes or "",
             trip_title=trip_title or "",customer_code=customer_code or "",
+            mail_hint=mail_hint,
             has_flight="Flug" in types,
             has_hotel="Hotel" in types or hm in ("customer","own"),
             has_car="Mietwagen" in types or bool(car),
@@ -1833,15 +1855,23 @@ async def _dashboard(request: Request, focus: str):
                         flight_alert_bar += f'<div style="margin:0 12px 6px;padding:6px 12px;background:{bg};border:1px solid {bc};border-radius:var(--rs);font-size:12px;color:{fc};font-weight:500">{fal}</div>'
                 # Normale Warnungen (Kein Flugbeleg / Hotel fehlt)
                 doc_warnings=[w for w in t["warnings"] if w not in fa]
+                dep_s=str(t["dep"])[:10] if t["dep"] else ""
+                ret_s=str(t["ret"])[:10] if t["ret"] else ""
+                date_range=f"{dep_s} – {ret_s}" if dep_s and ret_s else (dep_s or "Datum fehlt")
+                dest_show=t["destinations"] or t["cc"] or "–"
+                fn_line=f'<div style="font-family:DM Mono,monospace;font-size:11px;color:var(--b600);margin-top:2px">✈ {t["fns"]}</div>' if t["fns"] else ""
+                pnr_inline=f' · <span style="font-family:DM Mono,monospace;color:var(--gr6)">{t["pnr"]}</span>' if t["pnr"] else ""
                 cards+=f"""<div class="card {"alert" if ha else ""}" onclick="location.href='/trip/{t["tc"]}'">
                   <div class="c-top">{_code_header(t)}
-                    <div class="c-info"><div class="c-traveler">{t["traveler"] or "–"}</div>
-                      <div class="c-dest">{t["destinations"] or t["cc"]}</div></div>
+                    <div class="c-info">
+                      <div class="c-traveler">{t["traveler"] or '<span style="color:var(--am6)">⚠ Reisender?</span>'}</div>
+                      <div class="c-dest">{dest_show} · {date_range}{pnr_inline}</div>
+                      {fn_line}
+                    </div>
                     <div class="sbadge sb-active">{"<span class='adot'></span>Alert" if ha else "Aktiv"}</div>
                   </div>
                   {flight_alert_bar}
                   {"<div class='alert-bar'>⚠ " + " · ".join(doc_warnings) + "</div>" if doc_warnings else ""}
-                  {pnr_bar}
                   <div class="c-div"></div>
                   <div class="c-meta">{_pills(t)}{_hotel_badge(t)}</div>
                   <div class="c-foot">
@@ -1859,11 +1889,29 @@ async def _dashboard(request: Request, focus: str):
             if not trips: return '<div class="empty">Keine geplanten Reisen. Über &ldquo;+ Neu&rdquo; anlegen.</div>'
             cards=""
             for t in trips:
-                dep=str(t["dep"])[:10] if t["dep"] else "–"
+                dep=str(t["dep"])[:10] if t["dep"] else None
+                ret=str(t["ret"])[:10] if t["ret"] else None
+                # Kopfzeile: was wir wissen
+                traveler_line = t["traveler"] or '<span style="color:var(--am6);font-size:12px">⚠ Reisender fehlt</span>'
+                dest_line = t["destinations"] or t["cc"] or ""
+                if not t["destinations"] and not t["trip_title"]:
+                    dest_line = '<span style="color:var(--am6);font-size:11px">⚠ Ziel fehlt – bitte ergänzen</span>'
+                # Datum-Anzeige
+                date_line=""
+                if dep and ret: date_line=f"{dep} – {ret}"
+                elif dep: date_line=f"Ab {dep}"
+                else: date_line='<span style="color:var(--am6);font-size:11px">⚠ Datum fehlt</span>'
+                # Flugnummern / PNR wenn vorhanden
+                fn_line=f'<div style="font-family:DM Mono,monospace;font-size:11px;color:var(--b600);margin-top:3px">✈ {t["fns"]}</div>' if t["fns"] else ""
+                pnr_line=f'<div style="font-family:DM Mono,monospace;font-size:11px;color:var(--gr6)">PNR: {t["pnr"]}</div>' if t["pnr"] else ""
                 cards+=f"""<div class="card" onclick="location.href='/trip/{t["tc"]}'">
                   <div class="c-top">{_code_header(t)}
-                    <div class="c-info"><div class="c-traveler">{t["traveler"] or "–"}</div>
-                      <div class="c-dest">Ab {dep} · {t["destinations"] or t["cc"]}</div></div>
+                    <div class="c-info">
+                      <div class="c-traveler">{traveler_line}</div>
+                      <div class="c-dest">{dest_line}</div>
+                      <div style="font-size:11px;color:var(--t500);margin-top:2px">{date_line}</div>
+                      {fn_line}{pnr_line}
+                    </div>
                     <div class="sbadge sb-planned">Geplant</div>
                   </div>
                   {_progress(t)}
@@ -1871,7 +1919,10 @@ async def _dashboard(request: Request, focus: str):
                   <div class="c-meta">{_pills(t)}{_hotel_badge(t)}</div>
                   <div class="c-foot">
                     <div><div class="c-amt">–</div><div class="c-amt-sub">Noch nicht aktiv</div></div>
-                    <div class="c-acts"><a class="btn-g" href="/edit-trip/{t["tc"]}">Bearbeiten</a></div>
+                    <div class="c-acts">
+                      <a class="btn-g" href="/edit-trip/{t["tc"]}">✏ Bearbeiten</a>
+                      <a class="btn-s" href="/trip/{t["tc"]}">Detail</a>
+                    </div>
                   </div>
                 </div>"""
             return f'<div class="cards">{cards}</div>'
