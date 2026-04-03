@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "8.0"
+APP_VERSION = "8.1"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2315,156 +2315,122 @@ async def analyze_attachments():
         mail_rows=cur.fetchall()
         mail_processed=0
         for mid,subj,body,tc in mail_rows:
-            full=f"{subj or ''}\n{body or ''}"
-            fields=await mistral_extract(full,known_codes,"mail")
-            if fields:
-                pnr=fields.get("pnr_code","") or ""
-                fns=fields.get("flight_numbers","") or ""
-                trains=fields.get("train_numbers","") or ""
-                rc=fields.get("reisecode","") or tc or ""
-                traveler_ki=fields.get("traveler_name","") or ""
-                dest_ki=fields.get("destination","") or ""
-                betrag_ki=fields.get("betrag","") or ""
-                waehrung_ki=fields.get("waehrung","EUR") or "EUR"
-                typ_ki=fields.get("beleg_typ","") or ""
-                datum_ki=fields.get("datum","") or ""
-                vendor_ki=fields.get("anbieter","") or ""
-                conf_ki=fields.get("confidence","niedrig") or "niedrig"
+            try:
+                full=f"{subj or ''}\n{body or ''}"
+                fields=await mistral_extract(full,known_codes,"mail")
+                if fields:
+                    pnr=fields.get("pnr_code","") or ""
+                    fns=fields.get("flight_numbers","") or ""
+                    trains=fields.get("train_numbers","") or ""
+                    rc=fields.get("reisecode","") or tc or ""
+                    traveler_ki=fields.get("traveler_name","") or ""
+                    dest_ki=fields.get("destination","") or ""
+                    betrag_ki=fields.get("betrag","") or ""
+                    waehrung_ki=fields.get("waehrung","EUR") or "EUR"
+                    typ_ki=fields.get("beleg_typ","") or ""
+                    datum_ki=fields.get("datum","") or ""
+                    vendor_ki=fields.get("anbieter","") or ""
+                    conf_ki=fields.get("confidence","niedrig") or "niedrig"
 
-                if pnr and rc:
-                    cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr,rc))
-                if fns and rc:
-                    cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns,rc))
-                if trains and rc:
-                    cur.execute("UPDATE trip_meta SET train_numbers=%s WHERE trip_code=%s AND (train_numbers IS NULL OR train_numbers='')",(trains,rc))
-                if traveler_ki and rc:
-                    cur.execute("UPDATE trip_meta SET traveler_name=%s WHERE trip_code=%s AND (traveler_name IS NULL OR traveler_name='')",(traveler_ki,rc))
-                if dest_ki and rc:
-                    cur.execute("UPDATE trip_meta SET destinations=%s WHERE trip_code=%s AND (destinations IS NULL OR destinations='')",(dest_ki,rc))
+                    if pnr and rc:
+                        cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr,rc))
+                    if fns and rc:
+                        cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns,rc))
+                    if trains and rc:
+                        cur.execute("UPDATE trip_meta SET train_numbers=%s WHERE trip_code=%s AND (train_numbers IS NULL OR train_numbers='')",(trains,rc))
+                    if traveler_ki and rc:
+                        cur.execute("UPDATE trip_meta SET traveler_name=%s WHERE trip_code=%s AND (traveler_name IS NULL OR traveler_name='')",(traveler_ki,rc))
+                    if dest_ki and rc:
+                        cur.execute("UPDATE trip_meta SET destinations=%s WHERE trip_code=%s AND (destinations IS NULL OR destinations='')",(dest_ki,rc))
 
-                # ── Mail-Body als Beleg anlegen wenn Betrag + Typ erkannt ──
-                if betrag_ki and typ_ki and typ_ki not in ("Sonstiges","") and rc:
-                    # Duplikat-Prüfung: gleicher Typ + gleiche Mail (mail_uid) reicht
-                    cur.execute("""SELECT id FROM mail_attachments
-                        WHERE trip_code=%s AND detected_type=%s
-                        AND storage_key LIKE 'mail_body_%'
-                        AND detected_vendor=%s""",(rc,typ_ki,vendor_ki or ""))
-                    if not cur.fetchone():
-                        betrag_eur_ki=""
-                        try:
-                            val=float(betrag_ki.replace(",","."))
-                            eur,_=await convert_to_eur(val,waehrung_ki)
-                            betrag_eur_ki=f"{eur:.2f}".replace(".",",")
-                        except: pass
-                        cur.execute("""SELECT mail_uid FROM mail_messages WHERE id=%s""",(mid,))
-                        mail_uid_row=cur.fetchone()
-                        mail_uid_val=mail_uid_row[0] if mail_uid_row else f"mail_{mid}"
-                        safe_name=f"Mail: {(subj or 'Buchungsbestätigung')[:60]}"
-                        # Neue Felder aus Extraktion
-                        seg_ki     = fields.get("flight_segments","") or ""
-                        checkin_ki = fields.get("checkin_date","") or ""
-                        checkout_ki= fields.get("checkout_date","") or ""
-                        cin_t_ki   = fields.get("checkin_time","") or ""
-                        cout_t_ki  = fields.get("checkout_time","") or ""
-                        nights_ki  = int(fields.get("nights",0) or 0)
-                        cur.execute("""INSERT INTO mail_attachments
-                            (mail_uid,trip_code,original_filename,saved_filename,content_type,
-                             storage_key,detected_type,detected_amount,detected_amount_eur,
-                             detected_currency,detected_date,detected_vendor,
-                             detected_nights,detected_checkin,detected_checkout,
-                             detected_checkin_time,detected_checkout_time,flight_segments,
-                             detected_flight_numbers,
-                             analysis_status,confidence,review_flag,ki_bemerkung)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                            (mail_uid_val,rc,safe_name,safe_name,"text/plain",
-                             f"mail_body_{mid}",typ_ki,betrag_ki,betrag_eur_ki,
-                             waehrung_ki,datum_ki,vendor_ki,
-                             nights_ki,checkin_ki or None,checkout_ki or None,
-                             cin_t_ki or None,cout_t_ki or None,seg_ki or None,
-                             fns or None,
-                             "ok (Mail-Body)",conf_ki,
-                             "ok" if conf_ki=="hoch" else "pruefen",
-                             f"Aus Mail-Text extrahiert · {subj or ''}"))
-                        mail_processed+=1  # zählt auch als verarbeitet
+                    # Mail-Body als Beleg anlegen wenn Betrag + Typ erkannt
+                    if betrag_ki and typ_ki and typ_ki not in ("Sonstiges","") and rc:
+                        cur.execute(
+                            "SELECT id FROM mail_attachments WHERE trip_code=%s AND detected_type=%s "
+                            "AND storage_key LIKE 'mail_body_%%' AND detected_vendor=%s",
+                            (rc,typ_ki,vendor_ki or ""))
+                        if not cur.fetchone():
+                            betrag_eur_ki=""
+                            try:
+                                val=float(betrag_ki.replace(",","."))
+                                eur,_=await convert_to_eur(val,waehrung_ki)
+                                betrag_eur_ki=f"{eur:.2f}".replace(".",",")
+                            except: pass
+                            cur.execute("SELECT mail_uid FROM mail_messages WHERE id=%s",(mid,))
+                            mur=cur.fetchone()
+                            mail_uid_val=mur[0] if mur else f"mail_{mid}"
+                            safe_name=f"Mail: {(subj or 'Buchungsbestaetigung')[:60]}"
+                            seg_ki      = fields.get("flight_segments","") or ""
+                            checkin_ki  = fields.get("checkin_date","") or ""
+                            checkout_ki = fields.get("checkout_date","") or ""
+                            cin_t_ki    = fields.get("checkin_time","") or ""
+                            cout_t_ki   = fields.get("checkout_time","") or ""
+                            nights_ki   = int(fields.get("nights",0) or 0)
+                            cur.execute(
+                                "INSERT INTO mail_attachments "
+                                "(mail_uid,trip_code,original_filename,saved_filename,content_type,"
+                                " storage_key,detected_type,detected_amount,detected_amount_eur,"
+                                " detected_currency,detected_date,detected_vendor,"
+                                " detected_nights,detected_checkin,detected_checkout,"
+                                " detected_checkin_time,detected_checkout_time,flight_segments,"
+                                " detected_flight_numbers,"
+                                " analysis_status,confidence,review_flag,ki_bemerkung) "
+                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                                (mail_uid_val,rc,safe_name,safe_name,"text/plain",
+                                 f"mail_body_{mid}",typ_ki,betrag_ki,betrag_eur_ki,
+                                 waehrung_ki,datum_ki,vendor_ki,
+                                 nights_ki,checkin_ki or None,checkout_ki or None,
+                                 cin_t_ki or None,cout_t_ki or None,seg_ki or None,
+                                 fns or None,
+                                 "ok (Mail-Body)",conf_ki,
+                                 "ok" if conf_ki=="hoch" else "pruefen",
+                                 f"Aus Mail-Text: {subj or ''}"))
 
-                # ── NEU: VMA-Destinationen aus Flügen automatisch ableiten ──
-                if fns and rc:
-                    cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(rc,))
-                    trip_row=cur.fetchone()
-                    if trip_row and trip_row[0] and not trip_row[2]:
-                        dep_d_str=str(trip_row[0])
-                        ret_d_str=str(trip_row[1]) if trip_row[1] else ""
-                        # IATA-Flughafen → Land-Mapping (häufigste)
-                        AIRPORT_CC={
-                            "FRA":"DE","MUC":"DE","BER":"DE","HAM":"DE","DUS":"DE","STR":"DE","CGN":"DE",
-                            "CDG":"FR","ORY":"FR","LYS":"FR","NCE":"FR","MRS":"FR","BOD":"FR",
-                            "LHR":"GB","LGW":"GB","MAN":"GB","EDI":"GB","BHX":"GB",
-                            "JFK":"US","LAX":"US","ORD":"US","MIA":"US","SFO":"US","BOS":"US",
-                            "BOM":"IN","DEL":"IN","MAA":"IN","BLR":"IN","HYD":"IN","CCU":"IN",
-                            "DXB":"AE","AUH":"AE","SHJ":"AE",
-                            "GYD":"AZ","ALA":"KZ",
-                            "ZRH":"CH","GVA":"CH",
-                            "VIE":"AT","SZG":"AT","INN":"AT",
-                            "FCO":"IT","MXP":"IT","NAP":"IT","VCE":"IT",
-                            "MAD":"ES","BCN":"ES","AGP":"ES",
-                            "TLS":"FR","LIS":"PT","OPO":"PT",
-                            "AMS":"NL","EIN":"NL","RTM":"NL",
-                            "BRU":"BE","CRL":"BE",
-                            "WAW":"PL","KRK":"PL",
-                            "PRG":"CZ","BUD":"HU","OTP":"RO",
-                            "IST":"TR","SAW":"TR","AYT":"TR",
-                            "NRT":"JP","HND":"JP","KIX":"JP",
-                            "SIN":"SG",
-                            "PEK":"CN","PVG":"CN","CAN":"CN",
-                            "ICN":"KR","GMP":"KR",
-                            "DOH":"QA","RUH":"SA","JED":"SA",
-                            "CAI":"EG","ADD":"ET","JNB":"ZA",
-                            "SYD":"AU","MEL":"AU","BNE":"AU",
-                            "YYZ":"CA","YVR":"CA","YUL":"CA",
-                            "GRU":"BR","EZE":"AR","BOG":"CO",
-                        }
-                        # Flüge parsen: z.B. "LH1234" → Carrier LH
-                        # Ziel-Airport aus ICS ki_bemerkung oder Mail-Text ableiten
-                        # Einfache Heuristik: destination → Land
-                        dest_cc=None
-                        if dest_ki:
-                            # Destination-Text → CC ableiten
-                            dest_low=dest_ki.lower()
+                    # VMA-Destinationen aus Zielland ableiten
+                    if dest_ki and rc and fns:
+                        cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(rc,))
+                        trip_row=cur.fetchone()
+                        if trip_row and trip_row[0] and not trip_row[2]:
+                            dep_d_str=str(trip_row[0])
+                            ret_d_str=str(trip_row[1]) if trip_row[1] else ""
                             DEST_CC_MAP={
-                                "frankreich":"FR","france":"FR","paris":"FR","lyon":"FR","nizza":"FR","marseille":"FR",
-                                "indien":"IN","india":"IN","mumbai":"IN","delhi":"IN","bangalore":"IN","hyderabad":"IN",
-                                "dubai":"AE","abu dhabi":"AE","uae":"AE","vae":"AE","emirate":"AE",
-                                "aserbaidschan":"AZ","baku":"AZ","azerbaijan":"AZ",
-                                "usa":"US","united states":"US","new york":"US","los angeles":"US","chicago":"US",
-                                "großbritannien":"GB","uk":"GB","london":"GB","england":"GB",
-                                "schweiz":"CH","switzerland":"CH","zürich":"CH","genf":"CH",
-                                "österreich":"AT","austria":"AT","wien":"AT","vienna":"AT",
-                                "italien":"IT","italy":"IT","rom":"IT","rome":"IT","mailand":"IT",
-                                "spanien":"ES","spain":"ES","barcelona":"ES","madrid":"ES",
-                                "türkei":"TR","turkey":"TR","istanbul":"TR","antalya":"TR",
-                                "japan":"JP","tokio":"JP","osaka":"JP",
-                                "singapur":"SG","singapore":"SG",
-                                "china":"CN","peking":"CN","shanghai":"CN",
-                                "katar":"QA","qatar":"QA","doha":"QA",
-                                "saudi":"SA","riad":"SA","jeddah":"SA",
+                                "frankreich":"FR","france":"FR","paris":"FR","lyon":"FR","nizza":"FR",
+                                "indien":"IN","india":"IN","mumbai":"IN","delhi":"IN",
+                                "dubai":"AE","abu dhabi":"AE","uae":"AE",
+                                "usa":"US","new york":"US","los angeles":"US",
+                                "grossbritannien":"GB","uk":"GB","london":"GB",
+                                "schweiz":"CH","zuerich":"CH","genf":"CH",
+                                "oesterreich":"AT","wien":"AT","vienna":"AT",
+                                "italien":"IT","rom":"IT","mailand":"IT",
+                                "spanien":"ES","barcelona":"ES","madrid":"ES",
+                                "tuerkei":"TR","istanbul":"TR",
+                                "japan":"JP","tokio":"JP",
+                                "singapur":"SG","china":"CN","katar":"QA",
                             }
+                            dest_cc=None
+                            dest_low=dest_ki.lower()
                             for key,cc in DEST_CC_MAP.items():
                                 if key in dest_low:
                                     dest_cc=cc; break
-                        if dest_cc and dest_cc != "DE":
-                            # Einfache vma_destinations: Abreisetag DE, nächster Tag Zielland, Rückreisetag DE
-                            vma_dest_auto=f"{dep_d_str}:DE"
-                            try:
-                                next_day=str(date.fromisoformat(dep_d_str)+timedelta(days=1))
-                                vma_dest_auto+=f",{next_day}:{dest_cc}"
-                            except: pass
-                            if ret_d_str:
-                                vma_dest_auto+=f",{ret_d_str}:DE"
-                            cur.execute("UPDATE trip_meta SET vma_destinations=%s WHERE trip_code=%s AND (vma_destinations IS NULL OR vma_destinations='')",
-                                (vma_dest_auto,rc))
+                            if dest_cc and dest_cc!="DE":
+                                try:
+                                    next_day=str(date.fromisoformat(dep_d_str)+timedelta(days=1))
+                                    vma_auto=f"{dep_d_str}:DE,{next_day}:{dest_cc}"
+                                    if ret_d_str: vma_auto+=f",{ret_d_str}:DE"
+                                    cur.execute(
+                                        "UPDATE trip_meta SET vma_destinations=%s "
+                                        "WHERE trip_code=%s AND (vma_destinations IS NULL OR vma_destinations='')",
+                                        (vma_auto,rc))
+                                except: pass
 
-            cur.execute("UPDATE mail_messages SET analysis_status='ok' WHERE id=%s",(mid,))
-            mail_processed+=1
+                cur.execute("UPDATE mail_messages SET analysis_status='ok' WHERE id=%s",(mid,))
+                mail_processed+=1
+            except Exception as mail_err:
+                import traceback as _tb
+                print(f"[Mail-Analyse ID={mid}]: {_tb.format_exc()[:400]}")
+                try: cur.execute("UPDATE mail_messages SET analysis_status='fehler' WHERE id=%s",(mid,))
+                except: pass
+
         conn.commit()
 
         # Anhänge analysieren – ausstehende, aber keine Inline-Bilder/ICS
@@ -2495,7 +2461,9 @@ async def analyze_attachments():
           <div class="acts"><a class="btn" href="/">Dashboard</a><a class="btn-l" href="/attachment-log">Anhang-Log</a></div>
         </div>""")
     except Exception as e:
-        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+        import traceback
+        tb=traceback.format_exc()
+        return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler bei KI-Analyse</h2><p><b>{e}</b></p><pre style="font-size:10px;overflow-x:auto;white-space:pre-wrap;background:var(--page);padding:12px;border-radius:8px">{tb}</pre></div>')
 
 
 # =========================================================
