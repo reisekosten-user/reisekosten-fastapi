@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.9.2"
+APP_VERSION = "7.9.3"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -407,12 +407,19 @@ Felder:
   Format: Airline-IATA-Code (2 Buchstaben) + Zahl, z.B. "LH", "AZ", "AF", "EK"
 - train_numbers: kommagetrennte Zugnummern z.B. "ICE 1234, IC 578", oder ""
 - nights: Anzahl Uebernachtungen als Zahl z.B. 3, oder 0
+- checkin_date: Hotel Check-in Datum "DD.MM.YYYY" oder "" (Suche: Check-in, Anreise, Arrival)
+- checkout_date: Hotel Check-out Datum "DD.MM.YYYY" oder "" (Suche: Check-out, Abreise, Departure)
+- checkin_time: Hotel Check-in Uhrzeit z.B. "15:00" oder ""
+- checkout_time: Hotel Check-out Uhrzeit z.B. "11:00" oder ""
+- flight_segments: Flug-Segmente als String, Format: "FN|DEP|ARR|DEP_DATE|DEP_TIME|ARR_DATE|ARR_TIME" getrennt durch Semikolon
+  z.B. "LH1234|FRA|LYS|15.06.2026|06:30|15.06.2026|08:15;LH4321|LYS|FRA|18.06.2026|19:00|18.06.2026|20:45"
+  Suche nach: Abflug/Ankunft, Departure/Arrival, Flugnummer, Flughafen-Codes (3 Buchstaben)
 - traveler_name: Vollstaendiger Name des Reisenden z.B. "Max Mustermann", sonst ""
-  Suche nach: "Passagier", "Passenger", "Reisender", "Gebucht fuer", "Name:"
+  Suche nach: "Passagier", "Passenger", "Reisender", "Gebucht fuer", "Name:", "Gast"
 - destination: Hauptreiseziel z.B. "Lyon", "Mumbai", "Frankfurt Messe", sonst ""
-  Bei Flug: Zielort des Hinflugs nehmen.
+  Bei Flug: Zielort des Hinflugs. Bei Hotel: Stadtname.
 - confidence: "hoch" wenn Betrag+Typ+Datum sicher, "mittel" wenn 2 von 3, sonst "niedrig"
-- bemerkung: kurze Notiz auf Deutsch, z.B. "Hin+Rueckflug", "2 Personen geteilt", sonst ""
+- bemerkung: kurze Notiz auf Deutsch, z.B. "Hin+Rueckflug 3 Segmente", "3 Naechte Lyon", sonst ""
 
 WICHTIG: INR/USD/GBP nur wenn explizites Symbol/Code im Text, sonst immer EUR."""
 
@@ -644,6 +651,11 @@ async def _apply_fields(cur, att_id, fields, ocr_text=""):
     fns        = fields.get("flight_numbers","") or ""
     trains     = fields.get("train_numbers","") or ""
     nights     = int(fields.get("nights",0) or 0)
+    checkin    = fields.get("checkin_date","") or ""
+    checkout   = fields.get("checkout_date","") or ""
+    checkin_t  = fields.get("checkin_time","") or ""
+    checkout_t = fields.get("checkout_time","") or ""
+    segments   = fields.get("flight_segments","") or ""
     confidence = fields.get("confidence","niedrig") or "niedrig"
     bemerkung  = fields.get("bemerkung","") or ""
 
@@ -678,11 +690,16 @@ async def _apply_fields(cur, att_id, fields, ocr_text=""):
         extracted_text=%s,detected_amount=%s,detected_amount_eur=%s,detected_currency=%s,
         detected_date=%s,detected_vendor=%s,detected_type=%s,
         pnr_code=%s,detected_flight_numbers=%s,detected_train_numbers=%s,detected_nights=%s,
+        detected_checkin=%s,detected_checkout=%s,detected_checkin_time=%s,detected_checkout_time=%s,
+        flight_segments=%s,
         analysis_status=%s,confidence=%s,review_flag=%s,ki_bemerkung=%s
         WHERE id=%s""",
         (ocr_text[:10000] if ocr_text else None,
          betrag,betrag_eur,waehrung,datum,anbieter,beleg_typ,
-         pnr,fns,trains,nights,status,confidence,review,bemerkung,att_id))
+         pnr,fns,trains,nights,
+         checkin or None,checkout or None,checkin_t or None,checkout_t or None,
+         segments or None,
+         status,confidence,review,bemerkung,att_id))
 
 
 # =========================================================
@@ -1752,7 +1769,8 @@ def init():
                     "detected_amount TEXT","detected_amount_eur TEXT","detected_currency TEXT",
                     "detected_date TEXT","detected_vendor TEXT","pnr_code TEXT",
                     "detected_flight_numbers TEXT","detected_train_numbers TEXT","detected_nights INTEGER DEFAULT 0",
-                    "flight_time_info TEXT",
+                    "flight_time_info TEXT","detected_checkin TEXT","detected_checkout TEXT",
+                    "detected_checkin_time TEXT","detected_checkout_time TEXT","flight_segments TEXT",
                     "analysis_status TEXT DEFAULT 'ausstehend'","confidence TEXT DEFAULT 'niedrig'",
                     "review_flag TEXT DEFAULT 'pruefen'","ki_bemerkung TEXT",
                     "file_hash TEXT","created_at TIMESTAMP DEFAULT now()"]:
@@ -2640,7 +2658,9 @@ def trip_detail(tc: str):
         cur.execute("""SELECT original_filename,detected_type,detected_amount_eur,detected_currency,
             detected_date,detected_vendor,analysis_status,confidence,ki_bemerkung,id,
             pnr_code,detected_flight_numbers,detected_train_numbers,detected_amount,detected_nights,
-            COALESCE(flight_time_info,'')
+            COALESCE(flight_time_info,''),COALESCE(detected_checkin,''),COALESCE(detected_checkout,''),
+            COALESCE(detected_checkin_time,''),COALESCE(detected_checkout_time,''),
+            COALESCE(flight_segments,'')
             FROM mail_attachments WHERE trip_code=%s ORDER BY detected_date,id""",(tc,))
         atts=cur.fetchall()
 
@@ -2727,85 +2747,142 @@ def trip_detail(tc: str):
         # Belege als Timeline-Einträge
         beleg_sum=0.0
         for a in atts:
-            fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt,det_nights,ft_info=a
+            fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt,det_nights,ft_info,checkin_s,checkout_s,checkin_t_s,checkout_t_s,seg_s=a
             if amt_eur:
                 try: beleg_sum+=float(amt_eur.replace(".","").replace(",","."))
                 except: pass
-            # Datum parsen
-            ev_date=dep_d
-            if ddate:
+
+            # Datum parsen helper
+            def parse_dd(s):
+                if not s: return None
+                s=str(s).strip()
                 try:
-                    if "." in str(ddate):
-                        parts=str(ddate).split(".")
-                        if len(parts)==3:
-                            ev_date=date(int(parts[2]),int(parts[1]),int(parts[0]))
-                    else:
-                        ev_date=date.fromisoformat(str(ddate)[:10])
-                except: pass
+                    if "." in s:
+                        p=s.split(".")
+                        if len(p)==3: return date(int(p[2]),int(p[1]),int(p[0]))
+                    return date.fromisoformat(s[:10])
+                except: return None
+
+            ev_date = parse_dd(ddate) or dep_d
+            checkin_d  = parse_dd(checkin_s)
+            checkout_d = parse_dd(checkout_s)
+
             type_icons={"Flug":"✈","Hotel":"🏨","Taxi":"🚕","Bahn":"🚆","Mietwagen":"🚗",
                        "Essen":"🍽","Kalendereintrag":"📅","Sonstiges":"📄"}
             icon=type_icons.get(dtype,"📄")
             amount_str=f"{amt_eur} €" if amt_eur else (f"{amt} {curr}" if amt else "–")
             edit_url=f"/beleg-edit/{att_id}"
-            # Vorschau: nur wenn echter S3-Key (kein mail_body_)
             view_url=f"/beleg/{att_id}"
-            # Hotel: für jeden gebuchten Tag eine Zeile
-            n_nights=int(det_nights or 0)
-            if dtype=="Hotel" and n_nights>1 and ev_date:
-                for night_i in range(n_nights):
-                    night_date=ev_date+timedelta(days=night_i)
-                    night_label=f"{vendor or 'Hotel'} · Nacht {night_i+1}/{n_nights}"
-                    timeline_events.append({
-                        "date": night_date,
-                        "time": "",
-                        "icon": "🏨",
-                        "label": night_label,
-                        "detail": f"{amount_str}" if night_i==0 else "→ Folgenacht",
-                        "extra": (f'<a href="{view_url}" target="_blank" style="color:var(--b600);margin-right:6px" title="Beleg anzeigen">📄</a>'
-                                 f'<a href="{edit_url}" style="color:var(--t300)" title="Korrigieren">✏</a>') if night_i==0 else "",
-                        "status": stat if night_i==0 else "",
-                        "type": "beleg",
-                        "att_id": att_id,
-                        "hidden": False,
-                    })
-            else:
-                # Zeiten: aus flight_time_info für ICS/Flüge, sonst leer
-                ev_time = ""
-                ev_detail_extra = ""
-                if dtype in ("Flug","Kalendereintrag") and ft_info:
-                    # Extrahiere erste Abflugszeit aus ki_bemerkung oder flight_time_info
-                    tm = re.search(r"(\d{2}:\d{2})\s*(?:UTC|\([^)]+\))?", ft_info)
-                    if tm: ev_time = tm.group(1)
-                    # Zeige Route aus ki_bemerkung (FRA→CDG)
-                    route_m = re.search(r"([A-Z]{3}→[A-Z]{3})", bemerk or "")
-                    if route_m: ev_detail_extra = f' <span style="font-family:DM Mono,monospace;font-size:11px;color:var(--b600)">{route_m.group(1)}</span>'
-                # Label: für ICS die Flugnummer prominent zeigen
-                if dtype == "Kalendereintrag" and afns:
-                    label = f"✈ {afns}"
-                    if vendor: label += f" · {vendor}"
+            actions=(f'<a href="{view_url}" target="_blank" style="color:var(--b600);margin-right:6px" title="Beleg anzeigen">📄</a>'
+                    f'<a href="{edit_url}" style="color:var(--t300)" title="KI-Ergebnis korrigieren">✏</a>')
+
+            # ── HOTEL: mehrtägig mit Check-in/out ──────────────────────
+            if dtype == "Hotel":
+                hotel_name = vendor or "Hotel"
+                # Check-in Tag
+                cin_d  = checkin_d or ev_date or dep_d or date.today()
+                cin_t  = checkin_t_s or "15:00"
+                # Check-out Tag: bevorzuge explizites Datum, dann cin + nights
+                n_nights = int(det_nights or 0)
+                if checkout_d:
+                    cout_d = checkout_d
+                    n_nights = (cout_d - cin_d).days if cin_d else n_nights
+                elif n_nights > 0 and cin_d:
+                    cout_d = cin_d + timedelta(days=n_nights)
                 else:
-                    label = f"{vendor or fn_a or dtype or 'Beleg'}"
-                # Detail: Betrag + Zeitinfo
-                detail_str = amount_str
-                if ft_info and dtype in ("Flug","Kalendereintrag"):
-                    # Kompakte Zeitanzeige
-                    time_parts = re.findall(r"(\d{2}:\d{2})\s*\(([^)]+)\)", ft_info)
-                    if len(time_parts)>=2:
-                        detail_str = f"{time_parts[0][0]} {time_parts[0][1]} → {time_parts[1][0]} {time_parts[1][1]}"
-                    elif amount_str and amount_str != "–":
-                        detail_str = amount_str
+                    cout_d = None
+                cout_t = checkout_t_s or "11:00"
+
+                # Check-in Zeile
+                timeline_events.append({
+                    "date": cin_d, "time": cin_t,
+                    "icon": "🏨", "type": "beleg",
+                    "label": f"{hotel_name} · Check-in",
+                    "detail": f"{amount_str}{f' · {n_nights} Nächte' if n_nights else ''}",
+                    "extra": actions, "status": stat, "att_id": att_id,
+                })
+                # Zwischennächte
+                if n_nights > 1 and cin_d:
+                    for ni in range(1, n_nights):
+                        nd = cin_d + timedelta(days=ni)
+                        timeline_events.append({
+                            "date": nd, "time": "",
+                            "icon": "🏨", "type": "beleg",
+                            "label": f"{hotel_name} · Nacht {ni+1}/{n_nights}",
+                            "detail": "→ übernächtig", "extra": "", "status": "", "att_id": att_id,
+                        })
+                # Check-out Zeile
+                if cout_d:
+                    timeline_events.append({
+                        "date": cout_d, "time": cout_t,
+                        "icon": "🏨", "type": "beleg",
+                        "label": f"{hotel_name} · Check-out",
+                        "detail": "", "extra": "", "status": "", "att_id": att_id,
+                    })
+
+            # ── FLUG: aus flight_segments oder ft_info ─────────────────
+            elif dtype in ("Flug","Kalendereintrag"):
+                segs_added = False
+                if seg_s:
+                    for seg in seg_s.split(";"):
+                        parts = seg.strip().split("|")
+                        if len(parts) >= 2:
+                            fn_seg  = parts[0] if len(parts)>0 else afns or ""
+                            dep_apt = parts[1] if len(parts)>1 else ""
+                            arr_apt = parts[2] if len(parts)>2 else ""
+                            dep_dt  = parse_dd(parts[3]) if len(parts)>3 and parts[3] else ev_date
+                            dep_tm  = parts[4] if len(parts)>4 else ""
+                            arr_dt  = parse_dd(parts[5]) if len(parts)>5 and parts[5] else dep_dt
+                            arr_tm  = parts[6] if len(parts)>6 else ""
+                            route   = f"{dep_apt}→{arr_apt}" if dep_apt and arr_apt else (dep_apt or arr_apt or "")
+                            time_detail = ""
+                            if dep_tm and arr_tm:
+                                time_detail = f"{dep_tm} → {arr_tm}"
+                            elif dep_tm:
+                                time_detail = f"ab {dep_tm}"
+                            label = f"✈ {fn_seg}" + (f" {route}" if route else "")
+                            # Betrag nur beim ersten Segment
+                            detail = (amount_str + (f" · {time_detail}" if time_detail else "")) if not segs_added else (time_detail or "")
+                            timeline_events.append({
+                                "date": dep_dt or ev_date or dep_d or date.today(),
+                                "time": dep_tm or "",
+                                "icon": "✈", "type": "beleg",
+                                "label": label,
+                                "detail": detail,
+                                "extra": actions if not segs_added else "",
+                                "status": stat if not segs_added else "",
+                                "att_id": att_id,
+                            })
+                            segs_added = True
+                if not segs_added:
+                    # Fallback: einfacher Eintrag mit ft_info
+                    ev_time = ""
+                    if ft_info:
+                        tm = re.search(r"(\d{2}:\d{2})", ft_info)
+                        if tm: ev_time = tm.group(1)
+                    route_m = re.search(r"([A-Z]{3}→[A-Z]{3})", bemerk or ft_info or "")
+                    route_str = f" {route_m.group(1)}" if route_m else ""
+                    fn_label = afns or fn_a or "Flug"
+                    timeline_events.append({
+                        "date": ev_date or dep_d or date.today(),
+                        "time": ev_time, "icon": "✈", "type": "beleg",
+                        "label": f"✈ {fn_label}{route_str}",
+                        "detail": amount_str,
+                        "extra": actions, "status": stat, "att_id": att_id,
+                    })
+
+            # ── ALLE ANDEREN TYPEN ─────────────────────────────────────
+            else:
+                ev_time = ""
+                if dtype == "Taxi" and bemerk:
+                    tm = re.search(r"(\d{1,2}:\d{2})", bemerk)
+                    if tm: ev_time = tm.group(1)
                 timeline_events.append({
                     "date": ev_date or dep_d or date.today(),
-                    "time": ev_time,
-                    "icon": icon,
-                    "label": label + ev_detail_extra,
-                    "detail": detail_str,
-                    "extra": (f'<a href="{view_url}" target="_blank" style="color:var(--b600);margin-right:6px" title="Beleg anzeigen">📄</a>'
-                             f'<a href="{edit_url}" style="color:var(--t300)" title="KI-Ergebnis korrigieren">✏</a>'),
-                    "status": stat,
-                    "type": "beleg",
-                    "att_id": att_id,
-                    "hidden": False,
+                    "time": ev_time, "icon": icon, "type": "beleg",
+                    "label": f"{vendor or fn_a or dtype or 'Beleg'}",
+                    "detail": amount_str,
+                    "extra": actions, "status": stat, "att_id": att_id,
                 })
 
         # Verpflegung pro Tag direkt in Timeline einbauen
