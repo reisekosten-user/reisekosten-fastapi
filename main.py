@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.9"
+APP_VERSION = "7.9.1"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -885,9 +885,10 @@ def _fetch_mails_internal():
                 if existing:
                     dupl += 1
                     print(f"[Duplikat] {decoded_fn} Hash:{h} – bereits als ID {existing[0]} vorhanden")
-                    # Mail als gelesen markieren trotzdem
                     mail.store(i,"+FLAGS","\\Seen")
                     continue
+
+                safe_fn = sanitize_filename(decoded_fn)
 
                 # ICS-Datei direkt parsen (Flugdaten ohne KI)
                 ics_bemerkung = ""
