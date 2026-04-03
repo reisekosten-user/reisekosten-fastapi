@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.9.1"
+APP_VERSION = "7.9.2"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -929,6 +929,15 @@ def _fetch_mails_internal():
                                         (f"{existing},{ics_flight_nr}".strip(","), code))
                     except Exception as ics_err:
                         print(f"[ICS] Fehler: {ics_err}")
+
+                # S3-Upload
+                storage_key = f"mail_attachments/{uid}_{safe_fn}"
+                try:
+                    s3 = get_s3()
+                    s3.put_object(Bucket=S3_BUCKET, Key=storage_key, Body=pl,
+                                  ContentType=part.get_content_type())
+                except Exception as s3e:
+                    storage_key = f"S3-FEHLER:{str(s3e)[:60]}"
 
                 cur.execute("""INSERT INTO mail_attachments
                     (mail_uid,trip_code,original_filename,saved_filename,content_type,
@@ -2498,7 +2507,9 @@ def fetch_mails():
           <div class="acts"><a class="btn" href="/">Dashboard</a><a class="btn-l" href="/analyze-attachments">KI-Analyse starten</a><a class="btn-l" href="/attachment-log">Anhang-Log</a></div>
         </div>""")
     except Exception as e:
-        return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p></div>')
+        import traceback
+        tb = traceback.format_exc()
+        return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p><pre style="font-size:10px;overflow-x:auto;white-space:pre-wrap">{tb}</pre></div>')
 
 
 # =========================================================
