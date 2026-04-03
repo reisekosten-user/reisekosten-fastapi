@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "7.9.6"
+APP_VERSION = "7.9.7"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -406,22 +406,32 @@ Felder:
 - flight_numbers: alle Flugnummern kommagetrennt z.B. "LH1234, LH4321", auch Rückflüge
   Format: Airline-IATA-Code (2 Buchstaben) + Zahl, z.B. "LH", "AZ", "AF", "EK"
 - train_numbers: kommagetrennte Zugnummern z.B. "ICE 1234, IC 578", oder ""
-- nights: Anzahl Uebernachtungen als Zahl z.B. 3, oder 0
-- checkin_date: Hotel Check-in Datum "DD.MM.YYYY" oder "" (Suche: Check-in, Anreise, Arrival)
-- checkout_date: Hotel Check-out Datum "DD.MM.YYYY" oder "" (Suche: Check-out, Abreise, Departure)
-- checkin_time: Hotel Check-in Uhrzeit z.B. "15:00" oder ""
-- checkout_time: Hotel Check-out Uhrzeit z.B. "11:00" oder ""
-- flight_segments: Flug-Segmente als String, Format: "FN|DEP|ARR|DEP_DATE|DEP_TIME|ARR_DATE|ARR_TIME" getrennt durch Semikolon
-  z.B. "LH1234|FRA|LYS|15.06.2026|06:30|15.06.2026|08:15;LH4321|LYS|FRA|18.06.2026|19:00|18.06.2026|20:45"
-  Suche nach: Abflug/Ankunft, Departure/Arrival, Flugnummer, Flughafen-Codes (3 Buchstaben)
-- traveler_name: Vollstaendiger Name des Reisenden z.B. "Max Mustermann", sonst ""
-  Suche nach: "Passagier", "Passenger", "Reisender", "Gebucht fuer", "Name:", "Gast"
-- destination: Hauptreiseziel z.B. "Lyon", "Mumbai", "Frankfurt Messe", sonst ""
-  Bei Flug: Zielort des Hinflugs. Bei Hotel: Stadtname.
+- nights: Anzahl Uebernachtungen als Zahl. WICHTIG: Berechne aus Check-in und Check-out falls nicht explizit angegeben.
+  z.B. Check-in 22.04. Check-out 25.04. = 3 Naechte
+- checkin_date: Hotel Check-in Datum "DD.MM.YYYY".
+  Suche nach: "Check-in", "Anreise", "Arrival", "ab", "von", "Einzug"
+  Beispiel: "Anreise: Dienstag, 22. April 2026" → "22.04.2026"
+- checkout_date: Hotel Check-out Datum "DD.MM.YYYY".
+  Suche nach: "Check-out", "Abreise", "Departure", "bis", "Auszug"
+  Beispiel: "Abreise: Freitag, 25. April 2026" → "25.04.2026"
+- checkin_time: Hotel Check-in Uhrzeit z.B. "15:00" oder "" (Standard wenn nicht angegeben: "")
+- checkout_time: Hotel Check-out Uhrzeit z.B. "11:00" oder "" (Standard wenn nicht angegeben: "")
+- flight_segments: ALLE Flug-Segmente als String.
+  Format pro Segment: "FLUGNR|ABFLUGHAFEN|ANKUNFTHAFEN|DATUM_AB|UHRZEIT_AB|DATUM_AN|UHRZEIT_AN"
+  Mehrere Segmente getrennt durch Semikolon.
+  Beispiel: "LH3463|NUE|FRA|20.04.2026|06:30|20.04.2026|07:35;LH1078|FRA|LYS|20.04.2026|09:15|20.04.2026|10:20"
+  Flughafen-Codes: 3-Buchstaben IATA z.B. FRA, MUC, NUE, LYS, CDG, ZRH, VIE
+  Suche nach: "Flug", "Flight", "Abflug", "Ankunft", "Departure", "Arrival", Flugnummer + Uhrzeit
+  WICHTIG: Auch Rueckfluege erfassen! Alle Segmente einer Reise eintragen.
+- traveler_name: Vollstaendiger Name des Reisenden.
+  Suche nach: "Passagier", "Passenger", "Reisender", "Gebucht fuer", "Name:", "Gast", "Buchung fuer"
+- destination: Hauptreiseziel z.B. "Lyon", "Paris", "Frankfurt". Bei Flug: Ankunftsstadt des Hinflugs. Bei Hotel: Hotelstadt.
 - confidence: "hoch" wenn Betrag+Typ+Datum sicher, "mittel" wenn 2 von 3, sonst "niedrig"
-- bemerkung: kurze Notiz auf Deutsch, z.B. "Hin+Rueckflug 3 Segmente", "3 Naechte Lyon", sonst ""
+- bemerkung: Kurze Zusammenfassung z.B. "Hinflug NUE→FRA→LYS, Rueckflug LYS→FRA→NUE", "3 Naechte Marriott Lyon 22.-25.04."
 
-WICHTIG: INR/USD/GBP nur wenn explizites Symbol/Code im Text, sonst immer EUR."""
+WICHTIG: INR/USD/GBP nur wenn explizites Symbol/Code im Text, sonst immer EUR.
+WICHTIG: Bei Hotelbuchungen IMMER checkin_date UND checkout_date UND nights ausfuellen!
+WICHTIG: Bei Flugbuchungen IMMER alle Segmente in flight_segments eintragen!"""
 
     user = f"Bekannte Reisecodes: {codes_str}\n\nText:\n---\n{text[:8000]}\n---\nJSON:"
     try:
@@ -907,45 +917,24 @@ def _fetch_mails_internal():
 
                 safe_fn = sanitize_filename(decoded_fn)
 
-                # ICS-Datei direkt parsen (Flugdaten ohne KI)
-                ics_bemerkung = ""
-                ics_detected_date = ""
-                ics_flight_nr = ""
-                if safe_fn.lower().endswith(".ics") and pl:
-                    try:
-                        ics_text = pl.decode(errors="ignore")
-                        # ICS kann Zeilenfortsetzungen haben (Leerzeichen/Tab am Zeilenanfang)
-                        ics_text = re.sub(r"\r?\n[ \t]", "", ics_text)
-                        ics_summary = re.search(r"^SUMMARY[^:]*:(.*)", ics_text, re.MULTILINE)
-                        ics_dtstart = re.search(r"^DTSTART[^:]*:([\dTZ]+)", ics_text, re.MULTILINE)
-                        ics_loc     = re.search(r"^LOCATION[^:]*:(.*)", ics_text, re.MULTILINE)
-                        ics_desc    = re.search(r"^DESCRIPTION[^:]*:(.*)", ics_text, re.MULTILINE)
-                        ics_full = " ".join(filter(None,[
-                            ics_summary.group(1).strip() if ics_summary else "",
-                            ics_desc.group(1).strip() if ics_desc else "",
-                        ]))
-                        ics_flight_m = re.search(r"\b([A-Z]{2}\d{3,4})\b", ics_full)
-                        ics_flight_nr = ics_flight_m.group(1) if ics_flight_m else ""
-                        raw_date = ics_dtstart.group(1).strip()[:8] if ics_dtstart else ""
-                        if raw_date and len(raw_date) == 8:
-                            ics_detected_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
-                        ics_bemerkung = " | ".join(filter(None,[
-                            f"Termin: {ics_summary.group(1).strip()}" if ics_summary else "",
-                            f"Datum: {ics_detected_date}" if ics_detected_date else "",
-                            f"Ort: {ics_loc.group(1).strip()}" if ics_loc else "",
-                            f"Flug: {ics_flight_nr}" if ics_flight_nr else "",
-                        ]))
-                        # Flugnummer in trip_meta übernehmen
-                        if code and ics_flight_nr:
-                            cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code=%s",(code,))
-                            row_fn = cur.fetchone()
-                            if row_fn:
-                                existing = (row_fn[0] or "")
-                                if ics_flight_nr not in existing:
-                                    cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",
-                                        (f"{existing},{ics_flight_nr}".strip(","), code))
-                    except Exception as ics_err:
-                        print(f"[ICS] Fehler: {ics_err}")
+                # ICS-Dateien überspringen – Flugdaten kommen aus Mail-Body
+                if safe_fn.lower().endswith(".ics"):
+                    # Flugnummer trotzdem aus ICS in trip_meta übernehmen (schneller Scan)
+                    if pl and code:
+                        try:
+                            ics_text = pl.decode(errors="ignore")
+                            ics_text = re.sub(r"\r?\n[ \t]", "", ics_text)
+                            for fn_m in re.finditer(r"\b([A-Z]{2}\d{3,4})\b", ics_text):
+                                fn_ics = fn_m.group(1)
+                                cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code=%s",(code,))
+                                row_fn = cur.fetchone()
+                                if row_fn:
+                                    existing = row_fn[0] or ""
+                                    if fn_ics not in existing:
+                                        cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",
+                                            (f"{existing},{fn_ics}".strip(","), code))
+                        except: pass
+                    continue  # ICS nicht in DB speichern
 
                 # S3-Upload
                 storage_key = f"mail_attachments/{uid}_{safe_fn}"
@@ -959,16 +948,11 @@ def _fetch_mails_internal():
                 cur.execute("""INSERT INTO mail_attachments
                     (mail_uid,trip_code,original_filename,saved_filename,content_type,
                      storage_key,detected_type,analysis_status,confidence,review_flag,
-                     file_hash,ki_bemerkung,detected_date,detected_flight_numbers)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                     file_hash)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (uid,code,safe_fn,f"{uid}_{safe_fn}",part.get_content_type(),
                      storage_key,detect_type_with_rules(safe_fn,subject,body,load_custom_rules()),
-                     "ok" if ics_bemerkung else "ausstehend",
-                     "hoch" if ics_bemerkung else "niedrig",
-                     "ok" if ics_bemerkung else "pruefen",
-                     h, ics_bemerkung or None,
-                     ics_detected_date or None,
-                     ics_flight_nr or None))
+                     "ausstehend","niedrig","pruefen",h))
 
         # Mail erfolgreich importiert → für Löschung vormerken
         ids_to_delete.append(i)
@@ -2729,12 +2713,15 @@ def trip_detail(tc: str):
         for a in atts:
             fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt,det_nights,ft_info,checkin_s,checkout_s,checkin_t_s,checkout_t_s,seg_s=a
 
-            # ── Filter: Inline-Bilder und nicht-analysierbare Dateien überspringen ──
+            # ── Filter: Inline-Bilder, ICS-Reste und nicht-analysierbare ──
             fn_lower=(fn_a or "").lower()
-            # Inline-Bilder aus HTML-Mails (image001.png etc., .emz, .wmz)
+            # Inline-Bilder aus HTML-Mails
             if re.match(r"image\d+\.(png|jpg|jpeg|gif|bmp|emz|wmz)$", fn_lower):
                 continue
-            # Nicht analysierbare Typen ohne Betrag und ohne Flugnummer
+            # ICS-Dateien (alte Einträge in DB) – jetzt aus Mail-Body
+            if fn_lower.endswith(".ics") or dtype == "Kalendereintrag":
+                continue
+            # Nicht analysierbare ohne Betrag/Flugnummer
             if stat in ("nicht analysierbar",) and not amt_eur and not afns:
                 continue
 
