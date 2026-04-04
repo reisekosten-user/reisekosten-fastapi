@@ -327,7 +327,7 @@ AIRPORT_CC = {
 # Panama, Costa Rica etc. → kein BMF-Satz → DE-Satz als Fallback
 # Bitte jährlich mit BMF-Schreiben abgleichen!
 
-APP_VERSION = "9.6"
+APP_VERSION = "9.7"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -3113,26 +3113,67 @@ def mail_log():
     try:
         conn=get_conn();cur=conn.cursor()
         cur.execute("""SELECT id,sender,subject,trip_code,detected_type,pnr_code,
-            analysis_status,created_at FROM mail_messages ORDER BY id DESC LIMIT 100""")
-        rows=cur.fetchall();cur.close();conn.close()
+            analysis_status,created_at,LENGTH(body) FROM mail_messages ORDER BY id DESC LIMIT 100""")
+        rows=cur.fetchall()
+        cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code DESC LIMIT 30")
+        all_codes=[r[0] for r in cur.fetchall()]
+        cur.close();conn.close()
+        code_opts="<option value=''>– zuordnen –</option>"+"".join(f"<option>{c}</option>" for c in all_codes)
         html="".join(f"""<tr>
             <td style="font-size:11px;color:var(--t300)">{str(r[7] or '')[:16]}</td>
-            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{r[1] or ''}</td>
-            <td><a href="/mail-detail/{r[0]}" style="color:var(--b600);text-decoration:none;font-weight:500">{r[2] or '–'}</a></td>
-            <td class="cc">{r[3] or ''}</td><td>{r[4] or ''}</td>
+            <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">{r[1] or ''}</td>
+            <td><a href="/mail-detail/{r[0]}" style="color:var(--b600);text-decoration:none;font-weight:500">{(r[2] or '–')[:50]}</a></td>
+            <td class="cc">{r[3] or '<span style="color:var(--am6)">–</span>'}</td>
+            <td>{r[4] or ''}</td>
             <td style="font-family:'DM Mono',monospace;color:var(--gr6)">{r[5] or ''}</td>
+            <td style="font-size:11px">{r[8] or 0} B</td>
             <td><span class="bdg {"bdg-ok" if r[6]=="ok" else "bdg-w"}">{r[6] or 'ausstehend'}</span></td>
+            <td>
+              <form method="post" action="/mail-assign/{r[0]}" style="display:flex;gap:4px">
+                <select name="trip_code" style="font-size:11px;padding:2px 4px;border:1px solid var(--bd);border-radius:4px">
+                  {code_opts.replace(f'<option>{r[3]}</option>',f'<option selected>{r[3]}</option>') if r[3] else code_opts}
+                </select>
+                <button type="submit" style="font-size:11px;padding:2px 8px;background:var(--b600);color:white;border:none;border-radius:4px;cursor:pointer">✓</button>
+              </form>
+            </td>
             </tr>""" for r in rows)
         return page_shell("Mail-Log",f"""
-        <div class="page-card"><h2>Mail-Log ({len(rows)} Einträge)</h2>
-          <div class="acts"><a class="btn-l" href="/">Zurück</a><a class="btn" href="/analyze-attachments">KI-Analyse</a></div>
+        <div class="page-card" style="max-width:1200px"><h2>Mail-Log ({len(rows)} Einträge)</h2>
+          <div class="acts">
+            <a class="btn-l" href="/">Zurück</a>
+            <a class="btn" href="/analyze-attachments">KI-Analyse</a>
+            <a class="btn-l" href="/reanalyze-mails" onclick="return confirm('Mails zurücksetzen?')">🔄 Reset+Reanalyse</a>
+          </div>
+          <p class="sub" style="margin-bottom:8px">Mails ohne Code (orange –) können hier manuell einer Reise zugeordnet werden.</p>
           <div style="overflow-x:auto"><table>
-            <tr><th>Zeit</th><th>Von</th><th>Betreff</th><th>Code</th><th>Typ</th><th>PNR</th><th>Status</th></tr>
-            {html or '<tr><td colspan="7">Keine Mails</td></tr>'}
+            <tr><th>Zeit</th><th>Von</th><th>Betreff</th><th>Code</th><th>Typ</th><th>PNR</th><th>Größe</th><th>Status</th><th>Zuordnen</th></tr>
+            {html or '<tr><td colspan="9">Keine Mails</td></tr>'}
           </table></div>
         </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+
+
+@app.post("/mail-assign/{mail_id}")
+async def mail_assign(mail_id: int, request: Request):
+    """Weist einer Mail manuell einen Reisecode zu und setzt Status auf ausstehend."""
+    try:
+        form=await request.form()
+        tc=(form.get("trip_code") or "").strip()
+        if not tc:
+            return RedirectResponse(url="/mail-log",status_code=303)
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("UPDATE mail_messages SET trip_code=%s, analysis_status='ausstehend' WHERE id=%s",(tc,mail_id))
+        # Auch zugehörige Attachments zuordnen
+        cur.execute("SELECT mail_uid FROM mail_messages WHERE id=%s",(mail_id,))
+        row=cur.fetchone()
+        if row:
+            cur.execute("UPDATE mail_attachments SET trip_code=%s WHERE mail_uid=%s AND (trip_code IS NULL OR trip_code='')",(tc,row[0]))
+        cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(tc,))
+        conn.commit();cur.close();conn.close()
+        return RedirectResponse(url="/mail-log",status_code=303)
+    except Exception as e:
+        return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
 
 
 @app.get("/mail-detail/{mail_id}", response_class=HTMLResponse)
@@ -4945,17 +4986,34 @@ async def upload_beleg(
 
 @app.get("/reanalyze-mails")
 def reanalyze_mails():
-    """Setzt Mail-Status zurück UND löscht alte Mail-Body-Belege → sauber neu analysieren."""
+    """Setzt Mail-Status zurück, löscht Mail-Body-Belege, markiert Inline-Bilder."""
     try:
         conn=get_conn();cur=conn.cursor()
         # Mail-Status zurücksetzen
         cur.execute("UPDATE mail_messages SET analysis_status='ausstehend' WHERE analysis_status='ok'")
         n_mails=cur.rowcount
-        # Alte Mail-Body-Belege löschen (werden neu erstellt)
+        # Alte Mail-Body-Belege löschen
         cur.execute("DELETE FROM mail_attachments WHERE storage_key LIKE 'mail_body_%'")
         n_belege=cur.rowcount
+        # Inline-Bilder + nicht-analysierbare sofort als irrelevant markieren
+        cur.execute("""UPDATE mail_attachments SET
+            analysis_status='Inline-Grafik', confidence='niedrig', review_flag='ok',
+            detected_type='Inline-Grafik'
+            WHERE original_filename SIMILAR TO 'image[0-9]+[.](png|jpg|jpeg|gif|bmp|emz|wmz)'
+            OR original_filename ILIKE '%.emz'
+            OR original_filename ILIKE '%.wmz'""")
+        n_images=cur.rowcount
+        # Ausstehende echte Anhänge (PDFs, Bilder ohne inline-Muster) zurücksetzen
+        cur.execute("""UPDATE mail_attachments SET analysis_status='ausstehend'
+            WHERE analysis_status NOT IN ('Inline-Grafik','ok (manuell)')
+            AND storage_key NOT LIKE 'mail_body_%'
+            AND original_filename NOT SIMILAR TO 'image[0-9]+[.](png|jpg|jpeg|gif|bmp|emz|wmz)'
+            AND original_filename NOT ILIKE '%.emz'
+            AND original_filename NOT ILIKE '%.wmz'""")
         conn.commit();cur.close();conn.close()
-        return {"status":"ok","mails_reset":n_mails,"mailbody_belege_geloescht":n_belege,
+        return {"status":"ok","mails_reset":n_mails,
+                "mailbody_belege_geloescht":n_belege,
+                "inline_bilder_markiert":n_images,
                 "hinweis":"Bitte /analyze-attachments aufrufen"}
     except Exception as e:
         return {"status":"fehler","detail":str(e)}
