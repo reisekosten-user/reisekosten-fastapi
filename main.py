@@ -152,7 +152,7 @@ async def generate_and_store_mail_pdf(att_id: int, subj: str, body: str,
         return None
 
 
-APP_VERSION = "9.0"
+APP_VERSION = "9.1"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -587,15 +587,18 @@ PFLICHTFELDER:
 - bemerkung: Kurze Zusammenfassung auf Deutsch
 
 FLUG-FELDER (nur bei beleg_typ=Flug):
-- flight_numbers: alle Flugnummern kommagetrennt z.B. "LH3463,LH1078,LH1077,LH3464"
+- flight_numbers: alle Flugnummern kommagetrennt z.B. "LH3463,LH1078,LH1077,LH3463"
+  WICHTIG: Die Anzahl der Flugnummern MUSS mit der Anzahl der Segmente übereinstimmen!
 - flight_segments: Jedes Flug-Segment im Format "FN|VON|NACH|DATUM|ABF|DATUM|ANK"
   Trennzeichen zwischen Segmenten: Semikolon
   Beispiel 4 Segmente Nuernberg-Lyon und zurueck:
-  "LH3463|NUE|FRA|20.04.2026|06:30|20.04.2026|07:35;LH1078|FRA|LYS|20.04.2026|09:15|20.04.2026|10:20;LH1077|LYS|FRA|24.04.2026|19:00|24.04.2026|20:15;LH3464|FRA|NUE|24.04.2026|21:00|24.04.2026|21:55"
+  "LH3463|NUE|FRA|20.04.2026|06:30|20.04.2026|07:35;LH1078|FRA|LYS|20.04.2026|09:15|20.04.2026|10:20;LH1077|LYS|FRA|24.04.2026|14:35|24.04.2026|17:19;LH3463|FRA|NUE|24.04.2026|17:19|24.04.2026|19:15"
   Alle Felder: Flugnummer | Abflughafen-IATA | Ankunfthafen-IATA | Abflugdatum | Abflugzeit | Ankunftdatum | Ankunftzeit
   IATA-Codes: NUE=Nuernberg FRA=Frankfurt LYS=Lyon MUC=Muenchen BER=Berlin CDG=Paris ZRH=Zuerich VIE=Wien
   Wenn Uhrzeit fehlt: leeres Feld lassen z.B. "LH3463|NUE|FRA|20.04.2026||20.04.2026|"
-  WICHTIG: Hin- UND Rueckfluege erfassen!
+  ABSOLUT ZWINGEND: ALLE Segmente eintragen - Hin- UND Rueckfluege!
+  Bei Verbindungsflug NUE->FRA->LYS sind das 2 Segmente, nicht 1!
+  Zähle alle Flugnummern und stelle sicher dass jede ein eigenes Segment hat!
 - traveler_name: Name des Passagiers z.B. "Max Mustermann"
 - destination: Zielstadt des Hinflugs z.B. "Lyon"
 
@@ -863,6 +866,19 @@ async def _apply_fields(cur, att_id, fields, ocr_text=""):
     segments   = fields.get("flight_segments","") or ""
     confidence = fields.get("confidence","niedrig") or "niedrig"
     bemerkung  = fields.get("bemerkung","") or ""
+
+    # Segment-Vollständigkeitsprüfung: jede Flugnummer braucht ein Segment
+    if fns and beleg_typ == "Flug":
+        fn_list = [f.strip() for f in fns.split(",") if f.strip()]
+        seg_list = [s.strip() for s in segments.split(";") if s.strip()] if segments else []
+        seg_fns  = [s.split("|")[0].strip() for s in seg_list if s]
+        missing  = [f for f in fn_list if f not in seg_fns]
+        if missing:
+            # Fehlende als Stub-Segmente anhängen (nur Flugnummer, Rest leer)
+            for mfn in missing:
+                seg_list.append(f"{mfn}|||||| ")
+            segments = ";".join(seg_list)
+            bemerkung = (bemerkung + f" [Stub-Segmente für: {','.join(missing)}]").strip()
 
     # Custom Rules: wenn KI "Sonstiges" oder kein Typ → eigene Regeln prüfen
     if beleg_typ in ("Sonstiges","") and anbieter:
@@ -3255,23 +3271,33 @@ def trip_detail(tc: str):
             })
 
         # Fallback: Flugnummern aus trip_meta die noch nicht in Segmenten erscheinen
-        # → als Hinweis-Zeile damit nichts verloren geht
+        # → auf Rückreisedatum platzieren mit direktem Beleg-Edit-Link
         all_meta_fns = [f.strip() for f in (fns or "").split(",") if f.strip()]
         missing_fns = [f for f in all_meta_fns if f not in fns_from_belege]
         if missing_fns:
-            timeline_events.append({
-                "date": ret_d or dep_d or date.today(),
-                "time": "",
-                "icon": "✈",
-                "task": f"Flug {', '.join(missing_fns)}",
-                "route": "⚠ Kein Segment",
-                "timerange": "",
-                "detail": "",
-                "extra": f'<span style="font-size:10px;color:var(--am6)">Bitte Beleg korrigieren</span>',
-                "status": "",
-                "type": "beleg",
-                "att_id": None,
-            })
+            # Finde den Flug-Beleg für Edit-Link
+            edit_att_id = None
+            for a in atts:
+                if a[1] in ("Flug","Kalendereintrag") and a[11]:  # afns not empty
+                    edit_att_id = a[9]
+                    break
+            edit_hint = (f'<a href="/beleg-edit/{edit_att_id}?back=/trip/{tc}" '
+                        f'style="font-size:10px;color:var(--am6);margin-left:6px">'
+                        f'✏ Segment ergänzen</a>') if edit_att_id else ""
+            for missing_fn in missing_fns:
+                timeline_events.append({
+                    "date": ret_d or dep_d or date.today(),
+                    "time": "",
+                    "icon": "✈",
+                    "task": f"Flug {missing_fn}",
+                    "route": "⚠ Segment fehlt",
+                    "timerange": "",
+                    "detail": "",
+                    "extra": edit_hint,
+                    "status": "",
+                    "type": "beleg",
+                    "att_id": edit_att_id,
+                })
 
         # Chronologisch sortieren – Mahlzeiten nach Belegen, Journeys an Rand
         timeline_events.sort(key=lambda e: (
