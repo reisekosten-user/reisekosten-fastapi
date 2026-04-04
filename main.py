@@ -8,7 +8,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "8.7"
+APP_VERSION = "8.8"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -119,16 +119,20 @@ VMA = {
     "CN_HK": {"full": 83.0, "partial": 56.0},
 }
 # Mahlzeitenabzug 2026: 20%/40%/40% vom deutschen 24h-Satz (28 EUR)
-MEAL_DED = {"breakfast": 5.60, "lunch": 11.20, "dinner": 11.20}
+# Mahlzeitenabzug: prozentual vom Tagessatz (§ 9 Abs. 4a EStG)
+# Frühstück 20%, Mittagessen 40%, Abendessen 40%
+MEAL_DED_PCT = {"breakfast": 0.20, "lunch": 0.40, "dinner": 0.40}
 
 def get_vma(cc, day_type, meals, city_key=None):
-    """Gibt VMA-Betrag zurück. city_key z.B. 'FR_PARIS' für stadtspez. Satz."""
+    """VMA-Betrag mit prozentualem Mahlzeitenabzug vom länderspezifischen Tagessatz."""
     cc_norm=(cc or "DE").upper().strip()
-    # Stadtspezifischen Satz bevorzugen wenn vorhanden
     key = city_key.upper() if city_key and city_key.upper() in VMA else cc_norm
     r = VMA.get(key, VMA.get(cc_norm, {"full":28.0,"partial":14.0}))
-    base  = r["full"] if day_type == "full" else r["partial"]
-    abzug = sum(MEAL_DED.get(m,0) for m in (meals or []))
+    # Basis ist immer der volle 24h-Satz für den Abzug (BMF: Abzug vom Höchstbetrag)
+    full_rate = r["full"]
+    base = full_rate if day_type == "full" else r["partial"]
+    # Abzug prozentual vom vollen Tagessatz
+    abzug = sum(full_rate * MEAL_DED_PCT.get(m, 0) for m in (meals or []))
     return max(0.0, round(base - abzug, 2))
 
 def load_daily_meals(trip_code: str) -> dict:
@@ -4633,7 +4637,7 @@ def vma_rates_page():
             <tr><th>Code</th><th>Region</th><th>8-24h (Partial)</th><th>&gt;24h (Full)</th><th>Stand</th></tr>
             {rows}
           </table></div>
-          <p class="sub" style="margin-top:12px">Mahlzeitenabzug: Frühstück {MEAL_DED['breakfast']:.2f} € · Mittagessen {MEAL_DED['lunch']:.2f} € · Abendessen {MEAL_DED['dinner']:.2f} €</p>
+          <p class="sub" style="margin-top:12px">Mahlzeitenabzug: Frühstück 20% · Mittagessen 40% · Abendessen 40% des jeweiligen Ländersatzes (§ 9 Abs. 4a EStG)</p>
           <p class="sub">Quelle: BMF-Schreiben zu § 9 Abs. 4a EStG · Sätze gelten ab 01.01.2026</p>
         </div>""",active_tab="")
     except Exception as e:
@@ -4862,7 +4866,8 @@ def meals_page(tc: str):
 
             # VMA-Satz Info
             vma_r=VMA.get(day_cc,{"full":28.0,"partial":14.0})
-            base=vma_r["full"] if dtype=="full" else vma_r["partial"]
+            full_rate=vma_r["full"]
+            base=full_rate if dtype=="full" else vma_r["partial"]
 
             rows_html+=f"""<tr{wkend_style}>
                 <td style="font-weight:500;white-space:nowrap;font-size:12px">{str(d)} {wd}</td>
@@ -4884,7 +4889,7 @@ def meals_page(tc: str):
                 <td><input type="text" class="finp" name="n_{d}" value="{notes_val}" placeholder="Notiz..." style="padding:2px 6px;font-size:11px"></td>
                 <td style="text-align:right;font-family:DM Mono,monospace;color:var(--b600);font-size:12px;white-space:nowrap">
                   {vma_day:.2f} € {vma_source_icon}
-                  <div style="font-size:9px;color:var(--t300)">{day_cc} · {base:.0f}€ Basis</div>
+                  <div style="font-size:9px;color:var(--t300)">{day_cc} · {base:.0f}€/Tag · F:{full_rate*0.2:.2f}/M:{full_rate*0.4:.2f}/A:{full_rate*0.4:.2f}€</div>
                 </td>
             </tr>"""
 
@@ -4910,9 +4915,9 @@ def meals_page(tc: str):
             <div style="overflow-x:auto"><table>
               <tr>
                 <th>Datum</th>
-                <th style="text-align:center">🍳 Früh<br><span style="font-size:9px;font-weight:400">−5,60€</span></th>
-                <th style="text-align:center">🥗 Mittag<br><span style="font-size:9px;font-weight:400">−11,20€</span></th>
-                <th style="text-align:center">🍽 Abend<br><span style="font-size:9px;font-weight:400">−11,20€</span></th>
+                <th style="text-align:center">🍳 Früh<br><span style="font-size:9px;font-weight:400">−20%</span></th>
+                <th style="text-align:center">🥗 Mittag<br><span style="font-size:9px;font-weight:400">−40%</span></th>
+                <th style="text-align:center">🍽 Abend<br><span style="font-size:9px;font-weight:400">−40%</span></th>
                 <th>Land</th>
                 <th>VMA manuell<br><span style="font-size:9px;font-weight:400">leer = auto</span></th>
                 <th>Notiz</th>
