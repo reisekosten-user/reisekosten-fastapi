@@ -1,8 +1,27 @@
 from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-import os, re, base64, json, httpx, imaplib, email, hashlib, threading, time, io
+import os, re, base64, json, httpx, imaplib, email, hashlib, threading, time, io, sys, subprocess
 from email.header import decode_header
+
+# ── Auto-Install PDF-Bibliotheken falls nicht vorhanden ──────────────────────
+def _ensure_pdf_libs():
+    missing = []
+    try: import reportlab
+    except ImportError: missing.append("reportlab>=4.2.0")
+    try: import pypdf
+    except ImportError: missing.append("pypdf>=4.3.0")
+    try: import PIL
+    except ImportError: missing.append("Pillow>=10.0.0")
+    if missing:
+        print(f"[PDF] Installiere fehlende Libraries: {missing}")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet"] + missing)
+            print("[PDF] Installation erfolgreich")
+        except Exception as e:
+            print(f"[PDF] Installation fehlgeschlagen: {e}")
+
+_ensure_pdf_libs()
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 import psycopg2
@@ -155,7 +174,7 @@ async def generate_and_store_mail_pdf(att_id: int, subj: str, body: str,
         return None
 
 
-APP_VERSION = "9.3"
+APP_VERSION = "9.4"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
