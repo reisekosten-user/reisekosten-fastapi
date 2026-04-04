@@ -8,7 +8,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "8.4"
+APP_VERSION = "8.5"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -1987,6 +1987,9 @@ def _progress(t):
 # =========================================================
 
 @app.get("/", response_class=HTMLResponse)
+async def dashboard_main(request: Request):
+    return await _dashboard(request, "all")
+
 @app.get("/active", response_class=HTMLResponse)
 async def dashboard_active(request: Request):
     return await _dashboard(request, "active")
@@ -2148,7 +2151,21 @@ async def _dashboard(request: Request, focus: str):
                 </div>"""
             return f'<div class="cards">{cards}</div>'
 
-        # Nur relevante Sektion zeigen je nach Tab
+        # Sektionen je nach Tab
+        all_sections = f"""
+        <div class="sb" id="active">
+          <div class="sec-hdr"><div class="sec-dot active"></div><span class="sec-title">Laufende Reisen</span><span class="sec-cnt">{len(active_t)} aktiv</span></div>
+          {active_cards(active_t)}
+        </div>
+        <div class="sb" id="planned">
+          <div class="sec-hdr"><div class="sec-dot planned"></div><span class="sec-title">Vorplanung</span><span class="sec-cnt">{len(planned_t)} geplant</span></div>
+          {planned_cards(planned_t)}
+        </div>
+        <div class="sb" id="done">
+          <div class="sec-hdr"><div class="sec-dot done"></div><span class="sec-title">Abgeschlossen</span><span class="sec-cnt">{len(done_t)} Reisen</span></div>
+          {done_cards(done_t)}
+        </div>"""
+
         if focus == "active":
             sections = f"""
         <div class="sb">
@@ -2167,7 +2184,8 @@ async def _dashboard(request: Request, focus: str):
           <div class="sec-hdr"><div class="sec-dot done"></div><span class="sec-title">Abgeschlossen</span><span class="sec-cnt">{len(done_t)} Reisen</span></div>
           {done_cards(done_t)}
         </div>"""
-        else:
+        else:  # "all" – Hauptseite zeigt alle drei
+            sections = all_sections
             sections = f"""
         <div class="sb" id="active">
           <div class="sec-hdr"><div class="sec-dot active"></div><span class="sec-title">Laufende Reisen</span><span class="sec-cnt">{len(active_t)} aktiv</span></div>
@@ -2191,6 +2209,7 @@ async def _dashboard(request: Request, focus: str):
             <a class="btn-l" href="/attachment-log">Anhang-Log</a>
             <a class="btn-l" href="/mail-log">Mail-Log</a>
             <a class="btn-l" href="/rules">⚙ Kategorie-Regeln</a>
+            <a class="btn-l" href="/vma-rates" title="VMA-Sätze prüfen und aktualisieren">📋 VMA-Sätze 2026</a>
             <a class="btn-l" href="/reset-all" style="color:var(--re6)">Reset</a>
             <a class="btn-l" href="/init" style="color:var(--t300)">DB Init</a>
           </div>
@@ -4253,6 +4272,94 @@ def stats():
 # =========================================================
 # KATEGORIE-REGELN ADMIN
 # =========================================================
+
+@app.get("/vma-rates", response_class=HTMLResponse)
+def vma_rates_page():
+    """Zeigt aktuelle VMA-Sätze und ermöglicht Aktualisierung."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        # VMA-Sätze aus DB laden falls vorhanden (überschreiben Hardcode)
+        cur.execute("""CREATE TABLE IF NOT EXISTS vma_settings (
+            id SERIAL PRIMARY KEY, cc TEXT UNIQUE, full_rate NUMERIC, partial_rate NUMERIC,
+            label TEXT, updated_at TIMESTAMP DEFAULT now())""")
+        cur.execute("SELECT cc,label,full_rate,partial_rate,updated_at FROM vma_settings ORDER BY cc")
+        db_rates=cur.fetchall()
+        cur.close();conn.close()
+
+        # Tabelle aus aktuellem VMA dict
+        rows=""
+        for cc, r in sorted(VMA.items()):
+            db_row=next((x for x in db_rates if x[0]==cc),None)
+            full = float(db_row[2]) if db_row else r["full"]
+            partial = float(db_row[3]) if db_row else r["partial"]
+            updated = str(db_row[4])[:10] if db_row else "Hardcode 2026"
+            rows+=f"""<tr>
+                <td style="font-family:DM Mono,monospace;font-weight:600">{cc}</td>
+                <td style="font-size:11px;color:var(--t500)">{db_row[1] if db_row else cc}</td>
+                <td style="font-family:DM Mono,monospace;text-align:right">{partial:.2f} €</td>
+                <td style="font-family:DM Mono,monospace;text-align:right">{full:.2f} €</td>
+                <td style="font-size:11px;color:var(--t300)">{updated}</td>
+            </tr>"""
+
+        return page_shell("VMA-Sätze",f"""
+        <div class="page-card" style="max-width:900px">
+          <h2>Verpflegungsmehraufwendungen – Aktuelle Sätze</h2>
+          <div style="background:var(--am1);border:1px solid rgba(201,124,10,.2);border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px">
+            <b>⚠ Wichtiger Hinweis:</b> Das BMF veröffentlicht jährlich neue Sätze (meist im Oktober für das Folgejahr).
+            Bitte prüfen Sie die Sätze unter
+            <a href="https://www.bundesfinanzministerium.de" target="_blank" style="color:var(--b600)">bundesfinanzministerium.de</a>
+            und aktualisieren Sie die Werte hier bei Bedarf.
+            <b>Aktuell hinterlegt: Sätze 2026</b>
+          </div>
+          <div class="acts" style="margin-bottom:16px">
+            <a class="btn" href="/vma-rates/update" onclick="return confirm('VMA-Sätze aus Hardcode in DB schreiben?')">💾 Aktuelle Sätze in DB speichern</a>
+            <a class="btn-l" href="/">Dashboard</a>
+          </div>
+          <div style="overflow-x:auto"><table>
+            <tr><th>Code</th><th>Region</th><th>8-24h (Partial)</th><th>&gt;24h (Full)</th><th>Stand</th></tr>
+            {rows}
+          </table></div>
+          <p class="sub" style="margin-top:12px">Mahlzeitenabzug: Frühstück {MEAL_DED['breakfast']:.2f} € · Mittagessen {MEAL_DED['lunch']:.2f} € · Abendessen {MEAL_DED['dinner']:.2f} €</p>
+          <p class="sub">Quelle: BMF-Schreiben zu § 9 Abs. 4a EStG · Sätze gelten ab 01.01.2026</p>
+        </div>""",active_tab="")
+    except Exception as e:
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+
+@app.get("/vma-rates/update")
+def vma_rates_save():
+    """Schreibt die Hardcode-VMA-Sätze in die DB (für Audit-Trail)."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS vma_settings (
+            id SERIAL PRIMARY KEY, cc TEXT UNIQUE, full_rate NUMERIC, partial_rate NUMERIC,
+            label TEXT, updated_at TIMESTAMP DEFAULT now())""")
+        LABELS={"DE":"Deutschland","FR":"Frankreich","FR_PARIS":"Frankreich/Paris",
+                "GB":"Großbritannien","GB_LONDON":"Großbritannien/London",
+                "US":"USA","US_NYC":"USA/New York","US_LA":"USA/Los Angeles",
+                "US_CHI":"USA/Chicago","US_MIA":"USA/Miami",
+                "AT":"Österreich","CH":"Schweiz","CH_GENF":"Schweiz/Genf",
+                "IT":"Italien","IT_MAILAND":"Italien/Mailand",
+                "ES":"Spanien","ES_MADRID":"Spanien/Madrid",
+                "NL":"Niederlande","BE":"Belgien","DK":"Dänemark",
+                "PL":"Polen","PL_WARSCHAU":"Polen/Warschau",
+                "JP":"Japan","JP_TOKIO":"Japan/Tokio",
+                "CN":"China","CN_HK":"Hongkong",
+                "IN":"Indien","AE":"VAE/Dubai","AZ":"Aserbaidschan",
+                "SG":"Singapur","QA":"Katar","SA":"Saudi-Arabien",
+                "TR":"Türkei","SE":"Schweden","NO":"Norwegen",
+                "FI":"Finnland","CZ":"Tschechien","HU":"Ungarn","RO":"Rumänien",
+                "KR":"Südkorea","AU":"Australien","CA":"Kanada","BR":"Brasilien","RU":"Russland"}
+        for cc,r in VMA.items():
+            cur.execute("""INSERT INTO vma_settings (cc,full_rate,partial_rate,label,updated_at)
+                VALUES (%s,%s,%s,%s,now())
+                ON CONFLICT (cc) DO UPDATE SET full_rate=EXCLUDED.full_rate,
+                partial_rate=EXCLUDED.partial_rate,label=EXCLUDED.label,updated_at=now()""",
+                (cc,r["full"],r["partial"],LABELS.get(cc,cc)))
+        conn.commit();cur.close();conn.close()
+        return RedirectResponse(url="/vma-rates",status_code=303)
+    except Exception as e:
+        return {"status":"fehler","detail":str(e)}
+
 
 @app.get("/rules", response_class=HTMLResponse)
 def rules_page():
