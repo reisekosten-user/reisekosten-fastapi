@@ -1,14 +1,158 @@
 from fastapi import FastAPI, Request, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-import os, re, base64, json, httpx, imaplib, email, hashlib, threading, time
+import os, re, base64, json, httpx, imaplib, email, hashlib, threading, time, io
 from email.header import decode_header
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "8.9"
+
+# =========================================================
+# PDF-HILFSFUNKTIONEN
+# =========================================================
+
+def _try_import_pdf():
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+        from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
+        import pypdf
+        return True
+    except ImportError:
+        return False
+
+HAS_PDF_LIBS = _try_import_pdf()
+
+def make_text_pdf(title: str, body_text: str, meta: dict = None) -> bytes:
+    """Erstellt ein einfaches PDF aus Text mit reportlab. Gibt bytes zurück."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+    from reportlab.lib.enums import TA_LEFT
+    import html
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+        leftMargin=20*mm, rightMargin=20*mm, topMargin=20*mm, bottomMargin=20*mm)
+    styles = getSampleStyleSheet()
+    story = []
+
+    # Header
+    header_style = ParagraphStyle('Header', parent=styles['Title'],
+        fontSize=16, textColor=colors.HexColor('#1a3d96'), spaceAfter=4)
+    sub_style = ParagraphStyle('Sub', parent=styles['Normal'],
+        fontSize=9, textColor=colors.HexColor('#5a6e8a'), spaceAfter=12)
+    body_style = ParagraphStyle('Body', parent=styles['Normal'],
+        fontSize=9, leading=14, spaceAfter=6)
+    label_style = ParagraphStyle('Label', parent=styles['Normal'],
+        fontSize=8, textColor=colors.HexColor('#5a6e8a'), fontName='Helvetica-Bold')
+
+    story.append(Paragraph(html.escape(title), header_style))
+    story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor('#1a3d96')))
+    story.append(Spacer(1, 4*mm))
+
+    # Meta-Tabelle
+    if meta:
+        rows = [[Paragraph(html.escape(str(k)), label_style),
+                 Paragraph(html.escape(str(v)), body_style)]
+                for k,v in meta.items() if v]
+        if rows:
+            t = Table(rows, colWidths=[45*mm, 120*mm])
+            t.setStyle(TableStyle([
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.HexColor('#f8faff'), colors.white]),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#eaeef5')),
+                ('TOPPADDING', (0,0), (-1,-1), 4),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+            ]))
+            story.append(t)
+            story.append(Spacer(1, 6*mm))
+
+    # Body-Text
+    if body_text:
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#dde4ef')))
+        story.append(Spacer(1, 3*mm))
+        for line in body_text.split('\n'):
+            safe = html.escape(line.strip())
+            if safe:
+                story.append(Paragraph(safe, body_style))
+            else:
+                story.append(Spacer(1, 2*mm))
+
+    # Footer
+    story.append(Spacer(1, 8*mm))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#dde4ef')))
+    footer_style = ParagraphStyle('Footer', parent=styles['Normal'],
+        fontSize=7, textColor=colors.HexColor('#9bafc8'))
+    story.append(Paragraph(
+        f"Herrhammer Kürschner Kerzenmaschinen · Erstellt {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+        footer_style))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def merge_pdfs(pdf_bytes_list: list) -> bytes:
+    """Führt mehrere PDF-bytes zu einer einzigen PDF zusammen."""
+    import pypdf
+    writer = pypdf.PdfWriter()
+    for pdf_bytes in pdf_bytes_list:
+        if not pdf_bytes:
+            continue
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+            for page in reader.pages:
+                writer.add_page(page)
+        except Exception as e:
+            print(f"[PDF merge skip]: {e}")
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+async def generate_and_store_mail_pdf(att_id: int, subj: str, body: str,
+                                       typ: str, vendor: str, betrag: str,
+                                       datum: str, tc: str, conn) -> str | None:
+    """Generiert PDF aus Mail-Body und speichert in S3. Gibt storage_key zurück."""
+    if not HAS_PDF_LIBS:
+        return None
+    try:
+        meta = {
+            "Typ": typ or "–",
+            "Anbieter": vendor or "–",
+            "Betrag": f"{betrag} €" if betrag else "–",
+            "Datum": datum or "–",
+            "Reise": tc or "–",
+        }
+        pdf_bytes = make_text_pdf(
+            title=f"{typ or 'Buchungsbestätigung'}: {vendor or subj or '–'}",
+            body_text=body or "",
+            meta=meta
+        )
+        key = f"mail_pdfs/{tc}/mail_body_{att_id}.pdf"
+        s3 = get_s3()
+        s3.put_object(Bucket=S3_BUCKET, Key=key, Body=pdf_bytes,
+                      ContentType="application/pdf")
+        # PDF-Key in DB speichern
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS pdf_key TEXT")
+        cur.execute("UPDATE mail_attachments SET pdf_key=%s WHERE id=%s", (key, att_id))
+        conn.commit()
+        cur.close()
+        return key
+    except Exception as e:
+        print(f"[PDF gen error att {att_id}]: {e}")
+        return None
+
+
+APP_VERSION = "9.0"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -1806,6 +1950,7 @@ def init():
                     "detected_flight_numbers TEXT","detected_train_numbers TEXT","detected_nights INTEGER DEFAULT 0",
                     "flight_time_info TEXT","detected_checkin TEXT","detected_checkout TEXT",
                     "detected_checkin_time TEXT","detected_checkout_time TEXT","flight_segments TEXT",
+                    "pdf_key TEXT",
                     "analysis_status TEXT DEFAULT 'ausstehend'","confidence TEXT DEFAULT 'niedrig'",
                     "review_flag TEXT DEFAULT 'pruefen'","ki_bemerkung TEXT",
                     "file_hash TEXT","created_at TIMESTAMP DEFAULT now()"]:
@@ -2454,8 +2599,17 @@ async def analyze_attachments():
                                  "ok (Mail-Body)",conf_ki,
                                  "ok" if conf_ki=="hoch" else "pruefen",
                                  f"Aus Mail-Text: {subj or ''}"))
-
-                    # ── VMA-Destinationen automatisch ableiten ──────────────────
+                            # Neue ID holen und sofort PDF generieren
+                            cur.execute("SELECT lastval()")
+                            new_att_id = cur.fetchone()[0]
+                            if HAS_PDF_LIBS:
+                                pdf_key = await generate_and_store_mail_pdf(
+                                    new_att_id, subj, body,
+                                    typ_ki, vendor_ki, betrag_ki,
+                                    datum_ki, rc, conn)
+                                if pdf_key:
+                                    cur.execute("UPDATE mail_attachments SET pdf_key=%s WHERE id=%s",
+                                        (pdf_key, new_att_id))
                     # Quellen: flight_segments (Flughafen→Land), checkin/checkout, dest_ki
                     if rc:
                         cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(rc,))
@@ -2781,7 +2935,8 @@ def trip_detail(tc: str):
             pnr_code,detected_flight_numbers,detected_train_numbers,detected_amount,detected_nights,
             COALESCE(flight_time_info,''),COALESCE(detected_checkin,''),COALESCE(detected_checkout,''),
             COALESCE(detected_checkin_time,''),COALESCE(detected_checkout_time,''),
-            COALESCE(flight_segments,'')
+            COALESCE(flight_segments,''),
+            COALESCE(pdf_key,'')
             FROM mail_attachments WHERE trip_code=%s ORDER BY detected_date,id""",(tc,))
         atts=cur.fetchall()
 
@@ -2848,7 +3003,7 @@ def trip_detail(tc: str):
         # Belege als Timeline-Einträge
         beleg_sum=0.0
         for a in atts:
-            fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt,det_nights,ft_info,checkin_s,checkout_s,checkin_t_s,checkout_t_s,seg_s=a
+            fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt,det_nights,ft_info,checkin_s,checkout_s,checkin_t_s,checkout_t_s,seg_s,pdf_key_a=a
 
             # ── Filter: Inline-Bilder, ICS-Reste, Irrelevantes ──
             fn_lower=(fn_a or "").lower()
@@ -2887,7 +3042,13 @@ def trip_detail(tc: str):
             amount_str=f"{amt_eur} €" if amt_eur else (f"{amt} {curr}" if amt else "–")
             edit_url=f"/beleg-edit/{att_id}"
             view_url=f"/beleg/{att_id}"
-            actions=(f'<a href="{view_url}" target="_blank" style="color:var(--b600);margin-right:6px" title="Beleg anzeigen">📄</a>'
+            # PDF-Link: direktes PDF wenn vorhanden, sonst Beleg-Vorschau
+            pdf_link=""
+            if pdf_key_a:
+                pdf_view_url=f"/beleg-pdf/{att_id}"
+                pdf_link=f'<a href="{pdf_view_url}" target="_blank" style="color:var(--gr6);margin-right:6px" title="PDF anzeigen">📋</a>'
+            actions=(pdf_link +
+                    f'<a href="{view_url}" target="_blank" style="color:var(--b600);margin-right:6px" title="Beleg anzeigen">📄</a>'
                     f'<a href="{edit_url}" style="color:var(--t300)" title="KI-Ergebnis korrigieren">✏</a>')
 
             # ── HOTEL: mehrtägig mit Check-in/out ──────────────────────
@@ -3708,10 +3869,16 @@ def report_pdf(tc: str):
 # FLUG + BAHN CHECK
 # =========================================================
 
-@app.get("/report-komplett/{tc}", response_class=HTMLResponse)
+@app.get("/report-komplett/{tc}")
 async def report_komplett(tc: str):
-    """Komplette Abrechnung als druckbares HTML mit allen Belegen als Anhang."""
+    """Komplettes Abrechnung-PDF: Deckblatt + VMA + alle Belege als eine PDF."""
     try:
+        if not HAS_PDF_LIBS:
+            return HTMLResponse("""<div style='font-family:sans-serif;padding:32px'>
+                <h2>PDF-Bibliotheken fehlen</h2>
+                <p>Bitte <code>reportlab</code> und <code>pypdf</code> in requirements.txt eintragen und neu deployen.</p>
+            </div>""", status_code=500)
+
         conn=get_conn();cur=conn.cursor()
         cur.execute("""SELECT traveler_name,departure_date,return_date,country_code,
             departure_time_home,arrival_time_home,destinations,meals_reimbursed,
@@ -3719,17 +3886,17 @@ async def report_komplett(tc: str):
             nights_planned,nights_booked,trip_title,customer_code,vma_destinations,employee_code
             FROM trip_meta WHERE trip_code=%s""",(tc,))
         meta=cur.fetchone()
-        if not meta: return HTMLResponse("Nicht gefunden",404)
+        if not meta:
+            cur.close();conn.close()
+            return HTMLResponse("Reise nicht gefunden",404)
         (traveler,dep,ret,cc,dep_t,ret_t,destinations,meals_reimb,
          fns,trains,colleagues,notes,pnr,nights_p,nights_b,
          trip_title,customer_code,vma_dest_str,employee_code)=meta
 
         cur.execute("""SELECT id,original_filename,detected_type,detected_amount,
             detected_amount_eur,detected_currency,detected_date,detected_vendor,
-            analysis_status,storage_key,content_type
+            analysis_status,storage_key,content_type,pdf_key
             FROM mail_attachments WHERE trip_code=%s
-            AND storage_key NOT LIKE 'mail_body_%%'
-            AND storage_key NOT LIKE 'S3-%%'
             AND original_filename NOT SIMILAR TO 'image[0-9]+[.](png|jpg|jpeg|gif|bmp|emz|wmz)'
             ORDER BY detected_date,id""",(tc,))
         atts=cur.fetchall();cur.close();conn.close()
@@ -3738,7 +3905,6 @@ async def report_komplett(tc: str):
         ret_d=ret if isinstance(ret,date) else (date.fromisoformat(str(ret)) if ret else None)
         days=(ret_d-dep_d).days+1 if dep_d and ret_d else 0
 
-        # VMA berechnen
         vma_dest=parse_vma_destinations(vma_dest_str or "")
         daily=load_daily_meals(tc)
         ml=[m.strip() for m in (meals_reimb or "").split(",") if m.strip()]
@@ -3751,143 +3917,207 @@ async def report_komplett(tc: str):
             vma_total=0.0; vma_rows_data=[]
         trenn_total,_=trennungspauschale(dep_d,ret_d,dep_t or "08:00",ret_t or "18:00")
 
-        # Belege-Summe
         beleg_sum=0.0
-        beleg_rows_html=""
-        for i,(att_id,fn,dtype,amt,amt_eur,curr,ddate,vendor,stat,skey,ctype) in enumerate(atts,1):
-            if amt_eur:
-                try: beleg_sum+=float(amt_eur.replace(".","").replace(",","."))
+        for a in atts:
+            if a[4]:
+                try: beleg_sum+=float(a[4].replace(".","").replace(",","."))
                 except: pass
-            beleg_rows_html+=f"""<tr>
-                <td style="text-align:center;color:#666">{i}</td>
-                <td>{vendor or fn or '–'}</td>
-                <td>{dtype or '–'}</td>
-                <td>{ddate or '–'}</td>
-                <td style="text-align:right">{amt or '–'} {curr or ''}</td>
-                <td style="text-align:right;font-weight:600">{amt_eur or '–'} €</td>
-                <td style="color:#666;font-size:10pt">{stat or '–'}</td>
-            </tr>"""
-
         gesamt=beleg_sum+vma_total+trenn_total
         title_line=" · ".join(filter(None,[employee_code,trip_title,customer_code]))
 
-        # Belege als Base64 einbetten (PDFs als iframes, Bilder direkt)
+        # ── 1. DECKBLATT PDF ────────────────────────────────────────────
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, PageBreak
+        from reportlab.lib.enums import TA_RIGHT, TA_CENTER
+
+        buf_deckblatt = io.BytesIO()
+        doc = SimpleDocTemplate(buf_deckblatt, pagesize=A4,
+            leftMargin=20*mm, rightMargin=20*mm, topMargin=20*mm, bottomMargin=20*mm)
+        styles = getSampleStyleSheet()
+        BLU = colors.HexColor('#1a3d96')
+        GRY = colors.HexColor('#5a6e8a')
+        LBL = ParagraphStyle('lbl', parent=styles['Normal'], fontSize=8, textColor=GRY, fontName='Helvetica-Bold')
+        VAL = ParagraphStyle('val', parent=styles['Normal'], fontSize=10)
+        H1  = ParagraphStyle('h1', parent=styles['Title'], fontSize=22, textColor=BLU, spaceAfter=2)
+        H2  = ParagraphStyle('h2', parent=styles['Heading2'], fontSize=12, textColor=BLU, spaceBefore=12, spaceAfter=4)
+        SMN = ParagraphStyle('smn', parent=styles['Normal'], fontSize=8, textColor=GRY)
+        MON = ParagraphStyle('mon', parent=styles['Normal'], fontSize=10, fontName='Courier')
+        BIG = ParagraphStyle('big', parent=styles['Normal'], fontSize=18, fontName='Courier-Bold', textColor=BLU, alignment=2)
+
+        story=[]
+        story.append(Paragraph("REISEKOSTENABRECHNUNG", H1))
+        story.append(Paragraph(f"{tc} · {title_line}", SMN))
+        story.append(HRFlowable(width="100%", thickness=2, color=BLU, spaceAfter=8))
+
+        # Meta-Grid
+        meta_rows=[
+            [Paragraph("Reisender", LBL), Paragraph(f"{employee_code or ''} {traveler or '–'}", VAL)],
+            [Paragraph("Zeitraum", LBL), Paragraph(f"{dep} {dep_t or ''} – {ret} {ret_t or ''} ({days} Tage)", VAL)],
+            [Paragraph("Reiseziel", LBL), Paragraph(destinations or cc or "–", VAL)],
+            [Paragraph("PNR", LBL), Paragraph(pnr or "–", MON)],
+            [Paragraph("Hotel", LBL), Paragraph(f"{nights_b or 0}/{nights_p or 0} Nächte", VAL)],
+        ]
+        if colleagues: meta_rows.append([Paragraph("Kollegen", LBL), Paragraph(colleagues, VAL)])
+        if notes: meta_rows.append([Paragraph("Notiz", LBL), Paragraph(notes, VAL)])
+        t=Table(meta_rows, colWidths=[40*mm, 130*mm])
+        t.setStyle(TableStyle([
+            ('VALIGN',(0,0),(-1,-1),'TOP'),
+            ('ROWBACKGROUNDS',(0,0),(-1,-1),[colors.HexColor('#f0f4f9'),colors.white]),
+            ('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#eaeef5')),
+            ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
+        ]))
+        story.append(t)
+        story.append(Spacer(1,8*mm))
+
+        # Belege-Tabelle
+        story.append(Paragraph("Belege", H2))
+        brows=[[Paragraph(h,LBL) for h in ["#","Anbieter","Typ","Datum","Betrag","EUR","Status"]]]
+        for i,(att_id,fn,dtype,amt,amt_eur,curr,ddate,vendor,stat,skey,ctype,pdf_k) in enumerate(atts,1):
+            brows.append([
+                Paragraph(str(i),SMN),
+                Paragraph((vendor or fn or "–")[:40], VAL),
+                Paragraph(dtype or "–", VAL),
+                Paragraph(ddate or "–", VAL),
+                Paragraph(f"{amt or '–'} {curr or ''}", MON),
+                Paragraph(f"{amt_eur or '–'} €", MON),
+                Paragraph(stat or "–", SMN),
+            ])
+        brows.append([
+            Paragraph("","LBL"), Paragraph("","VAL"),
+            Paragraph("","VAL"), Paragraph("","VAL"),
+            Paragraph("Summe Belege", LBL), Paragraph(f"{beleg_sum:.2f} €", BIG),
+            Paragraph("","SMN"),
+        ])
+        bt=Table(brows, colWidths=[8*mm,50*mm,22*mm,22*mm,25*mm,22*mm,20*mm])
+        bt.setStyle(TableStyle([
+            ('BACKGROUND',(0,0),(-1,0),colors.HexColor('#eef4ff')),
+            ('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#eaeef5')),
+            ('VALIGN',(0,0),(-1,-1),'TOP'),
+            ('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4),
+            ('FONTSIZE',(0,0),(-1,-1),8),
+            ('BACKGROUND',(0,-1),(-1,-1),colors.HexColor('#f0f4f9')),
+        ]))
+        story.append(bt)
+        story.append(Spacer(1,6*mm))
+
+        # VMA-Tabelle
+        story.append(Paragraph("Verpflegungsmehraufwand §9 EStG", H2))
+        vrows=[[Paragraph(h,LBL) for h in ["Datum","Tag","Land","Mahlzeiten-Abzug","VMA"]]]
+        for d,lbl,cc_d,m_icons,v in vma_rows_data:
+            vrows.append([Paragraph(d,SMN),Paragraph(lbl,VAL),Paragraph(cc_d,MON),
+                          Paragraph(m_icons,VAL),Paragraph(f"{v:.2f} €",MON)])
+        vrows.append([Paragraph("","SMN"),Paragraph("","VAL"),Paragraph("","VAL"),
+                      Paragraph("Summe VMA",LBL),Paragraph(f"{vma_total:.2f} €",MON)])
+        vt=Table(vrows, colWidths=[25*mm,28*mm,18*mm,50*mm,28*mm])
+        vt.setStyle(TableStyle([
+            ('BACKGROUND',(0,0),(-1,0),colors.HexColor('#eef4ff')),
+            ('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#eaeef5')),
+            ('VALIGN',(0,0),(-1,-1),'TOP'),
+            ('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4),
+            ('FONTSIZE',(0,0),(-1,-1),8),
+            ('BACKGROUND',(0,-1),(-1,-1),colors.HexColor('#f0f4f9')),
+        ]))
+        story.append(vt)
+        story.append(Spacer(1,8*mm))
+
+        # Gesamtsumme-Box
+        summe_data=[[
+            Paragraph("GESAMTBETRAG REISEKOSTENABRECHNUNG", LBL),
+            Paragraph(f"{gesamt:,.2f} €", BIG),
+        ]]
+        if trenn_total>0:
+            summe_data.insert(0,[Paragraph("Trennungspauschale",LBL),Paragraph(f"{trenn_total:.2f} €",MON)])
+        summe_data.insert(0,[Paragraph("VMA §9 EStG",LBL),Paragraph(f"{vma_total:.2f} €",MON)])
+        summe_data.insert(0,[Paragraph("Summe Belege",LBL),Paragraph(f"{beleg_sum:.2f} €",MON)])
+        st=Table(summe_data, colWidths=[80*mm,90*mm])
+        st.setStyle(TableStyle([
+            ('BACKGROUND',(0,0),(-1,-2),colors.HexColor('#f0f4f9')),
+            ('BACKGROUND',(0,-1),(-1,-1),colors.HexColor('#1a3d96')),
+            ('TEXTCOLOR',(0,-1),(-1,-1),colors.white),
+            ('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#dde4ef')),
+            ('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6),
+            ('FONTSIZE',(0,0),(-1,-1),9),
+        ]))
+        story.append(st)
+        story.append(Spacer(1,6*mm))
+        story.append(Paragraph(
+            f"Erstellt: {datetime.now().strftime('%d.%m.%Y %H:%M')} · Herrhammer Kürschner Kerzenmaschinen",
+            SMN))
+
+        doc.build(story)
+        deckblatt_pdf = buf_deckblatt.getvalue()
+
+        # ── 2. BELEGE SAMMELN ────────────────────────────────────────────
         s3=get_s3()
-        beleg_pages=""
-        for i,(att_id,fn,dtype,amt,amt_eur,curr,ddate,vendor,stat,skey,ctype) in enumerate(atts,1):
-            if not skey: continue
-            try:
-                obj=s3.get_object(Bucket=S3_BUCKET,Key=skey)
-                data=obj["Body"].read()
-                b64=__import__("base64").b64encode(data).decode()
-                ctype_safe=ctype or "application/octet-stream"
-                label=f"Beleg {i}: {vendor or fn or dtype}"
-                if "pdf" in ctype_safe.lower():
-                    beleg_pages+=f"""
-                    <div style="page-break-before:always">
-                      <h2 style="font-size:14pt;color:#1a3d96;margin-bottom:8px">{label}</h2>
-                      <p style="font-size:10pt;color:#666;margin-bottom:8px">{fn} · {ddate or '–'} · {amt_eur or '–'} €</p>
-                      <iframe src="data:{ctype_safe};base64,{b64}"
-                        style="width:100%;height:900px;border:1px solid #dde4ef;border-radius:4px"
-                        title="{label}"></iframe>
-                    </div>"""
-                elif any(x in ctype_safe.lower() for x in ["jpeg","jpg","png","webp","gif"]):
-                    beleg_pages+=f"""
-                    <div style="page-break-before:always">
-                      <h2 style="font-size:14pt;color:#1a3d96;margin-bottom:8px">{label}</h2>
-                      <p style="font-size:10pt;color:#666;margin-bottom:8px">{fn} · {ddate or '–'} · {amt_eur or '–'} €</p>
-                      <img src="data:{ctype_safe};base64,{b64}"
-                        style="max-width:100%;border:1px solid #dde4ef;border-radius:4px"
-                        alt="{label}">
-                    </div>"""
-            except Exception as e:
-                beleg_pages+=f'<div style="page-break-before:always"><p style="color:red">Beleg {i} nicht ladbar: {e}</p></div>'
+        beleg_pdfs=[]
+        for att_id,fn,dtype,amt,amt_eur,curr,ddate,vendor,stat,skey,ctype,pdf_k in atts:
+            pdf_bytes=None
+            # Priorität: generiertes PDF > Original-PDF > Original-Bild als PDF
+            if pdf_k:
+                try:
+                    obj=s3.get_object(Bucket=S3_BUCKET,Key=pdf_k)
+                    pdf_bytes=obj["Body"].read()
+                except: pass
+            if not pdf_bytes and skey and not skey.startswith(("mail_body_","S3-FEHLER")):
+                try:
+                    obj=s3.get_object(Bucket=S3_BUCKET,Key=skey)
+                    raw=obj["Body"].read()
+                    ctype_s=(ctype or "").lower()
+                    if "pdf" in ctype_s:
+                        pdf_bytes=raw
+                    elif any(x in ctype_s for x in ["jpeg","jpg","png","webp"]):
+                        # Bild → PDF mit reportlab
+                        from reportlab.platypus import Image as RLImage
+                        img_buf=io.BytesIO(raw)
+                        out_buf=io.BytesIO()
+                        doc2=SimpleDocTemplate(out_buf,pagesize=A4,
+                            leftMargin=15*mm,rightMargin=15*mm,topMargin=15*mm,bottomMargin=15*mm)
+                        from PIL import Image as PILImg
+                        try:
+                            pil=PILImg.open(img_buf)
+                            w,h=pil.size
+                            max_w=170*mm; max_h=240*mm
+                            scale=min(max_w/w, max_h/h)
+                            img_buf.seek(0)
+                            img_story=[
+                                Paragraph(f"{vendor or fn} · {ddate or '–'} · {amt_eur or '–'} €",
+                                    ParagraphStyle('x',fontSize=9,textColor=GRY)),
+                                Spacer(1,4*mm),
+                                RLImage(img_buf, width=w*scale, height=h*scale)
+                            ]
+                            doc2.build(img_story)
+                            pdf_bytes=out_buf.getvalue()
+                        except: pass
+                except: pass
 
-        vma_rows_html="".join(
-            f"<tr><td>{d}</td><td>{lbl}</td><td>{c_}</td><td>{m}</td><td style='text-align:right'>{v:.2f} €</td></tr>"
-            for d,lbl,c_,m,v in vma_rows_data) if vma_rows_data else \
-            "".join(f"<tr><td>{lbl}</td><td>{c_}</td><td>{m}</td><td style='text-align:right'>{v:.2f} €</td></tr>"
-            for lbl,c_,m,v in (vma_rows_data or []))
+            if not pdf_bytes and skey and skey.startswith("mail_body_"):
+                # Mail-Body-Beleg: Fallback-PDF generieren
+                pdf_bytes=make_text_pdf(
+                    title=f"{dtype}: {vendor or '–'}",
+                    body_text=f"Datum: {ddate or '–'}\nBetrag: {amt_eur or '–'} EUR\nStatus: {stat or '–'}",
+                    meta={"Typ":dtype,"Anbieter":vendor,"Betrag":f"{amt_eur} €","Datum":ddate})
 
-        return HTMLResponse(f"""<!DOCTYPE html>
-<html lang="de"><head><meta charset="UTF-8">
-<title>Abrechnung {tc} – Komplett</title>
-<style>
-  @page{{margin:18mm}}
-  @media print{{.no-print{{display:none}}body{{font-size:10pt}}}}
-  body{{font-family:Arial,sans-serif;font-size:11px;color:#1a1a2e;margin:0;padding:24px}}
-  h1{{font-size:20px;color:#1a3d96;margin-bottom:4px}}
-  h2{{font-size:13px;color:#2c3e5e;margin:18px 0 6px;border-bottom:2px solid #1a3d96;padding-bottom:4px}}
-  table{{width:100%;border-collapse:collapse;margin-bottom:12px}}
-  th{{background:#eef4ff;padding:6px 8px;text-align:left;border:1px solid #dde4ef;font-size:10px}}
-  td{{padding:5px 8px;border:1px solid #eaeef5;font-size:11px;vertical-align:top}}
-  .sum-box{{background:#1a3d96;color:white;padding:16px 20px;border-radius:8px;margin:20px 0;display:flex;justify-content:space-between;align-items:center}}
-  .sum-val{{font-size:22px;font-weight:700;font-family:monospace}}
-  .no-print{{position:fixed;top:16px;right:16px;display:flex;gap:8px}}
-  .btn-print{{background:#1a3d96;color:white;border:none;border-radius:6px;padding:10px 20px;font-size:13px;cursor:pointer;font-family:Arial}}
-  .btn-back{{background:#f0f4f9;color:#1a3d96;border:1px solid #dde4ef;border-radius:6px;padding:10px 20px;font-size:13px;text-decoration:none;font-family:Arial}}
-  .meta-grid{{display:grid;grid-template-columns:160px 1fr;gap:3px 0;margin-bottom:16px;font-size:11px}}
-  .ml{{font-weight:600;color:#5a6e8a}} .mv{{color:#1a1a2e}}
-</style></head>
-<body>
-<div class="no-print">
-  <a class="btn-back" href="/trip/{tc}">← Zurück</a>
-  <button class="btn-print" onclick="window.print()">🖨 Drucken / PDF</button>
-</div>
+            if pdf_bytes:
+                beleg_pdfs.append(pdf_bytes)
 
-<h1>Reisekostenabrechnung</h1>
-<p style="font-size:12px;color:#5a6e8a;margin-bottom:16px">{tc} · {title_line}</p>
+        # ── 3. ALLES ZUSAMMENFÜHREN ──────────────────────────────────────
+        all_pdfs=[deckblatt_pdf]+beleg_pdfs
+        final_pdf=merge_pdfs(all_pdfs)
 
-<div class="meta-grid">
-  <span class="ml">Reisender</span><span class="mv">{employee_code or ''} {traveler or '–'}</span>
-  <span class="ml">Zeitraum</span><span class="mv">{dep or '–'} {dep_t or ''} – {ret or '–'} {ret_t or ''} ({days} Tage)</span>
-  <span class="ml">Reiseziel</span><span class="mv">{destinations or cc or '–'}</span>
-  <span class="ml">PNR</span><span class="mv">{pnr or '–'}</span>
-  <span class="ml">Hotel</span><span class="mv">{nights_b or 0}/{nights_p or 0} Nächte</span>
-  {f'<span class="ml">Kollegen</span><span class="mv">{colleagues}</span>' if colleagues else ''}
-  {f'<span class="ml">Notiz</span><span class="mv">{notes}</span>' if notes else ''}
-</div>
+        filename=f"Abrechnung_{tc}_{datetime.now().strftime('%Y%m%d')}.pdf"
+        return Response(
+            content=final_pdf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
 
-<h2>Belege ({len(atts)})</h2>
-<table>
-  <tr><th>#</th><th>Anbieter</th><th>Typ</th><th>Datum</th><th style="text-align:right">Betrag</th><th style="text-align:right">EUR</th><th>Status</th></tr>
-  {beleg_rows_html or '<tr><td colspan="7">Keine Belege</td></tr>'}
-  <tr style="background:#f0f4f9"><td colspan="5"><strong>Summe Belege</strong></td>
-    <td style="text-align:right;font-weight:700">{beleg_sum:.2f} €</td><td></td></tr>
-</table>
-
-<h2>Verpflegungsmehraufwand §9 EStG</h2>
-<table>
-  <tr><th>Datum</th><th>Tag</th><th>Land</th><th>Mahlzeiten-Abzug</th><th style="text-align:right">VMA</th></tr>
-  {vma_rows_html or '<tr><td colspan="5">Keine Daten</td></tr>'}
-  <tr style="background:#f0f4f9"><td colspan="4"><strong>Summe VMA</strong></td>
-    <td style="text-align:right;font-weight:700">{vma_total:.2f} €</td></tr>
-</table>
-
-{f'''<h2>Trennungspauschale</h2><p>{trenn_total:.2f} €</p>''' if trenn_total>0 else ''}
-
-<div class="sum-box">
-  <span style="font-size:14px">Gesamtbetrag Reisekostenabrechnung</span>
-  <span class="sum-val">{gesamt:,.2f} €</span>
-</div>
-
-<p style="font-size:9px;color:#999;margin-top:8px">Erstellt: {datetime.now().strftime('%d.%m.%Y %H:%M')} · {tc} · Herrhammer Kürschner Kerzenmaschinen</p>
-
-<!-- ═══════════════════════════════════════════════ -->
-<!-- BELEGE ALS ANHANG                               -->
-<!-- ═══════════════════════════════════════════════ -->
-{beleg_pages}
-
-<script>
-// Auto-print nach Laden (nur wenn ?print=1)
-if(window.location.search.includes('print=1')){{
-  window.addEventListener('load',()=>setTimeout(()=>window.print(),800));
-}}
-</script>
-</body></html>""")
     except Exception as e:
         import traceback
-        return HTMLResponse(f"<pre>{traceback.format_exc()}</pre>",status_code=500)
+        return HTMLResponse(f"<pre style='padding:24px'>{traceback.format_exc()}</pre>",status_code=500)
+
 
 
 @app.get("/check-flights/{tc}", response_class=HTMLResponse)
@@ -3990,6 +4220,26 @@ async def check_flights(tc: str):
 # =========================================================
 # BELEG VORSCHAU (Signed URL aus Hetzner)
 # =========================================================
+
+@app.get("/beleg-pdf/{att_id}")
+def beleg_pdf(att_id: int):
+    """Liefert das generierte PDF eines Belegs direkt aus S3."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("SELECT pdf_key,original_filename,detected_vendor,detected_type FROM mail_attachments WHERE id=%s",(att_id,))
+        row=cur.fetchone();cur.close();conn.close()
+        if not row or not row[0]:
+            return HTMLResponse("Kein PDF für diesen Beleg vorhanden",status_code=404)
+        pdf_key,fn,vendor,dtype=row
+        s3=get_s3()
+        obj=s3.get_object(Bucket=S3_BUCKET,Key=pdf_key)
+        pdf_bytes=obj["Body"].read()
+        label=f"{vendor or dtype or fn or 'beleg'}_{att_id}.pdf"
+        return Response(content=pdf_bytes, media_type="application/pdf",
+            headers={"Content-Disposition":f'inline; filename="{label}"'})
+    except Exception as e:
+        return HTMLResponse(f"Fehler: {e}",status_code=500)
+
 
 @app.get("/beleg/{att_id}")
 def beleg_vorschau(att_id: int):
