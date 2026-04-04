@@ -20,7 +20,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "8.1"
+APP_VERSION = "8.2"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2736,26 +2736,27 @@ def trip_detail(tc: str):
             # ── HOTEL: mehrtägig mit Check-in/out ──────────────────────
             if dtype == "Hotel":
                 hotel_name = vendor or "Hotel"
-                # Check-in Tag
-                # checkin_d aus explizitem Feld – NICHT aus detected_date (=Buchungsdatum)
-                # Wenn kein explizites checkin_date: auf dep_d der Reise zurückfallen
-                cin_d = checkin_d or dep_d or date.today()
-                if not checkin_d:
-                    # Keine explizite Check-in-Info → Warnung in bemerkung
-                    pass
-                cin_t  = checkin_t_s or "15:00"
-                # Check-out Tag: bevorzuge explizites Datum, dann cin + nights
+                # Nächte zuerst bestimmen
                 n_nights = int(det_nights or 0)
-                # Nächte aus Check-in/out berechnen wenn nights=0
                 if n_nights == 0 and checkin_d and checkout_d:
                     n_nights = max(0, (checkout_d - checkin_d).days)
-                # Nächte aus ki_bemerkung parsen: "3 Nächte", "3 nights"
                 if n_nights == 0 and bemerk:
                     nm = re.search(r"(\d+)\s*(?:Nächte|Naechte|nights?)", bemerk, re.IGNORECASE)
                     if nm: n_nights = int(nm.group(1))
+
+                # Check-in: explizites Datum bevorzugen
+                # Wenn kein checkin aber checkout + nights → rückwärts berechnen
+                cin_d = checkin_d
+                if not cin_d and checkout_d and n_nights > 0:
+                    cin_d = checkout_d - timedelta(days=n_nights)
+                if not cin_d:
+                    cin_d = dep_d or date.today()
+                cin_t = checkin_t_s or "15:00"
+
+                # Check-out
                 if checkout_d:
                     cout_d = checkout_d
-                    n_nights = (cout_d - cin_d).days if cin_d else n_nights
+                    if cin_d: n_nights = max(n_nights, (cout_d - cin_d).days)
                 elif n_nights > 0 and cin_d:
                     cout_d = cin_d + timedelta(days=n_nights)
                 else:
@@ -2763,11 +2764,16 @@ def trip_detail(tc: str):
                 cout_t = checkout_t_s or "11:00"
 
                 # Check-in Zeile
+                # Ort aus ki_bemerkung extrahieren (z.B. "3 Nächte Marriott Lyon")
+                hotel_city = ""
+                if bemerk:
+                    city_m = re.search(r'(?:Naechte|Nächte|Naecht)\s+\w+\s+(\w+)', bemerk, re.IGNORECASE)
+                    if city_m: hotel_city = city_m.group(1)
                 timeline_events.append({
                     "date": cin_d, "time": cin_t,
                     "icon": "🏨", "type": "beleg",
                     "task": f"Check-in {hotel_name}",
-                    "route": checkout_s or (str(cout_d) if cout_d else ""),
+                    "route": hotel_city or "",
                     "timerange": f"ab {cin_t}",
                     "detail": f"{amount_str}{f' · {n_nights} Nächte' if n_nights else ''}",
                     "extra": actions, "status": stat, "att_id": att_id,
@@ -3628,11 +3634,31 @@ async def check_flights(tc: str):
 def beleg_vorschau(att_id: int):
     try:
         conn=get_conn();cur=conn.cursor()
-        cur.execute("SELECT storage_key,original_filename,content_type FROM mail_attachments WHERE id=%s",(att_id,))
+        cur.execute("SELECT storage_key,original_filename,content_type,ki_bemerkung,detected_type,detected_amount_eur,detected_vendor,detected_date FROM mail_attachments WHERE id=%s",(att_id,))
         row=cur.fetchone();cur.close();conn.close()
         if not row: return HTMLResponse("Beleg nicht gefunden",status_code=404)
-        storage_key,filename,content_type=row
-        if not storage_key or storage_key.startswith("S3-FEHLER"):
+        storage_key,filename,content_type,bemerk,dtype,amt,vendor,ddate=row
+        # Mail-Body-Belege haben keinen S3-Key → Info-Seite anzeigen
+        if not storage_key or storage_key.startswith("mail_body_"):
+            return HTMLResponse(f"""<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8">
+            <title>Mail-Beleg</title>
+            <style>body{{font-family:sans-serif;padding:32px;background:#f0f4f9;color:#1a1a2e}}
+            .card{{background:#fff;border-radius:12px;padding:24px;max-width:560px;margin:0 auto;box-shadow:0 4px 16px rgba(0,0,0,.08)}}
+            h2{{margin-bottom:16px;color:#1a3d96}}table{{border-collapse:collapse;width:100%}}
+            td{{padding:8px 12px;border-bottom:1px solid #eaeef5;font-size:13px}}
+            td:first-child{{font-weight:600;color:#5a6e8a;width:40%}}</style></head>
+            <body><div class="card"><h2>📧 Mail-Body Beleg</h2>
+            <p style="font-size:12px;color:#9bafc8;margin-bottom:16px">Dieser Beleg wurde aus dem E-Mail-Text extrahiert, keine Datei vorhanden.</p>
+            <table>
+            <tr><td>Typ</td><td>{dtype or '–'}</td></tr>
+            <tr><td>Anbieter</td><td>{vendor or '–'}</td></tr>
+            <tr><td>Betrag</td><td>{amt or '–'} €</td></tr>
+            <tr><td>Datum</td><td>{ddate or '–'}</td></tr>
+            <tr><td>KI-Notiz</td><td style="font-size:11px">{(bemerk or '–')[:300]}</td></tr>
+            </table>
+            <p style="margin-top:16px"><a href="javascript:history.back()" style="color:#2152c4">← Zurück</a></p>
+            </div></body></html>""")
+        if storage_key.startswith("S3-FEHLER"):
             return HTMLResponse(f"Datei nicht im Bucket: {storage_key}",status_code=404)
         s3=get_s3()
         signed_url=s3.generate_presigned_url("get_object",
