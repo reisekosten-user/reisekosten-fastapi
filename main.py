@@ -8,7 +8,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "8.6"
+APP_VERSION = "8.7"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -132,28 +132,28 @@ def get_vma(cc, day_type, meals, city_key=None):
     return max(0.0, round(base - abzug, 2))
 
 def load_daily_meals(trip_code: str) -> dict:
-    """Lädt tagesbasierte Mahlzeiten aus DB. Gibt {date: {'breakfast':bool,...}} zurück."""
+    """Lädt tagesbasierte Mahlzeiten. Gibt {date: (meals_list, country_code, vma_override)} zurück."""
     try:
         conn=get_conn();cur=conn.cursor()
-        cur.execute("""SELECT meal_date,breakfast,lunch,dinner
+        cur.execute("""SELECT meal_date,breakfast,lunch,dinner,
+                       COALESCE(country_code,'DE'),vma_override
                        FROM daily_meals WHERE trip_code=%s ORDER BY meal_date""",(trip_code,))
         rows=cur.fetchall();cur.close();conn.close()
         result={}
-        for meal_date,b,l,d in rows:
+        for meal_date,b,l,d,cc,vma_ov in rows:
             meals=[]
             if b: meals.append("breakfast")
             if l: meals.append("lunch")
             if d: meals.append("dinner")
-            result[meal_date]=meals
+            result[meal_date]=(meals, cc or "DE", float(vma_ov) if vma_ov is not None else None)
         return result
     except Exception:
         return {}
 
 def calc_vma_from_daily(dep_d, ret_d, daily_meals_dict: dict, vma_dest: dict, default_cc: str) -> tuple:
     """
-    Berechnet VMA taggenau aus daily_meals Tabelle.
-    Für jeden Tag wird geprüft welche Mahlzeiten erstattet wurden → Abzug.
-    Gibt (total, rows) zurück.
+    Berechnet VMA taggenau. daily_meals_dict: {date: (meals_list, country_code, vma_override)}
+    Gibt (total, rows) zurück. rows: (datum, lbl, cc, meal_icons, vma_betrag)
     """
     if not dep_d or not ret_d:
         return 0.0, []
@@ -167,17 +167,29 @@ def calc_vma_from_daily(dep_d, ret_d, daily_meals_dict: dict, vma_dest: dict, de
 
     for i,(lbl,dtype) in enumerate(tag_list):
         current_day=dep_d+timedelta(days=i)
-        cc=get_country_for_day(current_day,vma_dest,default_cc)
-        # Mahlzeiten für diesen Tag – aus daily_meals wenn vorhanden
-        ml=daily_meals_dict.get(current_day, [])
-        v=get_vma(cc,dtype,ml)
+        # Land: aus daily_meals (manuell gesetzt) > vma_destinations > default
+        day_data=daily_meals_dict.get(current_day)
+        if day_data:
+            ml, day_cc, vma_override = day_data
+            # Wenn kein manuelles Land gesetzt → aus vma_destinations
+            if day_cc == "DE" and vma_dest:
+                day_cc = get_country_for_day(current_day, vma_dest, default_cc)
+        else:
+            ml=[]; day_cc=get_country_for_day(current_day,vma_dest,default_cc); vma_override=None
+
+        if vma_override is not None:
+            v=float(vma_override)
+            cc_label=f"{day_cc}*"  # * = manuell
+        else:
+            v=get_vma(day_cc,dtype,ml)
+            cc_label=day_cc
         total+=v
         meal_icons=" ".join(filter(None,[
             "🍳" if "breakfast" in ml else "",
             "🥗" if "lunch" in ml else "",
             "🍽" if "dinner" in ml else "",
         ])) or "–"
-        rows.append((str(current_day),lbl,cc,meal_icons,v))
+        rows.append((str(current_day),lbl,cc_label,meal_icons,v))
     return total,rows
 
 def parse_vma_destinations(vma_dest_str: str) -> dict:
@@ -1842,8 +1854,12 @@ def init():
             lunch BOOLEAN DEFAULT FALSE,
             dinner BOOLEAN DEFAULT FALSE,
             notes TEXT,
+            country_code TEXT DEFAULT 'DE',
+            vma_override NUMERIC,
             updated_at TIMESTAMP DEFAULT now(),
             UNIQUE(trip_code, meal_date))""")
+        for col in ["country_code TEXT DEFAULT 'DE'","vma_override NUMERIC"]:
+            cur.execute(f"ALTER TABLE daily_meals ADD COLUMN IF NOT EXISTS {col}")
 
         conn.commit();cur.close();conn.close()
         return {"status":"ok","version":APP_VERSION}
@@ -3039,13 +3055,15 @@ def trip_detail(tc: str):
             days_range = (ret_d - dep_d).days + 1
             for i in range(days_range):
                 d = dep_d + timedelta(days=i)
-                ml = daily.get(d, [])
-                # Mahlzeiten-Zeile immer zeigen (auch wenn leer → zum Anklicken)
+                day_data = daily.get(d)
+                ml = day_data[0] if day_data else []
+                day_cc = day_data[1] if day_data else (cc or "DE")
+                vma_ov = day_data[2] if day_data else None
                 b_chk = "✅" if "breakfast" in ml else "☐"
                 l_chk = "✅" if "lunch" in ml else "☐"
                 d_chk = "✅" if "dinner" in ml else "☐"
                 dtype = "partial" if i == 0 or i == days_range - 1 else "full"
-                vma_day = get_vma(cc or "DE", dtype, ml)
+                vma_day = float(vma_ov) if vma_ov is not None else get_vma(day_cc, dtype, ml)
                 timeline_events.append({
                     "date": d,
                     "time": "",
@@ -4776,74 +4794,134 @@ def reclassify():
 def meals_page(tc: str):
     try:
         conn=get_conn();cur=conn.cursor()
-        cur.execute("SELECT departure_date,return_date,traveler_name,trip_title FROM trip_meta WHERE trip_code=%s",(tc,))
+        cur.execute("""SELECT departure_date,return_date,traveler_name,trip_title,
+            country_code,vma_destinations FROM trip_meta WHERE trip_code=%s""",(tc,))
         meta=cur.fetchone()
         if not meta: return HTMLResponse("Reise nicht gefunden",404)
-        dep,ret,traveler,title=meta
+        dep,ret,traveler,title,default_cc,vma_dest_str=meta
         dep_d=dep if isinstance(dep,date) else (date.fromisoformat(str(dep)) if dep else None)
         ret_d=ret if isinstance(ret,date) else (date.fromisoformat(str(ret)) if ret else None)
         if not dep_d or not ret_d:
             return page_shell(f"Mahlzeiten {tc}",f"""
             <div class="page-card"><h2>Mahlzeiten {tc}</h2>
-            <p class="sub">Bitte zuerst Abreise- und Rückkehrdatum in der Reise hinterlegen.</p>
+            <p class="sub">Bitte zuerst Abreise- und Rückkehrdatum hinterlegen.</p>
             <a class="btn" href="/edit-trip/{tc}">Reise bearbeiten</a></div>""")
 
-        # Bestehende Einträge laden
-        cur.execute("SELECT meal_date,breakfast,lunch,dinner,notes FROM daily_meals WHERE trip_code=%s ORDER BY meal_date",(tc,))
+        vma_dest_dict=parse_vma_destinations(vma_dest_str or "")
+        cur.execute("""SELECT meal_date,breakfast,lunch,dinner,notes,country_code,vma_override
+            FROM daily_meals WHERE trip_code=%s ORDER BY meal_date""",(tc,))
         existing={row[0]: row for row in cur.fetchall()}
         cur.close();conn.close()
 
-        # Tabelle für alle Reisetage generieren
         days=(ret_d-dep_d).days+1
+
+        # Alle verfügbaren Länder aus VMA-Tabelle für Dropdown
+        country_opts=""
+        for cc_key, r in sorted(VMA.items()):
+            if "_" not in cc_key:  # nur Länder-Codes, keine Städte
+                label=cc_key
+                country_opts+=f'<option value="{cc_key}">{cc_key} ({r["full"]:.0f}€/Tag)</option>'
+
         rows_html=""
-        vma_preview=0.0
+        vma_total=0.0
         for i in range(days):
             d=dep_d+timedelta(days=i)
             e=existing.get(d)
             b_chk="checked" if e and e[1] else ""
             l_chk="checked" if e and e[2] else ""
             di_chk="checked" if e and e[3] else ""
-            notes_val=e[4] if e and e[4] else ""
-            # Tagestyp für VMA
+            notes_val=(e[4] if e and e[4] else "")
+            # Land für diesen Tag: manuelle Angabe > vma_destinations > default
+            day_cc = (e[5] if e and e[5] else None) or get_country_for_day(d,vma_dest_dict,default_cc or "DE")
+            # VMA-Override manuell?
+            vma_override = float(e[6]) if e and e[6] is not None else None
+
             dtype="partial" if i==0 or i==days-1 else "full"
             ml=[]
             if e:
                 if e[1]: ml.append("breakfast")
                 if e[2]: ml.append("lunch")
                 if e[3]: ml.append("dinner")
-            vma_day=get_vma("DE",dtype,ml)
-            vma_preview+=vma_day
+
+            if vma_override is not None:
+                vma_day=vma_override
+                vma_source_icon="✏"
+            else:
+                vma_day=get_vma(day_cc,dtype,ml)
+                vma_source_icon=""
+            vma_total+=vma_day
+
             wd=["Mo","Di","Mi","Do","Fr","Sa","So"][d.weekday()]
             wkend_style=' style="background:var(--b50)"' if d.weekday()>=5 else ""
+
+            # Land-Dropdown für diesen Tag
+            cc_options="".join(
+                f'<option value="{cc}" {"selected" if cc==day_cc else ""}>{cc}</option>'
+                for cc in sorted(set(k for k in VMA.keys() if "_" not in k))
+            )
+
+            # VMA-Satz Info
+            vma_r=VMA.get(day_cc,{"full":28.0,"partial":14.0})
+            base=vma_r["full"] if dtype=="full" else vma_r["partial"]
+
             rows_html+=f"""<tr{wkend_style}>
-                <td style="font-weight:500;white-space:nowrap">{str(d)} {wd}</td>
-                <td style="text-align:center"><input type="checkbox" name="b_{d}" {b_chk} onchange="this.form.submit()"></td>
-                <td style="text-align:center"><input type="checkbox" name="l_{d}" {l_chk} onchange="this.form.submit()"></td>
-                <td style="text-align:center"><input type="checkbox" name="d_{d}" {di_chk} onchange="this.form.submit()"></td>
-                <td><input type="text" class="finp" name="n_{d}" value="{notes_val}" placeholder="Notiz..." style="padding:3px 6px;font-size:12px"></td>
-                <td style="text-align:right;font-family:DM Mono,monospace;color:var(--b600)">{vma_day:.2f} €</td>
+                <td style="font-weight:500;white-space:nowrap;font-size:12px">{str(d)} {wd}</td>
+                <td style="text-align:center"><input type="checkbox" name="b_{d}" {b_chk} onchange="calcRow(this)"></td>
+                <td style="text-align:center"><input type="checkbox" name="l_{d}" {l_chk} onchange="calcRow(this)"></td>
+                <td style="text-align:center"><input type="checkbox" name="d_{d}" {di_chk} onchange="calcRow(this)"></td>
+                <td>
+                  <select name="cc_{d}" class="fsel" style="padding:2px 4px;font-size:11px;width:70px"
+                    onchange="this.form.submit()" title="Land für VMA-Satz">
+                    {cc_options}
+                  </select>
+                </td>
+                <td>
+                  <input type="number" class="finp" name="vma_override_{d}"
+                    value="{vma_override if vma_override is not None else ''}"
+                    placeholder="{vma_day:.2f}" step="0.01" min="0" style="padding:2px 6px;font-size:11px;width:70px"
+                    title="Manueller VMA-Betrag (leer = automatisch)">
+                </td>
+                <td><input type="text" class="finp" name="n_{d}" value="{notes_val}" placeholder="Notiz..." style="padding:2px 6px;font-size:11px"></td>
+                <td style="text-align:right;font-family:DM Mono,monospace;color:var(--b600);font-size:12px;white-space:nowrap">
+                  {vma_day:.2f} € {vma_source_icon}
+                  <div style="font-size:9px;color:var(--t300)">{day_cc} · {base:.0f}€ Basis</div>
+                </td>
             </tr>"""
 
         title_str=f" · {title}" if title else ""
+
+        # VMA-Satz-Jahr-Hinweis
+        current_year=datetime.now().year
+        vma_warning=""
+        if current_year > 2026:
+            vma_warning=f"""<div style="background:var(--am1);border:1px solid rgba(201,124,10,.25);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px">
+              ⚠ <b>Hinweis:</b> Die hinterlegten VMA-Sätze gelten für 2026.
+              Für {current_year} bitte aktuelle BMF-Sätze unter
+              <a href="/vma-rates" style="color:var(--am6)">VMA-Sätze</a> prüfen und aktualisieren.
+            </div>"""
+
         return page_shell(f"Mahlzeiten {tc}",f"""
-        <div class="page-card" style="max-width:800px">
-          <h2>Mahlzeiten-Erfassung – {tc}{title_str}</h2>
+        <div class="page-card" style="max-width:900px">
+          <h2>🍽 Mahlzeiten-Erfassung – {tc}{title_str}</h2>
           <p class="sub" style="margin-bottom:4px">Reisender: {traveler or '–'} · {days} Tage · {str(dep_d)} bis {str(ret_d)}</p>
-          <p class="sub" style="margin-bottom:16px">Haken setzen = Mahlzeit wurde <b>vom Kunden/Hotel gestellt</b> → wird vom VMA abgezogen</p>
+          <p class="sub" style="margin-bottom:12px">Haken = Mahlzeit vom Kunden/Hotel gestellt (→ Abzug vom VMA)</p>
+          {vma_warning}
           <form method="post" action="/meals/{tc}">
             <div style="overflow-x:auto"><table>
               <tr>
                 <th>Datum</th>
-                <th style="text-align:center">🍳 Frühstück<br><span style="font-size:10px;font-weight:400">−5,60 €</span></th>
-                <th style="text-align:center">🥗 Mittagessen<br><span style="font-size:10px;font-weight:400">−11,20 €</span></th>
-                <th style="text-align:center">🍽 Abendessen<br><span style="font-size:10px;font-weight:400">−11,20 €</span></th>
+                <th style="text-align:center">🍳 Früh<br><span style="font-size:9px;font-weight:400">−5,60€</span></th>
+                <th style="text-align:center">🥗 Mittag<br><span style="font-size:9px;font-weight:400">−11,20€</span></th>
+                <th style="text-align:center">🍽 Abend<br><span style="font-size:9px;font-weight:400">−11,20€</span></th>
+                <th>Land</th>
+                <th>VMA manuell<br><span style="font-size:9px;font-weight:400">leer = auto</span></th>
                 <th>Notiz</th>
                 <th style="text-align:right">VMA</th>
               </tr>
               {rows_html}
               <tr style="background:var(--b50)">
-                <td colspan="5"><b>Summe VMA (Vorschau, Land DE)</b></td>
-                <td style="text-align:right;font-family:DM Mono,monospace;font-weight:600">{vma_preview:.2f} €</td>
+                <td colspan="7"><b>Summe VMA</b></td>
+                <td style="text-align:right;font-family:DM Mono,monospace;font-weight:700;color:var(--b600)">{vma_total:.2f} €</td>
               </tr>
             </table></div>
             <div class="mfooter">
@@ -4851,10 +4929,15 @@ def meals_page(tc: str):
               <button type="submit" class="btn-mp">💾 Speichern</button>
             </div>
           </form>
-          <p class="sub" style="margin-top:12px">💡 VMA-Vorschau gilt für DE. Länderspezifische Sätze werden in der Abrechnung berechnet.</p>
+          <div style="margin-top:12px;font-size:11px;color:var(--t300)">
+            💡 Land-Dropdown ändert den VMA-Satz für diesen Tag. Manuelles VMA überschreibt die Berechnung komplett.
+            <a href="/vma-rates" style="color:var(--b600)">Aktuelle VMA-Sätze ansehen</a>
+          </div>
         </div>""")
     except Exception as e:
-        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+        import traceback
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p><pre style="font-size:10px">{traceback.format_exc()}</pre></div>')
+
 
 
 @app.post("/meals/{tc}")
@@ -4876,12 +4959,18 @@ async def meals_save(tc: str, request: Request):
             l=bool(form.get(f"l_{d}"))
             di=bool(form.get(f"d_{d}"))
             notes=form.get(f"n_{d}","").strip() or None
-            cur.execute("""INSERT INTO daily_meals (trip_code,meal_date,breakfast,lunch,dinner,notes,updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,now())
+            cc=form.get(f"cc_{d}","DE").strip().upper() or "DE"
+            vma_ov_raw=form.get(f"vma_override_{d}","").strip()
+            vma_ov=float(vma_ov_raw) if vma_ov_raw else None
+            cur.execute("""INSERT INTO daily_meals
+                (trip_code,meal_date,breakfast,lunch,dinner,notes,country_code,vma_override,updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,now())
                 ON CONFLICT (trip_code,meal_date) DO UPDATE SET
                 breakfast=EXCLUDED.breakfast, lunch=EXCLUDED.lunch,
-                dinner=EXCLUDED.dinner, notes=EXCLUDED.notes, updated_at=now()""",
-                (tc,d,b,l,di,notes))
+                dinner=EXCLUDED.dinner, notes=EXCLUDED.notes,
+                country_code=EXCLUDED.country_code, vma_override=EXCLUDED.vma_override,
+                updated_at=now()""",
+                (tc,d,b,l,di,notes,cc,vma_ov))
         conn.commit();cur.close();conn.close()
         return RedirectResponse(url=f"/meals/{tc}",status_code=303)
     except Exception as e:
