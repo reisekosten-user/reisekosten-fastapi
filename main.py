@@ -174,7 +174,160 @@ async def generate_and_store_mail_pdf(att_id: int, subj: str, body: str,
         return None
 
 
-APP_VERSION = "9.4"
+
+# ── Flughafen → ISO-Ländercode (global, einmalig gepflegt) ───────────────────
+AIRPORT_CC = {
+    # Deutschland
+    "FRA":"DE","MUC":"DE","BER":"DE","HAM":"DE","DUS":"DE","STR":"DE",
+    "CGN":"DE","NUE":"DE","LEJ":"DE","HAJ":"DE","FDH":"DE","HHN":"DE",
+    # Frankreich
+    "CDG":"FR","ORY":"FR","LYS":"FR","NCE":"FR","MRS":"FR","BOD":"FR","TLS":"FR","NTE":"FR",
+    # Großbritannien
+    "LHR":"GB","LGW":"GB","MAN":"GB","EDI":"GB","STN":"GB","BHX":"GB","GLA":"GB",
+    # USA
+    "JFK":"US","LAX":"US","ORD":"US","MIA":"US","SFO":"US","BOS":"US",
+    "IAH":"US","DFW":"US","ATL":"US","DCA":"US","IAD":"US","EWR":"US",
+    "SEA":"US","LAS":"US","MCO":"US","PHX":"US","MSP":"US","DTW":"US",
+    # Indien
+    "BOM":"IN","DEL":"IN","MAA":"IN","BLR":"IN","HYD":"IN","CCU":"IN","AMD":"IN",
+    # VAE
+    "DXB":"AE","AUH":"AE","SHJ":"AE",
+    # Aserbaidschan
+    "GYD":"AZ",
+    # Schweiz
+    "ZRH":"CH","GVA":"CH","BSL":"CH","BRN":"CH",
+    # Österreich
+    "VIE":"AT","SZG":"AT","INN":"AT","GRZ":"AT","LNZ":"AT",
+    # Italien
+    "FCO":"IT","MXP":"IT","NAP":"IT","VCE":"IT","LIN":"IT","BLQ":"IT","PSA":"IT",
+    # Spanien
+    "MAD":"ES","BCN":"ES","AGP":"ES","PMI":"ES","VLC":"ES","SVQ":"ES","TFS":"ES",
+    # Türkei
+    "IST":"TR","SAW":"TR","AYT":"TR","ADB":"TR","ESB":"TR",
+    # Japan
+    "NRT":"JP","HND":"JP","KIX":"JP","NGO":"JP","CTS":"JP",
+    # China/HK
+    "PEK":"CN","PKX":"CN","PVG":"CN","CAN":"CN","CTU":"CN","SZX":"CN",
+    "HKG":"CN",
+    # Korea
+    "ICN":"KR","GMP":"KR","PUS":"KR",
+    # Singapur
+    "SIN":"SG",
+    # Katar
+    "DOH":"QA",
+    # Saudi-Arabien
+    "RUH":"SA","JED":"SA","DMM":"SA",
+    # Niederlande
+    "AMS":"NL","EIN":"NL",
+    # Belgien
+    "BRU":"BE","CRL":"BE",
+    # Polen
+    "WAW":"PL","KRK":"PL","WRO":"PL","GDN":"PL",
+    # Tschechien
+    "PRG":"CZ",
+    # Ungarn
+    "BUD":"HU",
+    # Rumänien
+    "OTP":"RO","CLJ":"RO",
+    # Skandinavien
+    "ARN":"SE","GOT":"SE","MMX":"SE",
+    "CPH":"DK","BLL":"DK",
+    "HEL":"FI","TMP":"FI",
+    "OSL":"NO","BGO":"NO","TRD":"NO",
+    # Portugal
+    "LIS":"PT","OPO":"PT","FAO":"PT",
+    # Griechenland
+    "ATH":"GR","SKG":"GR","HER":"GR","RHO":"GR",
+    # Russland
+    "SVO":"RU","DME":"RU","LED":"RU",
+    # ── LATEINAMERIKA ──────────────────────────────────────────────────────────
+    # Panama
+    "PTY":"PA",
+    # Costa Rica
+    "SJO":"CR","LIR":"CR",
+    # Mexiko
+    "MEX":"MX","CUN":"MX","GDL":"MX","MTY":"MX","SJD":"MX",
+    # Brasilien
+    "GRU":"BR","GIG":"BR","BSB":"BR","SSA":"BR","FOR":"BR","REC":"BR",
+    # Argentinien
+    "EZE":"AR","AEP":"AR","COR":"AR",
+    # Chile
+    "SCL":"CL","PMC":"CL",
+    # Peru
+    "LIM":"PE",
+    # Kolumbien
+    "BOG":"CO","MDE":"CO","CLO":"CO",
+    # Ecuador
+    "UIO":"EC","GYE":"EC",
+    # Venezuela
+    "CCS":"VE",
+    # Dominikanische Republik
+    "SDQ":"DO","PUJ":"DO",
+    # Kuba
+    "HAV":"CU",
+    # Jamaika
+    "KIN":"JM","MBJ":"JM",
+    # Bahamas
+    "NAS":"BS",
+    # Trinidad
+    "POS":"TT",
+    # Uruguay
+    "MVD":"UY",
+    # Bolivien
+    "VVI":"BO","LPB":"BO",
+    # Paraguay
+    "ASU":"PY",
+    # Honduras
+    "TGU":"HN",
+    # Guatemala
+    "GUA":"GT",
+    # El Salvador
+    "SAL":"SV",
+    # Nicaragua
+    "MGA":"NI",
+    # Kanada
+    "YYZ":"CA","YVR":"CA","YUL":"CA","YYC":"CA","YEG":"CA","YOW":"CA",
+    # Australien
+    "SYD":"AU","MEL":"AU","BNE":"AU","PER":"AU","ADL":"AU",
+    # Neuseeland
+    "AKL":"NZ","WLG":"NZ","CHC":"NZ",
+    # Südafrika
+    "JNB":"ZA","CPT":"ZA","DUR":"ZA",
+    # Marokko
+    "CMN":"MA","RAK":"MA","AGA":"MA",
+    # Ägypten
+    "CAI":"EG","HRG":"EG","SSH":"EG","LXR":"EG",
+    # Israel
+    "TLV":"IL",
+    # Iran
+    "IKA":"IR","THR":"IR",
+    # Pakistan
+    "KHI":"PK","LHE":"PK","ISB":"PK",
+    # Bangladesch
+    "DAC":"BD",
+    # Sri Lanka
+    "CMB":"LK",
+    # Thailand
+    "BKK":"TH","DMK":"TH","HKT":"TH","CNX":"TH",
+    # Vietnam
+    "HAN":"VN","SGN":"VN","DAD":"VN",
+    # Malaysia
+    "KUL":"MY","PEN":"MY",
+    # Indonesien
+    "CGK":"ID","DPS":"ID","SUB":"ID",
+    # Philippinen
+    "MNL":"PH","CEB":"PH",
+    # Taiwan
+    "TPE":"TW","TSA":"TW",
+    # Kasachstan
+    "ALA":"KZ","TSE":"KZ",
+}
+
+# VMA-Sätze für Länder ohne eigenen Eintrag (Fallback auf Satz für "sonstige Länder" = DE)
+# Panama, Costa Rica etc. → kein BMF-Satz → DE-Satz als Fallback
+# Bitte jährlich mit BMF-Schreiben abgleichen!
+
+APP_VERSION = "9.5"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -282,6 +435,35 @@ VMA = {
     "HU":  {"full": 35.0,  "partial": 17.5},
     "RO":  {"full": 30.0,  "partial": 15.0},
     "BR":  {"full": 40.0,  "partial": 20.0},
+    # Lateinamerika – BMF-Schreiben (§9 EStG, nicht gelistete Länder = 30€/15€)
+    "PA":  {"full": 45.0,  "partial": 30.0},   # Panama (Richtwert, kein BMF-Satz)
+    "CR":  {"full": 40.0,  "partial": 26.5},   # Costa Rica
+    "MX":  {"full": 45.0,  "partial": 30.0},   # Mexiko
+    "AR":  {"full": 40.0,  "partial": 20.0},   # Argentinien
+    "CL":  {"full": 45.0,  "partial": 30.0},   # Chile
+    "PE":  {"full": 40.0,  "partial": 20.0},   # Peru
+    "CO":  {"full": 40.0,  "partial": 20.0},   # Kolumbien
+    "EC":  {"full": 35.0,  "partial": 17.5},   # Ecuador
+    "UY":  {"full": 40.0,  "partial": 20.0},   # Uruguay
+    "DO":  {"full": 35.0,  "partial": 17.5},   # Dominikanische Republik
+    "GT":  {"full": 35.0,  "partial": 17.5},   # Guatemala
+    "SV":  {"full": 35.0,  "partial": 17.5},   # El Salvador
+    "HN":  {"full": 35.0,  "partial": 17.5},   # Honduras
+    "NI":  {"full": 35.0,  "partial": 17.5},   # Nicaragua
+    "CU":  {"full": 35.0,  "partial": 17.5},   # Kuba
+    "JM":  {"full": 35.0,  "partial": 17.5},   # Jamaika
+    # Sonstige (Sammelkategorie §9 EStG)
+    "ZA":  {"full": 35.0,  "partial": 17.5},   # Südafrika
+    "MA":  {"full": 35.0,  "partial": 17.5},   # Marokko
+    "EG":  {"full": 35.0,  "partial": 17.5},   # Ägypten
+    "IL":  {"full": 45.0,  "partial": 30.0},   # Israel
+    "TH":  {"full": 35.0,  "partial": 17.5},   # Thailand
+    "VN":  {"full": 35.0,  "partial": 17.5},   # Vietnam
+    "MY":  {"full": 40.0,  "partial": 20.0},   # Malaysia
+    "ID":  {"full": 35.0,  "partial": 17.5},   # Indonesien
+    "PH":  {"full": 35.0,  "partial": 17.5},   # Philippinen
+    "TW":  {"full": 45.0,  "partial": 30.0},   # Taiwan
+    "NZ":  {"full": 40.0,  "partial": 20.0},   # Neuseeland
     "CN_HK": {"full": 83.0, "partial": 56.0},
 }
 # Mahlzeitenabzug 2026: 20%/40%/40% vom deutschen 24h-Satz (28 EUR)
@@ -1103,14 +1285,39 @@ def _fetch_mails_internal():
                 continue
 
         body = ""
+        html_body = ""
         if msg.is_multipart():
             for part in msg.walk():
-                if part.get_content_type()=="text/plain" and "attachment" not in str(part.get("Content-Disposition") or "").lower():
-                    pl=part.get_payload(decode=True)
-                    if pl: body=pl.decode(errors="ignore"); break
+                ct = part.get_content_type()
+                cd = str(part.get("Content-Disposition") or "").lower()
+                if "attachment" in cd: continue
+                pl = part.get_payload(decode=True)
+                if not pl: continue
+                if ct == "text/plain" and not body:
+                    body = pl.decode(errors="ignore")
+                elif ct == "text/html" and not html_body:
+                    html_body = pl.decode(errors="ignore")
         else:
-            pl=msg.get_payload(decode=True)
-            if pl: body=pl.decode(errors="ignore")
+            pl = msg.get_payload(decode=True)
+            ct = msg.get_content_type()
+            if pl:
+                if ct == "text/html":
+                    html_body = pl.decode(errors="ignore")
+                else:
+                    body = pl.decode(errors="ignore")
+
+        # HTML → Plain Text Fallback wenn kein plain/text vorhanden
+        if not body and html_body:
+            # Einfaches HTML-Stripping: Tags entfernen, Whitespace normalisieren
+            import html as _html
+            text = _html.unescape(html_body)
+            text = re.sub(r'<style[^>]*>.*?</style>', ' ', text, flags=re.DOTALL|re.IGNORECASE)
+            text = re.sub(r'<script[^>]*>.*?</script>', ' ', text, flags=re.DOTALL|re.IGNORECASE)
+            text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+            text = re.sub(r'<[^>]+>', ' ', text)
+            text = re.sub(r'[ \t]+', ' ', text)
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            body = text.strip()[:20000]
 
         full  = f"{subject}\n{body}"
         code  = extract_trip_code(full)
@@ -2666,25 +2873,7 @@ async def analyze_attachments():
                             ret_d_str=str(trip_row[1]) if trip_row[1] else ""
 
                             # Flughafen → Ländercode
-                            AIRPORT_CC={
-                                "FRA":"DE","MUC":"DE","BER":"DE","HAM":"DE","DUS":"DE","STR":"DE",
-                                "CGN":"DE","NUE":"DE","LEJ":"DE","HAJ":"DE","FDH":"DE",
-                                "CDG":"FR","ORY":"FR","LYS":"FR","NCE":"FR","MRS":"FR","BOD":"FR","TLS":"FR",
-                                "LHR":"GB","LGW":"GB","MAN":"GB","EDI":"GB","STN":"GB",
-                                "JFK":"US","LAX":"US","ORD":"US","MIA":"US","SFO":"US","BOS":"US",
-                                "BOM":"IN","DEL":"IN","MAA":"IN","BLR":"IN","HYD":"IN",
-                                "DXB":"AE","AUH":"AE","SHJ":"AE",
-                                "GYD":"AZ","ZRH":"CH","GVA":"CH",
-                                "VIE":"AT","SZG":"AT","INN":"AT",
-                                "FCO":"IT","MXP":"IT","NAP":"IT","VCE":"IT",
-                                "MAD":"ES","BCN":"ES","AGP":"ES",
-                                "IST":"TR","SAW":"TR","AYT":"TR",
-                                "NRT":"JP","HND":"JP","KIX":"JP",
-                                "SIN":"SG","PEK":"CN","PVG":"CN","ICN":"KR",
-                                "DOH":"QA","RUH":"SA","JED":"SA",
-                                "AMS":"NL","BRU":"BE","WAW":"PL","PRG":"CZ",
-                                "ARN":"SE","CPH":"DK","HEL":"FI","OSL":"NO",
-                            }
+                            # AIRPORT_CC = globale Konstante (oben definiert)
                             # Zielland aus flight_segments ableiten
                             # Format: FN|DEP|ARR|DATE|TIME|DATE|TIME;...
                             dest_cc_from_seg = None
@@ -4761,26 +4950,7 @@ def recalc_vma(tc: str):
         if not meta: return {"status":"fehler","detail":"Reise nicht gefunden"}
         dep_d_raw,ret_d_raw,destinations=meta
 
-        AIRPORT_CC={
-            "FRA":"DE","MUC":"DE","BER":"DE","HAM":"DE","NUE":"DE","DUS":"DE","STR":"DE","CGN":"DE",
-            "CDG":"FR","ORY":"FR","LYS":"FR","NCE":"FR","MRS":"FR","BOD":"FR","TLS":"FR",
-            "LHR":"GB","LGW":"GB","MAN":"GB","EDI":"GB","STN":"GB",
-            "JFK":"US","LAX":"US","ORD":"US","MIA":"US","SFO":"US","BOS":"US","IAH":"US","DCA":"US",
-            "BOM":"IN","DEL":"IN","MAA":"IN","BLR":"IN","HYD":"IN",
-            "DXB":"AE","AUH":"AE","SHJ":"AE",
-            "GYD":"AZ","ZRH":"CH","GVA":"CH","BSL":"CH",
-            "VIE":"AT","SZG":"AT","INN":"AT",
-            "FCO":"IT","MXP":"IT","NAP":"IT","VCE":"IT","LIN":"IT",
-            "MAD":"ES","BCN":"ES","AGP":"ES","PMI":"ES",
-            "IST":"TR","SAW":"TR","AYT":"TR",
-            "NRT":"JP","HND":"JP","KIX":"JP",
-            "SIN":"SG","PEK":"CN","PVG":"CN","CAN":"CN","HKG":"CN",
-            "ICN":"KR","GMP":"KR",
-            "DOH":"QA","RUH":"SA","JED":"SA",
-            "AMS":"NL","BRU":"BE","WAW":"PL","KRK":"PL","WRO":"PL",
-            "ARN":"SE","CPH":"DK","HEL":"FI","OSL":"NO",
-            "PRG":"CZ","BUD":"HU","OTP":"RO",
-        }
+        # AIRPORT_CC = globale Konstante (oben definiert)
 
         dest_cc=None
         arrive_date=None
