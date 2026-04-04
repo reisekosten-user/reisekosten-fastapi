@@ -327,7 +327,7 @@ AIRPORT_CC = {
 # Panama, Costa Rica etc. → kein BMF-Satz → DE-Satz als Fallback
 # Bitte jährlich mit BMF-Schreiben abgleichen!
 
-APP_VERSION = "9.5"
+APP_VERSION = "9.6"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -783,11 +783,12 @@ PFLICHTFELDER:
 - betrag: Gesamtbetrag als "142.50" (Punkt als Dezimaltrennzeichen), oder ""
 - waehrung: "EUR" (Standard), oder expliziter Code wie "USD", "GBP", "CHF"
 - datum: NUR das Buchungsdatum als "DD.MM.YYYY" - NICHT das Reisedatum!
-  Buchungsdatum = wann die Buchung gemacht wurde (oft "Buchung vom", "Bestelldatum")
-- anbieter: Firmenname z.B. "Lufthansa", "Marriott", "Booking.com"
-- reisecode: "YY-NNN" falls im Text z.B. "26-001", sonst ""
-- pnr_code: 6-stelliger Buchungscode z.B. "83WPJT", oder ""
+  Buchungsdatum = wann die Buchung gemacht wurde (oft "Buchung vom", "Bestelldatum", "Ausstellungsdatum")
+- anbieter: Firmenname z.B. "Lufthansa", "Marriott", "Swiss"
+- reisecode: Bekannte Reisecodes: {codes_str}. Suche im Text nach diesen Codes und trage den passenden ein, oder ""
+- pnr_code: 6-stelliger alphanumerischer Buchungscode z.B. "Z6INOT", "83WPJT", oder ""
 - confidence: "hoch" | "mittel" | "niedrig"
+- bemerkung: Kurze Zusammenfassung auf Deutsch
 - bemerkung: Kurze Zusammenfassung auf Deutsch
 
 FLUG-FELDER (nur bei beleg_typ=Flug):
@@ -2784,13 +2785,39 @@ async def analyze_attachments():
         mail_processed=0
         for mid,subj,body,tc in mail_rows:
             try:
-                full=f"{subj or ''}\n{body or ''}"
+                # HTML → Plaintext wenn Body noch HTML enthält
+                body_clean = body or ""
+                if body_clean and ("<html" in body_clean.lower() or "<div" in body_clean.lower() or "<td" in body_clean.lower()):
+                    import html as _html
+                    body_clean = _html.unescape(body_clean)
+                    body_clean = re.sub(r'<style[^>]*>.*?</style>', ' ', body_clean, flags=re.DOTALL|re.IGNORECASE)
+                    body_clean = re.sub(r'<script[^>]*>.*?</script>', ' ', body_clean, flags=re.DOTALL|re.IGNORECASE)
+                    body_clean = re.sub(r'<br\s*/?>', '\n', body_clean, flags=re.IGNORECASE)
+                    body_clean = re.sub(r'<[^>]+>', ' ', body_clean)
+                    body_clean = re.sub(r'[ \t]+', ' ', body_clean)
+                    body_clean = re.sub(r'\n{3,}', '\n\n', body_clean).strip()
+                    # Bereinigten Body in DB speichern
+                    cur.execute("UPDATE mail_messages SET body=%s WHERE id=%s", (body_clean[:20000], mid))
+
+                full=f"{subj or ''}\n{body_clean}"
                 fields=await mistral_extract(full,known_codes,"mail")
                 if fields:
                     pnr=fields.get("pnr_code","") or ""
                     fns=fields.get("flight_numbers","") or ""
                     trains=fields.get("train_numbers","") or ""
                     rc=fields.get("reisecode","") or tc or ""
+                    # Wenn kein Reisecode → über PNR in trip_meta suchen
+                    if not rc and pnr:
+                        cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(pnr,))
+                        pnr_row=cur.fetchone()
+                        if pnr_row: rc=pnr_row[0]
+                    # Wenn immer noch kein Code → Mail-Betreff nach Reisecode durchsuchen
+                    if not rc:
+                        rc_m=re.search(r'\b(\d{2}-\d{3})\b', subj or "")
+                        if rc_m: rc=rc_m.group(1)
+                    # Mail in DB auf gefundenen Code aktualisieren
+                    if rc and not tc:
+                        cur.execute("UPDATE mail_messages SET trip_code=%s WHERE id=%s AND (trip_code IS NULL OR trip_code='')",(rc,mid))
                     traveler_ki=fields.get("traveler_name","") or ""
                     dest_ki=fields.get("destination","") or ""
                     betrag_ki=fields.get("betrag","") or ""
