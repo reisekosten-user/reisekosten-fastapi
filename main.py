@@ -327,7 +327,7 @@ AIRPORT_CC = {
 # Panama, Costa Rica etc. → kein BMF-Satz → DE-Satz als Fallback
 # Bitte jährlich mit BMF-Schreiben abgleichen!
 
-APP_VERSION = "9.7"
+APP_VERSION = "9.8"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -1137,9 +1137,154 @@ def extract_trip_code(text):
     return m.group(0) if m else None
 
 def extract_pnr(text):
-    """AMADEUS PNR: 6 Zeichen alphanumerisch, typisch in Reisebestaetigung."""
-    m = re.search(r"\b([A-Z0-9]{6})\b", text or "")
+    """PNR/Buchungsreferenz: 6 alphanumerische Zeichen (Grossbuchstaben+Ziffern)."""
+    # Explizite Labels zuerst
+    labeled = re.search(r'(?:Buchungsreferenz|PNR|Booking\s*Ref(?:erence)?|Record\s*Locator)\s*[:\s#]*([A-Z0-9]{6})\b', text or "", re.IGNORECASE)
+    if labeled: return labeled.group(1).upper()
+    # Fallback: 6-stellige Sequenz aus Grossbuchstaben+Ziffern
+    m = re.search(r'\b([A-Z]{2}[A-Z0-9]{4}|[A-Z0-9]{2}[A-Z]{2}[A-Z0-9]{2})\b', text or "")
     return m.group(1) if m else None
+
+def extract_flight_numbers(text: str) -> list:
+    """Extrahiert alle Flugnummern aus Text via Regex. Zuverlässiger als KI."""
+    if not text: return []
+    # Pattern: 2 Buchstaben + 3-4 Ziffern (IATA Airline Code + Flugnummer)
+    # Bekannte Airlines explizit: LH, LX, OS, SK, AF, KL, BA, FR, EW, U2, W6 etc.
+    matches = re.findall(r'\b([A-Z]{2})\s*(\d{3,4})\b', text)
+    AIRLINE_CODES = {
+        "LH","LX","OS","SK","AF","KL","BA","IB","VY","FR","U2","W6","EW","TK",
+        "AY","SN","QR","EK","EY","DL","AA","UA","AC","WS","NH","JL","OZ","KE",
+        "CX","SQ","MH","TG","VN","GA","AI","SG","6E","G8","IX","QP","S5",
+        "WK","SR","SU","FI","AZ","TP","RO","LO","OK","BT","TF","OA","A3",
+        "HV","PC","VF","TO","LS","BY","MT","TCX","MON","AMC",
+    }
+    result = []
+    seen = set()
+    for airline, num in matches:
+        if airline in AIRLINE_CODES:
+            fn = f"{airline}{num}"
+            if fn not in seen:
+                seen.add(fn)
+                result.append(fn)
+    return result
+
+def extract_hotel_dates(text: str) -> dict:
+    """Extrahiert Check-in/Check-out aus Bestätigungsmails via Regex."""
+    result = {}
+    # Check-in patterns
+    ci = re.search(r'(?:Check.in|Arrival|Anreise|Eincheck)[:\s]*(\d{1,2}[./]\d{1,2}[./]\d{2,4}|\d{1,2}\s+\w+\s+\d{4}|\w+,?\s+\d{1,2}\s+\w+\s+\d{4})', text, re.IGNORECASE)
+    if ci: result['checkin'] = ci.group(1)
+    # Check-out patterns
+    co = re.search(r'(?:Check.out|Departure|Abreise|Auscheck)[:\s]*(\d{1,2}[./]\d{1,2}[./]\d{2,4}|\d{1,2}\s+\w+\s+\d{4}|\w+,?\s+\d{1,2}\s+\w+\s+\d{4})', text, re.IGNORECASE)
+    if co: result['checkout'] = co.group(1)
+    # Nächte
+    nights = re.search(r'(\d+)\s*(?:Nächte?|nights?|Übernachtung)', text, re.IGNORECASE)
+    if nights: result['nights'] = int(nights.group(1))
+    return result
+
+def extract_flight_segments_from_text(text: str) -> list:
+    """
+    Versucht strukturierte Flug-Segmente aus Buchungstext zu extrahieren.
+    Gibt Liste von Dicts zurück: {fn, dep, arr, date, dep_time, arr_time}
+    """
+    segments = []
+    # Pattern für typische Itinerary-Zeilen:
+    # "LX 3613 ... FRA ... ZRH ... 25MAY 06:35 ... 07:30"
+    # Datum-Formate: 25MAY, 25.05.2026, 25 Mai 2026
+    MONTH_MAP = {
+        'jan':'01','feb':'02','mar':'03','apr':'04','may':'05','mai':'05',
+        'jun':'06','jul':'07','aug':'08','sep':'09','oct':'10','okt':'10',
+        'nov':'11','dec':'12','dez':'12'
+    }
+    def parse_date_str(s):
+        """Parst Datumsstring in DD.MM.YYYY."""
+        s = s.strip()
+        # 25MAY2026 oder 25MAY
+        m = re.match(r'(\d{1,2})([A-Za-z]{3})(\d{4})?', s)
+        if m:
+            d, mon, yr = m.group(1), m.group(2).lower(), m.group(3)
+            mo = MONTH_MAP.get(mon, '01')
+            yr = yr or '2026'
+            return f"{int(d):02d}.{mo}.{yr}"
+        # 25.05.2026
+        m = re.match(r'(\d{1,2})[./](\d{1,2})[./](\d{4})', s)
+        if m: return f"{int(m.group(1)):02d}.{int(m.group(2)):02d}.{m.group(3)}"
+        return s
+
+    # Flugzeilen mit IATA-Codes finden
+    # Muster: Flugnummer, Von-IATA, Nach-IATA, Datum, Abflugzeit, Ankunftzeit
+    pattern = re.compile(
+        r'([A-Z]{2})\s*(\d{3,4})'          # Flugnummer z.B. "LX 3613"
+        r'.*?'
+        r'(\d{1,2}[A-Za-z]{3}(?:\d{4})?)'  # Datum z.B. "25MAY" oder "25MAY2026"
+        r'[,\s]*'
+        r'(\d{2}:\d{2})',                   # Abflugzeit z.B. "06:35"
+        re.DOTALL
+    )
+
+    # Einfacherer Ansatz: IATA-Städte + Zeiten aus Tabellenformat
+    # Suche nach Blöcken wie: "FRA ... ZRH ... 06:35 ... 07:30"
+    airport_pairs = re.findall(
+        r'\b([A-Z]{3})\b.*?\b([A-Z]{3})\b.*?(\d{2}:\d{2}).*?(\d{2}:\d{2})',
+        text, re.DOTALL
+    )
+
+    # Kombiniere Flugnummern mit gefundenen Airports
+    fns = extract_flight_numbers(text)
+
+    # Versuche Datum pro Flugnummer zu finden
+    # Suche nach Datum-Flugnummer Kombination
+    for fn in fns:
+        airline = fn[:2]
+        num = fn[2:]
+        # Datum das vor/nach der Flugnummer steht
+        fn_pattern = re.compile(
+            rf'(\d{{1,2}}[A-Za-z]{{3}}(?:\d{{4}})?)'  # Datum
+            r'[^\n]{0,200}'
+            rf'{re.escape(airline)}\s*{re.escape(num)}'
+            r'|'
+            rf'{re.escape(airline)}\s*{re.escape(num)}'
+            r'[^\n]{0,200}'
+            rf'(\d{{1,2}}[A-Za-z]{{3}}(?:\d{{4}})?)',  # Datum danach
+            re.IGNORECASE
+        )
+        dm = fn_pattern.search(text)
+        seg_date = ""
+        if dm:
+            d_str = dm.group(1) or dm.group(2) or ""
+            seg_date = parse_date_str(d_str) if d_str else ""
+
+        # Zeiten für diesen Flug
+        fn_region = ""
+        fn_pos = text.upper().find(f"{airline} {num}")
+        if fn_pos == -1: fn_pos = text.upper().find(f"{airline}{num}")
+        if fn_pos >= 0:
+            fn_region = text[max(0,fn_pos-100):fn_pos+500]
+
+        times = re.findall(r'\b(\d{2}:\d{2})\b', fn_region)
+        dep_time = times[0] if len(times) > 0 else ""
+        arr_time = times[1] if len(times) > 1 else ""
+
+        # Airports aus der Nähe der Flugnummer
+        apts = re.findall(r'\b([A-Z]{3})\b', fn_region)
+        # Filtere bekannte IATA-Airports
+        valid_apts = [a for a in apts if a in AIRPORT_CC]
+        dep_apt = valid_apts[0] if len(valid_apts) > 0 else ""
+        arr_apt = valid_apts[1] if len(valid_apts) > 1 else ""
+
+        segments.append({
+            "fn": fn, "dep": dep_apt, "arr": arr_apt,
+            "date": seg_date, "dep_time": dep_time, "arr_time": arr_time
+        })
+
+    return segments
+
+def segments_to_string(segments: list) -> str:
+    """Konvertiert Segment-Liste in DB-Format: FN|DEP|ARR|DATE|TIME|DATE|TIME;..."""
+    parts = []
+    for s in segments:
+        parts.append(f"{s['fn']}|{s['dep']}|{s['arr']}|{s['date']}|{s['dep_time']}|{s['date']}|{s['arr_time']}")
+    return ";".join(parts)
 
 def decode_mime_header(value):
     if not value: return ""
@@ -1150,8 +1295,8 @@ def decode_mime_header(value):
 
 def detect_mail_type(text):
     t=(text or "").lower()
-    if any(x in t for x in ["flug","flight","boarding","pnr","ticket","airline","itinerary","eticket"]): return "Flug"
-    if any(x in t for x in ["hotel","booking.com","check-in","reservation","zimmer","accommodation"]): return "Hotel"
+    if any(x in t for x in ["flug","flight","boarding","pnr","ticket","airline","itinerary","eticket","buchungsreferenz","flugnummer","check-in","lx ","lh ","os ","sk "]): return "Flug"
+    if any(x in t for x in ["hotel","booking.com","check-in","reservation","zimmer","accommodation","sheraton","marriott","hilton","hyatt"]): return "Hotel"
     if any(x in t for x in ["taxi","uber","cab","ride"]): return "Taxi"
     if any(x in t for x in ["bahn","zug","train","ice","db ","bahnticket"]): return "Bahn"
     if any(x in t for x in ["restaurant","verpflegung","essen","dinner","lunch","breakfast"]): return "Essen"
@@ -2796,10 +2941,33 @@ async def analyze_attachments():
                     body_clean = re.sub(r'<[^>]+>', ' ', body_clean)
                     body_clean = re.sub(r'[ \t]+', ' ', body_clean)
                     body_clean = re.sub(r'\n{3,}', '\n\n', body_clean).strip()
-                    # Bereinigten Body in DB speichern
                     cur.execute("UPDATE mail_messages SET body=%s WHERE id=%s", (body_clean[:20000], mid))
 
                 full=f"{subj or ''}\n{body_clean}"
+
+                # ── REGEX-PRE-EXTRAKTION (zuverlässiger als KI) ──────────────
+                regex_fns   = extract_flight_numbers(full)
+                regex_pnr   = extract_pnr(full) or ""
+                regex_segs  = extract_flight_segments_from_text(full) if regex_fns else []
+                regex_seg_s = segments_to_string(regex_segs) if regex_segs else ""
+                regex_type  = "Flug" if regex_fns else ""
+                # Reisecode aus Betreff
+                regex_tc    = extract_trip_code(full) or tc or ""
+                # PNR → Reisecode-Lookup
+                if not regex_tc and regex_pnr:
+                    cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(regex_pnr,))
+                    pnr_row=cur.fetchone()
+                    if pnr_row: regex_tc=pnr_row[0]
+                # Mail-Zuordnung aktualisieren wenn Regex mehr weiß als DB
+                if regex_tc and not tc:
+                    cur.execute("UPDATE mail_messages SET trip_code=%s WHERE id=%s AND (trip_code IS NULL OR trip_code='')",(regex_tc,mid))
+                if regex_pnr and regex_tc:
+                    cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(regex_pnr,regex_tc))
+                if regex_fns and regex_tc:
+                    fns_str=",".join(regex_fns)
+                    cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns_str,regex_tc))
+                    print(f"[Regex] {regex_tc}: {fns_str} | PNR:{regex_pnr}")
+
                 fields=await mistral_extract(full,known_codes,"mail")
                 if fields:
                     pnr=fields.get("pnr_code","") or ""
@@ -2855,7 +3023,7 @@ async def analyze_attachments():
                             mur=cur.fetchone()
                             mail_uid_val=mur[0] if mur else f"mail_{mid}"
                             safe_name=f"Mail: {(subj or 'Buchungsbestaetigung')[:60]}"
-                            seg_ki      = fields.get("flight_segments","") or ""
+                            seg_ki      = fields.get("flight_segments","") or regex_seg_s or ""
                             checkin_ki  = fields.get("checkin_date","") or ""
                             checkout_ki = fields.get("checkout_date","") or ""
                             cin_t_ki    = fields.get("checkin_time","") or ""
@@ -2876,7 +3044,7 @@ async def analyze_attachments():
                                  waehrung_ki,datum_ki,vendor_ki,
                                  nights_ki,checkin_ki or None,checkout_ki or None,
                                  cin_t_ki or None,cout_t_ki or None,seg_ki or None,
-                                 fns or None,
+                                 fns or (",".join(regex_fns) if regex_fns else None),
                                  "ok (Mail-Body)",conf_ki,
                                  "ok" if conf_ki=="hoch" else "pruefen",
                                  f"Aus Mail-Text: {subj or ''}"))
