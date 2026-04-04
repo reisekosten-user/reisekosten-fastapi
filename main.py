@@ -1,15 +1,3 @@
-"""
-Herrhammer Reisekosten – Version 6.3
-=====================================
-Neu in 6.3:
-  - ICS-Parsing: detected_date Spalte fix, ICS korrekt in analyse erkannt
-  - Dashboard: Reisetitel + Kundenkürzel neben Reisecode
-  - DB Bahn API: echte Verbindungsprüfung mit Client-ID/Secret
-  - Analyse: Fehlerursachen klarer, alle Anhänge werden verarbeitet
-  - /init: alle fehlenden Spalten zuverlässig nachgerüstet
-  - trip_meta: neues Feld trip_title + customer_code
-"""
-
 from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +8,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "8.2"
+APP_VERSION = "8.3"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2386,42 +2374,130 @@ async def analyze_attachments():
                                  "ok" if conf_ki=="hoch" else "pruefen",
                                  f"Aus Mail-Text: {subj or ''}"))
 
-                    # VMA-Destinationen aus Zielland ableiten
-                    if dest_ki and rc and fns:
+                    # ── VMA-Destinationen automatisch ableiten ──────────────────
+                    # Quellen: flight_segments (Flughafen→Land), checkin/checkout, dest_ki
+                    if rc:
                         cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(rc,))
                         trip_row=cur.fetchone()
                         if trip_row and trip_row[0] and not trip_row[2]:
                             dep_d_str=str(trip_row[0])
                             ret_d_str=str(trip_row[1]) if trip_row[1] else ""
-                            DEST_CC_MAP={
-                                "frankreich":"FR","france":"FR","paris":"FR","lyon":"FR","nizza":"FR",
-                                "indien":"IN","india":"IN","mumbai":"IN","delhi":"IN",
-                                "dubai":"AE","abu dhabi":"AE","uae":"AE",
-                                "usa":"US","new york":"US","los angeles":"US",
-                                "grossbritannien":"GB","uk":"GB","london":"GB",
-                                "schweiz":"CH","zuerich":"CH","genf":"CH",
-                                "oesterreich":"AT","wien":"AT","vienna":"AT",
-                                "italien":"IT","rom":"IT","mailand":"IT",
-                                "spanien":"ES","barcelona":"ES","madrid":"ES",
-                                "tuerkei":"TR","istanbul":"TR",
-                                "japan":"JP","tokio":"JP",
-                                "singapur":"SG","china":"CN","katar":"QA",
+
+                            # Flughafen → Ländercode
+                            AIRPORT_CC={
+                                "FRA":"DE","MUC":"DE","BER":"DE","HAM":"DE","DUS":"DE","STR":"DE",
+                                "CGN":"DE","NUE":"DE","LEJ":"DE","HAJ":"DE","FDH":"DE",
+                                "CDG":"FR","ORY":"FR","LYS":"FR","NCE":"FR","MRS":"FR","BOD":"FR","TLS":"FR",
+                                "LHR":"GB","LGW":"GB","MAN":"GB","EDI":"GB","STN":"GB",
+                                "JFK":"US","LAX":"US","ORD":"US","MIA":"US","SFO":"US","BOS":"US",
+                                "BOM":"IN","DEL":"IN","MAA":"IN","BLR":"IN","HYD":"IN",
+                                "DXB":"AE","AUH":"AE","SHJ":"AE",
+                                "GYD":"AZ","ZRH":"CH","GVA":"CH",
+                                "VIE":"AT","SZG":"AT","INN":"AT",
+                                "FCO":"IT","MXP":"IT","NAP":"IT","VCE":"IT",
+                                "MAD":"ES","BCN":"ES","AGP":"ES",
+                                "IST":"TR","SAW":"TR","AYT":"TR",
+                                "NRT":"JP","HND":"JP","KIX":"JP",
+                                "SIN":"SG","PEK":"CN","PVG":"CN","ICN":"KR",
+                                "DOH":"QA","RUH":"SA","JED":"SA",
+                                "AMS":"NL","BRU":"BE","WAW":"PL","PRG":"CZ",
+                                "ARN":"SE","CPH":"DK","HEL":"FI","OSL":"NO",
                             }
-                            dest_cc=None
-                            dest_low=dest_ki.lower()
-                            for key,cc in DEST_CC_MAP.items():
-                                if key in dest_low:
-                                    dest_cc=cc; break
-                            if dest_cc and dest_cc!="DE":
+                            # Zielland aus flight_segments ableiten
+                            # Format: FN|DEP|ARR|DATE|TIME|DATE|TIME;...
+                            dest_cc_from_seg = None
+                            dep_date_in_dest = None  # wann man ankommt
+                            arr_date_back    = None  # wann man zurückfliegt
+                            seg_ki_vma = fields.get("flight_segments","") or seg_ki or ""
+                            if seg_ki_vma:
+                                segs = [s.strip().split("|") for s in seg_ki_vma.split(";") if s.strip()]
+                                # Hinflug: erstes Segment dessen Ankunftsflughafen nicht DE ist
+                                for seg in segs:
+                                    if len(seg) >= 3:
+                                        arr_apt = seg[2].strip().upper()
+                                        cc = AIRPORT_CC.get(arr_apt)
+                                        if cc and cc != "DE":
+                                            dest_cc_from_seg = cc
+                                            # Ankunftsdatum
+                                            if len(seg) >= 6 and seg[5].strip():
+                                                try:
+                                                    p=seg[5].strip().split(".")
+                                                    if len(p)==3:
+                                                        dep_date_in_dest = date(int(p[2]),int(p[1]),int(p[0]))
+                                                except: pass
+                                            if not dep_date_in_dest and len(seg) >= 4 and seg[3].strip():
+                                                try:
+                                                    p=seg[3].strip().split(".")
+                                                    if len(p)==3:
+                                                        dep_date_in_dest = date(int(p[2]),int(p[1]),int(p[0]))
+                                                except: pass
+                                            break
+                                # Rückflug: letztes Segment dessen Abflughafen nicht DE ist
+                                for seg in reversed(segs):
+                                    if len(seg) >= 2:
+                                        dep_apt = seg[1].strip().upper()
+                                        cc = AIRPORT_CC.get(dep_apt)
+                                        if cc and cc != "DE":
+                                            if len(seg) >= 4 and seg[3].strip():
+                                                try:
+                                                    p=seg[3].strip().split(".")
+                                                    if len(p)==3:
+                                                        arr_date_back = date(int(p[2]),int(p[1]),int(p[0]))
+                                                except: pass
+                                            break
+
+                            # Fallback: Zielland aus dest_ki Text
+                            if not dest_cc_from_seg and dest_ki:
+                                DEST_CC_MAP={
+                                    "frankreich":"FR","france":"FR","paris":"FR","lyon":"FR","nizza":"FR","marseille":"FR",
+                                    "indien":"IN","india":"IN","mumbai":"IN","delhi":"IN","bangalore":"IN",
+                                    "dubai":"AE","abu dhabi":"AE","uae":"AE","emirate":"AE",
+                                    "usa":"US","new york":"US","los angeles":"US","chicago":"US",
+                                    "grossbritannien":"GB","uk":"GB","london":"GB","england":"GB",
+                                    "schweiz":"CH","zuerich":"CH","genf":"CH",
+                                    "oesterreich":"AT","wien":"AT","salzburg":"AT",
+                                    "italien":"IT","rom":"IT","mailand":"IT","venedig":"IT",
+                                    "spanien":"ES","barcelona":"ES","madrid":"ES",
+                                    "tuerkei":"TR","istanbul":"TR","ankara":"TR",
+                                    "japan":"JP","tokio":"JP","osaka":"JP",
+                                    "singapur":"SG","singapore":"SG",
+                                    "china":"CN","peking":"CN","shanghai":"CN",
+                                    "katar":"QA","doha":"QA","saudi":"SA",
+                                    "niederlande":"NL","amsterdam":"NL",
+                                    "belgien":"BE","bruessel":"BE",
+                                    "portugal":"PT","lissabon":"PT",
+                                    "norwegen":"NO","schweden":"SE","daenemark":"DK","finnland":"FI",
+                                }
+                                dest_low = dest_ki.lower()
+                                for key,cc in DEST_CC_MAP.items():
+                                    if key in dest_low:
+                                        dest_cc_from_seg = cc; break
+
+                            # VMA-String aufbauen wenn Zielland != DE gefunden
+                            if dest_cc_from_seg and dest_cc_from_seg != "DE":
                                 try:
-                                    next_day=str(date.fromisoformat(dep_d_str)+timedelta(days=1))
-                                    vma_auto=f"{dep_d_str}:DE,{next_day}:{dest_cc}"
-                                    if ret_d_str: vma_auto+=f",{ret_d_str}:DE"
+                                    dep_d = date.fromisoformat(dep_d_str)
+                                    ret_d = date.fromisoformat(ret_d_str) if ret_d_str else None
+
+                                    # Tag des Eintreffens im Zielland
+                                    arrive_foreign = dep_date_in_dest or (dep_d + timedelta(days=1))
+                                    # Tag der Rückreise
+                                    leave_foreign  = arr_date_back or ret_d or (arrive_foreign + timedelta(days=1))
+
+                                    vma_parts = [f"{dep_d_str}:DE"]
+                                    if arrive_foreign > dep_d:
+                                        vma_parts.append(f"{arrive_foreign}:{dest_cc_from_seg}")
+                                    if leave_foreign and leave_foreign > arrive_foreign:
+                                        vma_parts.append(f"{leave_foreign}:DE")
+
+                                    vma_auto = ",".join(vma_parts)
                                     cur.execute(
                                         "UPDATE trip_meta SET vma_destinations=%s "
                                         "WHERE trip_code=%s AND (vma_destinations IS NULL OR vma_destinations='')",
-                                        (vma_auto,rc))
-                                except: pass
+                                        (vma_auto, rc))
+                                    print(f"[VMA] {rc}: {vma_auto}")
+                                except Exception as vma_e:
+                                    print(f"[VMA Fehler]: {vma_e}")
 
                 cur.execute("UPDATE mail_messages SET analysis_status='ok' WHERE id=%s",(mid,))
                 mail_processed+=1
