@@ -152,7 +152,7 @@ async def generate_and_store_mail_pdf(att_id: int, subj: str, body: str,
         return None
 
 
-APP_VERSION = "9.1"
+APP_VERSION = "9.2"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -4271,30 +4271,78 @@ def beleg_pdf(att_id: int):
 def beleg_vorschau(att_id: int):
     try:
         conn=get_conn();cur=conn.cursor()
-        cur.execute("SELECT storage_key,original_filename,content_type,ki_bemerkung,detected_type,detected_amount_eur,detected_vendor,detected_date FROM mail_attachments WHERE id=%s",(att_id,))
-        row=cur.fetchone();cur.close();conn.close()
-        if not row: return HTMLResponse("Beleg nicht gefunden",status_code=404)
-        storage_key,filename,content_type,bemerk,dtype,amt,vendor,ddate=row
-        # Mail-Body-Belege haben keinen S3-Key → Info-Seite anzeigen
+        cur.execute("""SELECT a.storage_key,a.original_filename,a.content_type,
+            a.ki_bemerkung,a.detected_type,a.detected_amount_eur,a.detected_vendor,
+            a.detected_date,a.pdf_key,a.trip_code,a.detected_amount,a.detected_currency,
+            a.detected_checkin,a.detected_checkout,a.detected_nights,
+            m.subject,m.body
+            FROM mail_attachments a
+            LEFT JOIN mail_messages m ON m.mail_uid=a.mail_uid
+            WHERE a.id=%s""",(att_id,))
+        row=cur.fetchone()
+        if not row:
+            cur.close();conn.close()
+            return HTMLResponse("Beleg nicht gefunden",status_code=404)
+        (storage_key,filename,content_type,bemerk,dtype,amt,vendor,ddate,
+         pdf_key,tc,amt_orig,curr,checkin,checkout,nights,subj,body)=row
+
+        # Mail-Body-Beleg → PDF generieren und direkt ausliefern
         if not storage_key or storage_key.startswith("mail_body_"):
-            return HTMLResponse(f"""<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8">
-            <title>Mail-Beleg</title>
-            <style>body{{font-family:sans-serif;padding:32px;background:#f0f4f9;color:#1a1a2e}}
-            .card{{background:#fff;border-radius:12px;padding:24px;max-width:560px;margin:0 auto;box-shadow:0 4px 16px rgba(0,0,0,.08)}}
-            h2{{margin-bottom:16px;color:#1a3d96}}table{{border-collapse:collapse;width:100%}}
-            td{{padding:8px 12px;border-bottom:1px solid #eaeef5;font-size:13px}}
-            td:first-child{{font-weight:600;color:#5a6e8a;width:40%}}</style></head>
-            <body><div class="card"><h2>📧 Mail-Body Beleg</h2>
-            <p style="font-size:12px;color:#9bafc8;margin-bottom:16px">Dieser Beleg wurde aus dem E-Mail-Text extrahiert, keine Datei vorhanden.</p>
-            <table>
-            <tr><td>Typ</td><td>{dtype or '–'}</td></tr>
-            <tr><td>Anbieter</td><td>{vendor or '–'}</td></tr>
-            <tr><td>Betrag</td><td>{amt or '–'} €</td></tr>
-            <tr><td>Datum</td><td>{ddate or '–'}</td></tr>
-            <tr><td>KI-Notiz</td><td style="font-size:11px">{(bemerk or '–')[:300]}</td></tr>
-            </table>
-            <p style="margin-top:16px"><a href="javascript:history.back()" style="color:#2152c4">← Zurück</a></p>
-            </div></body></html>""")
+            # Prüfe ob PDF bereits in S3
+            if pdf_key:
+                try:
+                    s3=get_s3()
+                    obj=s3.get_object(Bucket=S3_BUCKET,Key=pdf_key)
+                    pdf_bytes=obj["Body"].read()
+                    cur.close();conn.close()
+                    label=f"{vendor or dtype or 'beleg'}_{att_id}.pdf"
+                    return Response(content=pdf_bytes, media_type="application/pdf",
+                        headers={"Content-Disposition":f'inline; filename="{label}"'})
+                except: pass
+
+            # PDF on-the-fly generieren
+            if HAS_PDF_LIBS:
+                meta={
+                    "Typ": dtype or "–",
+                    "Anbieter": vendor or "–",
+                    "Betrag": f"{amt or amt_orig or '–'} €",
+                    "Datum": ddate or "–",
+                    "Check-in": checkin or "",
+                    "Check-out": checkout or "",
+                    "Nächte": str(nights) if nights else "",
+                    "Reise": tc or "–",
+                }
+                # Leere Felder entfernen
+                meta={k:v for k,v in meta.items() if v and v not in ("–","0","")}
+                # Sophos-Links aus Body entfernen für bessere Lesbarkeit
+                clean_body=re.sub(r'https://[^\s]*sophos[^\s]*','[Link]',body or "")
+                clean_body=re.sub(r'https://[^\s]{80,}','[Link]',clean_body)
+                clean_body=clean_body[:8000]  # max 8000 Zeichen
+
+                pdf_bytes=make_text_pdf(
+                    title=f"{dtype or 'Buchungsbestätigung'}: {vendor or '–'}",
+                    body_text=f"Betreff: {subj or '–'}\n\n{clean_body}",
+                    meta=meta)
+
+                # In S3 speichern für künftige Aufrufe
+                try:
+                    new_key=f"mail_pdfs/{tc}/mail_body_{att_id}.pdf"
+                    s3=get_s3()
+                    s3.put_object(Bucket=S3_BUCKET,Key=new_key,Body=pdf_bytes,
+                                  ContentType="application/pdf")
+                    cur.execute("UPDATE mail_attachments SET pdf_key=%s WHERE id=%s",(new_key,att_id))
+                    conn.commit()
+                except: pass
+
+                cur.close();conn.close()
+                label=f"{vendor or dtype or 'beleg'}_{att_id}.pdf"
+                return Response(content=pdf_bytes, media_type="application/pdf",
+                    headers={"Content-Disposition":f'inline; filename="{label}"'})
+            else:
+                cur.close();conn.close()
+                return HTMLResponse("PDF-Bibliotheken fehlen (reportlab/pypdf nicht installiert)",status_code=500)
+
+        cur.close();conn.close()
         if storage_key.startswith("S3-FEHLER"):
             return HTMLResponse(f"Datei nicht im Bucket: {storage_key}",status_code=404)
         s3=get_s3()
@@ -4305,7 +4353,8 @@ def beleg_vorschau(att_id: int):
             ExpiresIn=300)
         return RedirectResponse(url=signed_url)
     except Exception as e:
-        return HTMLResponse(f"Fehler: {e}",status_code=500)
+        import traceback
+        return HTMLResponse(f"<pre>Fehler: {traceback.format_exc()}</pre>",status_code=500)
 
 
 @app.get("/beleg-edit/{att_id}", response_class=HTMLResponse)
