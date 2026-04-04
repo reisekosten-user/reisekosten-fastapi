@@ -8,7 +8,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "8.3"
+APP_VERSION = "8.4"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -70,21 +70,63 @@ def ist_feiertag_oder_wochenende(d: date) -> bool:
     return d in feiertage_bayern(d.year)
 
 # ── BMF VMA §9 EStG ───────────────────────────────────────────────────────────
+# VMA-Sätze 2026 (§ 9 Abs. 4a EStG, BMF-Schreiben)
+# "partial" = An-/Abreisetag (8-24h), "full" = volle Reisetage (>24h)
 VMA = {
-    "DE":{"full":28.0,"partial":14.0}, "FR":{"full":40.0,"partial":20.0},
-    "GB":{"full":54.0,"partial":27.0}, "US":{"full":56.0,"partial":28.0},
-    "IN":{"full":32.0,"partial":16.0}, "AE":{"full":53.0,"partial":26.5},
-    "AZ":{"full":37.0,"partial":18.5}, "CN":{"full":44.0,"partial":22.0},
-    "JP":{"full":48.0,"partial":24.0}, "SG":{"full":45.0,"partial":22.5},
-    "TR":{"full":35.0,"partial":17.5}, "CH":{"full":55.0,"partial":27.5},
-    "AT":{"full":35.0,"partial":17.5}, "IT":{"full":37.0,"partial":18.5},
-    "ES":{"full":35.0,"partial":17.5}, "NL":{"full":39.0,"partial":19.5},
-    "PL":{"full":24.0,"partial":12.0},
+    "DE":  {"full": 28.0,  "partial": 14.0},
+    "BE":  {"full": 59.0,  "partial": 40.0},
+    "DK":  {"full": 75.0,  "partial": 50.0},
+    "CN":  {"full": 57.0,  "partial": 38.0},
+    "FR":  {"full": 53.0,  "partial": 36.0},
+    "FR_PARIS": {"full": 58.0, "partial": 39.0},
+    "GB":  {"full": 53.0,  "partial": 36.0},
+    "GB_LONDON": {"full": 66.0, "partial": 44.0},
+    "IT":  {"full": 48.0,  "partial": 32.0},
+    "IT_MAILAND": {"full": 42.0, "partial": 28.0},
+    "JP":  {"full": 33.0,  "partial": 22.0},
+    "JP_TOKIO": {"full": 50.0, "partial": 33.0},
+    "NL":  {"full": 58.0,  "partial": 39.0},
+    "AT":  {"full": 50.0,  "partial": 33.0},
+    "PL":  {"full": 34.0,  "partial": 23.0},
+    "PL_WARSCHAU": {"full": 40.0, "partial": 27.0},
+    "CH":  {"full": 82.0,  "partial": 55.0},
+    "CH_GENF": {"full": 70.0, "partial": 47.0},
+    "ES":  {"full": 34.0,  "partial": 23.0},
+    "ES_MADRID": {"full": 44.0, "partial": 28.0},
+    "TR":  {"full": 35.0,  "partial": 17.5},
+    "US":  {"full": 59.0,  "partial": 40.0},
+    "US_NYC":  {"full": 66.0, "partial": 44.0},
+    "US_LA":   {"full": 64.0, "partial": 43.0},
+    "US_CHI":  {"full": 65.0, "partial": 44.0},
+    "US_MIA":  {"full": 65.0, "partial": 44.0},
+    "IN":  {"full": 32.0,  "partial": 16.0},
+    "AE":  {"full": 53.0,  "partial": 26.5},
+    "AZ":  {"full": 37.0,  "partial": 18.5},
+    "SG":  {"full": 45.0,  "partial": 22.5},
+    "QA":  {"full": 35.0,  "partial": 17.5},
+    "SA":  {"full": 35.0,  "partial": 17.5},
+    "KR":  {"full": 40.0,  "partial": 20.0},
+    "AU":  {"full": 40.0,  "partial": 20.0},
+    "CA":  {"full": 45.0,  "partial": 22.5},
+    "RU":  {"full": 30.0,  "partial": 20.0},
+    "SE":  {"full": 45.0,  "partial": 22.5},
+    "NO":  {"full": 55.0,  "partial": 27.5},
+    "FI":  {"full": 45.0,  "partial": 22.5},
+    "CZ":  {"full": 35.0,  "partial": 17.5},
+    "HU":  {"full": 35.0,  "partial": 17.5},
+    "RO":  {"full": 30.0,  "partial": 15.0},
+    "BR":  {"full": 40.0,  "partial": 20.0},
+    "CN_HK": {"full": 83.0, "partial": 56.0},
 }
-MEAL_DED = {"breakfast":5.60,"lunch":11.20,"dinner":11.20}
+# Mahlzeitenabzug 2026: 20%/40%/40% vom deutschen 24h-Satz (28 EUR)
+MEAL_DED = {"breakfast": 5.60, "lunch": 11.20, "dinner": 11.20}
 
-def get_vma(cc, day_type, meals):
-    r = VMA.get((cc or "DE").upper().strip(), {"full":28.0,"partial":14.0})
+def get_vma(cc, day_type, meals, city_key=None):
+    """Gibt VMA-Betrag zurück. city_key z.B. 'FR_PARIS' für stadtspez. Satz."""
+    cc_norm=(cc or "DE").upper().strip()
+    # Stadtspezifischen Satz bevorzugen wenn vorhanden
+    key = city_key.upper() if city_key and city_key.upper() in VMA else cc_norm
+    r = VMA.get(key, VMA.get(cc_norm, {"full":28.0,"partial":14.0}))
     base  = r["full"] if day_type == "full" else r["partial"]
     abzug = sum(MEAL_DED.get(m,0) for m in (meals or []))
     return max(0.0, round(base - abzug, 2))
@@ -3989,6 +4031,112 @@ def reanalyze_mails():
                 "hinweis":"Bitte /analyze-attachments aufrufen"}
     except Exception as e:
         return {"status":"fehler","detail":str(e)}
+
+@app.get("/recalc-vma/{tc}")
+def recalc_vma(tc: str):
+    """Berechnet vma_destinations für eine Reise neu aus Flug-Segmenten und Ziel."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        # Reset vma_destinations
+        cur.execute("UPDATE trip_meta SET vma_destinations=NULL WHERE trip_code=%s",(tc,))
+        # Hole flight_segments aus mail_attachments
+        cur.execute("""SELECT flight_segments,detected_checkin,detected_checkout,detected_type
+            FROM mail_attachments WHERE trip_code=%s AND flight_segments IS NOT NULL
+            ORDER BY id""", (tc,))
+        segs_rows=cur.fetchall()
+        cur.execute("SELECT departure_date,return_date,destinations FROM trip_meta WHERE trip_code=%s",(tc,))
+        meta=cur.fetchone()
+        if not meta: return {"status":"fehler","detail":"Reise nicht gefunden"}
+        dep_d_raw,ret_d_raw,destinations=meta
+
+        AIRPORT_CC={
+            "FRA":"DE","MUC":"DE","BER":"DE","HAM":"DE","NUE":"DE","DUS":"DE","STR":"DE","CGN":"DE",
+            "CDG":"FR","ORY":"FR","LYS":"FR","NCE":"FR","MRS":"FR","BOD":"FR","TLS":"FR",
+            "LHR":"GB","LGW":"GB","MAN":"GB","EDI":"GB","STN":"GB",
+            "JFK":"US","LAX":"US","ORD":"US","MIA":"US","SFO":"US","BOS":"US","IAH":"US","DCA":"US",
+            "BOM":"IN","DEL":"IN","MAA":"IN","BLR":"IN","HYD":"IN",
+            "DXB":"AE","AUH":"AE","SHJ":"AE",
+            "GYD":"AZ","ZRH":"CH","GVA":"CH","BSL":"CH",
+            "VIE":"AT","SZG":"AT","INN":"AT",
+            "FCO":"IT","MXP":"IT","NAP":"IT","VCE":"IT","LIN":"IT",
+            "MAD":"ES","BCN":"ES","AGP":"ES","PMI":"ES",
+            "IST":"TR","SAW":"TR","AYT":"TR",
+            "NRT":"JP","HND":"JP","KIX":"JP",
+            "SIN":"SG","PEK":"CN","PVG":"CN","CAN":"CN","HKG":"CN",
+            "ICN":"KR","GMP":"KR",
+            "DOH":"QA","RUH":"SA","JED":"SA",
+            "AMS":"NL","BRU":"BE","WAW":"PL","KRK":"PL","WRO":"PL",
+            "ARN":"SE","CPH":"DK","HEL":"FI","OSL":"NO",
+            "PRG":"CZ","BUD":"HU","OTP":"RO",
+        }
+
+        dest_cc=None
+        arrive_date=None
+        leave_date=None
+
+        # Aus flight_segments
+        for seg_str,_,_,_ in segs_rows:
+            if not seg_str: continue
+            segs=[s.strip().split("|") for s in seg_str.split(";") if s.strip()]
+            # Hinflug: Ankunft nicht-DE
+            for seg in segs:
+                if len(seg)>=3:
+                    arr=seg[2].strip().upper()
+                    cc=AIRPORT_CC.get(arr)
+                    if cc and cc!="DE":
+                        dest_cc=cc
+                        if len(seg)>=6 and seg[5].strip():
+                            try:
+                                p=seg[5].split("."); arrive_date=date(int(p[2]),int(p[1]),int(p[0]))
+                            except: pass
+                        if not arrive_date and len(seg)>=4 and seg[3].strip():
+                            try:
+                                p=seg[3].split("."); arrive_date=date(int(p[2]),int(p[1]),int(p[0]))
+                            except: pass
+                        break
+            # Rückflug: Abflug nicht-DE
+            for seg in reversed(segs):
+                if len(seg)>=2:
+                    dep=seg[1].strip().upper()
+                    cc=AIRPORT_CC.get(dep)
+                    if cc and cc!="DE":
+                        if len(seg)>=4 and seg[3].strip():
+                            try:
+                                p=seg[3].split("."); leave_date=date(int(p[2]),int(p[1]),int(p[0]))
+                            except: pass
+                        break
+            if dest_cc: break
+
+        # Fallback: Destinations-Text
+        if not dest_cc and destinations:
+            DEST_CC_MAP={"lyon":"FR","paris":"FR","frankreich":"FR","france":"FR",
+                "london":"GB","grossbritannien":"GB","indien":"IN","dubai":"AE",
+                "usa":"US","schweiz":"CH","oesterreich":"AT","spanien":"ES",
+                "italien":"IT","tuerkei":"TR","japan":"JP","singapur":"SG","china":"CN"}
+            for k,v in DEST_CC_MAP.items():
+                if k in destinations.lower():
+                    dest_cc=v; break
+
+        if not dest_cc or dest_cc=="DE":
+            return {"status":"ok","detail":"Kein Auslandsaufenthalt erkannt","vma_destinations":None}
+
+        try:
+            dep_d=dep_d_raw if isinstance(dep_d_raw,date) else date.fromisoformat(str(dep_d_raw))
+            ret_d=ret_d_raw if isinstance(ret_d_raw,date) else (date.fromisoformat(str(ret_d_raw)) if ret_d_raw else None)
+            arrive=arrive_date or (dep_d+timedelta(days=1))
+            leave=leave_date or ret_d or arrive
+            parts=[f"{dep_d}:DE"]
+            if arrive>dep_d: parts.append(f"{arrive}:{dest_cc}")
+            if leave>arrive: parts.append(f"{leave}:DE")
+            vma_str=",".join(parts)
+            cur.execute("UPDATE trip_meta SET vma_destinations=%s WHERE trip_code=%s",(vma_str,tc))
+            conn.commit();cur.close();conn.close()
+            return {"status":"ok","vma_destinations":vma_str,"land":dest_cc}
+        except Exception as e:
+            return {"status":"fehler","detail":str(e)}
+    except Exception as e:
+        return {"status":"fehler","detail":str(e)}
+
 
 @app.get("/cleanup-duplicates")
 def cleanup_duplicates():
