@@ -8,7 +8,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "8.5"
+APP_VERSION = "8.6"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -3227,6 +3227,7 @@ def trip_detail(tc: str):
           <div class="acts" style="margin-bottom:16px">
             <a class="btn" href="/report/{tc}">📊 Abrechnung</a>
             <a class="btn" href="/report-pdf/{tc}" target="_blank">📄 PDF</a>
+            <a class="btn" href="/report-komplett/{tc}" target="_blank" style="background:linear-gradient(135deg,#0f9e6e,#0d8a5e)">📎 Komplett-PDF</a>
             <a class="btn-l" href="/meals/{tc}">🍽 Mahlzeiten</a>
             <a class="btn-l" href="/check-flights/{tc}">✈ Flüge</a>
             {"<a class='btn-l' href='/check-trains/"+tc+"'>🚆 Züge</a>" if trains else ""}
@@ -3666,6 +3667,188 @@ def report_pdf(tc: str):
 # FLUG + BAHN CHECK
 # =========================================================
 
+@app.get("/report-komplett/{tc}", response_class=HTMLResponse)
+async def report_komplett(tc: str):
+    """Komplette Abrechnung als druckbares HTML mit allen Belegen als Anhang."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""SELECT traveler_name,departure_date,return_date,country_code,
+            departure_time_home,arrival_time_home,destinations,meals_reimbursed,
+            flight_numbers,train_numbers,colleagues,notes,pnr_code,
+            nights_planned,nights_booked,trip_title,customer_code,vma_destinations,employee_code
+            FROM trip_meta WHERE trip_code=%s""",(tc,))
+        meta=cur.fetchone()
+        if not meta: return HTMLResponse("Nicht gefunden",404)
+        (traveler,dep,ret,cc,dep_t,ret_t,destinations,meals_reimb,
+         fns,trains,colleagues,notes,pnr,nights_p,nights_b,
+         trip_title,customer_code,vma_dest_str,employee_code)=meta
+
+        cur.execute("""SELECT id,original_filename,detected_type,detected_amount,
+            detected_amount_eur,detected_currency,detected_date,detected_vendor,
+            analysis_status,storage_key,content_type
+            FROM mail_attachments WHERE trip_code=%s
+            AND storage_key NOT LIKE 'mail_body_%%'
+            AND storage_key NOT LIKE 'S3-%%'
+            AND original_filename NOT SIMILAR TO 'image[0-9]+[.](png|jpg|jpeg|gif|bmp|emz|wmz)'
+            ORDER BY detected_date,id""",(tc,))
+        atts=cur.fetchall();cur.close();conn.close()
+
+        dep_d=dep if isinstance(dep,date) else (date.fromisoformat(str(dep)) if dep else None)
+        ret_d=ret if isinstance(ret,date) else (date.fromisoformat(str(ret)) if ret else None)
+        days=(ret_d-dep_d).days+1 if dep_d and ret_d else 0
+
+        # VMA berechnen
+        vma_dest=parse_vma_destinations(vma_dest_str or "")
+        daily=load_daily_meals(tc)
+        ml=[m.strip() for m in (meals_reimb or "").split(",") if m.strip()]
+        if days>0:
+            if daily:
+                vma_total,vma_rows_data=calc_vma_from_daily(dep_d,ret_d,daily,vma_dest,cc)
+            else:
+                vma_total,vma_rows_data=calc_vma_multi(dep_d,ret_d,ml,vma_dest,cc)
+        else:
+            vma_total=0.0; vma_rows_data=[]
+        trenn_total,_=trennungspauschale(dep_d,ret_d,dep_t or "08:00",ret_t or "18:00")
+
+        # Belege-Summe
+        beleg_sum=0.0
+        beleg_rows_html=""
+        for i,(att_id,fn,dtype,amt,amt_eur,curr,ddate,vendor,stat,skey,ctype) in enumerate(atts,1):
+            if amt_eur:
+                try: beleg_sum+=float(amt_eur.replace(".","").replace(",","."))
+                except: pass
+            beleg_rows_html+=f"""<tr>
+                <td style="text-align:center;color:#666">{i}</td>
+                <td>{vendor or fn or '–'}</td>
+                <td>{dtype or '–'}</td>
+                <td>{ddate or '–'}</td>
+                <td style="text-align:right">{amt or '–'} {curr or ''}</td>
+                <td style="text-align:right;font-weight:600">{amt_eur or '–'} €</td>
+                <td style="color:#666;font-size:10pt">{stat or '–'}</td>
+            </tr>"""
+
+        gesamt=beleg_sum+vma_total+trenn_total
+        title_line=" · ".join(filter(None,[employee_code,trip_title,customer_code]))
+
+        # Belege als Base64 einbetten (PDFs als iframes, Bilder direkt)
+        s3=get_s3()
+        beleg_pages=""
+        for i,(att_id,fn,dtype,amt,amt_eur,curr,ddate,vendor,stat,skey,ctype) in enumerate(atts,1):
+            if not skey: continue
+            try:
+                obj=s3.get_object(Bucket=S3_BUCKET,Key=skey)
+                data=obj["Body"].read()
+                b64=__import__("base64").b64encode(data).decode()
+                ctype_safe=ctype or "application/octet-stream"
+                label=f"Beleg {i}: {vendor or fn or dtype}"
+                if "pdf" in ctype_safe.lower():
+                    beleg_pages+=f"""
+                    <div style="page-break-before:always">
+                      <h2 style="font-size:14pt;color:#1a3d96;margin-bottom:8px">{label}</h2>
+                      <p style="font-size:10pt;color:#666;margin-bottom:8px">{fn} · {ddate or '–'} · {amt_eur or '–'} €</p>
+                      <iframe src="data:{ctype_safe};base64,{b64}"
+                        style="width:100%;height:900px;border:1px solid #dde4ef;border-radius:4px"
+                        title="{label}"></iframe>
+                    </div>"""
+                elif any(x in ctype_safe.lower() for x in ["jpeg","jpg","png","webp","gif"]):
+                    beleg_pages+=f"""
+                    <div style="page-break-before:always">
+                      <h2 style="font-size:14pt;color:#1a3d96;margin-bottom:8px">{label}</h2>
+                      <p style="font-size:10pt;color:#666;margin-bottom:8px">{fn} · {ddate or '–'} · {amt_eur or '–'} €</p>
+                      <img src="data:{ctype_safe};base64,{b64}"
+                        style="max-width:100%;border:1px solid #dde4ef;border-radius:4px"
+                        alt="{label}">
+                    </div>"""
+            except Exception as e:
+                beleg_pages+=f'<div style="page-break-before:always"><p style="color:red">Beleg {i} nicht ladbar: {e}</p></div>'
+
+        vma_rows_html="".join(
+            f"<tr><td>{d}</td><td>{lbl}</td><td>{c_}</td><td>{m}</td><td style='text-align:right'>{v:.2f} €</td></tr>"
+            for d,lbl,c_,m,v in vma_rows_data) if vma_rows_data else \
+            "".join(f"<tr><td>{lbl}</td><td>{c_}</td><td>{m}</td><td style='text-align:right'>{v:.2f} €</td></tr>"
+            for lbl,c_,m,v in (vma_rows_data or []))
+
+        return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="de"><head><meta charset="UTF-8">
+<title>Abrechnung {tc} – Komplett</title>
+<style>
+  @page{{margin:18mm}}
+  @media print{{.no-print{{display:none}}body{{font-size:10pt}}}}
+  body{{font-family:Arial,sans-serif;font-size:11px;color:#1a1a2e;margin:0;padding:24px}}
+  h1{{font-size:20px;color:#1a3d96;margin-bottom:4px}}
+  h2{{font-size:13px;color:#2c3e5e;margin:18px 0 6px;border-bottom:2px solid #1a3d96;padding-bottom:4px}}
+  table{{width:100%;border-collapse:collapse;margin-bottom:12px}}
+  th{{background:#eef4ff;padding:6px 8px;text-align:left;border:1px solid #dde4ef;font-size:10px}}
+  td{{padding:5px 8px;border:1px solid #eaeef5;font-size:11px;vertical-align:top}}
+  .sum-box{{background:#1a3d96;color:white;padding:16px 20px;border-radius:8px;margin:20px 0;display:flex;justify-content:space-between;align-items:center}}
+  .sum-val{{font-size:22px;font-weight:700;font-family:monospace}}
+  .no-print{{position:fixed;top:16px;right:16px;display:flex;gap:8px}}
+  .btn-print{{background:#1a3d96;color:white;border:none;border-radius:6px;padding:10px 20px;font-size:13px;cursor:pointer;font-family:Arial}}
+  .btn-back{{background:#f0f4f9;color:#1a3d96;border:1px solid #dde4ef;border-radius:6px;padding:10px 20px;font-size:13px;text-decoration:none;font-family:Arial}}
+  .meta-grid{{display:grid;grid-template-columns:160px 1fr;gap:3px 0;margin-bottom:16px;font-size:11px}}
+  .ml{{font-weight:600;color:#5a6e8a}} .mv{{color:#1a1a2e}}
+</style></head>
+<body>
+<div class="no-print">
+  <a class="btn-back" href="/trip/{tc}">← Zurück</a>
+  <button class="btn-print" onclick="window.print()">🖨 Drucken / PDF</button>
+</div>
+
+<h1>Reisekostenabrechnung</h1>
+<p style="font-size:12px;color:#5a6e8a;margin-bottom:16px">{tc} · {title_line}</p>
+
+<div class="meta-grid">
+  <span class="ml">Reisender</span><span class="mv">{employee_code or ''} {traveler or '–'}</span>
+  <span class="ml">Zeitraum</span><span class="mv">{dep or '–'} {dep_t or ''} – {ret or '–'} {ret_t or ''} ({days} Tage)</span>
+  <span class="ml">Reiseziel</span><span class="mv">{destinations or cc or '–'}</span>
+  <span class="ml">PNR</span><span class="mv">{pnr or '–'}</span>
+  <span class="ml">Hotel</span><span class="mv">{nights_b or 0}/{nights_p or 0} Nächte</span>
+  {f'<span class="ml">Kollegen</span><span class="mv">{colleagues}</span>' if colleagues else ''}
+  {f'<span class="ml">Notiz</span><span class="mv">{notes}</span>' if notes else ''}
+</div>
+
+<h2>Belege ({len(atts)})</h2>
+<table>
+  <tr><th>#</th><th>Anbieter</th><th>Typ</th><th>Datum</th><th style="text-align:right">Betrag</th><th style="text-align:right">EUR</th><th>Status</th></tr>
+  {beleg_rows_html or '<tr><td colspan="7">Keine Belege</td></tr>'}
+  <tr style="background:#f0f4f9"><td colspan="5"><strong>Summe Belege</strong></td>
+    <td style="text-align:right;font-weight:700">{beleg_sum:.2f} €</td><td></td></tr>
+</table>
+
+<h2>Verpflegungsmehraufwand §9 EStG</h2>
+<table>
+  <tr><th>Datum</th><th>Tag</th><th>Land</th><th>Mahlzeiten-Abzug</th><th style="text-align:right">VMA</th></tr>
+  {vma_rows_html or '<tr><td colspan="5">Keine Daten</td></tr>'}
+  <tr style="background:#f0f4f9"><td colspan="4"><strong>Summe VMA</strong></td>
+    <td style="text-align:right;font-weight:700">{vma_total:.2f} €</td></tr>
+</table>
+
+{f'''<h2>Trennungspauschale</h2><p>{trenn_total:.2f} €</p>''' if trenn_total>0 else ''}
+
+<div class="sum-box">
+  <span style="font-size:14px">Gesamtbetrag Reisekostenabrechnung</span>
+  <span class="sum-val">{gesamt:,.2f} €</span>
+</div>
+
+<p style="font-size:9px;color:#999;margin-top:8px">Erstellt: {datetime.now().strftime('%d.%m.%Y %H:%M')} · {tc} · Herrhammer Kürschner Kerzenmaschinen</p>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- BELEGE ALS ANHANG                               -->
+<!-- ═══════════════════════════════════════════════ -->
+{beleg_pages}
+
+<script>
+// Auto-print nach Laden (nur wenn ?print=1)
+if(window.location.search.includes('print=1')){{
+  window.addEventListener('load',()=>setTimeout(()=>window.print(),800));
+}}
+</script>
+</body></html>""")
+    except Exception as e:
+        import traceback
+        return HTMLResponse(f"<pre>{traceback.format_exc()}</pre>",status_code=500)
+
+
 @app.get("/check-flights/{tc}", response_class=HTMLResponse)
 async def check_flights(tc: str):
     try:
@@ -3809,7 +3992,106 @@ def beleg_vorschau(att_id: int):
 
 
 @app.get("/beleg-edit/{att_id}", response_class=HTMLResponse)
-def beleg_edit_form(att_id: int):
+def beleg_edit_form(att_id: int, back: str = ""):
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""SELECT id,trip_code,original_filename,detected_type,
+            detected_amount,detected_amount_eur,detected_currency,
+            detected_date,detected_vendor,ki_bemerkung,confidence,analysis_status,
+            detected_nights,detected_checkin,detected_checkout,
+            detected_checkin_time,detected_checkout_time,
+            flight_segments,detected_flight_numbers,storage_key
+            FROM mail_attachments WHERE id=%s""",(att_id,))
+        row=cur.fetchone()
+        cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code")
+        all_codes=[r[0] for r in cur.fetchall()]
+        cur.close();conn.close()
+        if not row: return HTMLResponse("Nicht gefunden",404)
+        (_,tc,fname,dtype,amt,amt_eur,curr,ddate,vendor,bemerk,conf,astatus,
+         nights,checkin,checkout,cin_t,cout_t,seg_s,fn_s,storage_key)=row
+
+        back_url = back or (f"/trip/{tc}" if tc else "/attachment-log")
+        is_mail_body = bool(storage_key and storage_key.startswith("mail_body_"))
+
+        type_opts="".join(f'<option {"selected" if dtype==t else ""}>{t}</option>'
+            for t in ["Flug","Hotel","Taxi","Bahn","Mietwagen","Essen","Sonstiges"])
+        code_opts="".join(f'<option value="{c}" {"selected" if tc==c else ""}>{c}</option>'
+            for c in all_codes)
+
+        # Hotel-Felder nur anzeigen wenn Typ Hotel
+        hotel_section=f"""
+            <div id="hotel-fields">
+              <div class="fgrp"><label class="flbl">Check-in Datum (DD.MM.YYYY)</label>
+                <input class="finp" name="detected_checkin" value="{checkin or ''}"></div>
+              <div class="fgrp"><label class="flbl">Check-in Uhrzeit</label>
+                <input class="finp" name="detected_checkin_time" value="{cin_t or '15:00'}" placeholder="15:00"></div>
+              <div class="fgrp"><label class="flbl">Check-out Datum (DD.MM.YYYY)</label>
+                <input class="finp" name="detected_checkout" value="{checkout or ''}"></div>
+              <div class="fgrp"><label class="flbl">Check-out Uhrzeit</label>
+                <input class="finp" name="detected_checkout_time" value="{cout_t or '11:00'}" placeholder="11:00"></div>
+              <div class="fgrp ff"><label class="flbl">Anzahl Nächte</label>
+                <input class="finp" type="number" name="detected_nights" value="{nights or 0}" min="0"></div>
+            </div>"""
+
+        flight_section=f"""
+            <div id="flight-fields">
+              <div class="fgrp ff"><label class="flbl">Flugnummern (kommagetrennt)</label>
+                <input class="finp" name="detected_flight_numbers" value="{fn_s or ''}" placeholder="LH3463,LH1078"></div>
+              <div class="fgrp ff">
+                <label class="flbl">Flug-Segmente</label>
+                <textarea class="finp" name="flight_segments" rows="3"
+                  placeholder="LH3463|NUE|FRA|20.04.2026|06:30|20.04.2026|07:35;LH1078|FRA|LYS|20.04.2026|09:15|20.04.2026|10:20"
+                  style="font-family:DM Mono,monospace;font-size:11px">{seg_s or ''}</textarea>
+                <div class="hint">Format: FLUGNR|VON|NACH|DATUM_AB|ZEIT_AB|DATUM_AN|ZEIT_AN; nächstes Segment</div>
+              </div>
+            </div>"""
+
+        # Beleg-Vorschau wenn in S3
+        preview_html=""
+        if not is_mail_body and storage_key and not storage_key.startswith("S3-FEHLER"):
+            preview_html=f'<div style="margin-bottom:16px"><a class="btn-l" href="/beleg/{att_id}" target="_blank">📄 Original anzeigen</a></div>'
+
+        return page_shell(f"Beleg #{att_id} bearbeiten",f"""
+        <div class="page-card" style="max-width:700px">
+          <h2>✏ Beleg #{att_id} korrigieren</h2>
+          <p class="sub" style="margin-bottom:12px">{fname or '–'} · Status: {astatus or '–'}</p>
+          {preview_html}
+          <form method="post" action="/beleg-edit/{att_id}?back={back_url}">
+            <div class="fgrid">
+              <div class="fgrp ff"><label class="flbl">Reisecode</label>
+                <select class="fsel" name="trip_code"><option value="">– nicht zugeordnet –</option>{code_opts}</select></div>
+              <div class="fgrp"><label class="flbl">Belegtyp</label>
+                <select class="fsel" name="detected_type" id="dtype-sel" onchange="showFields(this.value)">{type_opts}</select></div>
+              <div class="fgrp"><label class="flbl">Anbieter / Hotel / Airline</label>
+                <input class="finp" name="detected_vendor" value="{vendor or ''}"></div>
+              <div class="fgrp"><label class="flbl">Datum (DD.MM.YYYY)</label>
+                <input class="finp" name="detected_date" value="{ddate or ''}"></div>
+              <div class="fgrp"><label class="flbl">Betrag (Original)</label>
+                <input class="finp" name="detected_amount" value="{amt or ''}"></div>
+              <div class="fgrp"><label class="flbl">Währung (ISO)</label>
+                <input class="finp" name="detected_currency" value="{curr or 'EUR'}" maxlength="3"></div>
+              <div class="fgrp ff"><label class="flbl">Betrag EUR (Komma als Dezimaltrennzeichen)</label>
+                <input class="finp" name="detected_amount_eur" value="{amt_eur or ''}"></div>
+              {hotel_section}
+              {flight_section}
+              <div class="fgrp ff"><label class="flbl">Notiz / KI-Bemerkung</label>
+                <textarea class="finp" name="ki_bemerkung" rows="2">{bemerk or ''}</textarea></div>
+            </div>
+            <div class="mfooter">
+              <a class="btn-mc" href="{back_url}">Abbrechen</a>
+              <button type="submit" class="btn-mp">💾 Speichern</button>
+            </div>
+          </form>
+        </div>
+        <script>
+        function showFields(t){{
+          document.getElementById('hotel-fields').style.display=t==='Hotel'?'contents':'none';
+          document.getElementById('flight-fields').style.display=t==='Flug'?'contents':'none';
+        }}
+        showFields('{dtype or ""}');
+        </script>""")
+    except Exception as e:
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
     try:
         conn=get_conn();cur=conn.cursor()
         cur.execute("""SELECT id,trip_code,original_filename,detected_type,
@@ -3859,13 +4141,19 @@ def beleg_edit_form(att_id: int):
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
 
 @app.post("/beleg-edit/{att_id}")
-async def beleg_edit_save(att_id: int, request: Request):
+async def beleg_edit_save(att_id: int, request: Request, back: str = ""):
     try:
         form=await request.form()
         conn=get_conn();cur=conn.cursor()
+        nights=0
+        try: nights=int(form.get("detected_nights") or 0)
+        except: pass
         cur.execute("""UPDATE mail_attachments SET
             trip_code=%s,detected_type=%s,detected_vendor=%s,detected_date=%s,
             detected_amount=%s,detected_currency=%s,detected_amount_eur=%s,
+            detected_nights=%s,detected_checkin=%s,detected_checkout=%s,
+            detected_checkin_time=%s,detected_checkout_time=%s,
+            flight_segments=%s,detected_flight_numbers=%s,
             ki_bemerkung=%s,review_flag='ok',analysis_status='ok (manuell)'
             WHERE id=%s""",
             (form.get("trip_code") or None,
@@ -3875,16 +4163,24 @@ async def beleg_edit_save(att_id: int, request: Request):
              form.get("detected_amount") or None,
              (form.get("detected_currency") or "EUR").upper(),
              form.get("detected_amount_eur") or None,
+             nights,
+             form.get("detected_checkin") or None,
+             form.get("detected_checkout") or None,
+             form.get("detected_checkin_time") or None,
+             form.get("detected_checkout_time") or None,
+             form.get("flight_segments") or None,
+             form.get("detected_flight_numbers") or None,
              form.get("ki_bemerkung") or None,
              att_id))
         conn.commit()
-        # Reisecode updaten falls gesetzt
         tc = form.get("trip_code")
         if tc:
             cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(tc,))
             conn.commit()
         cur.close();conn.close()
-        return RedirectResponse(url=f"/attachment-log",status_code=303)
+        # Smart redirect: zurück zum Trip oder zur Log-Seite
+        redirect_to = back or (f"/trip/{tc}" if tc else "/attachment-log")
+        return RedirectResponse(url=redirect_to,status_code=303)
     except Exception as e:
         return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
 
