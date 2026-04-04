@@ -23,10 +23,13 @@ def _try_import_pdf():
         from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
         import pypdf
         return True
-    except ImportError:
+    except ImportError as e:
+        print(f"[PDF] Import fehlt: {e}")
         return False
 
-HAS_PDF_LIBS = _try_import_pdf()
+def HAS_PDF_LIBS():
+    """Lazy check – immer aktuell, kein Startup-Timing-Problem."""
+    return _try_import_pdf()
 
 def make_text_pdf(title: str, body_text: str, meta: dict = None) -> bytes:
     """Erstellt ein einfaches PDF aus Text mit reportlab. Gibt bytes zurück."""
@@ -121,7 +124,7 @@ async def generate_and_store_mail_pdf(att_id: int, subj: str, body: str,
                                        typ: str, vendor: str, betrag: str,
                                        datum: str, tc: str, conn) -> str | None:
     """Generiert PDF aus Mail-Body und speichert in S3. Gibt storage_key zurück."""
-    if not HAS_PDF_LIBS:
+    if not HAS_PDF_LIBS():
         return None
     try:
         meta = {
@@ -152,7 +155,7 @@ async def generate_and_store_mail_pdf(att_id: int, subj: str, body: str,
         return None
 
 
-APP_VERSION = "9.2"
+APP_VERSION = "9.3"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -1938,7 +1941,16 @@ def api_active_codes():
 
 @app.get("/version")
 def version():
-    return {"version":APP_VERSION,"ki":"mistral-eu" if MISTRAL_API_KEY else "keine","auto_imap":"aktiv"}
+    pdf_ok = HAS_PDF_LIBS()
+    pdf_detail = ""
+    try:
+        import reportlab; pdf_detail += f"reportlab {reportlab.__version__} "
+    except Exception as e: pdf_detail += f"reportlab FEHLT: {e} "
+    try:
+        import pypdf; pdf_detail += f"pypdf {pypdf.__version__}"
+    except Exception as e: pdf_detail += f"pypdf FEHLT: {e}"
+    return {"version":APP_VERSION,"ki":"mistral-eu" if MISTRAL_API_KEY else "keine",
+            "auto_imap":"aktiv","pdf_libs":pdf_ok,"pdf_detail":pdf_detail}
 
 
 # =========================================================
@@ -2618,7 +2630,7 @@ async def analyze_attachments():
                             # Neue ID holen und sofort PDF generieren
                             cur.execute("SELECT lastval()")
                             new_att_id = cur.fetchone()[0]
-                            if HAS_PDF_LIBS:
+                            if HAS_PDF_LIBS():
                                 pdf_key = await generate_and_store_mail_pdf(
                                     new_att_id, subj, body,
                                     typ_ki, vendor_ki, betrag_ki,
@@ -3899,7 +3911,7 @@ def report_pdf(tc: str):
 async def report_komplett(tc: str):
     """Komplettes Abrechnung-PDF: Deckblatt + VMA + alle Belege als eine PDF."""
     try:
-        if not HAS_PDF_LIBS:
+        if not HAS_PDF_LIBS():
             return HTMLResponse("""<div style='font-family:sans-serif;padding:32px'>
                 <h2>PDF-Bibliotheken fehlen</h2>
                 <p>Bitte <code>reportlab</code> und <code>pypdf</code> in requirements.txt eintragen und neu deployen.</p>
@@ -4301,7 +4313,7 @@ def beleg_vorschau(att_id: int):
                 except: pass
 
             # PDF on-the-fly generieren
-            if HAS_PDF_LIBS:
+            if HAS_PDF_LIBS():
                 meta={
                     "Typ": dtype or "–",
                     "Anbieter": vendor or "–",
