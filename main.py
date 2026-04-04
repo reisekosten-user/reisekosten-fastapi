@@ -8,7 +8,7 @@ from typing import Optional
 import psycopg2
 import boto3
 
-APP_VERSION = "8.8"
+APP_VERSION = "8.9"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -3091,6 +3091,25 @@ def trip_detail(tc: str):
                 "timerange": ret_t or "18:00",
                 "detail": "",
                 "type": "journey"
+            })
+
+        # Fallback: Flugnummern aus trip_meta die noch nicht in Segmenten erscheinen
+        # → als Hinweis-Zeile damit nichts verloren geht
+        all_meta_fns = [f.strip() for f in (fns or "").split(",") if f.strip()]
+        missing_fns = [f for f in all_meta_fns if f not in fns_from_belege]
+        if missing_fns:
+            timeline_events.append({
+                "date": ret_d or dep_d or date.today(),
+                "time": "",
+                "icon": "✈",
+                "task": f"Flug {', '.join(missing_fns)}",
+                "route": "⚠ Kein Segment",
+                "timerange": "",
+                "detail": "",
+                "extra": f'<span style="font-size:10px;color:var(--am6)">Bitte Beleg korrigieren</span>',
+                "status": "",
+                "type": "beleg",
+                "att_id": None,
             })
 
         # Chronologisch sortieren – Mahlzeiten nach Belegen, Journeys an Rand
