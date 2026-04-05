@@ -397,10 +397,67 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.11"
+APP_VERSION = "9.12"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.on_event("startup")
+async def seed_ki_examples():
+    """Seed-Beispiele beim Start einfügen wenn Tabelle leer ist."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS ki_examples (
+            id SERIAL PRIMARY KEY, mail_type TEXT, input_text TEXT,
+            expected_json TEXT, description TEXT, approved BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT now())""")
+        cur.execute("SELECT COUNT(*) FROM ki_examples")
+        count=cur.fetchone()[0]
+        if count == 0:
+            import json as _json
+            # Seed 1: FLY AWAY Itinerary Format
+            seed_input = """Reiseangebot Buchungsreferenz: Z6INOT
+Datum City Flug von/bis Klasse
+25 Mai Frankfurt - Zurich LX 3613 06:35 - 07:30 Business
+25 Mai Zurich - San Jose LX 8038 09:00 - 12:55 Business
+29 Mai San Jose - Zurich LH 4515 15:55 - 10:55 (+1) Business
+30 Mai Zurich - Frankfurt LH 5739 12:50 - 13:55 Business
+Ticketnummer LH 220-2979545073"""
+            seed_output = _json.dumps({
+                "beleg_typ": "Flug",
+                "anbieter": "Swiss/Lufthansa",
+                "pnr_code": "Z6INOT",
+                "flight_numbers": "LX3613,LX8038,LH4515,LH5739",
+                "flight_segments": "LX3613|FRA|ZRH|25.05.2026|06:35|25.05.2026|07:30;LX8038|ZRH|SJO|25.05.2026|09:00|25.05.2026|12:55;LH4515|SJO|ZRH|29.05.2026|15:55|30.05.2026|10:55;LH5739|ZRH|FRA|30.05.2026|12:50|30.05.2026|13:55",
+                "confidence": "hoch"
+            }, ensure_ascii=False)
+            cur.execute("INSERT INTO ki_examples (mail_type,input_text,expected_json,description,approved) VALUES (%s,%s,%s,%s,%s)",
+                ("Flug", seed_input, seed_output, "FLY AWAY Reisebüro Itinerary Format", True))
+
+            # Seed 2: Lufthansa Buchungsbestätigung Format
+            seed2_input = """WG: Vielen Dank für Ihre Buchung | von Nürnberg nach Lyon am 20 April 2026
+PNR: 83WPJT
+LH3463 NUE→FRA 13:00→18:15 20.04.2026
+LH1078 FRA→LYS 16:55→18:15 20.04.2026
+Gesamtpreis: 496,50 EUR"""
+            seed2_output = _json.dumps({
+                "beleg_typ": "Flug",
+                "betrag": "496.50",
+                "waehrung": "EUR",
+                "anbieter": "Lufthansa",
+                "pnr_code": "83WPJT",
+                "flight_numbers": "LH3463,LH1078",
+                "flight_segments": "LH3463|NUE|FRA|20.04.2026|13:00|20.04.2026|18:15;LH1078|FRA|LYS|20.04.2026|16:55|20.04.2026|18:15",
+                "confidence": "hoch"
+            }, ensure_ascii=False)
+            cur.execute("INSERT INTO ki_examples (mail_type,input_text,expected_json,description,approved) VALUES (%s,%s,%s,%s,%s)",
+                ("Flug", seed2_input, seed2_output, "Lufthansa Buchungsbestätigung NUE-LYS", True))
+
+            conn.commit()
+            print(f"[KI-Seed] {2} Beispiele eingefügt")
+        cur.close();conn.close()
+    except Exception as e:
+        print(f"[KI-Seed] Fehler: {e}")
 
 # ── Umgebungsvariablen ─────────────────────────────────────────────────────────
 DATABASE_URL          = os.getenv("DATABASE_URL")
@@ -1229,20 +1286,24 @@ def extract_pnr(text):
     return m.group(1) if m else None
 
 def extract_flight_numbers(text: str) -> list:
-    """Extrahiert alle Flugnummern aus Text via Regex. Zuverlässiger als KI."""
+    """Extrahiert Flugnummern aus Text. Schließt Ticketnummern (LH 220-xxx) aus."""
     if not text: return []
-    # Pattern: 2 Buchstaben + 3-4 Ziffern (IATA Airline Code + Flugnummer)
-    # Bekannte Airlines explizit: LH, LX, OS, SK, AF, KL, BA, FR, EW, U2, W6 etc.
-    matches = re.findall(r'\b([A-Z]{2})\s*(\d{3,4})\b', text)
     AIRLINE_CODES = {
         "LH","LX","OS","SK","AF","KL","BA","IB","VY","FR","U2","W6","EW","TK",
         "AY","SN","QR","EK","EY","DL","AA","UA","AC","WS","NH","JL","OZ","KE",
         "CX","SQ","MH","TG","VN","GA","AI","SG","6E","G8","IX","QP","S5",
         "WK","SR","SU","FI","AZ","TP","RO","LO","OK","BT","TF","OA","A3",
-        "HV","PC","VF","TO","LS","BY","MT","TCX","MON","AMC",
+        "HV","PC","VF","TO","LS","BY","MT","ET","MS","SV","CM","AM","LA",
     }
     result = []
     seen = set()
+    # Ticketnummern aus Text entfernen bevor wir suchen
+    # Ticketnummern: "220-2979545073" oder "LH 220-xxx" – enthalten Bindestrich nach Zahl
+    clean = re.sub(r'\b\d{3}\s*-\s*\d{7,}\b', '', text)  # "220-2979545073"
+    clean = re.sub(r'\b[A-Z]{2}\s+\d{3}\s*-\s*\d+', '', clean)  # "LH 220-xxx"
+    # Flugnummern: 2 Buchstaben + Leerzeichen (optional) + 3-4 Ziffern
+    # NICHT gefolgt von Bindestrich (wäre Ticketnummer)
+    matches = re.findall(r'\b([A-Z]{2})\s*(\d{3,4})\b(?!\s*[-/]\s*\d)', clean)
     for airline, num in matches:
         if airline in AIRLINE_CODES:
             fn = f"{airline}{num}"
@@ -1266,6 +1327,157 @@ def extract_hotel_dates(text: str) -> dict:
     return result
 
 def extract_flight_segments_from_text(text: str) -> list:
+    """
+    Parst Flug-Segmente aus Buchungsbestätigungen.
+    Unterstützt Tabellenformat (25 Mai FRA-ZRH LX3613 06:35-07:30)
+    und Detailformat (Abreise/Ankunft Blöcke).
+    """
+    MONTH_MAP = {
+        'jan':'01','feb':'02','mar':'03','apr':'04','may':'05','mai':'05',
+        'jun':'06','jul':'07','aug':'08','sep':'09','oct':'10','okt':'10',
+        'nov':'11','dec':'12','dez':'12'
+    }
+
+    # Stadt → IATA (für Mails ohne explizite IATA-Codes)
+    CITY_TO_IATA = {
+        "frankfurt": "FRA", "frankfurt intl": "FRA", "frankfurt international": "FRA",
+        "muenchen": "MUC", "münchen": "MUC", "munich": "MUC",
+        "berlin": "BER", "hamburg": "HAM", "duesseldorf": "DUS", "düsseldorf": "DUS",
+        "nuernberg": "NUE", "nürnberg": "NUE", "nuremberg": "NUE",
+        "zurich": "ZRH", "zuerich": "ZRH", "zürich": "ZRH", "zurich airport": "ZRH",
+        "genf": "GVA", "geneva": "GVA",
+        "wien": "VIE", "vienna": "VIE",
+        "paris": "CDG", "charles de gaulle": "CDG",
+        "london heathrow": "LHR", "london": "LHR", "heathrow": "LHR",
+        "amsterdam": "AMS",
+        "bruessel": "BRU", "brussels": "BRU",
+        "san jose": "SJO", "juan santamaria": "SJO", "juan santamaria intl": "SJO",
+        "panama city": "PTY", "tocumen": "PTY",
+        "new york": "JFK", "john f kennedy": "JFK", "jfk": "JFK",
+        "los angeles": "LAX", "miami": "MIA", "chicago": "ORD",
+        "dubai": "DXB", "abu dhabi": "AUH",
+        "doha": "DOH", "istanbul": "IST",
+        "singapur": "SIN", "singapore": "SIN",
+        "tokyo": "NRT", "tokio": "NRT", "narita": "NRT",
+        "bangkok": "BKK", "kuala lumpur": "KUL",
+        "delhi": "DEL", "mumbai": "BOM", "bombay": "BOM",
+        "johannesburg": "JNB", "kapstadt": "CPT", "cape town": "CPT",
+        "montreal": "YUL", "toronto": "YYZ", "vancouver": "YVR",
+    }
+
+    def parse_date(s):
+        s = s.strip()
+        m = re.match(r'(\d{1,2})\s*([A-Za-z]{3})\s*(\d{4})?', s)
+        if m:
+            d, mon, yr = int(m.group(1)), m.group(2).lower(), m.group(3) or "2026"
+            mo = MONTH_MAP.get(mon, "01")
+            return f"{d:02d}.{mo}.{yr}"
+        m = re.match(r'(\d{1,2})[./](\d{1,2})[./](\d{4})', s)
+        if m: return f"{int(m.group(1)):02d}.{int(m.group(2)):02d}.{m.group(3)}"
+        return ""
+
+    def find_iata(city_text):
+        """Findet IATA-Code aus Stadtname oder direkt aus 3-Buchstaben-Code."""
+        ct = city_text.strip()
+        # Direkter 3-Buchstaben IATA-Code
+        if re.match(r'^[A-Z]{3}$', ct): return ct
+        # In AIRPORT_CC nachschlagen
+        if ct.upper() in AIRPORT_CC: return ct.upper()
+        # Stadtname mapping
+        cl = ct.lower()
+        for city, iata in CITY_TO_IATA.items():
+            if city in cl: return iata
+        # Alle 3-Buchstaben Großbuchstaben aus dem Text
+        apts = re.findall(r'\b([A-Z]{3})\b', ct)
+        for a in apts:
+            if a in AIRPORT_CC: return a
+        return ""
+
+    segments = []
+    fns = extract_flight_numbers(text)
+    if not fns: return []
+
+    # ── Methode 1: Tabellenformat ────────────────────────────────────────────
+    # "25 Mai  Frankfurt - Zurich  LX 3613  06:35 - 07:30  Business"
+    table_pattern = re.compile(
+        r'(\d{1,2})\s+([A-Za-z]{3,10})\s+'      # Datum: "25 Mai"
+        r'([A-Za-zÄÖÜäöüß\s,\(\)]+?)\s*-\s*'    # Von-Stadt
+        r'([A-Za-zÄÖÜäöüß\s,\(\)]+?)\s+'        # Nach-Stadt
+        r'([A-Z]{2})\s*(\d{3,4})\s+'             # Flugnummer
+        r'(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})',   # Zeiten
+        re.IGNORECASE
+    )
+    for m in table_pattern.finditer(text):
+        day, mon = m.group(1), m.group(2)
+        dep_city, arr_city = m.group(3).strip(), m.group(4).strip()
+        airline, num = m.group(5).upper(), m.group(6)
+        dep_t, arr_t = m.group(7), m.group(8)
+        fn = f"{airline}{num}"
+        seg_date = parse_date(f"{day} {mon}")
+        dep_apt = find_iata(dep_city)
+        arr_apt = find_iata(arr_city)
+        if fn in fns or airline in {"LH","LX","OS","SK","AF","KL","BA","WK"}:
+            segments.append({"fn":fn,"dep":dep_apt,"arr":arr_apt,
+                             "date":seg_date,"dep_time":dep_t,"arr_time":arr_t})
+
+    if segments: return segments
+
+    # ── Methode 2: Detail-Blöcke (Abreise/Ankunft) ──────────────────────────
+    # Sucht nach Blöcken für jede Flugnummer
+    for fn in fns:
+        airline, num = fn[:2], fn[2:]
+        # Bereich um die Flugnummer herum
+        pos = -1
+        for pat in [f"{airline} {num}", f"{airline}{num}"]:
+            p = text.upper().find(pat.upper())
+            if p >= 0: pos = p; break
+        if pos < 0: continue
+
+        region = text[max(0,pos-50):pos+600]
+
+        # Datum: "25 Mai 2026" oder "29 Mai 2026"
+        dm = re.search(r'(\d{1,2})\s+([A-Za-z]{3,10})\s+(\d{4})', region)
+        seg_date = parse_date(f"{dm.group(1)} {dm.group(2)} {dm.group(3)}") if dm else ""
+
+        # Abreise/Ankunft Zeilen
+        dep_m = re.search(r'(?:Abreise|Departure|Abflug)[:\s]*(\d{1,2})\s+([A-Za-z]+)\s+(\d{2}:\d{2})\s+(.+?)(?:\n|Terminal|$)', region, re.IGNORECASE)
+        arr_m = re.search(r'(?:Ankunft|Arrival)[:\s]*(\d{1,2})\s+([A-Za-z]+)\s+(\d{2}:\d{2})\s+(.+?)(?:\n|Terminal|$)', region, re.IGNORECASE)
+
+        dep_time = dep_m.group(3) if dep_m else ""
+        arr_time = arr_m.group(3) if arr_m else ""
+
+        # Datum aus Abreise-Zeile wenn nicht gefunden
+        if not seg_date and dep_m:
+            seg_date = parse_date(f"{dep_m.group(1)} {dep_m.group(2)}")
+
+        # Ankunftsdatum kann +1 Tag sein
+        arr_date = seg_date
+        if arr_m:
+            arr_day = arr_m.group(1)
+            arr_mon = arr_m.group(2)
+            arr_date_str = parse_date(f"{arr_day} {arr_mon}")
+            if arr_date_str and arr_date_str != seg_date:
+                arr_date = arr_date_str
+
+        # Städte/Airports
+        dep_city = dep_m.group(4).strip() if dep_m else ""
+        arr_city = arr_m.group(4).strip() if arr_m else ""
+        dep_apt = find_iata(dep_city) if dep_city else ""
+        arr_apt = find_iata(arr_city) if arr_city else ""
+
+        # Fallback: IATA direkt aus dem Bereich
+        if not dep_apt or not arr_apt:
+            apts = [a for a in re.findall(r'\b([A-Z]{3})\b', region) if a in AIRPORT_CC]
+            if not dep_apt and len(apts) > 0: dep_apt = apts[0]
+            if not arr_apt and len(apts) > 1: arr_apt = apts[1]
+
+        segments.append({"fn":fn,"dep":dep_apt,"arr":arr_apt,
+                         "date":seg_date,"arr_date":arr_date,
+                         "dep_time":dep_time,"arr_time":arr_time})
+
+    return segments
+
+
     """
     Versucht strukturierte Flug-Segmente aus Buchungstext zu extrahieren.
     Gibt Liste von Dicts zurück: {fn, dep, arr, date, dep_time, arr_time}
@@ -1363,10 +1575,11 @@ def extract_flight_segments_from_text(text: str) -> list:
     return segments
 
 def segments_to_string(segments: list) -> str:
-    """Konvertiert Segment-Liste in DB-Format: FN|DEP|ARR|DATE|TIME|DATE|TIME;..."""
+    """Konvertiert Segment-Liste in DB-Format: FN|DEP|ARR|DATE|TIME|ARR_DATE|ARR_TIME;..."""
     parts = []
     for s in segments:
-        parts.append(f"{s['fn']}|{s['dep']}|{s['arr']}|{s['date']}|{s['dep_time']}|{s['date']}|{s['arr_time']}")
+        arr_date = s.get("arr_date") or s.get("date","")
+        parts.append(f"{s['fn']}|{s['dep']}|{s['arr']}|{s['date']}|{s['dep_time']}|{arr_date}|{s['arr_time']}")
     return ";".join(parts)
 
 def decode_mime_header(value):
