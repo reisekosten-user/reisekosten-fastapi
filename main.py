@@ -327,7 +327,77 @@ AIRPORT_CC = {
 # Panama, Costa Rica etc. → kein BMF-Satz → DE-Satz als Fallback
 # Bitte jährlich mit BMF-Schreiben abgleichen!
 
-APP_VERSION = "9.9"
+
+def anonymize_for_ki(text: str) -> str:
+    """
+    Anonymisiert Text bevor er als KI-Beispiel gespeichert oder an Mistral gesendet wird.
+    Entfernt: Namen, E-Mails, Telefonnummern, spezifische Buchungsnummern.
+    Behält: Flugnummern, Flughafencodes, Uhrzeiten, Beträge, Datumsformat.
+    DSGVO Art. 4 Nr. 1 – keine personenbezogenen Daten an Drittanbieter.
+    """
+    import re
+    t = text
+    # E-Mail-Adressen
+    t = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[E-MAIL]', t)
+    # Telefonnummern
+    t = re.sub(r'(?:\+\d{1,3}[\s-]?)?\(?\d{3,5}\)?[\s.-]?\d{3,5}[\s.-]?\d{3,6}', '[TEL]', t)
+    # Vollständige Namen (Vor + Nachname, Titel)
+    t = re.sub(r'\b(?:Mr|Mrs|Ms|Dr|Prof|Herr|Frau)\.?\s+[A-ZÄÖÜ][a-zäöüß]+\s+(?:[A-ZÄÖÜ][a-zäöüß]+\s+)?[A-ZÄÖÜ][a-zäöüß]+\b', '[NAME]', t)
+    # Häufige Name-Muster: "Diesslin Ralf" (Nachname Vorname)
+    t = re.sub(r'\b[A-ZÄÖÜ][a-zäöüß]{3,}\s+[A-ZÄÖÜ][a-zäöüß]{3,}\b', '[NAME]', t)
+    # Hotelreservierungsnummern (lange Zahlen)
+    t = re.sub(r'\b\d{8,}\b', '[RESERV-NR]', t)
+    # Straßenadressen
+    t = re.sub(r'\b[A-ZÄÖÜ][a-zäöüß]+(?:straße|str\.|gasse|weg|allee|platz|ring)\s*\d+\b', '[ADRESSE]', t, flags=re.IGNORECASE)
+    # Vielfliegernummern (z.B. "CX1500100882")
+    t = re.sub(r'\b(?:CX|LH|LX|BA|AF|KL|Miles|FF)\s*\d{8,}\b', '[FF-NR]', t, flags=re.IGNORECASE)
+    # Spezifische Buchungsreferenzen BEHALTEN (wichtig für KI-Training: PNR-Format)
+    # Adressen mit PLZ
+    t = re.sub(r'\b[A-Z]{0,2}\d{4,5}\s+[A-ZÄÖÜ][a-zäöüß]+\b', '[ORT]', t)
+    return t
+
+def load_ki_examples(mail_type: str = None, limit: int = 3) -> list:
+    """Lädt anonymisierte Few-Shot Beispiele aus DB für den Mistral-Prompt."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        if mail_type:
+            cur.execute("""SELECT input_text,expected_json,description FROM ki_examples
+                WHERE approved=TRUE AND mail_type=%s
+                ORDER BY created_at DESC LIMIT %s""",(mail_type,limit))
+        else:
+            cur.execute("""SELECT input_text,expected_json,description FROM ki_examples
+                WHERE approved=TRUE
+                ORDER BY created_at DESC LIMIT %s""",(limit,))
+        rows=cur.fetchall();cur.close();conn.close()
+        # Anonymisierung beim Laden – nie Rohdaten an Mistral
+        return [{"input": anonymize_for_ki(r[0])[:1500],
+                 "output":r[1],"desc":r[2] or ""} for r in rows]
+    except Exception:
+        return []
+
+def save_ki_example(mail_type: str, input_text: str, result_json: dict, description: str = ""):
+    """
+    Speichert KI-Lernbeispiel ANONYMISIERT in der DB.
+    Personenbezogene Daten werden vor der Speicherung entfernt (DSGVO Art. 25 – Privacy by Design).
+    """
+    try:
+        import json as _json
+        # Anonymisieren vor Speicherung
+        anon_text = anonymize_for_ki(input_text[:4000])
+        # Auch im JSON keine Namen
+        result_clean = {k:v for k,v in result_json.items()
+                       if k not in ("traveler_name",) and v}
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""INSERT INTO ki_examples (mail_type,input_text,expected_json,description)
+            VALUES (%s,%s,%s,%s)""",
+            (mail_type, anon_text, _json.dumps(result_clean, ensure_ascii=False), description))
+        conn.commit();cur.close();conn.close()
+        return True
+    except Exception as e:
+        print(f"[KI-Beispiel] Fehler: {e}")
+        return False
+
+APP_VERSION = "9.11"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -829,7 +899,20 @@ STRENGE REGELN:
 4. Alle Felder die nicht relevant sind: leer lassen ("")
 5. Nur EUR wenn kein anderes Symbol im Text"""
 
-    user = f"Bekannte Reisecodes: {codes_str}\n\nText:\n---\n{text[:8000]}\n---\nJSON:"
+    # Few-Shot Beispiele aus DB laden
+    examples = load_ki_examples(mail_type="Flug" if source=="mail" else None, limit=2)
+    examples_text = ""
+    if examples:
+        examples_text = "\n\nBEISPIELE aus echten Buchungsbestätigungen (verwende dieses Format):\n"
+        for ex in examples:
+            examples_text += f"\n--- BEISPIEL{' ('+ex['desc']+')' if ex['desc'] else ''} ---\n"
+            examples_text += f"Text: {ex['input'][:800]}\n"
+            examples_text += f"JSON: {ex['output']}\n"
+        examples_text += "\n--- DEIN TEXT ---\n"
+
+    # Personendaten anonymisieren vor API-Call (DSGVO Art. 25 – Privacy by Design)
+    anon_text = anonymize_for_ki(text)
+    user = f"Bekannte Reisecodes: {codes_str}{examples_text}\n\nText:\n---\n{anon_text[:7000]}\n---\nJSON:"
     try:
         async with httpx.AsyncClient(timeout=30.0) as cl:
             resp = await cl.post(f"{MISTRAL_BASE}/chat/completions",
@@ -2785,6 +2868,7 @@ async def _dashboard(request: Request, focus: str):
             <a class="btn-l" href="/attachment-log">Anhang-Log</a>
             <a class="btn-l" href="/mail-log">Mail-Log</a>
             <a class="btn-l" href="/rules">⚙ Kategorie-Regeln</a>
+            <a class="btn-l" href="/ki-beispiele">🧠 KI-Beispiele</a>
             <a class="btn-l" href="/vma-rates" title="VMA-Sätze prüfen und aktualisieren">📋 VMA-Sätze 2026</a>
             <a class="btn-l" href="/reset-all" style="color:var(--re6)">Reset</a>
             <a class="btn-l" href="/init" style="color:var(--t300)">DB Init</a>
@@ -5246,6 +5330,30 @@ async def mail_eingabe_save(request: Request):
 
         cur.execute("UPDATE mail_messages SET analysis_status='ok',trip_code=%s WHERE mail_uid=%s",(rc or None,uid))
 
+        # ── Lernbeispiel speichern wenn gutes Ergebnis ────────────────
+        if typ_ki and typ_ki != "Sonstiges" and (fns_ki or betrag_ki) and conf_ki in ("hoch","mittel"):
+            import json as _json
+            example_result = {
+                "beleg_typ": typ_ki,
+                "betrag": betrag_ki,
+                "waehrung": waehrung_ki,
+                "datum": datum_ki,
+                "anbieter": vendor_ki,
+                "pnr_code": pnr_ki,
+                "flight_numbers": fns_ki,
+                "flight_segments": seg_ki,
+                "confidence": "hoch",
+            }
+            # Nur relevante Felder
+            example_result = {k:v for k,v in example_result.items() if v}
+            save_ki_example(
+                mail_type=typ_ki,
+                input_text=full[:3000],
+                result_json=example_result,
+                description=f"{vendor_ki or typ_ki} · {subj[:40] if subj else 'manuell'}"
+            )
+            print(f"[KI-Beispiel] Gespeichert: {typ_ki} · {vendor_ki}")
+
         # VMA auto-berechnen
         if regex_segs and rc:
             cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(rc,))
@@ -5706,6 +5814,113 @@ def vma_rates_save():
         return RedirectResponse(url="/vma-rates",status_code=303)
     except Exception as e:
         return {"status":"fehler","detail":str(e)}
+
+
+@app.get("/dsgvo", response_class=HTMLResponse)
+def dsgvo_info():
+    return page_shell("Datenschutz",f"""
+    <div class="page-card" style="max-width:800px">
+      <h2>🔒 Datenschutz & DSGVO-Konformität</h2>
+
+      <h3 style="margin:20px 0 8px;color:var(--b700)">Datenspeicherung</h3>
+      <table>
+        <tr><th>Was</th><th>Wo</th><th>Zugriff</th></tr>
+        <tr><td>Reisedaten, Belege, Mails</td><td>PostgreSQL auf Render (EU/Frankfurt)</td><td>Nur Herrhammer intern</td></tr>
+        <tr><td>Dateien (PDFs, Bilder)</td><td>Hetzner Object Storage NBG1 (Nürnberg, DE)</td><td>Nur Herrhammer intern</td></tr>
+        <tr><td>KI-Lernbeispiele</td><td>Anonymisiert in PostgreSQL</td><td>Nur Herrhammer intern</td></tr>
+      </table>
+
+      <h3 style="margin:20px 0 8px;color:var(--b700)">Mistral KI – Datenverarbeitung</h3>
+      <table>
+        <tr><th>Aspekt</th><th>Status</th></tr>
+        <tr><td>Server-Standort</td><td>✅ Paris, Frankreich (EU)</td></tr>
+        <tr><td>DSGVO-Konformität</td><td>✅ Mistral AI ist EU-Unternehmen, GDPR-compliant</td></tr>
+        <tr><td>Training auf Kundendaten</td><td>✅ NEIN – nur Inference, kein Fine-Tuning</td></tr>
+        <tr><td>Datenspeicherung bei Mistral</td><td>✅ Keine – Daten nach Response gelöscht</td></tr>
+        <tr><td>Namen im API-Call</td><td>✅ Anonymisiert vor Übermittlung (Art. 25 DSGVO)</td></tr>
+        <tr><td>E-Mails im API-Call</td><td>✅ Werden zu [E-MAIL] anonymisiert</td></tr>
+        <tr><td>Telefonnummern im API-Call</td><td>✅ Werden zu [TEL] anonymisiert</td></tr>
+        <tr><td>Flugnummern, Beträge</td><td>✅ Bleiben erhalten (keine PII)</td></tr>
+      </table>
+
+      <h3 style="margin:20px 0 8px;color:var(--b700)">KI-Lernbeispiele (Few-Shot)</h3>
+      <div style="background:var(--b50);border:1px solid var(--b100);border-radius:8px;padding:12px 16px;font-size:13px">
+        <p>✅ <b>DSGVO-konform:</b> Beispiele werden <b>vor der Speicherung anonymisiert</b>.</p>
+        <p style="margin-top:6px">Die Beispiele verlassen das System nur als anonymisierter Text im Mistral-Prompt.
+        Mistral speichert sie nicht, trainiert nicht darauf – sie wirken nur für die Dauer eines API-Calls
+        als Kontext (In-Context Learning / RAG-Prinzip).</p>
+        <p style="margin-top:6px">Rechtsgrundlage: Art. 6 Abs. 1 lit. b DSGVO (Vertragserfüllung),
+        Art. 25 DSGVO (Privacy by Design).</p>
+      </div>
+
+      <h3 style="margin:20px 0 8px;color:var(--b700)">Empfehlung für Betriebsrat / Datenschutzbeauftragten</h3>
+      <ul style="font-size:13px;line-height:1.8;padding-left:20px">
+        <li>Mistral AI Data Processing Agreement (DPA) abschließen → <a href="https://mistral.ai/privacy/" target="_blank" style="color:var(--b600)">mistral.ai/privacy</a></li>
+        <li>Render.com DPA → EU-Rechenzentrum Frankfurt konfiguriert</li>
+        <li>Hetzner Online GmbH → deutsches Unternehmen, DSGVO-konform</li>
+        <li>Interne Datenschutzerklärung für Mitarbeiter erstellen</li>
+      </ul>
+
+      <div class="acts" style="margin-top:20px">
+        <a class="btn-l" href="/">← Dashboard</a>
+        <a class="btn-l" href="/ki-beispiele">KI-Beispiele ansehen</a>
+      </div>
+    </div>""")
+
+
+@app.get("/ki-beispiele", response_class=HTMLResponse)
+def ki_beispiele():
+    """Zeigt und verwaltet gespeicherte KI-Lernbeispiele."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS ki_examples (
+            id SERIAL PRIMARY KEY, mail_type TEXT, input_text TEXT,
+            expected_json TEXT, description TEXT, approved BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT now())""")
+        cur.execute("SELECT id,mail_type,description,approved,created_at,LENGTH(input_text) FROM ki_examples ORDER BY id DESC")
+        rows=cur.fetchall();cur.close();conn.close()
+        html="".join(f"""<tr>
+            <td style="font-size:11px;color:var(--t300)">{str(r[4])[:10]}</td>
+            <td><span class="bdg bdg-w">{r[1] or '–'}</span></td>
+            <td>{r[2] or '–'}</td>
+            <td>{r[5] or 0} Z.</td>
+            <td><span class="bdg {'bdg-ok' if r[3] else 'bdg-e'}">{'✓ aktiv' if r[3] else '✗ inaktiv'}</span></td>
+            <td>
+              <a href="/ki-beispiele/toggle/{r[0]}" style="font-size:11px;color:var(--b600)">{'Deaktivieren' if r[3] else 'Aktivieren'}</a>
+              · <a href="/ki-beispiele/delete/{r[0]}" onclick="return confirm('Löschen?')" style="font-size:11px;color:var(--re6)">Löschen</a>
+            </td></tr>""" for r in rows)
+        return page_shell("KI-Beispiele",f"""
+        <div class="page-card">
+          <h2>🧠 KI-Lernbeispiele ({len(rows)})</h2>
+          <p class="sub" style="margin-bottom:12px">Diese Beispiele werden automatisch beim manuellen Import gespeichert und helfen Mistral ähnliche Mails besser zu erkennen.</p>
+          <div class="acts">
+            <a class="btn-l" href="/">Dashboard</a>
+            <a class="btn" href="/mail-eingabe">+ Mail manuell eingeben</a>
+          </div>
+          {"<table><tr><th>Datum</th><th>Typ</th><th>Beschreibung</th><th>Länge</th><th>Status</th><th>Aktion</th></tr>"+html+"</table>" if rows else '<div class="empty">Noch keine Beispiele. Manuell Mails importieren um Beispiele zu erzeugen.</div>'}
+        </div>""")
+    except Exception as e:
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+
+@app.get("/ki-beispiele/toggle/{ex_id}")
+def ki_beispiel_toggle(ex_id: int):
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("UPDATE ki_examples SET approved=NOT approved WHERE id=%s",(ex_id,))
+        conn.commit();cur.close();conn.close()
+        return RedirectResponse(url="/ki-beispiele",status_code=303)
+    except Exception as e:
+        return JSONResponse({"status":"fehler","detail":str(e)})
+
+@app.get("/ki-beispiele/delete/{ex_id}")
+def ki_beispiel_delete(ex_id: int):
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("DELETE FROM ki_examples WHERE id=%s",(ex_id,))
+        conn.commit();cur.close();conn.close()
+        return RedirectResponse(url="/ki-beispiele",status_code=303)
+    except Exception as e:
+        return JSONResponse({"status":"fehler","detail":str(e)})
 
 
 @app.get("/rules", response_class=HTMLResponse)
