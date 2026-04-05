@@ -327,7 +327,7 @@ AIRPORT_CC = {
 # Panama, Costa Rica etc. → kein BMF-Satz → DE-Satz als Fallback
 # Bitte jährlich mit BMF-Schreiben abgleichen!
 
-APP_VERSION = "9.8"
+APP_VERSION = "9.9"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2394,6 +2394,16 @@ def init():
             category TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT now())""")
 
+        # KI-Lernbeispiele (Few-Shot Examples für Mistral)
+        cur.execute("""CREATE TABLE IF NOT EXISTS ki_examples (
+            id SERIAL PRIMARY KEY,
+            mail_type TEXT NOT NULL,
+            input_text TEXT NOT NULL,
+            expected_json TEXT NOT NULL,
+            description TEXT,
+            approved BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT now())""")
+
         # Tagesbasierte Mahlzeiten-Erfassung für VMA
         cur.execute("""CREATE TABLE IF NOT EXISTS daily_meals (
             id SERIAL PRIMARY KEY,
@@ -2770,6 +2780,7 @@ async def _dashboard(request: Request, focus: str):
           <div class="acts">
             <a class="btn" href="/fetch-mails">📥 Mails jetzt abrufen</a>
             <a class="btn" href="/analyze-attachments">🔍 KI-Analyse starten</a>
+            <a class="btn" href="/mail-eingabe" style="background:linear-gradient(135deg,#7c3aed,#6d28d9)">📝 Mail manuell eingeben</a>
             <a class="btn-l" href="/reanalyze-mails" onclick="return confirm('Alle Mail-Bodies nochmal analysieren?')">🔄 Mails re-analysieren</a>
             <a class="btn-l" href="/attachment-log">Anhang-Log</a>
             <a class="btn-l" href="/mail-log">Mail-Log</a>
@@ -5085,6 +5096,226 @@ async def check_trains(tc: str):
 # =========================================================
 # BELEG MANUELL HOCHLADEN
 # =========================================================
+
+@app.get("/mail-eingabe", response_class=HTMLResponse)
+def mail_eingabe_form():
+    """Manuelle Mail-Eingabe – Text direkt einfügen wenn IMAP nicht funktioniert."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code DESC LIMIT 30")
+        codes=[r[0] for r in cur.fetchall()]
+        cur.close();conn.close()
+        code_opts="<option value=''>– KI zuordnen lassen –</option>"+"".join(f"<option>{c}</option>" for c in codes)
+        return page_shell("Mail manuell einfügen",f"""
+        <div class="page-card" style="max-width:800px">
+          <h2>📧 Mail-Text manuell einfügen</h2>
+          <p class="sub" style="margin-bottom:16px">Mail-Text hier einfügen wenn der automatische Import nicht funktioniert.
+          Der Text wird sofort analysiert.</p>
+          <form method="post" action="/mail-eingabe">
+            <div class="fgrid">
+              <div class="fgrp"><label class="flbl">Reisecode zuordnen</label>
+                <select class="fsel" name="trip_code">{code_opts}</select></div>
+              <div class="fgrp"><label class="flbl">Betreff (optional)</label>
+                <input class="finp" name="subject" placeholder="z.B. Reiseangebot Z6INOT"></div>
+              <div class="fgrp ff"><label class="flbl">Mail-Text *</label>
+                <textarea class="finp" name="body" rows="20" style="font-family:DM Mono,monospace;font-size:11px"
+                  placeholder="Gesamten Mail-Text hier einfügen..."></textarea></div>
+            </div>
+            <div class="mfooter">
+              <a class="btn-mc" href="/">Abbrechen</a>
+              <button type="submit" class="btn-mp">📨 Importieren &amp; analysieren</button>
+            </div>
+          </form>
+        </div>""")
+    except Exception as e:
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+
+@app.post("/mail-eingabe", response_class=HTMLResponse)
+async def mail_eingabe_save(request: Request):
+    """Speichert manuell eingegebenen Mail-Text und analysiert ihn sofort."""
+    try:
+        form=await request.form()
+        body=(form.get("body") or "").strip()
+        subj=(form.get("subject") or "").strip()
+        tc  =(form.get("trip_code") or "").strip()
+        if not body:
+            return page_shell("Fehler",'<div class="page-card"><p>Bitte Mail-Text eingeben.</p></div>')
+
+        full=f"{subj}\n{body}"
+
+        # Regex-Extraktion
+        regex_fns  = extract_flight_numbers(full)
+        regex_pnr  = extract_pnr(full) or ""
+        regex_segs = extract_flight_segments_from_text(full) if regex_fns else []
+        regex_seg_s= segments_to_string(regex_segs) if regex_segs else ""
+        regex_tc   = extract_trip_code(full) or tc or ""
+
+        conn=get_conn();cur=conn.cursor()
+        known_codes=[r[0] for r in cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code") or []]
+        cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code")
+        known_codes=[r[0] for r in cur.fetchall()]
+
+        # PNR → Reisecode
+        if not regex_tc and regex_pnr:
+            cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(regex_pnr,))
+            row=cur.fetchone()
+            if row: regex_tc=row[0]
+        if not regex_tc and tc:
+            regex_tc=tc
+
+        # Duplikat-Check über Subject+PNR
+        if regex_pnr:
+            cur.execute("SELECT id FROM mail_messages WHERE body LIKE %s LIMIT 1",(f"%{regex_pnr}%",))
+            if cur.fetchone():
+                cur.close();conn.close()
+                return page_shell("Duplikat",f"""<div class="page-card">
+                  <h2 class="warn-t">⚠ Mail bereits vorhanden</h2>
+                  <p>PNR <b>{regex_pnr}</b> ist bereits in der Datenbank.</p>
+                  <div class="acts"><a class="btn" href="/reanalyze-mails" onclick="window.location='/analyze-attachments';return false">Neu analysieren</a>
+                  <a class="btn-l" href="/mail-log">Mail-Log</a></div></div>""")
+
+        # Mail einfügen
+        uid=f"manual_{__import__('hashlib').md5(body[:100].encode()).hexdigest()[:8]}"
+        mail_type="Flug" if regex_fns else detect_mail_type(full)
+        cur.execute("""INSERT INTO mail_messages
+            (mail_uid,message_id,sender,subject,body,trip_code,detected_type,pnr_code,analysis_status)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (mail_uid) DO UPDATE SET
+            body=EXCLUDED.body,trip_code=EXCLUDED.trip_code,analysis_status='ausstehend'""",
+            (uid,uid,"manuell",subj or "Manuelle Eingabe",
+             body,regex_tc or None,mail_type,regex_pnr or None,"ausstehend"))
+        conn.commit()
+
+        # Direkt analysieren
+        fields=await mistral_extract(full,known_codes,"mail")
+        if not fields: fields={}
+
+        pnr_ki   = fields.get("pnr_code","") or regex_pnr or ""
+        fns_ki   = fields.get("flight_numbers","") or (",".join(regex_fns) if regex_fns else "")
+        seg_ki   = fields.get("flight_segments","") or regex_seg_s or ""
+        betrag_ki= fields.get("betrag","") or ""
+        typ_ki   = fields.get("beleg_typ","") or mail_type or "Sonstiges"
+        vendor_ki= fields.get("anbieter","") or ""
+        datum_ki = fields.get("datum","") or ""
+        conf_ki  = fields.get("confidence","mittel") or "mittel"
+        dest_ki  = fields.get("destination","") or ""
+        rc       = fields.get("reisecode","") or regex_tc or tc or ""
+        waehrung_ki = fields.get("waehrung","EUR") or "EUR"
+
+        # trip_meta aktualisieren
+        if rc:
+            cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(rc,))
+            if pnr_ki: cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr_ki,rc))
+            if fns_ki: cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns_ki,rc))
+            if dest_ki: cur.execute("UPDATE trip_meta SET destinations=%s WHERE trip_code=%s AND (destinations IS NULL OR destinations='')",(dest_ki,rc))
+
+        # Beleg-Insert
+        betrag_eur_ki=""
+        if betrag_ki:
+            try:
+                val=float(betrag_ki.replace(",","."))
+                eur,_=await convert_to_eur(val,waehrung_ki)
+                betrag_eur_ki=f"{eur:.2f}".replace(".",",")
+            except: pass
+
+        # Segment-Vollständigkeit prüfen
+        if fns_ki and typ_ki=="Flug":
+            fn_list=[f.strip() for f in fns_ki.split(",") if f.strip()]
+            seg_list=[s.strip() for s in seg_ki.split(";") if s.strip()] if seg_ki else []
+            seg_fns=[s.split("|")[0].strip() for s in seg_list]
+            for mfn in [f for f in fn_list if f not in seg_fns]:
+                seg_list.append(f"{mfn}|||||")
+            if seg_list: seg_ki=";".join(seg_list)
+
+        if betrag_ki and typ_ki and typ_ki not in ("Sonstiges","") and rc:
+            cur.execute("""INSERT INTO mail_attachments
+                (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                 storage_key,detected_type,detected_amount,detected_amount_eur,
+                 detected_currency,detected_date,detected_vendor,
+                 flight_segments,detected_flight_numbers,
+                 analysis_status,confidence,review_flag,ki_bemerkung)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (uid,rc,f"Mail: {(subj or 'Manuelle Eingabe')[:60]}",
+                 f"Mail: {(subj or 'Manuelle Eingabe')[:60]}","text/plain",
+                 f"mail_body_manual_{uid}",typ_ki,betrag_ki,betrag_eur_ki,
+                 waehrung_ki,datum_ki,vendor_ki,
+                 seg_ki or None,fns_ki or None,
+                 "ok (Mail-Body)",conf_ki,
+                 "ok" if conf_ki=="hoch" else "pruefen",
+                 f"Manuell eingegeben · {subj or ''}"))
+
+        cur.execute("UPDATE mail_messages SET analysis_status='ok',trip_code=%s WHERE mail_uid=%s",(rc or None,uid))
+
+        # VMA auto-berechnen
+        if regex_segs and rc:
+            cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(rc,))
+            trip_row=cur.fetchone()
+            if trip_row and trip_row[0] and not trip_row[2]:
+                dep_d_str=str(trip_row[0])
+                ret_d_str=str(trip_row[1]) if trip_row[1] else ""
+                dest_cc=None; arrive_date=None; leave_date=None
+                for seg in regex_segs:
+                    arr=seg.get("arr","").upper()
+                    cc=AIRPORT_CC.get(arr)
+                    if cc and cc!="DE":
+                        dest_cc=cc
+                        if seg.get("date"):
+                            try:
+                                p=seg["date"].split("."); arrive_date=date(int(p[2]),int(p[1]),int(p[0]))
+                            except: pass
+                        break
+                for seg in reversed(regex_segs):
+                    dep=seg.get("dep","").upper()
+                    cc=AIRPORT_CC.get(dep)
+                    if cc and cc!="DE":
+                        if seg.get("date"):
+                            try:
+                                p=seg["date"].split("."); leave_date=date(int(p[2]),int(p[1]),int(p[0]))
+                            except: pass
+                        break
+                if dest_cc and dest_cc!="DE":
+                    try:
+                        dep_d=date.fromisoformat(dep_d_str)
+                        ret_d=date.fromisoformat(ret_d_str) if ret_d_str else None
+                        arrive=arrive_date or (dep_d+timedelta(days=1))
+                        leave=leave_date or ret_d or arrive
+                        parts=[f"{dep_d}:DE"]
+                        if arrive>dep_d: parts.append(f"{arrive}:{dest_cc}")
+                        if leave and leave>arrive: parts.append(f"{leave}:DE")
+                        vma_str=",".join(parts)
+                        cur.execute("UPDATE trip_meta SET vma_destinations=%s WHERE trip_code=%s AND (vma_destinations IS NULL OR vma_destinations='')",(vma_str,rc))
+                        print(f"[VMA manuell] {rc}: {vma_str}")
+                    except: pass
+
+        conn.commit();cur.close();conn.close()
+
+        # PDF generieren
+        pdf_key=None
+        if HAS_PDF_LIBS() and rc:
+            pdf_key=await generate_and_store_mail_pdf(0,subj,body,typ_ki,vendor_ki,betrag_ki,datum_ki,rc,get_conn())
+
+        return page_shell("Mail importiert",f"""
+        <div class="page-card">
+          <h2 class="ok-t">✓ Mail importiert und analysiert</h2>
+          <table style="margin:12px 0">
+            <tr><td>Typ</td><td><b>{typ_ki or '–'}</b></td></tr>
+            <tr><td>Reisecode</td><td><b style="font-family:DM Mono,monospace">{rc or '–'}</b></td></tr>
+            <tr><td>PNR</td><td><b style="font-family:DM Mono,monospace;color:var(--gr6)">{pnr_ki or '–'}</b></td></tr>
+            <tr><td>Flugnummern (Regex)</td><td><b style="font-family:DM Mono,monospace;color:var(--b600)">{", ".join(regex_fns) or '–'}</b></td></tr>
+            <tr><td>Flugnummern (KI)</td><td>{fns_ki or '–'}</td></tr>
+            <tr><td>Betrag</td><td>{betrag_ki or '–'} {waehrung_ki} = {betrag_eur_ki or '–'} €</td></tr>
+            <tr><td>Segmente</td><td style="font-family:DM Mono,monospace;font-size:10px">{(seg_ki or '–')[:200]}</td></tr>
+          </table>
+          <div class="acts">
+            {f'<a class="btn" href="/trip/{rc}">Reise {rc} anzeigen</a>' if rc else ''}
+            <a class="btn-l" href="/mail-eingabe">Weitere Mail eingeben</a>
+            <a class="btn-l" href="/attachment-log">Anhang-Log</a>
+          </div>
+        </div>""")
+    except Exception as e:
+        import traceback
+        return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p><pre style="font-size:10px">{traceback.format_exc()}</pre></div>')
+
 
 @app.post("/upload-beleg", response_class=HTMLResponse)
 async def upload_beleg(
