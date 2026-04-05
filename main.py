@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.12"
+APP_VERSION = "9.13"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2606,6 +2606,26 @@ def api_active_codes():
         return {"codes":codes}
     except Exception as e:
         return {"codes":[],"error":str(e)}
+
+@app.get("/debug/{tc}")
+def debug_trip(tc: str):
+    """Debug: zeigt rohe DB-Daten für eine Reise."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("""SELECT id,original_filename,detected_type,detected_amount_eur,
+            detected_flight_numbers,flight_segments,storage_key,analysis_status
+            FROM mail_attachments WHERE trip_code=%s ORDER BY id""",(tc,))
+        atts=cur.fetchall()
+        cur.execute("SELECT flight_numbers,pnr_code,vma_destinations,destinations FROM trip_meta WHERE trip_code=%s",(tc,))
+        meta=cur.fetchone()
+        cur.close();conn.close()
+        return {
+            "trip_meta": {"flight_numbers":meta[0],"pnr":meta[1],"vma_destinations":meta[2],"destinations":meta[3]} if meta else None,
+            "attachments": [{"id":a[0],"file":a[1],"type":a[2],"eur":a[3],
+                            "fns":a[4],"segments":a[5],"skey":a[6],"status":a[7]} for a in atts]
+        }
+    except Exception as e:
+        return {"error":str(e)}
 
 @app.get("/version")
 def version():
@@ -5646,62 +5666,208 @@ async def upload_beleg(
 ):
     try:
         if not file or not file.filename:
-            return page_shell("Upload",f'<div class="page-card"><h2 class="err-t">Keine Datei</h2><a class="btn-l" href="/">Zurück</a></div>')
+            return page_shell("Upload",'<div class="page-card"><h2 class="err-t">Keine Datei</h2><a class="btn-l" href="/">Zurück</a></div>')
 
         ext = (file.filename or "").lower().split(".")[-1]
         if ext not in ("pdf","jpg","jpeg","png","webp","ics"):
-            return page_shell("Upload",f'<div class="page-card"><h2 class="err-t">Dateityp .{ext} nicht unterstützt</h2><p class="sub">Erlaubt: PDF, JPG, PNG, WEBP, ICS</p><a class="btn-l" href="/">Zurück</a></div>')
+            return page_shell("Upload",f'<div class="page-card"><h2 class="err-t">.{ext} nicht unterstützt</h2><p class="sub">Erlaubt: PDF, JPG, PNG, WEBP, ICS</p><a class="btn-l" href="/">Zurück</a></div>')
 
         file_bytes = await file.read()
         h = file_hash(file_bytes)
-
         conn=get_conn();cur=conn.cursor()
 
         # Duplikat-Check
         cur.execute("SELECT id,trip_code FROM mail_attachments WHERE file_hash=%s",(h,))
-        existing = cur.fetchone()
+        existing=cur.fetchone()
         if existing:
             cur.close();conn.close()
-            return page_shell("Upload",f'<div class="page-card"><h2 class="warn-t">⚠ Duplikat</h2><p>Diese Datei wurde bereits als Anhang ID {existing[0]} gespeichert (Reise {existing[1] or "–"}).</p><a class="btn-l" href="/">Zurück</a></div>')
+            return page_shell("Upload",f'<div class="page-card"><h2 class="warn-t">⚠ Duplikat</h2><p>Bereits vorhanden als ID {existing[0]} (Reise {existing[1] or "–"}).</p><a class="btn-l" href="/">Zurück</a></div>')
 
-        # Reisecode aus Dateiname / Formular ermitteln
-        code = trip_code.strip() or extract_trip_code(file.filename)
+        code=trip_code.strip() or extract_trip_code(file.filename) or ""
+        safe_fn=sanitize_filename(file.filename)
+        uid=f"upload_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        storage_key=f"mail_attachments/{uid}_{safe_fn}"
+
+        # S3 Upload
+        try:
+            s3=get_s3()
+            s3.put_object(Bucket=S3_BUCKET,Key=storage_key,Body=file_bytes,
+                ContentType=file.content_type or "application/octet-stream")
+        except Exception as s3e:
+            storage_key=f"S3-FEHLER:{s3e}"
+
+        # DB eintragen
         if code:
             cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(code,))
-
-        safe_fn = sanitize_filename(file.filename)
-        uid = f"manual_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        storage_key = f"mail_attachments/{uid}_{safe_fn}"
-
-        try:
-            s3 = get_s3()
-            s3.put_object(Bucket=S3_BUCKET, Key=storage_key, Body=file_bytes,
-                          ContentType=file.content_type or "application/octet-stream")
-        except Exception as s3e:
-            storage_key = f"S3-FEHLER:{s3e}"
-
         cur.execute("""INSERT INTO mail_attachments
             (mail_uid,trip_code,original_filename,saved_filename,content_type,
              storage_key,detected_type,analysis_status,confidence,review_flag,file_hash)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (uid,code,safe_fn,f"{uid}_{safe_fn}",file.content_type,
-             storage_key,detect_type_with_rules(safe_fn,"","",load_custom_rules()),
-             "ausstehend","niedrig","pruefen",h))
+             storage_key,"ausstehend","ausstehend","niedrig","pruefen",h))
+        att_id=cur.fetchone()[0]
+        conn.commit()
 
-        conn.commit();cur.close();conn.close()
+        # ── SOFORT ANALYSIEREN ─────────────────────────────────────────────
+        ocr_text=""
+        fields={}
+        if not storage_key.startswith("S3-FEHLER"):
+            # OCR
+            ocr_text=await mistral_ocr(file_bytes,safe_fn)
+            if ocr_text and not ocr_text.startswith(("ERROR","KEIN","OCR_","NICHT")):
+                # Regex-Extraktion
+                regex_fns=extract_flight_numbers(ocr_text)
+                regex_segs=extract_flight_segments_from_text(ocr_text) if regex_fns else []
+                regex_seg_s=segments_to_string(regex_segs) if regex_segs else ""
+                regex_pnr=extract_pnr(ocr_text) or ""
 
+                # KI-Extraktion
+                known_codes=[r[0] for r in cur.execute("SELECT trip_code FROM trip_meta") or []]
+                cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code")
+                known_codes=[r[0] for r in cur.fetchall()]
+                fields=await mistral_extract(ocr_text,known_codes,"anhang") or {}
+
+                # Felder zusammenführen (Regex gewinnt bei Flugnummern/Segmenten)
+                fns_ki=fields.get("flight_numbers","") or ""
+                seg_ki=fields.get("flight_segments","") or ""
+                # Regex überschreibt wenn besser
+                if regex_fns:
+                    fns_final=",".join(regex_fns)
+                else:
+                    fns_final=fns_ki
+                if regex_seg_s and (not seg_ki or seg_ki.count("|")<regex_seg_s.count("|")):
+                    seg_final=regex_seg_s
+                else:
+                    seg_final=seg_ki or regex_seg_s
+
+                # Segment-Vollständigkeit
+                if fns_final:
+                    fn_list=[f.strip() for f in fns_final.split(",") if f.strip()]
+                    seg_list=[s.strip() for s in seg_final.split(";") if s.strip()] if seg_final else []
+                    seg_fns=[s.split("|")[0].strip() for s in seg_list]
+                    for mfn in [f for f in fn_list if f not in seg_fns]:
+                        seg_list.append(f"{mfn}|||||")
+                    seg_final=";".join(seg_list)
+
+                betrag=fields.get("betrag","") or ""
+                waehrung=fields.get("waehrung","EUR") or "EUR"
+                datum=fields.get("datum","") or ""
+                anbieter=fields.get("anbieter","") or ""
+                typ=fields.get("beleg_typ","Sonstiges") or "Sonstiges"
+                pnr=fields.get("pnr_code","") or regex_pnr or ""
+                conf=fields.get("confidence","mittel") or "mittel"
+                dest=fields.get("destination","") or ""
+
+                # Reisecode
+                if not code:
+                    code=fields.get("reisecode","") or ""
+                    if not code and pnr:
+                        cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(pnr,))
+                        row=cur.fetchone()
+                        if row: code=row[0]
+                    if code:
+                        cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(code,))
+
+                # EUR-Betrag
+                betrag_eur=""
+                if betrag:
+                    try:
+                        val=float(betrag.replace(",","."))
+                        eur,_=await convert_to_eur(val,waehrung)
+                        betrag_eur=f"{eur:.2f}".replace(".",",")
+                    except: pass
+
+                # UPDATE Beleg
+                cur.execute("""UPDATE mail_attachments SET
+                    trip_code=%s,detected_type=%s,detected_amount=%s,detected_amount_eur=%s,
+                    detected_currency=%s,detected_date=%s,detected_vendor=%s,
+                    detected_flight_numbers=%s,flight_segments=%s,pnr_code=%s,
+                    extracted_text=%s,analysis_status=%s,confidence=%s,
+                    review_flag=%s,ki_bemerkung=%s WHERE id=%s""",
+                    (code or None,typ,betrag,betrag_eur,waehrung,datum,anbieter,
+                     fns_final or None,seg_final or None,pnr or None,
+                     ocr_text[:10000],"ok",conf,
+                     "ok" if conf=="hoch" else "pruefen",
+                     f"Upload: {safe_fn}",att_id))
+
+                # trip_meta aktualisieren
+                if code:
+                    if pnr: cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr,code))
+                    if fns_final: cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns_final,code))
+                    if dest: cur.execute("UPDATE trip_meta SET destinations=%s WHERE trip_code=%s AND (destinations IS NULL OR destinations='')",(dest,code))
+
+                # VMA automatisch berechnen
+                if regex_segs and code:
+                    cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(code,))
+                    trip_row=cur.fetchone()
+                    if trip_row and trip_row[0] and not trip_row[2]:
+                        dep_d_str=str(trip_row[0])
+                        ret_d_str=str(trip_row[1]) if trip_row[1] else ""
+                        dest_cc=None;arrive_date=None;leave_date=None
+                        for seg in regex_segs:
+                            arr=seg.get("arr","").upper()
+                            cc=AIRPORT_CC.get(arr)
+                            if cc and cc!="DE":
+                                dest_cc=cc
+                                try:
+                                    p=seg["date"].split(".");arrive_date=date(int(p[2]),int(p[1]),int(p[0]))
+                                except: pass
+                                break
+                        for seg in reversed(regex_segs):
+                            dep=seg.get("dep","").upper()
+                            cc=AIRPORT_CC.get(dep)
+                            if cc and cc!="DE":
+                                try:
+                                    arr_d=seg.get("arr_date") or seg.get("date","")
+                                    p=arr_d.split(".");leave_date=date(int(p[2]),int(p[1]),int(p[0]))
+                                except: pass
+                                break
+                        if dest_cc and dest_cc!="DE":
+                            try:
+                                dep_d=date.fromisoformat(dep_d_str)
+                                ret_d=date.fromisoformat(ret_d_str) if ret_d_str else None
+                                arrive=arrive_date or (dep_d+timedelta(days=1))
+                                leave=leave_date or ret_d or arrive
+                                parts=[f"{dep_d}:DE"]
+                                if arrive>dep_d: parts.append(f"{arrive}:{dest_cc}")
+                                if leave and leave>arrive: parts.append(f"{leave}:DE")
+                                vma_str=",".join(parts)
+                                cur.execute("UPDATE trip_meta SET vma_destinations=%s WHERE trip_code=%s AND (vma_destinations IS NULL OR vma_destinations='')",(vma_str,code))
+                                print(f"[VMA Upload] {code}: {vma_str}")
+                            except Exception as ve:
+                                print(f"[VMA Upload Fehler]: {ve}")
+
+                conn.commit()
+            else:
+                cur.execute("UPDATE mail_attachments SET analysis_status='analysefehler',extracted_text=%s WHERE id=%s",(ocr_text,att_id))
+                conn.commit()
+
+        cur.close();conn.close()
+
+        # Ergebnis-Seite
+        fns_show=fields.get("flight_numbers","") or ",".join(extract_flight_numbers(ocr_text)) if ocr_text else ""
+        seg_show=(fields.get("flight_segments","") or "")[:200]
         return page_shell("Upload",f"""
         <div class="page-card">
-          <h2 class="ok-t">✓ {safe_fn} hochgeladen</h2>
-          <p style="margin-bottom:16px">Reise: <b>{code or '– noch nicht zugeordnet –'}</b> · Jetzt KI-Analyse starten.</p>
+          <h2 class="ok-t">✓ {safe_fn} hochgeladen &amp; analysiert</h2>
+          <table style="margin:12px 0">
+            <tr><td>Reise</td><td><b style="font-family:DM Mono,monospace">{code or '–'}</b></td></tr>
+            <tr><td>Typ</td><td>{fields.get("beleg_typ","–")}</td></tr>
+            <tr><td>Anbieter</td><td>{fields.get("anbieter","–")}</td></tr>
+            <tr><td>Betrag</td><td>{fields.get("betrag","–")} {fields.get("waehrung","")}</td></tr>
+            <tr><td>PNR</td><td style="font-family:DM Mono,monospace;color:var(--gr6)">{fields.get("pnr_code","–")}</td></tr>
+            <tr><td>Flugnummern</td><td style="font-family:DM Mono,monospace;color:var(--b600)">{fns_show or "–"}</td></tr>
+            <tr><td>Segmente</td><td style="font-family:DM Mono,monospace;font-size:10px">{seg_show or "–"}</td></tr>
+          </table>
           <div class="acts">
-            <a class="btn" href="/analyze-attachments">KI-Analyse starten</a>
+            {f'<a class="btn" href="/trip/{code}">Reise {code} anzeigen</a>' if code else ''}
+            <a class="btn-l" href="/beleg-edit/{att_id}?back={"/trip/"+code if code else "/attachment-log"}">✏ Korrigieren</a>
             <a class="btn-l" href="/">Dashboard</a>
-            {f'<a class="btn-l" href="/trip/{code}">Reise {code}</a>' if code else ''}
           </div>
         </div>""")
     except Exception as e:
-        return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Upload-Fehler</h2><p>{e}</p><a class="btn-l" href="/">Zurück</a></div>')
+        import traceback
+        return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Upload-Fehler</h2><p>{e}</p><pre style="font-size:10px">{traceback.format_exc()[:500]}</pre><a class="btn-l" href="/">Zurück</a></div>')
 
 
 @app.get("/reanalyze-mails")
