@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.18"
+APP_VERSION = "9.19"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -4144,7 +4144,8 @@ def trip_detail(tc: str):
             <a class="btn" href="/report-komplett/{tc}" target="_blank" style="background:linear-gradient(135deg,#0f9e6e,#0d8a5e)">📎 Komplett-PDF</a>
             <a class="btn-l" href="/meals/{tc}">🍽 Mahlzeiten</a>
             <a class="btn-l" href="/check-flights/{tc}">✈ Flüge</a>
-            <a class="btn-l" href="/set-segments/{tc}" style="color:var(--am6)">✏ Segmente</a>
+            <a class="btn-l" href="/repair-segments/{tc}" style="color:var(--gr6)"
+               onclick="this.textContent='⏳ Repariere...';fetch('/repair-segments/{tc}').then(r=>r.json()).then(d=>{{this.textContent='✓ Fertig';setTimeout(()=>location.reload(),800)}}).catch(()=>location.reload());return false;">🔧 Segmente reparieren</a>
             {"<a class='btn-l' href='/check-trains/"+tc+"'>🚆 Züge</a>" if trains else ""}
             <a class="btn-l" href="/edit-trip/{tc}">✏ Bearbeiten</a>
             <a class="btn-l" href="/">Zurück</a>
@@ -5934,101 +5935,172 @@ async def set_segments_save(tc: str, att_id: str, request: Request):
 
 
 @app.get("/repair-segments/{tc}")
-def repair_segments(tc: str):
+async def repair_segments(tc: str):
     """
-    Repariert fehlende flight_segments aus mail_bodies.
-    Liest den Mail-Body neu aus und extrahiert Segmente via Regex.
+    Liest ALLE Mails + Anhänge der Reise neu aus und extrahiert Flug-Segmente.
+    Erstellt fehlende Flug-Belege automatisch.
     """
     try:
-        conn=get_conn();cur=conn.cursor()
-        # Alle Flug-Belege für diese Reise
-        cur.execute("""SELECT a.id, a.flight_segments, a.detected_flight_numbers,
-            a.storage_key, a.ki_bemerkung, m.body, m.subject
-            FROM mail_attachments a
-            LEFT JOIN mail_messages m ON m.mail_uid=a.mail_uid
-            WHERE a.trip_code=%s AND a.detected_type='Flug'
-            ORDER BY a.id""",(tc,))
-        belege=cur.fetchall()
+        conn=get_conn(); cur=conn.cursor()
 
-        # trip_meta Flugnummern als Referenz
-        cur.execute("SELECT flight_numbers,departure_date,return_date,destinations FROM trip_meta WHERE trip_code=%s",(tc,))
-        meta=cur.fetchone()
-        if not meta: return {"status":"fehler","detail":"Reise nicht gefunden"}
-        meta_fns=[f.strip() for f in (meta[0] or "").split(",") if f.strip()]
-        dep_d=meta[1]; ret_d=meta[2]; destinations=meta[3] or ""
+        # 1. trip_meta lesen
+        cur.execute("""SELECT flight_numbers, departure_date, return_date, pnr_code
+            FROM trip_meta WHERE trip_code=%s""", (tc,))
+        meta = cur.fetchone()
+        if not meta:
+            return {"status":"fehler","detail":"Reise nicht gefunden"}
+        meta_fns = [f.strip() for f in (meta[0] or "").split(",") if f.strip()]
+        dep_d, ret_d, pnr_meta = meta[1], meta[2], meta[3]
 
-        repaired=0
-        results=[]
-        for att_id,seg_s,fns_s,skey,bemerk,body,subj in belege:
-            current_segs=seg_s or ""
-            current_fns=[f.strip() for f in (fns_s or "").split(",") if f.strip()]
+        # 2. Alle Mails dieser Reise lesen
+        cur.execute("""SELECT id, mail_uid, subject, body FROM mail_messages
+            WHERE trip_code=%s ORDER BY id""", (tc,))
+        mails = cur.fetchall()
 
-            # Text aus Mail-Body extrahieren
-            text=""
-            if body:
-                # HTML bereinigen
-                import html as _html
-                text=_html.unescape(body)
-                text=re.sub(r'<[^>]+>',' ',text)
-                text=re.sub(r'[ \t]+',' ',text)
-                text=re.sub(r'\n{3,}','\n\n',text).strip()
+        # 3. Auch direkt hochgeladene PDFs aus S3 lesen
+        cur.execute("""SELECT id, storage_key, original_filename, flight_segments,
+            detected_flight_numbers, extracted_text
+            FROM mail_attachments WHERE trip_code=%s
+            AND detected_type NOT IN ('Hotel','Essen','Taxi','Bahn','Mietwagen','Inline-Grafik')
+            ORDER BY id""", (tc,))
+        uploads = cur.fetchall()
 
-            # Segmente aus Text extrahieren
-            if text:
-                new_segs=extract_flight_segments_from_text(text)
-                new_seg_s=segments_to_string(new_segs) if new_segs else ""
-            else:
-                new_segs=[]
-                new_seg_s=""
+        all_segments = {}  # fn -> segment dict
+        all_found_fns = []
+        sources_used = []
 
-            # Stub-Segmente für bekannte Flugnummern
-            all_fns=list(dict.fromkeys(current_fns+meta_fns))  # dedupliziert
-            if all_fns and not new_seg_s:
-                # Datumsbasierte Stubs aus trip_meta
-                ROUTE_MAP={
-                    "NUE":"FRA","FRA":"NUE",  # typische NUE-Verbindungen
-                }
-                dep_d_str=str(dep_d) if dep_d else ""
-                ret_d_str=str(ret_d) if ret_d else ""
-                dest_apt=destinations[:3].upper() if destinations else ""
+        def clean_html(text):
+            import html as _h
+            t = _h.unescape(text or "")
+            t = re.sub(r'<style[^>]*>.*?</style>', ' ', t, flags=re.DOTALL|re.IGNORECASE)
+            t = re.sub(r'<[^>]+>', ' ', t)
+            t = re.sub(r'[ \t]+', ' ', t)
+            t = re.sub(r'\n{3,}', '\n\n', t)
+            return t.strip()
 
-                stubs=[]
-                for i,fn in enumerate(all_fns):
-                    if i<len(all_fns)//2:
-                        # Hinflug: Abreisetag
-                        stubs.append(f"{fn}|||{dep_d_str}||{dep_d_str}|")
-                    else:
-                        # Rückflug: Rückreisetag
-                        stubs.append(f"{fn}|||{ret_d_str}||{ret_d_str}|")
-                new_seg_s=";".join(stubs)
+        def merge_segs(new_segs, source):
+            for s in new_segs:
+                fn = s["fn"]
+                if fn not in all_segments or not all_segments[fn].get("dep"):
+                    all_segments[fn] = s
+                    if fn not in all_found_fns:
+                        all_found_fns.append(fn)
+                    sources_used.append(f"{fn}<-{source}")
 
-            # Segment-Vollständigkeit sicherstellen
-            if new_seg_s and all_fns:
-                seg_list=[s.strip() for s in new_seg_s.split(";") if s.strip()]
-                seg_fns={s.split("|")[0].strip() for s in seg_list}
-                for mfn in all_fns:
-                    if mfn not in seg_fns:
-                        # Auf Rückreisetag wenn Hinflug-FNs bereits vorhanden
-                        d_str=str(ret_d) if ret_d else str(dep_d) if dep_d else ""
-                        seg_list.append(f"{mfn}|||{d_str}||{d_str}|")
-                new_seg_s=";".join(seg_list)
+        # 4. Mail-Bodies auswerten
+        for mid, mail_uid, subj, body in mails:
+            if not body: continue
+            text = clean_html(body)
+            full = f"{subj or ''}\n{text}"
+            segs = extract_flight_segments_from_text(full)
+            if segs:
+                merge_segs(segs, f"mail#{mid}")
 
-            if new_seg_s != current_segs:
-                cur.execute("UPDATE mail_attachments SET flight_segments=%s, detected_flight_numbers=%s WHERE id=%s",
-                    (new_seg_s, ",".join(all_fns) or None, att_id))
-                repaired+=1
-                results.append({"id":att_id,"vorher":current_segs[:50] if current_segs else "leer","nachher":new_seg_s[:80]})
+        # 5. Hochgeladene Anhänge auswerten (extracted_text aus DB)
+        for att_id, skey, fname, seg_s, fns_s, ext_text in uploads:
+            # Bereits gespeicherte Segmente übernehmen
+            if seg_s:
+                for seg_str in seg_s.split(";"):
+                    parts = seg_str.split("|")
+                    if len(parts) >= 1 and parts[0]:
+                        fn = parts[0].strip()
+                        seg = {
+                            "fn": fn,
+                            "dep": parts[1].strip() if len(parts)>1 else "",
+                            "arr": parts[2].strip() if len(parts)>2 else "",
+                            "date": parts[3].strip() if len(parts)>3 else "",
+                            "dep_time": parts[4].strip() if len(parts)>4 else "",
+                            "arr_date": parts[5].strip() if len(parts)>5 else "",
+                            "arr_time": parts[6].strip() if len(parts)>6 else "",
+                        }
+                        merge_segs([seg], f"att#{att_id}")
+            # Extracted text neu parsen
+            if ext_text:
+                segs = extract_flight_segments_from_text(ext_text)
+                merge_segs(segs, f"ocr#{att_id}")
+            # S3 PDF direkt lesen
+            elif skey and not skey.startswith("S3-FEHLER") and fname and fname.lower().endswith(".pdf"):
+                try:
+                    s3 = get_s3()
+                    obj = s3.get_object(Bucket=S3_BUCKET, Key=skey)
+                    pdf_bytes = obj["Body"].read()
+                    import pypdf as _pypdf, io as _io
+                    reader = _pypdf.PdfReader(_io.BytesIO(pdf_bytes))
+                    pdf_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+                    if pdf_text.strip():
+                        segs = extract_flight_segments_from_text(pdf_text)
+                        merge_segs(segs, f"pdf#{att_id}")
+                        # Extracted text speichern für nächstes Mal
+                        cur.execute("UPDATE mail_attachments SET extracted_text=%s WHERE id=%s",
+                            (pdf_text[:10000], att_id))
+                except Exception as s3e:
+                    pass
 
-        # Auch trip_meta flight_numbers sicherstellen
-        if meta_fns:
+        # 6. Für fehlende meta_fns: Datum-Stubs mit Hin/Rück-Logik
+        for i, fn in enumerate(meta_fns):
+            if fn not in all_segments:
+                half = len(meta_fns) // 2
+                d = str(dep_d) if dep_d and i < half else (str(ret_d) if ret_d else str(dep_d) if dep_d else "")
+                all_segments[fn] = {"fn":fn,"dep":"","arr":"","date":d,"arr_date":d,"dep_time":"","arr_time":""}
+                all_found_fns.append(fn)
+
+        # 7. Segment-String bauen (Reihenfolge meta_fns, dann weitere)
+        ordered_fns = list(dict.fromkeys(meta_fns + all_found_fns))
+        seg_string = ";".join(
+            f"{fn}|{all_segments[fn]['dep']}|{all_segments[fn]['arr']}|{all_segments[fn]['date']}|{all_segments[fn]['dep_time']}|{all_segments[fn].get('arr_date',all_segments[fn]['date'])}|{all_segments[fn]['arr_time']}"
+            for fn in ordered_fns if fn in all_segments
+        )
+        fns_string = ",".join(ordered_fns)
+
+        # 8. Existierenden Flug-Beleg suchen oder neu anlegen
+        cur.execute("""SELECT id FROM mail_attachments
+            WHERE trip_code=%s AND detected_type='Flug'
+            AND storage_key NOT LIKE 'S3-FEHLER%%'
+            ORDER BY id LIMIT 1""", (tc,))
+        existing_beleg = cur.fetchone()
+
+        if existing_beleg:
+            cur.execute("""UPDATE mail_attachments SET
+                flight_segments=%s, detected_flight_numbers=%s,
+                analysis_status='ok (repariert)', confidence='hoch', review_flag='ok'
+                WHERE id=%s""", (seg_string, fns_string, existing_beleg[0]))
+            beleg_id = existing_beleg[0]
+            action = "aktualisiert"
+        else:
+            # Neuen Beleg aus Mail-Body anlegen
+            uid = f"repaired_{tc}_{int(__import__('time').time())}"
+            cur.execute("""INSERT INTO mail_attachments
+                (mail_uid, trip_code, original_filename, saved_filename, content_type,
+                 storage_key, detected_type, detected_flight_numbers, flight_segments,
+                 analysis_status, confidence, review_flag, ki_bemerkung)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                (uid, tc, f"Flüge {tc}: {fns_string[:60]}", f"Flüge {tc}",
+                 "text/plain", f"repaired_{tc}",
+                 "Flug", fns_string, seg_string,
+                 "ok (repariert)", "hoch", "ok",
+                 f"Auto-repariert aus {len(mails)} Mails + {len(uploads)} Uploads"))
+            beleg_id = cur.fetchone()[0]
+            action = "neu erstellt"
+
+        # 9. trip_meta aktualisieren
+        if fns_string:
             cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",
-                (",".join(meta_fns),tc))
+                (fns_string, tc))
 
-        conn.commit();cur.close();conn.close()
-        return {"status":"ok","repariert":repaired,"belege":len(belege),"details":results}
+        conn.commit(); cur.close(); conn.close()
+
+        return {
+            "status": "ok",
+            "action": action,
+            "beleg_id": beleg_id,
+            "flugnummern": fns_string,
+            "segmente": seg_string,
+            "quellen": sources_used,
+            "naechster_schritt": f"/trip/{tc}"
+        }
     except Exception as e:
         import traceback
-        return {"status":"fehler","detail":str(e),"trace":traceback.format_exc()[:500]}
+        return {"status":"fehler","detail":str(e),"trace":traceback.format_exc()[:800]}
 
 
 @app.get("/recalc-vma/{tc}")
