@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.14"
+APP_VERSION = "9.16"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -3174,6 +3174,8 @@ async def analyze_attachments():
                         cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(pnr,))
                         pnr_row=cur.fetchone()
                         if pnr_row: rc=pnr_row[0]
+                    # Fallback auf Regex-Ergebnis
+                    if not rc: rc=regex_tc
                     # Wenn immer noch kein Code → Mail-Betreff nach Reisecode durchsuchen
                     if not rc:
                         rc_m=re.search(r'\b(\d{2}-\d{3})\b', subj or "")
@@ -3189,24 +3191,41 @@ async def analyze_attachments():
                     datum_ki=fields.get("datum","") or ""
                     vendor_ki=fields.get("anbieter","") or ""
                     conf_ki=fields.get("confidence","niedrig") or "niedrig"
+                else:
+                    # Kein Mistral-Ergebnis → Regex-Daten verwenden
+                    pnr=regex_pnr; fns=",".join(regex_fns) if regex_fns else ""; trains=""
+                    rc=regex_tc; conf_ki="mittel"; vendor_ki=""; betrag_ki=""
+                    waehrung_ki="EUR"; typ_ki="Flug" if regex_fns else ""; datum_ki=""
+                    dest_ki=""; traveler_ki=""
+                if not rc and regex_tc: rc=regex_tc
 
-                    if pnr and rc:
-                        cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr,rc))
-                    if fns and rc:
-                        cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns,rc))
-                    if trains and rc:
-                        cur.execute("UPDATE trip_meta SET train_numbers=%s WHERE trip_code=%s AND (train_numbers IS NULL OR train_numbers='')",(trains,rc))
-                    if traveler_ki and rc:
-                        cur.execute("UPDATE trip_meta SET traveler_name=%s WHERE trip_code=%s AND (traveler_name IS NULL OR traveler_name='')",(traveler_ki,rc))
-                    if dest_ki and rc:
-                        cur.execute("UPDATE trip_meta SET destinations=%s WHERE trip_code=%s AND (destinations IS NULL OR destinations='')",(dest_ki,rc))
+                if pnr and rc:
+                    cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr,rc))
+                if fns and rc:
+                    cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns,rc))
+                if trains and rc:
+                    cur.execute("UPDATE trip_meta SET train_numbers=%s WHERE trip_code=%s AND (train_numbers IS NULL OR train_numbers='')",(trains,rc))
+                if traveler_ki and rc:
+                    cur.execute("UPDATE trip_meta SET traveler_name=%s WHERE trip_code=%s AND (traveler_name IS NULL OR traveler_name='')",(traveler_ki,rc))
+                if dest_ki and rc:
+                    cur.execute("UPDATE trip_meta SET destinations=%s WHERE trip_code=%s AND (destinations IS NULL OR destinations='')",(dest_ki,rc))
 
-                    # Mail-Body als Beleg anlegen wenn Betrag + Typ erkannt
-                    if betrag_ki and typ_ki and typ_ki not in ("Sonstiges","") and rc:
+                    # Mail-Body als Beleg anlegen:
+                    # - wenn Betrag + Typ erkannt, ODER
+                    # - wenn Flugnummern erkannt (auch ohne Betrag = Itinerary/Reiseangebot)
+                    has_fns = bool(fns or regex_fns)
+                    should_create = (
+                        (betrag_ki and typ_ki and typ_ki not in ("Sonstiges","")) or
+                        (has_fns and rc)
+                    )
+                    if should_create and rc:
+                        # Typ bestimmen wenn nur Flugnummern vorhanden
+                        eff_typ = typ_ki if typ_ki and typ_ki != "Sonstiges" else ("Flug" if has_fns else "")
+                        if not eff_typ: eff_typ = "Flug" if has_fns else typ_ki
                         cur.execute(
                             "SELECT id FROM mail_attachments WHERE trip_code=%s AND detected_type=%s "
                             "AND storage_key LIKE 'mail_body_%%' AND detected_vendor=%s",
-                            (rc,typ_ki,vendor_ki or ""))
+                            (rc, eff_typ, vendor_ki or ""))
                         if not cur.fetchone():
                             betrag_eur_ki=""
                             try:
@@ -3218,7 +3237,17 @@ async def analyze_attachments():
                             mur=cur.fetchone()
                             mail_uid_val=mur[0] if mur else f"mail_{mid}"
                             safe_name=f"Mail: {(subj or 'Buchungsbestaetigung')[:60]}"
-                            seg_ki      = fields.get("flight_segments","") or regex_seg_s or ""
+                            # Segmente: Regex bevorzugen, dann KI
+                            seg_ki      = regex_seg_s or fields.get("flight_segments","") or ""
+                            # Segment-Vollständigkeit prüfen
+                            all_fns_str = fns or (",".join(regex_fns) if regex_fns else "")
+                            if all_fns_str and eff_typ == "Flug":
+                                fn_list=[f.strip() for f in all_fns_str.split(",") if f.strip()]
+                                seg_list=[s.strip() for s in seg_ki.split(";") if s.strip()] if seg_ki else []
+                                seg_fns=[s.split("|")[0].strip() for s in seg_list]
+                                for mfn in [f for f in fn_list if f not in seg_fns]:
+                                    seg_list.append(f"{mfn}|||||")
+                                if seg_list: seg_ki=";".join(seg_list)
                             checkin_ki  = fields.get("checkin_date","") or ""
                             checkout_ki = fields.get("checkout_date","") or ""
                             cin_t_ki    = fields.get("checkin_time","") or ""
@@ -3235,11 +3264,11 @@ async def analyze_attachments():
                                 " analysis_status,confidence,review_flag,ki_bemerkung) "
                                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                                 (mail_uid_val,rc,safe_name,safe_name,"text/plain",
-                                 f"mail_body_{mid}",typ_ki,betrag_ki,betrag_eur_ki,
+                                 f"mail_body_{mid}",eff_typ,betrag_ki or None,betrag_eur_ki or None,
                                  waehrung_ki,datum_ki,vendor_ki,
                                  nights_ki,checkin_ki or None,checkout_ki or None,
                                  cin_t_ki or None,cout_t_ki or None,seg_ki or None,
-                                 fns or (",".join(regex_fns) if regex_fns else None),
+                                 all_fns_str or None,
                                  "ok (Mail-Body)",conf_ki,
                                  "ok" if conf_ki=="hoch" else "pruefen",
                                  f"Aus Mail-Text: {subj or ''}"))
