@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.20"
+APP_VERSION = "9.21"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2506,6 +2506,17 @@ def api_active_codes():
         return {"codes":codes}
     except Exception as e:
         return {"codes":[],"error":str(e)}
+
+@app.get("/debug-body/{tc}")
+def debug_body(tc: str):
+    """Zeigt die ersten 3000 Zeichen aller Mail-Bodies für eine Reise."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("SELECT id,subject,LENGTH(body),LEFT(body,3000) FROM mail_messages WHERE trip_code=%s ORDER BY id",(tc,))
+        rows=cur.fetchall();cur.close();conn.close()
+        return [{"id":r[0],"subject":r[1],"body_len":r[2],"body_preview":r[3]} for r in rows]
+    except Exception as e:
+        return {"error":str(e)}
 
 @app.get("/debug/{tc}")
 def debug_trip(tc: str):
