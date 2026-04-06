@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.22"
+APP_VERSION = "9.23"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2385,7 +2385,7 @@ def page_shell(title, content, active_tab=""):
         <button class="dd-item" onclick="openM('trip')"><div class="dd-icon di-b">✈</div><div><div style="font-weight:500">Neue Reise anlegen</div><div class="dd-sub">Code wird automatisch vergeben</div></div></button>
         <button class="dd-item" onclick="openM('event')"><div class="dd-icon di-g">📋</div><div><div style="font-weight:500">Manuelles Ereignis</div><div class="dd-sub">Alert oder Notiz eintragen</div></div></button>
         <div class="dd-div"></div>
-        <button class="dd-item" onclick="openM('upload')"><div class="dd-icon di-a">📎</div><div><div style="font-weight:500">Beleg hochladen</div><div class="dd-sub">KI-Analyse via Mistral OCR</div></div></button>
+        <button class="dd-item" onclick="window.location='/upload-beleg'"><div class="dd-icon di-a">📎</div><div><div style="font-weight:500">Beleg hochladen</div><div class="dd-sub">PDF direkt hochladen &amp; analysieren</div></div></button>
       </div>
     </div>
   </div>
@@ -5605,6 +5605,42 @@ async def mail_eingabe_save(request: Request):
         import traceback
         return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p><pre style="font-size:10px">{traceback.format_exc()}</pre></div>')
 
+
+@app.get("/upload-beleg", response_class=HTMLResponse)
+async def upload_beleg_form(request: Request):
+    """Dedizierte Upload-Seite – kein Modal, kein JS-Problem."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code DESC LIMIT 30")
+        codes=[r[0] for r in cur.fetchall()]
+        cur.close();conn.close()
+    except: codes=[]
+    opts="<option value=''>– KI zuordnen lassen –</option>"+"".join(f"<option>{c}</option>" for c in codes)
+    return page_shell("Beleg hochladen",f"""
+    <div class="page-card" style="max-width:600px">
+      <h2>📎 Beleg hochladen</h2>
+      <form method="post" action="/upload-beleg" enctype="multipart/form-data">
+        <div class="fgrid">
+          <div class="fgrp ff">
+            <label class="flbl">Reise zuordnen</label>
+            <select class="fsel" name="trip_code">{opts}</select>
+          </div>
+          <div class="fgrp ff">
+            <label class="flbl">Datei auswählen *</label>
+            <input class="finp" type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,.ics" required
+              style="padding:8px;cursor:pointer">
+            <div class="hint">PDF, JPG, PNG, ICS · PDF wird direkt via pypdf gelesen (kein OCR nötig)</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--t300);margin:12px 0">
+          🔒 DSGVO: PDF-Text wird lokal extrahiert. Nur anonymisierte Daten an Mistral EU (Paris).
+        </div>
+        <div class="mfooter">
+          <a class="btn-l" href="/">Abbrechen</a>
+          <button type="submit" class="btn-mp">📤 Hochladen &amp; analysieren</button>
+        </div>
+      </form>
+    </div>""")
 
 @app.post("/upload-beleg", response_class=HTMLResponse)
 async def upload_beleg(
