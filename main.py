@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.21"
+APP_VERSION = "9.22"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -5881,96 +5881,149 @@ def reanalyze_mails():
 
 @app.get("/set-segments/{tc}")
 def set_segments_form(tc: str):
-    """Formular zum manuellen Setzen von Flug-Segmenten."""
+    """Formular zum Setzen von Flug-Segmenten – vorausgefüllt mit bekannten Daten."""
     try:
         conn=get_conn();cur=conn.cursor()
-        cur.execute("""SELECT a.id,a.original_filename,a.detected_flight_numbers,a.flight_segments
-            FROM mail_attachments a WHERE a.trip_code=%s AND a.detected_type='Flug' ORDER BY a.id""",(tc,))
-        belege=cur.fetchall()
-        cur.execute("SELECT flight_numbers,departure_date,return_date FROM trip_meta WHERE trip_code=%s",(tc,))
+        cur.execute("""SELECT a.id,a.detected_flight_numbers,a.flight_segments
+            FROM mail_attachments a WHERE a.trip_code=%s AND a.detected_type='Flug'
+            ORDER BY a.id LIMIT 1""",(tc,))
+        beleg=cur.fetchone()
+        cur.execute("SELECT flight_numbers,departure_date,return_date,destinations FROM trip_meta WHERE trip_code=%s",(tc,))
         meta=cur.fetchone()
         cur.close();conn.close()
 
-        rows=""
-        for att_id,fname,fns,segs in belege:
-            rows+=f"""<div style="border:1px solid var(--bd);border-radius:8px;padding:16px;margin-bottom:12px">
-              <div style="font-weight:600;margin-bottom:8px">{fname or f"Beleg #{att_id}"}</div>
-              <form method="post" action="/set-segments/{tc}/{att_id}">
-                <div class="fgrp" style="margin-bottom:8px">
-                  <label class="flbl">Flugnummern</label>
-                  <input class="finp" name="fns" value="{fns or ''}" placeholder="LH3463,LH1078,LH1077,LH3463">
-                </div>
-                <div class="fgrp">
-                  <label class="flbl">Segmente (FN|DEP|ARR|DATUM|ZEIT_AB|DATUM|ZEIT_AN;...)</label>
-                  <textarea class="finp" name="segments" rows="4" style="font-family:DM Mono,monospace;font-size:11px">{segs or ''}</textarea>
-                </div>
-                <button type="submit" class="btn-mp" style="margin-top:8px">💾 Speichern</button>
-              </form>
-            </div>"""
+        fns_meta=meta[0] if meta else ""
+        dep_d=str(meta[1]) if meta and meta[1] else ""
+        ret_d=str(meta[2]) if meta and meta[2] else ""
+        dest=meta[3] if meta else ""
 
-        if not belege:
-            rows=f"""<div style="border:1px solid var(--bd);border-radius:8px;padding:16px;margin-bottom:12px">
-              <div style="font-weight:600;margin-bottom:8px">Neuen Flug-Beleg anlegen</div>
-              <form method="post" action="/set-segments/{tc}/new">
-                <div class="fgrp" style="margin-bottom:8px">
-                  <label class="flbl">Flugnummern</label>
-                  <input class="finp" name="fns" placeholder="LH3463,LH1078,LH1077,LH3463">
-                </div>
-                <div class="fgrp">
-                  <label class="flbl">Segmente</label>
-                  <textarea class="finp" name="segments" rows="4" style="font-family:DM Mono,monospace;font-size:11px"
-                    placeholder="LH3463|NUE|FRA|20.04.2026|13:00|20.04.2026|14:15;LH1078|FRA|LYS|20.04.2026|16:55|20.04.2026|18:15"></textarea>
-                </div>
-                <button type="submit" class="btn-mp" style="margin-top:8px">💾 Speichern</button>
-              </form>
-            </div>"""
+        att_id=beleg[0] if beleg else "new"
+        current_fns=beleg[1] if beleg else fns_meta
+        current_segs=beleg[2] if beleg else ""
 
-        dep_str=str(meta[1]) if meta and meta[1] else ""
-        ret_str=str(meta[2]) if meta and meta[2] else ""
-        fns_str=meta[0] if meta else ""
+        # Segmente vorausfüllen wenn leer oder nur Stubs (ohne Airports)
+        prefill_segs=current_segs or ""
+        if not prefill_segs or "||||||" in prefill_segs:
+            # Generiere vorausgefüllte Segmente aus Flugnummern + Daten
+            fn_list=[f.strip() for f in (current_fns or fns_meta or "").split(",") if f.strip()]
+            half=len(fn_list)//2 or 1
+            segs=[]
+            for i,fn in enumerate(fn_list):
+                d=dep_d if i<half else ret_d
+                d_fmt=d.replace("-",".") if "-" in d else d
+                # DD.MM.YYYY aus YYYY-MM-DD
+                if d_fmt and "-" not in d_fmt:
+                    pass
+                elif d_fmt:
+                    p=d_fmt.split("-")
+                    d_fmt=f"{p[2]}.{p[1]}.{p[0]}" if len(p)==3 else d_fmt
+                segs.append(f"{fn}|||{d_fmt}|||")
+            prefill_segs=";".join(segs)
+
+        # Jedes Segment als eigene Zeile im Textarea
+        seg_lines="\n".join(s.strip() for s in prefill_segs.split(";") if s.strip())
 
         return page_shell(f"Segmente {tc}",f"""
-        <div class="page-card" style="max-width:800px">
-          <h2>✈ Flug-Segmente für {tc}</h2>
-          <p class="sub" style="margin-bottom:4px">trip_meta: {fns_str or '–'} · {dep_str} – {ret_str}</p>
-          <p class="sub" style="margin-bottom:16px">Format: <code>FN|DEP|ARR|DD.MM.YYYY|HH:MM|DD.MM.YYYY|HH:MM</code> · Trenner: Semikolon</p>
-          {rows}
-          <div class="acts" style="margin-top:16px">
-            <a class="btn-l" href="/trip/{tc}">← Zurück</a>
-            <a class="btn-l" href="/repair-segments/{tc}" target="_blank">🔧 Auto-Reparatur</a>
-            <a class="btn-l" href="/recalc-vma/{tc}" target="_blank">🌍 VMA neu berechnen</a>
+        <div class="page-card" style="max-width:860px">
+          <h2>✈ Flug-Segmente setzen – {tc}</h2>
+          <div style="background:var(--b50);border:1px solid var(--b100);border-radius:8px;padding:14px 16px;margin-bottom:18px;font-size:12.5px">
+            <b>Format pro Zeile:</b> <code style="font-size:11px">FLUGNR|DEP|ARR|TT.MM.YYYY|HH:MM|TT.MM.YYYY|HH:MM</code><br>
+            <b>Beispiel:</b> <code style="font-size:11px">LH3463|NUE|FRA|20.04.2026|13:00|20.04.2026|14:15</code><br>
+            <span style="color:var(--t300)">Abflug- und Ankunfts-IATA-Code · Abflugdatum · Abflugzeit · Ankunftsdatum · Ankunftszeit</span>
           </div>
+          <form method="post" action="/set-segments/{tc}/{att_id}">
+            <div class="fgrp" style="margin-bottom:12px">
+              <label class="flbl">Flugnummern (kommagetrennt)</label>
+              <input class="finp" name="fns" value="{current_fns or fns_meta or ''}"
+                placeholder="LH3463,LH1078,LH1077,LH3463" style="font-family:DM Mono,monospace">
+            </div>
+            <div class="fgrp">
+              <label class="flbl">Segmente – eine Zeile pro Segment</label>
+              <textarea class="finp" name="segments" rows="{max(4,len(seg_lines.splitlines())+2)}"
+                style="font-family:DM Mono,monospace;font-size:12px;line-height:1.8">{seg_lines}</textarea>
+            </div>
+            <div style="background:var(--am1);border:1px solid rgba(201,124,10,.2);border-radius:6px;padding:10px 14px;margin:12px 0;font-size:12px">
+              <b>Reise {tc}:</b> {dep_d} → {ret_d} · Ziel: {dest or "–"}<br>
+              <span style="color:var(--t500)">Flughäfen: NUE=Nürnberg · FRA=Frankfurt · LYS=Lyon · ZRH=Zürich · SJO=San José · PTY=Panama</span>
+            </div>
+            <div class="mfooter">
+              <a class="btn-l" href="/trip/{tc}">Abbrechen</a>
+              <button type="submit" class="btn-mp">💾 Segmente speichern</button>
+            </div>
+          </form>
         </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
 
 @app.post("/set-segments/{tc}/{att_id}")
 async def set_segments_save(tc: str, att_id: str, request: Request):
-    """Speichert manuell eingegebene Segmente."""
+    """Speichert Segmente. Akzeptiert Semikolon oder Zeilenumbruch als Trenner."""
     try:
         form=await request.form()
         fns=(form.get("fns") or "").strip()
-        segs=(form.get("segments") or "").strip()
+        segs_raw=(form.get("segments") or "").strip()
+        # Normalisieren: Zeilenumbrüche → Semikolon
+        segs=";".join(l.strip() for l in re.split(r'[;\n]', segs_raw) if l.strip())
+
         conn=get_conn();cur=conn.cursor()
 
         if att_id == "new":
-            # Neuen Beleg anlegen
             uid=f"manual_seg_{tc}"
-            cur.execute("""INSERT INTO mail_attachments
-                (mail_uid,trip_code,original_filename,saved_filename,content_type,
-                 storage_key,detected_type,detected_flight_numbers,flight_segments,
-                 analysis_status,confidence,review_flag,ki_bemerkung)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (uid,tc,f"Manuell: {fns[:40]}",f"Manuell: {fns[:40]}","text/plain",
-                 f"manual_seg_{tc}","Flug",fns or None,segs or None,
-                 "ok (manuell)","hoch","ok","Manuell eingetragen"))
-            if fns:
-                cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns,tc))
+            cur.execute("SELECT id FROM mail_attachments WHERE storage_key=%s",(f"manual_seg_{tc}",))
+            existing=cur.fetchone()
+            if existing:
+                cur.execute("UPDATE mail_attachments SET flight_segments=%s,detected_flight_numbers=%s,analysis_status='ok (manuell)',confidence='hoch',review_flag='ok' WHERE id=%s",
+                    (segs or None,fns or None,existing[0]))
+            else:
+                cur.execute("""INSERT INTO mail_attachments
+                    (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                     storage_key,detected_type,detected_flight_numbers,flight_segments,
+                     analysis_status,confidence,review_flag,ki_bemerkung)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (uid,tc,f"Flüge {tc}",f"Flüge {tc}","text/plain",
+                     f"manual_seg_{tc}","Flug",fns or None,segs or None,
+                     "ok (manuell)","hoch","ok","Manuell eingetragen"))
         else:
-            cur.execute("UPDATE mail_attachments SET flight_segments=%s,detected_flight_numbers=%s,analysis_status='ok (manuell)' WHERE id=%s",
-                (segs or None, fns or None, int(att_id)))
-            if fns:
-                cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",(fns,tc))
+            cur.execute("UPDATE mail_attachments SET flight_segments=%s,detected_flight_numbers=%s,analysis_status='ok (manuell)',confidence='hoch',review_flag='ok' WHERE id=%s",
+                (segs or None,fns or None,int(att_id)))
+
+        if fns:
+            cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",(fns,tc))
+
+        # VMA aus Segmenten berechnen
+        if segs:
+            seg_list=[s.strip().split("|") for s in segs.split(";") if s.strip()]
+            dest_cc=None; arrive_d=None; leave_d=None
+            for seg in seg_list:
+                if len(seg)>=3 and seg[2].strip():
+                    cc=AIRPORT_CC.get(seg[2].strip().upper())
+                    if cc and cc!="DE" and not dest_cc:
+                        dest_cc=cc
+                        try:
+                            p=seg[3].strip().split("."); arrive_d=date(int(p[2]),int(p[1]),int(p[0]))
+                        except: pass
+            for seg in reversed(seg_list):
+                if len(seg)>=2 and seg[1].strip():
+                    cc=AIRPORT_CC.get(seg[1].strip().upper())
+                    if cc and cc!="DE":
+                        try:
+                            ds=seg[5].strip() if len(seg)>5 and seg[5].strip() else (seg[3].strip() if len(seg)>3 else "")
+                            p=ds.split("."); leave_d=date(int(p[2]),int(p[1]),int(p[0]))
+                        except: pass
+                        break
+            if dest_cc and dest_cc!="DE":
+                cur.execute("SELECT departure_date,return_date FROM trip_meta WHERE trip_code=%s",(tc,))
+                tr=cur.fetchone()
+                if tr and tr[0]:
+                    try:
+                        dep=tr[0]; ret=tr[1]
+                        arrive=arrive_d or (dep+timedelta(days=1))
+                        leave=leave_d or ret or arrive
+                        parts=[f"{dep}:DE"]
+                        if arrive>dep: parts.append(f"{arrive}:{dest_cc}")
+                        if leave and leave>arrive: parts.append(f"{leave}:DE")
+                        cur.execute("UPDATE trip_meta SET vma_destinations=%s WHERE trip_code=%s",(",".join(parts),tc))
+                    except: pass
 
         conn.commit();cur.close();conn.close()
         return RedirectResponse(url=f"/trip/{tc}",status_code=303)
