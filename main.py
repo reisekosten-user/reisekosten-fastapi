@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.16"
+APP_VERSION = "9.17"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -3729,6 +3729,12 @@ def trip_detail(tc: str):
                 except: return None
 
             ev_date = parse_dd(ddate) or dep_d
+            # Für Flugbelege: Buchungsdatum ≠ Flugdatum → erstes Segment-Datum nutzen
+            if dtype in ("Flug","Kalendereintrag") and seg_s:
+                first_seg = seg_s.split(";")[0].split("|")
+                if len(first_seg) > 3 and first_seg[3].strip():
+                    seg_date = parse_dd(first_seg[3].strip())
+                    if seg_date: ev_date = seg_date
             checkin_d  = parse_dd(checkin_s)
             checkout_d = parse_dd(checkout_s)
 
@@ -5572,17 +5578,25 @@ async def upload_beleg(
         h = file_hash(file_bytes)
         conn=get_conn();cur=conn.cursor()
 
-        # Duplikat-Check
-        cur.execute("SELECT id,trip_code FROM mail_attachments WHERE file_hash=%s",(h,))
+        # Duplikat-Check – bei Duplikat neu analysieren statt ablehnen
+        cur.execute("SELECT id,trip_code,flight_segments FROM mail_attachments WHERE file_hash=%s",(h,))
         existing=cur.fetchone()
-        if existing:
+        if existing and existing[2]:  # Segmente bereits vorhanden → wirklich Duplikat
             cur.close();conn.close()
-            return page_shell("Upload",f'<div class="page-card"><h2 class="warn-t">⚠ Duplikat</h2><p>Bereits vorhanden als ID {existing[0]} (Reise {existing[1] or "–"}).</p><a class="btn-l" href="/">Zurück</a></div>')
+            existing_tc = existing[1] or ""
+            trip_link = f'<a class="btn" href="/trip/{existing_tc}">Reise anzeigen</a>' if existing_tc else ""
+            return page_shell("Upload",f'<div class="page-card"><h2 class="warn-t">⚠ Bereits analysiert</h2><p>ID {existing[0]} (Reise {existing_tc or "–"}) · Segmente bereits vorhanden.</p><div class="acts">{trip_link}<a class="btn-l" href="/">Dashboard</a></div></div>')
+        elif existing:  # Datei bekannt aber Segmente fehlen → neu analysieren
+            att_id = existing[0]
+            code = trip_code.strip() or existing[1] or ""
+        else:
+            att_id = None
+            code = trip_code.strip() or extract_trip_code(file.filename) or ""
 
-        code=trip_code.strip() or extract_trip_code(file.filename) or ""
         safe_fn=sanitize_filename(file.filename)
         uid=f"upload_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         storage_key=f"mail_attachments/{uid}_{safe_fn}"
+        if not code: code=trip_code.strip() or ""
 
         # S3 Upload
         try:
@@ -5592,17 +5606,23 @@ async def upload_beleg(
         except Exception as s3e:
             storage_key=f"S3-FEHLER:{s3e}"
 
-        # DB eintragen
+        # DB eintragen oder aktualisieren
         if code:
             cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(code,))
-        cur.execute("""INSERT INTO mail_attachments
-            (mail_uid,trip_code,original_filename,saved_filename,content_type,
-             storage_key,detected_type,analysis_status,confidence,review_flag,file_hash)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-            (uid,code,safe_fn,f"{uid}_{safe_fn}",file.content_type,
-             storage_key,"ausstehend","ausstehend","niedrig","pruefen",h))
-        att_id=cur.fetchone()[0]
-        conn.commit()
+        if att_id:
+            # Neu analysieren – storage_key aktualisieren
+            cur.execute("UPDATE mail_attachments SET storage_key=%s,trip_code=%s,analysis_status='ausstehend' WHERE id=%s",
+                (storage_key,code or None,att_id))
+            conn.commit()
+        else:
+            cur.execute("""INSERT INTO mail_attachments
+                (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                 storage_key,detected_type,analysis_status,confidence,review_flag,file_hash)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                (uid,code,safe_fn,f"{uid}_{safe_fn}",file.content_type,
+                 storage_key,"ausstehend","ausstehend","niedrig","pruefen",h))
+            att_id=cur.fetchone()[0]
+            conn.commit()
 
         # ── SOFORT ANALYSIEREN ─────────────────────────────────────────────
         ocr_text=""
