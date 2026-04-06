@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.19"
+APP_VERSION = "9.20"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -1328,117 +1328,150 @@ def extract_hotel_dates(text: str) -> dict:
 
 def extract_flight_segments_from_text(text: str) -> list:
     """
-    Parst Flug-Segmente direkt aus Itinerary-Text via Regex.
-    Keine KI nötig. Zuverlässig für Standard-Reisebüro-Formate.
+    Extrahiert Flug-Segmente aus beliebigem Text.
+    WICHTIG: Gibt Liste zurück - doppelte Flugnummern (Hin+Rück) werden beide gespeichert.
     """
     MONTH_MAP = {
-        'jan':'01','feb':'02','mar':'03','maer':'03','apr':'04',
-        'mai':'05','may':'05','jun':'06','jul':'07','aug':'08',
-        'sep':'09','okt':'10','oct':'10','nov':'11','dez':'12','dec':'12'
+        "jan":"01","feb":"02","mar":"03","maer":"03","apr":"04",
+        "mai":"05","may":"05","jun":"06","jul":"07","aug":"08",
+        "sep":"09","okt":"10","oct":"10","nov":"11","dez":"12","dec":"12"
     }
     CITY_TO_IATA = {
-        "frankfurt": "FRA", "zurich": "ZRH", "zuerich": "ZRH", "zürich": "ZRH",
-        "genf": "GVA", "geneva": "GVA",
-        "muenchen": "MUC", "münchen": "MUC", "munich": "MUC",
-        "berlin": "BER", "hamburg": "HAM",
-        "nuernberg": "NUE", "nürnberg": "NUE",
-        "duesseldorf": "DUS", "düsseldorf": "DUS",
-        "wien": "VIE", "vienna": "VIE",
-        "paris": "CDG", "charles de gaulle": "CDG",
-        "london heathrow": "LHR", "heathrow": "LHR",
-        "london gatwick": "LGW", "london": "LHR",
-        "amsterdam": "AMS", "bruessel": "BRU", "brussels": "BRU",
-        "madrid": "MAD", "barcelona": "BCN",
-        "rom": "FCO", "rome": "FCO", "mailand": "MXP", "milan": "MXP",
-        "istanbul": "IST", "dubai": "DXB", "abu dhabi": "AUH",
-        "doha": "DOH",
-        "san jose": "SJO", "juan santamaria": "SJO",
-        "panama": "PTY", "panama city": "PTY",
-        "new york": "JFK", "john f kennedy": "JFK",
-        "los angeles": "LAX", "miami": "MIA", "chicago": "ORD",
-        "singapur": "SIN", "singapore": "SIN",
-        "tokio": "NRT", "tokyo": "NRT",
-        "bangkok": "BKK", "kuala lumpur": "KUL",
-        "delhi": "DEL", "mumbai": "BOM",
-        "peking": "PEK", "beijing": "PEK", "shanghai": "PVG",
-        "hongkong": "HKG", "hong kong": "HKG",
+        "frankfurt":"FRA","frankfurt intl":"FRA","frankfurt international":"FRA",
+        "nuernberg":"NUE","nürnberg":"NUE","nuremberg":"NUE",
+        "muenchen":"MUC","münchen":"MUC","munich":"MUC",
+        "berlin":"BER","hamburg":"HAM","duesseldorf":"DUS","düsseldorf":"DUS",
+        "koeln":"CGN","köln":"CGN","cologne":"CGN","stuttgart":"STR",
+        "zurich":"ZRH","zuerich":"ZRH","zürich":"ZRH","zurich airport":"ZRH",
+        "genf":"GVA","geneva":"GVA",
+        "wien":"VIE","vienna":"VIE","salzburg":"SZG",
+        "paris":"CDG","charles de gaulle":"CDG","orly":"ORY",
+        "lyon":"LYS","nizza":"NCE","nice":"NCE","marseille":"MRS",
+        "london":"LHR","heathrow":"LHR","gatwick":"LGW",
+        "amsterdam":"AMS","bruessel":"BRU","brussels":"BRU",
+        "madrid":"MAD","barcelona":"BCN",
+        "rom":"FCO","rome":"FCO","mailand":"MXP","milan":"MXP",
+        "istanbul":"IST","dubai":"DXB","abu dhabi":"AUH","doha":"DOH",
+        "san jose":"SJO","juan santamaria":"SJO",
+        "panama":"PTY","panama city":"PTY",
+        "new york":"JFK","los angeles":"LAX","miami":"MIA","chicago":"ORD",
+        "singapur":"SIN","singapore":"SIN",
+        "tokio":"NRT","tokyo":"NRT","narita":"NRT",
+        "bangkok":"BKK","kuala lumpur":"KUL",
+        "delhi":"DEL","mumbai":"BOM",
+        "peking":"PEK","beijing":"PEK","shanghai":"PVG",
+        "hongkong":"HKG","hong kong":"HKG",
     }
 
     def find_iata(city_text: str) -> str:
         c = city_text.strip()
-        if re.match(r'^[A-Z]{3}$', c) and c in AIRPORT_CC: return c
+        # IATA in Klammern: "Frankfurt (FRA)"
+        m = re.search(r"\(([A-Z]{3})\)", c)
+        if m and m.group(1) in AIRPORT_CC: return m.group(1)
+        # Direkt 3 Grossbuchstaben
+        if re.match(r"^[A-Z]{3}$", c) and c in AIRPORT_CC: return c
         cl = c.lower()
         for k in sorted(CITY_TO_IATA.keys(), key=len, reverse=True):
             if k in cl: return CITY_TO_IATA[k]
-        for apt in re.findall(r'\b([A-Z]{3})\b', c.upper()):
+        for apt in re.findall(r"\b([A-Z]{3})\b", c.upper()):
             if apt in AIRPORT_CC: return apt
         return ""
 
-    def parse_date(day: str, mon: str, yr: str = "2026") -> str:
-        mo = MONTH_MAP.get(mon.strip().lower()[:3], "01")
+    def parse_date_full(s: str) -> str:
+        m = re.match(r"(\d{1,2})[./](\d{1,2})[./](\d{4})", s.strip())
+        if m: return f"{int(m.group(1)):02d}.{int(m.group(2)):02d}.{m.group(3)}"
+        return s.strip()
+
+    def parse_date_mon(day, mon, yr="2026") -> str:
+        mo = MONTH_MAP.get(str(mon).strip().lower()[:3], "01")
         try: return f"{int(day):02d}.{mo}.{yr}"
         except: return ""
 
-    fns = extract_flight_numbers(text)
-    if not fns: return []
+    # Sophos-Links entfernen
+    text = re.sub(r"https?://[\w.-]*sophos[\w./-]*", " ", text, flags=re.IGNORECASE)
 
-    # Nur Flugnummern die echte Segmente sind (keine Codeshare-Subflüge)
-    # Codeshares stehen in Klammern: "(Durchgeführt von Lufthansa, LH1182)"
-    codeshare_fns = set(re.findall(r'\(Durchgeführt von[^,]+,\s*([A-Z]{2})\s*(\d{3,4})\)', text))
-    codeshare_fns |= set(re.findall(r'\(Operated by[^,]+,\s*([A-Z]{2})\s*(\d{3,4})\)', text, re.IGNORECASE))
-    codeshare_set = {f"{a}{n}" for a,n in codeshare_fns}
-    main_fns = [f for f in fns if f not in codeshare_set]
+    fns_all = extract_flight_numbers(text)
+    if not fns_all: return []
 
-    # ── Tabellenzeilen parsen ─────────────────────────────────────────────
-    # "25 Mai Frankfurt - Zurich LX 3613 06:35 - 07:30 Business"
-    table_re = re.compile(
-        r'(\d{1,2})\s+'
-        r'(Jan|Feb|M[aä]r|Apr|Mai|May|Jun|Jul|Aug|Sep|Okt|Oct|Nov|Dez|Dec)\s+'
-        r'([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\s\-,\.]*?)\s*-\s*'
-        r'([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\s\-,\.]*?)\s+'
-        r'([A-Z]{2})\s*(\d{3,4})\s+'
-        r'(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})',
+    # Codeshares herausfiltern
+    codeshare = set()
+    for m in re.finditer(r"\((?:Durchgeführt von|Operated by)[^,)]+,\s*([A-Z]{2})\s*(\d{3,4})\)", text, re.IGNORECASE):
+        codeshare.add(f"{m.group(1)}{m.group(2)}")
+    main_fns = [f for f in fns_all if f not in codeshare] or fns_all
+
+    result = []  # Liste, nicht Dict - erlaubt doppelte FN
+
+    # ── METHODE 1: "Flug LH3463: Stadt (FRA) → Stadt (LYS), DD.MM.YYYY, HH:MM → HH:MM" ──
+    m1 = re.compile(
+        r"(?:Flug\s+)?([A-Z]{2}\d{3,4})\s*[:\s]+"
+        r"([A-Za-z\xc0-\xff][A-Za-z\xc0-\xff\s\-,\.\(\)]{2,35}?)\s*(?:→|->|nach)\s*"
+        r"([A-Za-z\xc0-\xff][A-Za-z\xc0-\xff\s\-,\.\(\)]{2,35}?)[,;\s]+"
+        r"(\d{2}\.\d{2}\.\d{4})[,;\s]+"
+        r"(\d{2}:\d{2})\s*(?:→|->|–|-|bis)\s*(\d{2}:\d{2})",
         re.IGNORECASE
     )
+    found_m1 = set()
+    for m in m1.finditer(text):
+        fn = m.group(1).upper()
+        if fn not in main_fns: continue
+        dep = find_iata(m.group(2))
+        arr = find_iata(m.group(3))
+        d = parse_date_full(m.group(4))
+        seg = {"fn":fn,"dep":dep,"arr":arr,"date":d,"arr_date":d,"dep_time":m.group(5),"arr_time":m.group(6)}
+        result.append(seg)
+        found_m1.add(f"{fn}_{d}")  # Merken welche schon gefunden
 
-    segments = {}
-    for m in table_re.finditer(text):
+    # ── METHODE 2: Itinerary-Tabelle "25 Mai Frankfurt - Zurich LX3613 06:35-07:30" ──
+    m2 = re.compile(
+        r"(\d{1,2})\s+(Jan|Feb|M[aä]r|Apr|Mai|May|Jun|Jul|Aug|Sep|Okt|Oct|Nov|Dez|Dec)\s+"
+        r"([A-Za-z\xc0-\xff][A-Za-z\xc0-\xff\s\-,\.]*?)\s*-\s*"
+        r"([A-Za-z\xc0-\xff][A-Za-z\xc0-\xff\s\-,\.]*?)\s+"
+        r"([A-Z]{2})\s*(\d{3,4})\s+"
+        r"(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})",
+        re.IGNORECASE
+    )
+    for m in m2.finditer(text):
         fn = f"{m.group(5).upper()}{m.group(6)}"
         if fn not in main_fns: continue
-        dep_date = parse_date(m.group(1), m.group(2))
-        arr_time = m.group(8).strip()
-        # (+1) im Text → Ankunft am Folgetag
-        context = text[m.start():m.start()+150]
-        next_day = bool(re.search(r'\(\+\s*1\)', context))
-        if next_day and dep_date:
+        dep_date = parse_date_mon(m.group(1), m.group(2))
+        # Bereits durch Methode 1 gefunden?
+        if f"{fn}_{dep_date}" in found_m1: continue
+        arr_date = dep_date
+        ctx = text[m.start():m.start()+150]
+        if re.search(r"\(\+\s*1\)", ctx):
             try:
-                from datetime import date as _date, timedelta as _td
-                p = dep_date.split(".")
-                d = _date(int(p[2]),int(p[1]),int(p[0])) + _td(days=1)
-                arr_date = d.strftime("%d.%m.%Y")
-            except: arr_date = dep_date
-        else:
-            arr_date = dep_date
-        segments[fn] = {
-            "fn": fn,
-            "dep": find_iata(m.group(3)),
-            "arr": find_iata(m.group(4)),
-            "date": dep_date,
-            "arr_date": arr_date,
-            "dep_time": m.group(7),
-            "arr_time": arr_time,
-        }
+                from datetime import date as _d, timedelta as _td
+                p = dep_date.split("."); d2 = _d(int(p[2]),int(p[1]),int(p[0]))+_td(days=1)
+                arr_date = d2.strftime("%d.%m.%Y")
+            except: pass
+        result.append({"fn":fn,"dep":find_iata(m.group(3)),"arr":find_iata(m.group(4)),
+                       "date":dep_date,"arr_date":arr_date,"dep_time":m.group(7),"arr_time":m.group(8)})
 
-    # Reihenfolge aus main_fns beibehalten
-    result = []
+    # ── METHODE 3: IATA direkt "NUE→FRA" in Nähe der Flugnummer ──
+    already_found = {(s["fn"],s["date"]) for s in result}
     for fn in main_fns:
-        if fn in segments:
-            result.append(segments[fn])
-        else:
-            # Flugnummer bekannt aber kein Segment → Stub
-            result.append({"fn":fn,"dep":"","arr":"","date":"","arr_date":"","dep_time":"","arr_time":""})
-    return result
+        airline, num = fn[:2], fn[2:]
+        # Alle Vorkommen dieser Flugnummer suchen
+        for m_pos in [m.start() for m in re.finditer(rf"\b{re.escape(airline)}\s*{re.escape(num)}\b", text)]:
+            region = text[max(0,m_pos-60):m_pos+300]
+            route_m = re.search(r"\b([A-Z]{3})\s*(?:→|->|–)\s*([A-Z]{3})\b", region)
+            date_m  = re.search(r"(\d{2}\.\d{2}\.\d{4})", region)
+            times   = re.findall(r"\b(\d{2}:\d{2})\b", region)
+            dep_apt = route_m.group(1) if route_m and route_m.group(1) in AIRPORT_CC else ""
+            arr_apt = route_m.group(2) if route_m and route_m.group(2) in AIRPORT_CC else ""
+            d_str   = parse_date_full(date_m.group(1)) if date_m else ""
+            if (fn, d_str) in already_found: continue
+            if dep_apt or arr_apt or d_str:
+                seg = {"fn":fn,"dep":dep_apt,"arr":arr_apt,"date":d_str,"arr_date":d_str,
+                       "dep_time":times[0] if times else "","arr_time":times[1] if len(times)>1 else ""}
+                result.append(seg)
+                already_found.add((fn, d_str))
 
+    # Reihenfolge: nach main_fns sortieren (Hin dann Rück)
+    fn_order = {fn: i for i, fn in enumerate(main_fns)}
+    result.sort(key=lambda s: (fn_order.get(s["fn"], 99), s.get("date",""), s.get("dep_time","")))
+
+    return result
 
 
 def segments_to_string(segments: list) -> str:
@@ -5937,170 +5970,171 @@ async def set_segments_save(tc: str, att_id: str, request: Request):
 @app.get("/repair-segments/{tc}")
 async def repair_segments(tc: str):
     """
-    Liest ALLE Mails + Anhänge der Reise neu aus und extrahiert Flug-Segmente.
-    Erstellt fehlende Flug-Belege automatisch.
+    Liest alle Mail-Bodies + S3-PDFs der Reise und extrahiert Flug-Segmente.
+    Erstellt/aktualisiert den Flug-Beleg mit korrekten Segmenten.
     """
     try:
         conn=get_conn(); cur=conn.cursor()
 
-        # 1. trip_meta lesen
-        cur.execute("""SELECT flight_numbers, departure_date, return_date, pnr_code
-            FROM trip_meta WHERE trip_code=%s""", (tc,))
-        meta = cur.fetchone()
-        if not meta:
-            return {"status":"fehler","detail":"Reise nicht gefunden"}
-        meta_fns = [f.strip() for f in (meta[0] or "").split(",") if f.strip()]
+        # trip_meta
+        cur.execute("SELECT flight_numbers,departure_date,return_date,pnr_code FROM trip_meta WHERE trip_code=%s",(tc,))
+        meta=cur.fetchone()
+        if not meta: return {"status":"fehler","detail":"Reise nicht gefunden"}
+        meta_fns=[f.strip() for f in (meta[0] or "").split(",") if f.strip()]
         dep_d, ret_d, pnr_meta = meta[1], meta[2], meta[3]
 
-        # 2. Alle Mails dieser Reise lesen
-        cur.execute("""SELECT id, mail_uid, subject, body FROM mail_messages
-            WHERE trip_code=%s ORDER BY id""", (tc,))
-        mails = cur.fetchall()
+        # Alle Mails der Reise
+        cur.execute("SELECT id,subject,body FROM mail_messages WHERE trip_code=%s ORDER BY id",(tc,))
+        mails=cur.fetchall()
 
-        # 3. Auch direkt hochgeladene PDFs aus S3 lesen
-        cur.execute("""SELECT id, storage_key, original_filename, flight_segments,
-            detected_flight_numbers, extracted_text
+        # Alle Anhänge (extracted_text + S3-PDFs)
+        cur.execute("""SELECT id,storage_key,original_filename,extracted_text
             FROM mail_attachments WHERE trip_code=%s
-            AND detected_type NOT IN ('Hotel','Essen','Taxi','Bahn','Mietwagen','Inline-Grafik')
-            ORDER BY id""", (tc,))
-        uploads = cur.fetchall()
+            AND (content_type='application/pdf' OR original_filename ILIKE '%%.pdf')
+            AND storage_key NOT LIKE 'S3-FEHLER%%'
+            AND storage_key NOT LIKE 'mail_body%%'
+            AND storage_key NOT LIKE 'repaired%%'
+            ORDER BY id""",(tc,))
+        pdfs=cur.fetchall()
 
-        all_segments = {}  # fn -> segment dict
-        all_found_fns = []
-        sources_used = []
+        all_text_sources = []
 
-        def clean_html(text):
+        # Mail-Bodies sammeln
+        for mid, subj, body in mails:
+            if not body: continue
             import html as _h
-            t = _h.unescape(text or "")
+            t = _h.unescape(body)
             t = re.sub(r'<style[^>]*>.*?</style>', ' ', t, flags=re.DOTALL|re.IGNORECASE)
             t = re.sub(r'<[^>]+>', ' ', t)
             t = re.sub(r'[ \t]+', ' ', t)
-            t = re.sub(r'\n{3,}', '\n\n', t)
-            return t.strip()
+            t = re.sub(r'\n{3,}', '\n\n', t).strip()
+            # Sophos-Links entfernen
+            t = re.sub(r'https?://[\w.-]*sophos[\w./-]*', ' ', t, flags=re.IGNORECASE)
+            full = f"{subj or ''}\n{t}"
+            all_text_sources.append(("mail",mid,full))
 
-        def merge_segs(new_segs, source):
-            for s in new_segs:
-                fn = s["fn"]
-                if fn not in all_segments or not all_segments[fn].get("dep"):
-                    all_segments[fn] = s
-                    if fn not in all_found_fns:
-                        all_found_fns.append(fn)
-                    sources_used.append(f"{fn}<-{source}")
-
-        # 4. Mail-Bodies auswerten
-        for mid, mail_uid, subj, body in mails:
-            if not body: continue
-            text = clean_html(body)
-            full = f"{subj or ''}\n{text}"
-            segs = extract_flight_segments_from_text(full)
-            if segs:
-                merge_segs(segs, f"mail#{mid}")
-
-        # 5. Hochgeladene Anhänge auswerten (extracted_text aus DB)
-        for att_id, skey, fname, seg_s, fns_s, ext_text in uploads:
-            # Bereits gespeicherte Segmente übernehmen
-            if seg_s:
-                for seg_str in seg_s.split(";"):
-                    parts = seg_str.split("|")
-                    if len(parts) >= 1 and parts[0]:
-                        fn = parts[0].strip()
-                        seg = {
-                            "fn": fn,
-                            "dep": parts[1].strip() if len(parts)>1 else "",
-                            "arr": parts[2].strip() if len(parts)>2 else "",
-                            "date": parts[3].strip() if len(parts)>3 else "",
-                            "dep_time": parts[4].strip() if len(parts)>4 else "",
-                            "arr_date": parts[5].strip() if len(parts)>5 else "",
-                            "arr_time": parts[6].strip() if len(parts)>6 else "",
-                        }
-                        merge_segs([seg], f"att#{att_id}")
-            # Extracted text neu parsen
+        # PDFs aus S3 lesen
+        for att_id, skey, fname, ext_text in pdfs:
             if ext_text:
-                segs = extract_flight_segments_from_text(ext_text)
-                merge_segs(segs, f"ocr#{att_id}")
-            # S3 PDF direkt lesen
-            elif skey and not skey.startswith("S3-FEHLER") and fname and fname.lower().endswith(".pdf"):
+                all_text_sources.append(("pdf_cached",att_id,ext_text))
+            else:
                 try:
-                    s3 = get_s3()
-                    obj = s3.get_object(Bucket=S3_BUCKET, Key=skey)
-                    pdf_bytes = obj["Body"].read()
+                    s3=get_s3()
+                    obj=s3.get_object(Bucket=S3_BUCKET,Key=skey)
+                    pdf_bytes=obj["Body"].read()
                     import pypdf as _pypdf, io as _io
-                    reader = _pypdf.PdfReader(_io.BytesIO(pdf_bytes))
-                    pdf_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+                    reader=_pypdf.PdfReader(_io.BytesIO(pdf_bytes))
+                    pdf_text="\n".join(page.extract_text() or "" for page in reader.pages)
                     if pdf_text.strip():
-                        segs = extract_flight_segments_from_text(pdf_text)
-                        merge_segs(segs, f"pdf#{att_id}")
-                        # Extracted text speichern für nächstes Mal
-                        cur.execute("UPDATE mail_attachments SET extracted_text=%s WHERE id=%s",
-                            (pdf_text[:10000], att_id))
-                except Exception as s3e:
+                        cur.execute("UPDATE mail_attachments SET extracted_text=%s WHERE id=%s",(pdf_text[:10000],att_id))
+                        all_text_sources.append(("pdf_s3",att_id,pdf_text))
+                except: pass
+
+        # Segmente aus allen Quellen extrahieren
+        all_segs = []
+        seen_seg_keys = set()
+        sources_used = []
+
+        for src_type, src_id, text in all_text_sources:
+            segs = extract_flight_segments_from_text(text)
+            for seg in segs:
+                # Eindeutigkeitsschlüssel: FN + Datum + Abflugzeit
+                key = f"{seg['fn']}_{seg['date']}_{seg['dep_time']}"
+                if key not in seen_seg_keys and (seg['dep'] or seg['arr'] or seg['date']):
+                    seen_seg_keys.add(key)
+                    all_segs.append(seg)
+                    sources_used.append(f"{seg['fn']} von {src_type}#{src_id}")
+
+        # Fehlende meta_fns als Stubs hinzufügen (mit Datum)
+        found_fns = [s["fn"] for s in all_segs]
+        half = max(1, len(meta_fns)//2)
+        for i, fn in enumerate(meta_fns):
+            if fn not in found_fns:
+                d = str(dep_d) if dep_d and i < half else (str(ret_d) if ret_d else str(dep_d) if dep_d else "")
+                all_segs.append({"fn":fn,"dep":"","arr":"","date":d,"arr_date":d,"dep_time":"","arr_time":""})
+
+        # Segmente in Reihenfolge sortieren (Datum aufsteigend)
+        def sort_key(s):
+            d = s.get("date","")
+            try:
+                p=d.split("."); return (int(p[2]),int(p[1]),int(p[0]),s.get("dep_time",""))
+            except: return (9999,1,1,"")
+        all_segs.sort(key=sort_key)
+
+        # Segment-String bauen
+        seg_string = ";".join(
+            f"{s['fn']}|{s['dep']}|{s['arr']}|{s['date']}|{s['dep_time']}|{s.get('arr_date',s['date'])}|{s['arr_time']}"
+            for s in all_segs
+        )
+        # Flugnummern dedupliziert aber Reihenfolge bewahren
+        seen=set(); fns_dedup=[]
+        for s in all_segs:
+            if s["fn"] not in seen: seen.add(s["fn"]); fns_dedup.append(s["fn"])
+        fns_string = ",".join(fns_dedup)
+
+        # VMA automatisch berechnen
+        non_de_segs = [s for s in all_segs if s.get("arr") and AIRPORT_CC.get(s["arr"]) and AIRPORT_CC.get(s["arr"]) != "DE"]
+        if non_de_segs:
+            first_abroad = non_de_segs[0]
+            dest_cc = AIRPORT_CC.get(first_abroad["arr"],"")
+            # Letztes Segment im Ausland
+            return_segs = [s for s in all_segs if s.get("dep") and AIRPORT_CC.get(s["dep"]) and AIRPORT_CC.get(s["dep"]) != "DE"]
+            last_abroad_dep = return_segs[-1] if return_segs else None
+
+            if dest_cc and dest_cc != "DE" and dep_d:
+                try:
+                    from datetime import date as _date, timedelta as _td
+                    dep_date = dep_d
+                    arr_d_str = first_abroad["date"]
+                    p=arr_d_str.split(".")
+                    arrive = _date(int(p[2]),int(p[1]),int(p[0])) if arr_d_str and len(p)==3 else dep_date+_td(days=1)
+                    if last_abroad_dep:
+                        dp2=last_abroad_dep["date"].split(".")
+                        leave = _date(int(dp2[2]),int(dp2[1]),int(dp2[0])) if len(dp2)==3 else (ret_d or arrive)
+                    else:
+                        leave = ret_d or arrive
+                    parts=[f"{dep_date}:DE"]
+                    if arrive > dep_date: parts.append(f"{arrive}:{dest_cc}")
+                    if leave and leave > arrive: parts.append(f"{leave}:DE")
+                    vma_str=",".join(parts)
+                    cur.execute("UPDATE trip_meta SET vma_destinations=%s WHERE trip_code=%s",(vma_str,tc))
+                except Exception as ve:
                     pass
 
-        # 6. Für fehlende meta_fns: Datum-Stubs mit Hin/Rück-Logik
-        for i, fn in enumerate(meta_fns):
-            if fn not in all_segments:
-                half = len(meta_fns) // 2
-                d = str(dep_d) if dep_d and i < half else (str(ret_d) if ret_d else str(dep_d) if dep_d else "")
-                all_segments[fn] = {"fn":fn,"dep":"","arr":"","date":d,"arr_date":d,"dep_time":"","arr_time":""}
-                all_found_fns.append(fn)
-
-        # 7. Segment-String bauen (Reihenfolge meta_fns, dann weitere)
-        ordered_fns = list(dict.fromkeys(meta_fns + all_found_fns))
-        seg_string = ";".join(
-            f"{fn}|{all_segments[fn]['dep']}|{all_segments[fn]['arr']}|{all_segments[fn]['date']}|{all_segments[fn]['dep_time']}|{all_segments[fn].get('arr_date',all_segments[fn]['date'])}|{all_segments[fn]['arr_time']}"
-            for fn in ordered_fns if fn in all_segments
-        )
-        fns_string = ",".join(ordered_fns)
-
-        # 8. Existierenden Flug-Beleg suchen oder neu anlegen
+        # Existierenden Flug-Beleg suchen
         cur.execute("""SELECT id FROM mail_attachments
             WHERE trip_code=%s AND detected_type='Flug'
-            AND storage_key NOT LIKE 'S3-FEHLER%%'
-            ORDER BY id LIMIT 1""", (tc,))
-        existing_beleg = cur.fetchone()
+            ORDER BY CASE WHEN storage_key LIKE 'repaired%%' THEN 1 ELSE 0 END, id
+            LIMIT 1""",(tc,))
+        existing = cur.fetchone()
 
-        if existing_beleg:
+        if existing:
             cur.execute("""UPDATE mail_attachments SET
                 flight_segments=%s, detected_flight_numbers=%s,
-                analysis_status='ok (repariert)', confidence='hoch', review_flag='ok'
-                WHERE id=%s""", (seg_string, fns_string, existing_beleg[0]))
-            beleg_id = existing_beleg[0]
-            action = "aktualisiert"
+                analysis_status='ok (repariert)', confidence='hoch', review_flag='ok',
+                ki_bemerkung=%s WHERE id=%s""",
+                (seg_string, fns_string, f"Repariert: {len(all_segs)} Segmente aus {len(all_text_sources)} Quellen", existing[0]))
+            beleg_id=existing[0]; action="aktualisiert"
         else:
-            # Neuen Beleg aus Mail-Body anlegen
-            uid = f"repaired_{tc}_{int(__import__('time').time())}"
+            uid=f"repaired_{tc}"
             cur.execute("""INSERT INTO mail_attachments
-                (mail_uid, trip_code, original_filename, saved_filename, content_type,
-                 storage_key, detected_type, detected_flight_numbers, flight_segments,
-                 analysis_status, confidence, review_flag, ki_bemerkung)
+                (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                 storage_key,detected_type,detected_flight_numbers,flight_segments,
+                 analysis_status,confidence,review_flag,ki_bemerkung)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-                (uid, tc, f"Flüge {tc}: {fns_string[:60]}", f"Flüge {tc}",
-                 "text/plain", f"repaired_{tc}",
-                 "Flug", fns_string, seg_string,
-                 "ok (repariert)", "hoch", "ok",
-                 f"Auto-repariert aus {len(mails)} Mails + {len(uploads)} Uploads"))
-            beleg_id = cur.fetchone()[0]
-            action = "neu erstellt"
+                (uid,tc,f"Flüge {tc}",f"Flüge {tc}","text/plain",f"repaired_{tc}",
+                 "Flug",fns_string,seg_string,
+                 "ok (repariert)","hoch","ok",f"Auto: {len(all_segs)} Segs"))
+            beleg_id=cur.fetchone()[0]; action="neu erstellt"
 
-        # 9. trip_meta aktualisieren
-        if fns_string:
-            cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",
-                (fns_string, tc))
-
+        cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",(fns_string,tc))
         conn.commit(); cur.close(); conn.close()
 
-        return {
-            "status": "ok",
-            "action": action,
-            "beleg_id": beleg_id,
-            "flugnummern": fns_string,
-            "segmente": seg_string,
-            "quellen": sources_used,
-            "naechster_schritt": f"/trip/{tc}"
-        }
+        return {"status":"ok","action":action,"beleg_id":beleg_id,
+                "segmente":seg_string,"quellen":sources_used}
     except Exception as e:
         import traceback
-        return {"status":"fehler","detail":str(e),"trace":traceback.format_exc()[:800]}
+        return {"status":"fehler","detail":str(e),"trace":traceback.format_exc()[:1000]}
 
 
 @app.get("/recalc-vma/{tc}")
