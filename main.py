@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.31"
+APP_VERSION = "9.32"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 import os as _os
@@ -1557,13 +1557,95 @@ def decode_mime_header(value):
 
 def detect_mail_type(text):
     t=(text or "").lower()
-    if any(x in t for x in ["flug","flight","boarding","pnr","ticket","airline","itinerary","eticket","buchungsreferenz","flugnummer","check-in","lx ","lh ","os ","sk "]): return "Flug"
-    if any(x in t for x in ["hotel","booking.com","check-in","reservation","zimmer","accommodation","sheraton","marriott","hilton","hyatt"]): return "Hotel"
+    if any(x in t for x in ["flug","flight","boarding","pnr","ticket","airline","itinerary","eticket","buchungsreferenz","lx ","lh ","os ","sk ","af "]): return "Flug"
+    if any(x in t for x in ["hotel","booking.com","check-in","reservation","zimmer","accommodation","sheraton","marriott","hilton","hyatt","radisson","intercontinental"]): return "Hotel"
     if any(x in t for x in ["taxi","uber","cab","ride"]): return "Taxi"
     if any(x in t for x in ["bahn","zug","train","ice","db ","bahnticket"]): return "Bahn"
     if any(x in t for x in ["restaurant","verpflegung","essen","dinner","lunch","breakfast"]): return "Essen"
     if any(x in t for x in ["mietwagen","rental","hertz","sixt","avis"]): return "Mietwagen"
     return "Unbekannt"
+
+# Stadt/Hotel-Vendor → ISO-Ländercode für automatische VMA-Berechnung
+HOTEL_CITY_CC = {
+    # Deutschland
+    "münchen":"DE","berlin":"DE","hamburg":"DE","frankfurt":"DE","köln":"DE","düsseldorf":"DE",
+    "nürnberg":"DE","stuttgart":"DE","leipzig":"DE","hannover":"DE","bremen":"DE",
+    # Frankreich
+    "paris":"FR","lyon":"FR","marseille":"FR","nizza":"FR","bordeaux":"FR","toulouse":"FR",
+    "strasbourg":"FR","lille":"FR","nantes":"FR","france":"FR","frankreich":"FR",
+    # UK
+    "london":"GB","manchester":"GB","edinburgh":"GB","birmingham":"GB","glasgow":"GB",
+    # Schweiz
+    "zürich":"CH","genf":"CH","bern":"CH","basel":"CH","zurich":"CH","geneva":"CH",
+    # Österreich
+    "wien":"AT","salzburg":"AT","innsbruck":"AT","graz":"AT","vienna":"AT",
+    # Italien
+    "rom":"IT","mailand":"IT","venedig":"IT","florenz":"IT","rom":"IT","neapel":"IT",
+    "rome":"IT","milan":"IT","venice":"IT","florence":"IT","naples":"IT",
+    # Spanien
+    "madrid":"ES","barcelona":"ES","sevilla":"ES","valencia":"ES","málaga":"ES",
+    # USA
+    "new york":"US","los angeles":"US","chicago":"US","miami":"US","san francisco":"US",
+    "boston":"US","washington":"US","las vegas":"US","seattle":"US","houston":"US",
+    # VAE
+    "dubai":"AE","abu dhabi":"AE",
+    # Singapur
+    "singapore":"SG","singapur":"SG",
+    # Japan
+    "tokyo":"JP","tokio":"JP","osaka":"JP","kyoto":"JP",
+    # China
+    "beijing":"CN","shanghai":"CN","peking":"CN","guangzhou":"CN","shenzhen":"CN",
+    # Indien
+    "delhi":"IN","mumbai":"IN","bangalore":"IN","hyderabad":"IN","chennai":"IN",
+    # Panama
+    "panama":"PA","panama city":"PA","ciudad de panama":"PA",
+    # Costa Rica
+    "san jose":"CR","costa rica":"CR","san josé":"CR",
+    # Katar
+    "doha":"QA",
+    # Türkei
+    "istanbul":"TR","ankara":"TR",
+    # Niederlande
+    "amsterdam":"NL","rotterdam":"NL",
+    # Belgien
+    "brüssel":"BE","brussels":"BE","bruxelles":"BE",
+    # Polen
+    "warschau":"PL","warsaw":"PL","krakau":"PL","krakow":"PL",
+    # Schweden
+    "stockholm":"SE","göteborg":"SE","gothenburg":"SE",
+    # Dänemark
+    "kopenhagen":"DK","copenhagen":"DK",
+    # Norwegen
+    "oslo":"NO","bergen":"NO",
+    # Finnland
+    "helsinki":"FI",
+    # Portugal
+    "lissabon":"PT","lisbon":"PT","porto":"PT",
+    # Griechenland
+    "athen":"GR","athens":"GR","thessaloniki":"GR",
+    # Australien
+    "sydney":"AU","melbourne":"AU","brisbane":"AU","perth":"AU",
+    # Kanada
+    "toronto":"CA","vancouver":"CA","montreal":"CA","calgary":"CA",
+    # Brasilien
+    "são paulo":"BR","sao paulo":"BR","rio de janeiro":"BR","brasilia":"BR",
+    # Mexiko
+    "mexico city":"MX","ciudad de mexico":"MX","cancun":"MX","guadalajara":"MX",
+    # Argentinien
+    "buenos aires":"AR",
+    # Chile
+    "santiago":"CL",
+    # Kolumbien
+    "bogota":"CO","medellin":"CO",
+}
+
+def hotel_city_to_cc(vendor_or_city: str) -> str:
+    """Ermittelt ISO-Ländercode aus Hotel-Vendor oder Stadtname."""
+    if not vendor_or_city: return ""
+    t = vendor_or_city.strip().lower()
+    for city, cc in sorted(HOTEL_CITY_CC.items(), key=lambda x: len(x[0]), reverse=True):
+        if city in t: return cc
+    return ""
 
 def load_custom_rules() -> dict:
     """Lädt benutzerdefinierte Kategorie-Regeln aus der DB."""
@@ -2397,6 +2479,16 @@ function openM(t){
   document.body.style.overflow='hidden';
 }
 function closeM(t){document.getElementById('m-'+t).classList.remove('open');document.body.style.overflow='';}
+function suggestReturn(depVal){
+  if(!depVal) return;
+  const ret=document.getElementById('fi-return-date');
+  if(ret && !ret.value){
+    // Vorschlag: 3 Tage nach Abflug, gleicher Monat
+    const d=new Date(depVal);
+    d.setDate(d.getDate()+3);
+    ret.value=d.toISOString().split('T')[0];
+  }
+}
 function submitTrip(){
   const req=['fi-employee-code','fi-trip-title','fi-departure-date','fi-return-date'];
   for(const id of req){
@@ -2471,7 +2563,7 @@ def page_shell(title, content, active_tab=""):
         <div class="fgrp"><label class="flbl">Reisename / Ziel *</label><input class="finp" id="fi-trip-title" type="text" placeholder="z.B. Lyon, Messe München" required></div>
         <div class="fgrp"><label class="flbl">Kundenkürzel <span style="color:var(--t300);font-weight:400">(optional)</span></label><input class="finp" id="fi-customer-code" type="text" placeholder="z.B. BMW, intern"></div>
         <div class="fgrp"><label class="flbl">Reisender (Klarname)</label><input class="finp" id="fi-traveler-name" type="text" placeholder="Vor- und Nachname"></div>
-        <div class="fgrp"><label class="flbl">Abreise *</label><input class="finp" id="fi-departure-date" type="date" required></div>
+        <div class="fgrp"><label class="flbl">Abreise *</label><input class="finp" id="fi-departure-date" type="date" required onchange="suggestReturn(this.value)"></div>
         <div class="fgrp"><label class="flbl">Uhrzeit Abreise</label><input class="finp" id="fi-departure-time-home" type="time" value="08:00"></div>
         <div class="fgrp"><label class="flbl">Rückkehr *</label><input class="finp" id="fi-return-date" type="date" required></div>
         <div class="fgrp"><label class="flbl">Uhrzeit Ankunft</label><input class="finp" id="fi-arrival-time-home" type="time" value="18:00"></div>
@@ -3560,6 +3652,27 @@ async def analyze_attachments():
                                 if pdf_key:
                                     cur.execute("UPDATE mail_attachments SET pdf_key=%s WHERE id=%s",
                                         (pdf_key, new_att_id))
+
+                            # VMA aus Hotel-Ort berechnen
+                            if eff_typ == "Hotel" and rc and vendor_ki:
+                                hotel_cc = hotel_city_to_cc(vendor_ki)
+                                if not hotel_cc and dest_ki:
+                                    hotel_cc = hotel_city_to_cc(dest_ki)
+                                if hotel_cc and hotel_cc != "DE":
+                                    cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(rc,))
+                                    htr=cur.fetchone()
+                                    if htr and htr[0]:
+                                        try:
+                                            dep_hd=htr[0]; ret_hd=htr[1]
+                                            ci_d=date.fromisoformat(checkin_ki) if checkin_ki else (dep_hd+timedelta(days=1))
+                                            co_d=date.fromisoformat(checkout_ki) if checkout_ki else (ret_hd or ci_d)
+                                            parts=[f"{dep_hd}:DE"]
+                                            if ci_d>dep_hd: parts.append(f"{ci_d}:{hotel_cc}")
+                                            if co_d>ci_d: parts.append(f"{co_d}:DE")
+                                            vma_str=",".join(parts)
+                                            cur.execute("UPDATE trip_meta SET vma_destinations=%s,country_code=%s WHERE trip_code=%s AND (vma_destinations IS NULL OR vma_destinations='')",(vma_str,hotel_cc,rc))
+                                            if cur.rowcount: print(f"[VMA Hotel] {rc}: {vma_str}")
+                                        except Exception as ve: print(f"[VMA Hotel Fehler]: {ve}")
                     # Quellen: flight_segments (Flughafen→Land), checkin/checkout, dest_ki
                     if rc:
                         cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(rc,))
@@ -3716,25 +3829,41 @@ async def analyze_attachments():
 @app.get("/fetch-mails", response_class=HTMLResponse)
 def fetch_mails():
     try:
+        conn=get_conn();cur=conn.cursor()
+        # Zähle vor dem Fetch
+        cur.execute("SELECT COUNT(*) FROM mail_messages"); before=cur.fetchone()[0]
+        cur.close();conn.close()
+
         with _imap_lock:
             _fetch_mails_internal()
+
         conn=get_conn();cur=conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM mail_messages")
-        total_m=cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM mail_attachments")
-        total_a=cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM mail_messages"); total_m=cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM mail_attachments WHERE analysis_status='ausstehend'"); pending=cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM mail_attachments"); total_a=cur.fetchone()[0]
         cur.close();conn.close()
+        neue=total_m-before
         return page_shell("Mails",f"""
         <div class="page-card">
           <h2 class="ok-t">✓ Mailabruf abgeschlossen</h2>
-          <p style="margin-bottom:16px"><b>Gesamt im System:</b> {total_m} Mails · {total_a} Anhänge</p>
-          <p class="sub" style="margin-bottom:16px">Neue Mails werden als gelesen markiert · Duplikate werden erkannt und übersprungen</p>
-          <div class="acts"><a class="btn" href="/">Dashboard</a><a class="btn-l" href="/analyze-attachments">KI-Analyse starten</a><a class="btn-l" href="/attachment-log">Anhang-Log</a></div>
+          <div style="display:flex;gap:16px;margin:16px 0;flex-wrap:wrap">
+            <div class="sum-item"><div class="sum-val {'blue' if neue>0 else ''}">{neue}</div><div class="sum-lbl">Neue Mails</div></div>
+            <div class="sum-item"><div class="sum-val">{total_m}</div><div class="sum-lbl">Mails gesamt</div></div>
+            <div class="sum-item"><div class="sum-val {'blue' if pending>0 else ''}">{pending}</div><div class="sum-lbl">Ausstehend</div></div>
+            <div class="sum-item"><div class="sum-val">{total_a}</div><div class="sum-lbl">Anhänge gesamt</div></div>
+          </div>
+          {"<p style='color:var(--am6);font-weight:500;margin-bottom:12px'>⏳ "+str(pending)+" Anhänge warten auf KI-Analyse → bitte unten starten</p>" if pending>0 else "<p style='color:var(--gr6);margin-bottom:12px'>✓ Alle Anhänge analysiert</p>"}
+          <div class="acts">
+            <a class="btn" href="/">Dashboard</a>
+            {"<a class='btn' href='/analyze-attachments'>🔍 KI-Analyse starten ("+str(pending)+" ausstehend)</a>" if pending>0 else ""}
+            <a class="btn-l" href="/attachment-log">Anhang-Log</a>
+            <a class="btn-l" href="/mail-log">Mail-Log</a>
+          </div>
         </div>""")
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p><pre style="font-size:10px;overflow-x:auto;white-space:pre-wrap">{tb}</pre></div>')
+        return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p><pre style="font-size:10px;overflow-x:auto;white-space:pre-wrap">{tb[:500]}</pre></div>')
 
 
 # =========================================================
