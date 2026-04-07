@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.26"
+APP_VERSION = "9.27"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2604,71 +2604,104 @@ def debug_trip(tc: str):
 @app.get("/fix-trips")
 def fix_trips():
     """
-    Repariert bekannte Datenfehler:
-    - Löscht doppelte Flug-Belege (repaired/manual wenn echter vorhanden)
-    - Korrigiert falsche Flugnummern in trip_meta
-    - Setzt korrekte Segmente aus vorhandenen Belegen
+    Repariert bekannte Datenfehler direkt in der DB.
+    Setzt korrekte Segmente, bereinigt Duplikate, korrigiert Beträge.
     """
     try:
         conn=get_conn(); cur=conn.cursor()
         fixes=[]
 
-        # Für jede Reise: behalte nur den besten Flug-Beleg
+        # ── 1. Doppelte Flug-Belege entfernen ────────────────────────────────
         cur.execute("SELECT DISTINCT trip_code FROM mail_attachments WHERE detected_type='Flug'")
         trip_codes=[r[0] for r in cur.fetchall() if r[0]]
-
         for tc in trip_codes:
-            cur.execute("""SELECT id,storage_key,flight_segments,detected_flight_numbers
+            cur.execute("""SELECT id,storage_key,flight_segments
                 FROM mail_attachments WHERE trip_code=%s AND detected_type='Flug'
                 ORDER BY
                   CASE WHEN storage_key LIKE 'mail_attachments/%%' THEN 0
                        WHEN storage_key LIKE 'repaired%%' THEN 2
                        WHEN storage_key LIKE 'manual%%' THEN 3
-                       ELSE 1 END,
-                  id DESC""",(tc,))
+                       ELSE 1 END, id DESC""",(tc,))
             belege=cur.fetchall()
             if len(belege) <= 1: continue
-
-            # Besten Beleg finden (echter Upload mit Segmenten)
-            best=None
+            # Besten Beleg: echter Upload mit Airports in Segmenten
+            best_id=None
             for b in belege:
-                if b[2] and '|' in b[2] and b[2].count('|') > len(b[2].split(';')):
-                    # Hat echte Segmente (nicht nur Stubs)
-                    segs=[s.split('|') for s in b[2].split(';') if s.strip()]
-                    if any(len(s)>=3 and s[1].strip() and s[2].strip() for s in segs):
-                        best=b; break
-            if not best: best=belege[0]
-
-            # Alle anderen löschen
+                segs=[s.split('|') for s in (b[2] or '').split(';') if s.strip()]
+                if any(len(s)>=3 and s[1].strip() and s[2].strip() for s in segs):
+                    best_id=b[0]; break
+            if not best_id: best_id=belege[0][0]
             for b in belege:
-                if b[0] != best[0]:
+                if b[0]!=best_id:
                     cur.execute("DELETE FROM mail_attachments WHERE id=%s",(b[0],))
-                    fixes.append(f"{tc}: Duplikat ID {b[0]} gelöscht ({b[1][:30]})")
+                    fixes.append(f"{tc}: Duplikat ID {b[0]} gelöscht")
 
-        # 26-001: Flugnummern korrigieren (LH3468→LH3463)
-        cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code='26-001'")
-        row=cur.fetchone()
-        if row and row[0]:
-            fns_fixed=row[0].replace('LH3468','LH3463')
-            if fns_fixed != row[0]:
-                cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code='26-001'",(fns_fixed,))
-                fixes.append(f"26-001: flight_numbers korrigiert: {row[0]} → {fns_fixed}")
-            # Auch im Beleg korrigieren
-            cur.execute("UPDATE mail_attachments SET detected_flight_numbers=REPLACE(detected_flight_numbers,'LH3468','LH3463'), flight_segments=REPLACE(flight_segments,'LH3468','LH3463') WHERE trip_code='26-001'")
-            if cur.rowcount: fixes.append("26-001: LH3468→LH3463 in Beleg korrigiert")
+        # ── 2. 26-001: Korrekte Segmente direkt setzen ───────────────────────
+        SEGS_26001 = "LH3463|NUE|FRA|20.04.2026|13:00|20.04.2026|14:15;LH1078|FRA|LYS|20.04.2026|16:55|20.04.2026|18:15;LH1077|LYS|FRA|24.04.2026|14:35|24.04.2026|17:19;LH3463|FRA|NUE|24.04.2026|17:19|24.04.2026|19:15"
+        FNS_26001  = "LH3463,LH1078,LH1077,LH3463"
 
-        # 26-002: PNR korrigieren (RIGHTS→Z6INOT)
-        cur.execute("SELECT pnr_code FROM trip_meta WHERE trip_code='26-002'")
+        cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code='26-001'",(FNS_26001,))
+        cur.execute("SELECT id FROM mail_attachments WHERE trip_code='26-001' AND detected_type='Flug' ORDER BY id LIMIT 1")
         row=cur.fetchone()
-        if row and row[0]=='RIGHTS':
-            cur.execute("UPDATE trip_meta SET pnr_code='Z6INOT' WHERE trip_code='26-002'")
-            fixes.append("26-002: PNR RIGHTS→Z6INOT korrigiert")
+        if row:
+            cur.execute("""UPDATE mail_attachments SET
+                flight_segments=%s, detected_flight_numbers=%s,
+                analysis_status='ok (manuell)', confidence='hoch', review_flag='ok'
+                WHERE id=%s""",(SEGS_26001, FNS_26001, row[0]))
+            fixes.append(f"26-001: Segmente korrekt gesetzt (ID {row[0]})")
+        else:
+            uid="manual_seg_26-001"
+            cur.execute("""INSERT INTO mail_attachments
+                (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                 storage_key,detected_type,detected_flight_numbers,flight_segments,
+                 analysis_status,confidence,review_flag,ki_bemerkung)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (uid,"26-001","Flüge 26-001","Flüge 26-001","text/plain",
+                 "manual_seg_26-001","Flug",FNS_26001,SEGS_26001,
+                 "ok (manuell)","hoch","ok","Fix: korrekte Segmente"))
+            fixes.append("26-001: Neuer Flug-Beleg angelegt")
+
+        cur.execute("UPDATE trip_meta SET vma_destinations='2026-04-20:DE,2026-04-20:FR,2026-04-24:DE' WHERE trip_code='26-001'")
+        fixes.append("26-001: VMA auf Frankreich gesetzt")
+
+        # ── 3. 26-002: PNR + VMA korrigieren ────────────────────────────────
+        cur.execute("UPDATE trip_meta SET pnr_code='Z6INOT' WHERE trip_code='26-002' AND pnr_code='RIGHTS'")
+        if cur.rowcount: fixes.append("26-002: PNR RIGHTS→Z6INOT")
+
+        cur.execute("SELECT vma_destinations FROM trip_meta WHERE trip_code='26-002'")
+        vma_row=cur.fetchone()
+        if not vma_row or not vma_row[0] or 'CR' not in str(vma_row[0]):
+            cur.execute("UPDATE trip_meta SET vma_destinations='2026-05-25:DE,2026-05-25:CR,2026-05-29:DE' WHERE trip_code='26-002'")
+            fixes.append("26-002: VMA auf Costa Rica (CR) gesetzt")
+
+        # ── 4. Betrag 26-001: Lufthansa-Beleg hat 0€ → aus Mail lesen ───────
+        cur.execute("SELECT id,detected_amount FROM mail_attachments WHERE trip_code='26-001' AND detected_type='Flug'")
+        beleg_26001=cur.fetchone()
+        if beleg_26001 and not beleg_26001[1]:
+            cur.execute("UPDATE mail_attachments SET detected_amount='496.07',detected_amount_eur='496,07',detected_currency='EUR' WHERE id=%s",(beleg_26001[0],))
+            fixes.append("26-001: Betrag 496.07 EUR gesetzt (aus Lufthansa Mail)")
+
+        # ── 5. 26-002: LH4515 doppelt (einmal am 29.05, einmal am 30.05) ────
+        # LH4515 fliegt 29.05 ab → Ankunft 30.05. Am 30.05 darf er nicht nochmal erscheinen
+        cur.execute("SELECT id,flight_segments FROM mail_attachments WHERE trip_code='26-002' AND detected_type='Flug' LIMIT 1")
+        b26002=cur.fetchone()
+        if b26002 and b26002[1]:
+            segs=[s for s in b26002[1].split(';') if s.strip()]
+            # LH4515 darf nur 1x vorkommen
+            lh4515_segs=[s for s in segs if s.startswith('LH4515')]
+            if len(lh4515_segs)>1:
+                # Behalte nur den mit Abflugdatum 29.05
+                segs_fixed=[s for s in segs if not s.startswith('LH4515')]
+                segs_fixed.append([s for s in lh4515_segs if '29.05' in s][0] if any('29.05' in s for s in lh4515_segs) else lh4515_segs[0])
+                segs_fixed.sort(key=lambda s: s.split('|')[3] if len(s.split('|'))>3 else '')
+                cur.execute("UPDATE mail_attachments SET flight_segments=%s WHERE id=%s",(';'.join(segs_fixed),b26002[0]))
+                fixes.append(f"26-002: LH4515-Duplikat entfernt")
 
         conn.commit(); cur.close(); conn.close()
-        return {"status":"ok","fixes":fixes,"hinweis":"Bitte Seite neu laden"}
+        return {"status":"ok","fixes":fixes,"naechster_schritt":"Seite neu laden"}
     except Exception as e:
         import traceback
-        return {"status":"fehler","detail":str(e),"trace":traceback.format_exc()[:500]}
+        return {"status":"fehler","detail":str(e),"trace":traceback.format_exc()[:800]}
 
 @app.get("/version")
 def version():
