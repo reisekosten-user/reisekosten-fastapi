@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.30"
+APP_VERSION = "9.31"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 import os as _os
@@ -5534,23 +5534,31 @@ def reset_all(confirm: str = ""):
     if confirm != "ja":
         return page_shell("Reset","""
         <div class="page-card" style="max-width:500px">
-          <h2 class="err-t">⚠ Alle Daten löschen?</h2>
-          <p style="margin:12px 0 20px;color:var(--t500)">Löscht alle Reisen, Mails, Anhänge und Alerts unwiderruflich.</p>
+          <h2 class="err-t">⚠ Reisedaten löschen?</h2>
+          <p style="margin:12px 0 8px;color:var(--t500)">Löscht alle <b>Reisen, Mails, Anhänge und Alerts</b> unwiderruflich.</p>
+          <p style="margin:0 0 20px;color:var(--gr6);font-size:12px">✓ Erhalten bleiben: KI-Lernbeispiele · VMA-Sätze · Kategorie-Regeln</p>
           <div class="acts">
-            <a class="btn" style="background:var(--re6)" href="/reset-all?confirm=ja">Ja, alles löschen</a>
+            <a class="btn" style="background:var(--re6)" href="/reset-all?confirm=ja">Ja, Reisedaten löschen</a>
             <a class="btn-l" href="/">Abbrechen</a>
           </div>
         </div>""")
     try:
         conn=get_conn();cur=conn.cursor()
-        for tbl in ["mail_attachments","mail_messages","flight_alerts","trip_meta"]:
-            cur.execute(f"TRUNCATE TABLE {tbl} RESTART IDENTITY CASCADE")
+        # Nur Reisedaten löschen – KI-Wissen bleibt erhalten
+        for tbl in ["mail_attachments","mail_messages","flight_alerts","daily_meals","trip_meta"]:
+            try:
+                cur.execute(f"TRUNCATE TABLE {tbl} RESTART IDENTITY CASCADE")
+            except: pass
         conn.commit();cur.close();conn.close()
         return page_shell("Reset","""
         <div class="page-card" style="max-width:500px">
-          <h2 class="ok-t">✓ Datenbank geleert</h2>
-          <p style="margin:12px 0 20px;color:var(--t500)">Alle Daten gelöscht. Bereit für Echtdaten.</p>
-          <div class="acts"><a class="btn" href="/">Dashboard</a></div>
+          <h2 class="ok-t">✓ Reisedaten gelöscht</h2>
+          <p style="margin:12px 0 8px;color:var(--t500)">Alle Reisen, Mails und Anhänge wurden gelöscht.</p>
+          <p style="margin:0 0 20px;color:var(--gr6);font-size:12px">✓ KI-Lernbeispiele, VMA-Sätze und Regeln sind erhalten.</p>
+          <div class="acts">
+            <a class="btn" href="/">Dashboard</a>
+            <a class="btn-l" href="/init">Tabellen initialisieren</a>
+          </div>
         </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p></div>')
