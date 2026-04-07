@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.25"
+APP_VERSION = "9.26"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2601,6 +2601,75 @@ def debug_trip(tc: str):
     except Exception as e:
         return {"error":str(e)}
 
+@app.get("/fix-trips")
+def fix_trips():
+    """
+    Repariert bekannte Datenfehler:
+    - Löscht doppelte Flug-Belege (repaired/manual wenn echter vorhanden)
+    - Korrigiert falsche Flugnummern in trip_meta
+    - Setzt korrekte Segmente aus vorhandenen Belegen
+    """
+    try:
+        conn=get_conn(); cur=conn.cursor()
+        fixes=[]
+
+        # Für jede Reise: behalte nur den besten Flug-Beleg
+        cur.execute("SELECT DISTINCT trip_code FROM mail_attachments WHERE detected_type='Flug'")
+        trip_codes=[r[0] for r in cur.fetchall() if r[0]]
+
+        for tc in trip_codes:
+            cur.execute("""SELECT id,storage_key,flight_segments,detected_flight_numbers
+                FROM mail_attachments WHERE trip_code=%s AND detected_type='Flug'
+                ORDER BY
+                  CASE WHEN storage_key LIKE 'mail_attachments/%%' THEN 0
+                       WHEN storage_key LIKE 'repaired%%' THEN 2
+                       WHEN storage_key LIKE 'manual%%' THEN 3
+                       ELSE 1 END,
+                  id DESC""",(tc,))
+            belege=cur.fetchall()
+            if len(belege) <= 1: continue
+
+            # Besten Beleg finden (echter Upload mit Segmenten)
+            best=None
+            for b in belege:
+                if b[2] and '|' in b[2] and b[2].count('|') > len(b[2].split(';')):
+                    # Hat echte Segmente (nicht nur Stubs)
+                    segs=[s.split('|') for s in b[2].split(';') if s.strip()]
+                    if any(len(s)>=3 and s[1].strip() and s[2].strip() for s in segs):
+                        best=b; break
+            if not best: best=belege[0]
+
+            # Alle anderen löschen
+            for b in belege:
+                if b[0] != best[0]:
+                    cur.execute("DELETE FROM mail_attachments WHERE id=%s",(b[0],))
+                    fixes.append(f"{tc}: Duplikat ID {b[0]} gelöscht ({b[1][:30]})")
+
+        # 26-001: Flugnummern korrigieren (LH3468→LH3463)
+        cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code='26-001'")
+        row=cur.fetchone()
+        if row and row[0]:
+            fns_fixed=row[0].replace('LH3468','LH3463')
+            if fns_fixed != row[0]:
+                cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code='26-001'",(fns_fixed,))
+                fixes.append(f"26-001: flight_numbers korrigiert: {row[0]} → {fns_fixed}")
+            # Auch im Beleg korrigieren
+            cur.execute("UPDATE mail_attachments SET detected_flight_numbers=REPLACE(detected_flight_numbers,'LH3468','LH3463'), flight_segments=REPLACE(flight_segments,'LH3468','LH3463') WHERE trip_code='26-001'")
+            if cur.rowcount: fixes.append("26-001: LH3468→LH3463 in Beleg korrigiert")
+
+        # 26-002: PNR korrigieren (RIGHTS→Z6INOT)
+        cur.execute("SELECT pnr_code FROM trip_meta WHERE trip_code='26-002'")
+        row=cur.fetchone()
+        if row and row[0]=='RIGHTS':
+            cur.execute("UPDATE trip_meta SET pnr_code='Z6INOT' WHERE trip_code='26-002'")
+            fixes.append("26-002: PNR RIGHTS→Z6INOT korrigiert")
+
+        conn.commit(); cur.close(); conn.close()
+        return {"status":"ok","fixes":fixes,"hinweis":"Bitte Seite neu laden"}
+    except Exception as e:
+        import traceback
+        return {"status":"fehler","detail":str(e),"trace":traceback.format_exc()[:500]}
+
 @app.get("/version")
 def version():
     pdf_ok = HAS_PDF_LIBS()
@@ -3936,6 +4005,7 @@ def trip_detail(tc: str):
 
                 if seg_s:
                     # Strukturierte Segmente aus Mistral-Extraktion
+                    seen_seg_keys = set()  # Deduplizierung innerhalb aller Belege
                     for seg in seg_s.split(";"):
                         parts = seg.strip().split("|")
                         if len(parts) >= 2 and parts[0].strip():
@@ -3947,6 +4017,14 @@ def trip_detail(tc: str):
                             arr_dt  = parse_dd(parts[5]) if len(parts)>5 and parts[5].strip() else dep_dt
                             arr_tm  = parts[6].strip() if len(parts)>6 else ""
                             route   = f"{dep_apt}→{arr_apt}" if dep_apt and arr_apt else (dep_apt or arr_apt or "")
+                            # Deduplizierung: gleiche FN + Datum + Route nicht doppelt
+                            seg_key = f"{fn_seg}_{dep_dt}_{dep_apt}_{arr_apt}"
+                            # Prüfe ob dieses Segment bereits in timeline_events
+                            already_in = any(
+                                e.get("task")==f"Flug {fn_seg}" and e.get("date")==dep_dt
+                                for e in timeline_events
+                            )
+                            if already_in: continue
                             fns_from_belege.add(fn_seg)
                             timeline_events.append({
                                 "date": dep_dt or ev_date or dep_d or date.today(),
@@ -5912,12 +5990,16 @@ async def upload_beleg(
                                 print(f"[VMA Upload Fehler]: {ve}")
 
                 conn.commit()
-                # Alte repaired/manual Belege löschen wenn echtes PDF mit Segmenten da
+                # Alle synthetischen Flug-Belege löschen wenn echter Upload mit Segmenten da
                 if seg_final and code and att_id:
                     cur.execute("""DELETE FROM mail_attachments
                         WHERE trip_code=%s AND detected_type='Flug'
-                        AND (storage_key LIKE 'repaired_%%' OR storage_key LIKE 'manual_seg_%%')
+                        AND (storage_key LIKE 'repaired_%%'
+                          OR storage_key LIKE 'manual_seg_%%'
+                          OR storage_key LIKE 'manual%%')
                         AND id != %s""",(code, att_id))
+                    deleted=cur.rowcount
+                    if deleted: print(f"[Upload] {deleted} synthetische Belege für {code} gelöscht")
                     conn.commit()
             else:
                 cur.execute("UPDATE mail_attachments SET analysis_status='analysefehler',extracted_text=%s WHERE id=%s",(ocr_text,att_id))
