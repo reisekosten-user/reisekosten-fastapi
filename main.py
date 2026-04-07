@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.23"
+APP_VERSION = "9.25"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -1466,6 +1466,69 @@ def extract_flight_segments_from_text(text: str) -> list:
                        "dep_time":times[0] if times else "","arr_time":times[1] if len(times)>1 else ""}
                 result.append(seg)
                 already_found.add((fn, d_str))
+
+    # ── METHODE 5: Lufthansa-Format – Abflugsort/Ankunftsort Blöcke ─────────
+    # Format: "DD.MM.YYYY - HH:MM ... Abflugsort STADT ... Ankunftsort STADT"
+    # Kommt vor wenn Flugnummern in Bilder eingebettet sind (typisch Lufthansa HTML-Mail)
+    if len(result) < len(main_fns):
+        lh_blocks = re.findall(
+            r'(\d{2}\.\d{2}\.\d{4})\s*-\s*(\d{2}:\d{2}).*?'
+            r'Abflugsort\s+([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s]+?)\s*\n.*?'
+            r'Ankunftsort\s+([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff\s]+?)\s*\n',
+            text, re.DOTALL
+        )
+        if lh_blocks:
+            # Hub-Map: bei 1 Stopp über bekannte Hubs aufteilen
+            HUB_MAP = {
+                ("NUE","LYS"):[("NUE","FRA"),("FRA","LYS")],
+                ("NUE","CDG"):[("NUE","FRA"),("FRA","CDG")],
+                ("NUE","LHR"):[("NUE","FRA"),("FRA","LHR")],
+                ("NUE","AMS"):[("NUE","FRA"),("FRA","AMS")],
+                ("NUE","BRU"):[("NUE","FRA"),("FRA","BRU")],
+                ("NUE","VIE"):[("NUE","FRA"),("FRA","VIE")],
+                ("NUE","FCO"):[("NUE","FRA"),("FRA","FCO")],
+                ("NUE","MAD"):[("NUE","FRA"),("FRA","MAD")],
+                ("NUE","BCN"):[("NUE","FRA"),("FRA","BCN")],
+                ("NUE","IST"):[("NUE","FRA"),("FRA","IST")],
+                ("NUE","DXB"):[("NUE","FRA"),("FRA","DXB")],
+                ("NUE","DOH"):[("NUE","FRA"),("FRA","DOH")],
+                ("NUE","SIN"):[("NUE","FRA"),("FRA","SIN")],
+                ("NUE","JFK"):[("NUE","FRA"),("FRA","JFK")],
+                ("LYS","NUE"):[("LYS","FRA"),("FRA","NUE")],
+                ("CDG","NUE"):[("CDG","FRA"),("FRA","NUE")],
+                ("LHR","NUE"):[("LHR","FRA"),("FRA","NUE")],
+                ("MUC","LYS"):[("MUC","FRA"),("FRA","LYS")],
+                ("MUC","LHR"):[("MUC","FRA"),("FRA","LHR")],
+                ("MUC","CDG"):[("MUC","FRA"),("FRA","CDG")],
+            }
+            # Anzahl Stopps aus Text
+            stopps_list = [int(m) for m in re.findall(r'(\d+)\s*Stopp', text)]
+            already_found = {(s["fn"],s["date"]) for s in result}
+            fn_idx = len(result)  # Weitermachen wo aufgehört
+            for bi, (date_str, dep_time, dep_city, arr_city) in enumerate(lh_blocks):
+                dep = find_iata(dep_city.strip())
+                arr = find_iata(arr_city.strip())
+                n_stopps = stopps_list[bi] if bi < len(stopps_list) else 0
+                route_pair = HUB_MAP.get((dep, arr)) if n_stopps >= 1 else None
+                if route_pair and fn_idx + 1 < len(main_fns):
+                    for seg_dep, seg_arr in route_pair:
+                        if fn_idx >= len(main_fns): break
+                        fn = main_fns[fn_idx]
+                        if (fn, date_str) not in already_found:
+                            result.append({"fn":fn,"dep":seg_dep,"arr":seg_arr,
+                                "date":date_str,"arr_date":date_str,
+                                "dep_time":dep_time,"arr_time":""})
+                            already_found.add((fn, date_str))
+                        fn_idx += 1
+                else:
+                    if fn_idx < len(main_fns):
+                        fn = main_fns[fn_idx]
+                        if (fn, date_str) not in already_found:
+                            result.append({"fn":fn,"dep":dep,"arr":arr,
+                                "date":date_str,"arr_date":date_str,
+                                "dep_time":dep_time,"arr_time":""})
+                            already_found.add((fn, date_str))
+                        fn_idx += 1
 
     # Reihenfolge: nach main_fns sortieren (Hin dann Rück)
     fn_order = {fn: i for i, fn in enumerate(main_fns)}
@@ -5807,11 +5870,11 @@ async def upload_beleg(
                     if fns_final: cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns_final,code))
                     if dest: cur.execute("UPDATE trip_meta SET destinations=%s WHERE trip_code=%s AND (destinations IS NULL OR destinations='')",(dest,code))
 
-                # VMA automatisch berechnen
+                # VMA automatisch berechnen - immer wenn Auslandsflüge erkannt
                 if regex_segs and code:
                     cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(code,))
                     trip_row=cur.fetchone()
-                    if trip_row and trip_row[0] and not trip_row[2]:
+                    if trip_row and trip_row[0]:
                         dep_d_str=str(trip_row[0])
                         ret_d_str=str(trip_row[1]) if trip_row[1] else ""
                         dest_cc=None;arrive_date=None;leave_date=None
@@ -5843,12 +5906,19 @@ async def upload_beleg(
                                 if arrive>dep_d: parts.append(f"{arrive}:{dest_cc}")
                                 if leave and leave>arrive: parts.append(f"{leave}:DE")
                                 vma_str=",".join(parts)
-                                cur.execute("UPDATE trip_meta SET vma_destinations=%s WHERE trip_code=%s AND (vma_destinations IS NULL OR vma_destinations='')",(vma_str,code))
+                                cur.execute("UPDATE trip_meta SET vma_destinations=%s WHERE trip_code=%s",(vma_str,code))
                                 print(f"[VMA Upload] {code}: {vma_str}")
                             except Exception as ve:
                                 print(f"[VMA Upload Fehler]: {ve}")
 
                 conn.commit()
+                # Alte repaired/manual Belege löschen wenn echtes PDF mit Segmenten da
+                if seg_final and code and att_id:
+                    cur.execute("""DELETE FROM mail_attachments
+                        WHERE trip_code=%s AND detected_type='Flug'
+                        AND (storage_key LIKE 'repaired_%%' OR storage_key LIKE 'manual_seg_%%')
+                        AND id != %s""",(code, att_id))
+                    conn.commit()
             else:
                 cur.execute("UPDATE mail_attachments SET analysis_status='analysefehler',extracted_text=%s WHERE id=%s",(ocr_text,att_id))
                 conn.commit()
