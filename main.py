@@ -397,9 +397,12 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.27"
+APP_VERSION = "9.29"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
+import os as _os
+if not _os.path.exists("static"):
+    _os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.on_event("startup")
@@ -2696,6 +2699,46 @@ def fix_trips():
                 segs_fixed.sort(key=lambda s: s.split('|')[3] if len(s.split('|'))>3 else '')
                 cur.execute("UPDATE mail_attachments SET flight_segments=%s WHERE id=%s",(';'.join(segs_fixed),b26002[0]))
                 fixes.append(f"26-002: LH4515-Duplikat entfernt")
+
+        # ── 6. 26-001: Marriott-Beleg wiederherstellen falls fehlend ────────
+        cur.execute("SELECT id FROM mail_attachments WHERE trip_code='26-001' AND detected_type='Hotel'")
+        if not cur.fetchone():
+            uid="mail_body_marriott_26001"
+            cur.execute("""INSERT INTO mail_attachments
+                (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                 storage_key,detected_type,detected_amount,detected_amount_eur,
+                 detected_currency,detected_date,detected_vendor,
+                 detected_checkin,detected_checkout,detected_nights,
+                 analysis_status,confidence,review_flag,ki_bemerkung)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (uid,"26-001","Mail: Marriott Lyon Reservation","Mail: Marriott Lyon",
+                 "text/plain","mail_body_marriott_26001",
+                 "Hotel","385.00","385,00","EUR","26.11.2025",
+                 "Lyon Marriott Hotel Cité Internationale",
+                 "2026-04-22","2026-04-24",2,
+                 "ok (Mail-Body)","hoch","ok",
+                 "Wiederhergestellt: Lyon Marriott, 2 Nächte, 385€"))
+            fixes.append("26-001: Marriott-Beleg wiederhergestellt (385€, 22.-24.04)")
+
+        # ── 7. 26-002: Sheraton-Beleg prüfen ────────────────────────────────
+        cur.execute("SELECT id FROM mail_attachments WHERE trip_code='26-002' AND detected_type='Hotel'")
+        if not cur.fetchone():
+            uid2="mail_body_sheraton_26002"
+            cur.execute("""INSERT INTO mail_attachments
+                (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                 storage_key,detected_type,detected_amount,detected_amount_eur,
+                 detected_currency,detected_date,detected_vendor,
+                 detected_checkin,detected_checkout,detected_nights,
+                 analysis_status,confidence,review_flag,ki_bemerkung)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (uid2,"26-002","Mail: Sheraton Grand Panama","Mail: Sheraton Grand Panama",
+                 "text/plain","mail_body_sheraton_26002",
+                 "Hotel","506.00","439,05","USD","23.12.2025",
+                 "Sheraton Grand Panama",
+                 "2026-05-25","2026-05-30",5,
+                 "ok (Mail-Body)","hoch","ok",
+                 "Wiederhergestellt: Sheraton Grand Panama, 5 Nächte, 506$/439€"))
+            fixes.append("26-002: Sheraton-Beleg wiederhergestellt")
 
         conn.commit(); cur.close(); conn.close()
         return {"status":"ok","fixes":fixes,"naechster_schritt":"Seite neu laden"}
@@ -6068,16 +6111,20 @@ async def upload_beleg(
 
 @app.get("/reanalyze-mails")
 def reanalyze_mails():
-    """Setzt Mail-Status zurück, löscht Mail-Body-Belege, markiert Inline-Bilder."""
+    """Setzt Mail-Status zurück. Löscht NUR leere Mail-Body-Belege, nie Hotel/Flug mit Betrag."""
     try:
         conn=get_conn();cur=conn.cursor()
         # Mail-Status zurücksetzen
         cur.execute("UPDATE mail_messages SET analysis_status='ausstehend' WHERE analysis_status='ok'")
         n_mails=cur.rowcount
-        # Alte Mail-Body-Belege löschen
-        cur.execute("DELETE FROM mail_attachments WHERE storage_key LIKE 'mail_body_%'")
+        # Mail-Body-Belege löschen NUR wenn kein Betrag und kein Segment vorhanden
+        cur.execute("""DELETE FROM mail_attachments
+            WHERE storage_key LIKE 'mail_body_%'
+            AND (detected_amount IS NULL OR detected_amount='')
+            AND (flight_segments IS NULL OR flight_segments='')
+            AND detected_type NOT IN ('Hotel','Flug','Bahn','Mietwagen')""")
         n_belege=cur.rowcount
-        # Inline-Bilder + nicht-analysierbare sofort als irrelevant markieren
+        # Inline-Bilder markieren
         cur.execute("""UPDATE mail_attachments SET
             analysis_status='Inline-Grafik', confidence='niedrig', review_flag='ok',
             detected_type='Inline-Grafik'
@@ -6085,10 +6132,13 @@ def reanalyze_mails():
             OR original_filename ILIKE '%.emz'
             OR original_filename ILIKE '%.wmz'""")
         n_images=cur.rowcount
-        # Ausstehende echte Anhänge (PDFs, Bilder ohne inline-Muster) zurücksetzen
+        # Ausstehende echte Anhänge zurücksetzen (aber nicht ok (manuell) und nicht Hotel/Flug mit Betrag)
         cur.execute("""UPDATE mail_attachments SET analysis_status='ausstehend'
-            WHERE analysis_status NOT IN ('Inline-Grafik','ok (manuell)')
+            WHERE analysis_status NOT IN ('Inline-Grafik','ok (manuell)','ok (repariert)')
+            AND NOT (detected_type IN ('Hotel','Flug','Bahn','Mietwagen') AND detected_amount IS NOT NULL AND detected_amount != '')
             AND storage_key NOT LIKE 'mail_body_%'
+            AND storage_key NOT LIKE 'repaired_%'
+            AND storage_key NOT LIKE 'manual_%'
             AND original_filename NOT SIMILAR TO 'image[0-9]+[.](png|jpg|jpeg|gif|bmp|emz|wmz)'
             AND original_filename NOT ILIKE '%.emz'
             AND original_filename NOT ILIKE '%.wmz'""")
