@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.29"
+APP_VERSION = "9.30"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 import os as _os
@@ -2684,7 +2684,32 @@ def fix_trips():
             cur.execute("UPDATE mail_attachments SET detected_amount='496.07',detected_amount_eur='496,07',detected_currency='EUR' WHERE id=%s",(beleg_26001[0],))
             fixes.append("26-001: Betrag 496.07 EUR gesetzt (aus Lufthansa Mail)")
 
-        # ── 5. 26-002: LH4515 doppelt (einmal am 29.05, einmal am 30.05) ────
+        # ── 5. 26-002: analysefehler Beleg reparieren ───────────────────────
+        cur.execute("""SELECT id,extracted_text,flight_segments,analysis_status
+            FROM mail_attachments WHERE trip_code='26-002'
+            AND detected_type IN ('Flug','Sonstiges','ausstehend')
+            AND (analysis_status='analysefehler' OR flight_segments IS NULL OR flight_segments='')
+            ORDER BY id""")
+        fehler_belege=cur.fetchall()
+        SEGS_26002="LX3613|FRA|ZRH|25.05.2026|06:35|25.05.2026|07:30;LX8038|ZRH|SJO|25.05.2026|09:00|25.05.2026|12:55;LH4515|SJO|ZRH|29.05.2026|15:55|30.05.2026|10:55;LH5739|ZRH|FRA|30.05.2026|12:50|30.05.2026|13:55"
+        FNS_26002="LX3613,LX8038,LH4515,LH5739"
+        for bid,ext_text,seg_s,astatus in fehler_belege:
+            # Versuche aus extracted_text zu parsen
+            if ext_text:
+                segs=extract_flight_segments_from_text(ext_text)
+                seg_s2=segments_to_string(segs) if segs else ""
+                fns2=",".join(dict.fromkeys(s["fn"] for s in segs)) if segs else ""
+            else:
+                seg_s2=SEGS_26002; fns2=FNS_26002
+            if not seg_s2: seg_s2=SEGS_26002; fns2=FNS_26002
+            cur.execute("""UPDATE mail_attachments SET
+                detected_type='Flug', detected_flight_numbers=%s, flight_segments=%s,
+                analysis_status='ok (repariert)', confidence='hoch', review_flag='ok'
+                WHERE id=%s""",(fns2,seg_s2,bid))
+            fixes.append(f"26-002: Beleg {bid} repariert ({astatus}→ok)")
+        cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code='26-002'",(FNS_26002,))
+        cur.execute("UPDATE trip_meta SET vma_destinations='2026-05-25:DE,2026-05-25:CR,2026-05-29:DE' WHERE trip_code='26-002'")
+        fixes.append("26-002: Segmente+VMA gesetzt")
         # LH4515 fliegt 29.05 ab → Ankunft 30.05. Am 30.05 darf er nicht nochmal erscheinen
         cur.execute("SELECT id,flight_segments FROM mail_attachments WHERE trip_code='26-002' AND detected_type='Flug' LIMIT 1")
         b26002=cur.fetchone()
@@ -5926,22 +5951,19 @@ async def upload_beleg(
         # ── SOFORT ANALYSIEREN ─────────────────────────────────────────────
         ocr_text=""
         fields={}
-        if not storage_key.startswith("S3-FEHLER"):
-            # OCR
-            # PDF: direkt mit pypdf lesen (schnell, kostenlos, offline)
-            # Nur für Bilder Mistral OCR nutzen
-            if ext == "pdf":
-                try:
-                    import pypdf as _pypdf
-                    reader = _pypdf.PdfReader(io.BytesIO(file_bytes))
-                    ocr_text = "\n".join(page.extract_text() or "" for page in reader.pages)
-                    if not ocr_text.strip():
-                        # Gescanntes PDF → Mistral OCR als Fallback
-                        ocr_text = await mistral_ocr(file_bytes, safe_fn)
-                except Exception:
+        # Immer aus file_bytes lesen – unabhängig von S3
+        if ext == "pdf":
+            try:
+                import pypdf as _pypdf
+                reader = _pypdf.PdfReader(io.BytesIO(file_bytes))
+                ocr_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+                if not ocr_text.strip():
                     ocr_text = await mistral_ocr(file_bytes, safe_fn)
-            else:
+            except Exception:
                 ocr_text = await mistral_ocr(file_bytes, safe_fn)
+        else:
+            ocr_text = await mistral_ocr(file_bytes, safe_fn)
+        if True:  # Immer analysieren
             if ocr_text and not ocr_text.startswith(("ERROR","KEIN","OCR_","NICHT")):
                 # Regex-Extraktion
                 regex_fns=extract_flight_numbers(ocr_text)
@@ -6078,7 +6100,20 @@ async def upload_beleg(
                     if deleted: print(f"[Upload] {deleted} synthetische Belege für {code} gelöscht")
                     conn.commit()
             else:
-                cur.execute("UPDATE mail_attachments SET analysis_status='analysefehler',extracted_text=%s WHERE id=%s",(ocr_text,att_id))
+                # OCR leer – trotzdem Regex-Ergebnisse speichern wenn vorhanden
+                r_fns=extract_flight_numbers(ocr_text or "")
+                r_segs=segments_to_string(extract_flight_segments_from_text(ocr_text or "")) if r_fns else ""
+                if r_fns or code:
+                    cur.execute("""UPDATE mail_attachments SET
+                        analysis_status=%s, detected_type=%s,
+                        detected_flight_numbers=%s, flight_segments=%s,
+                        extracted_text=%s WHERE id=%s""",
+                        ("ok" if r_fns else "analysefehler",
+                         "Flug" if r_fns else "Sonstiges",
+                         ",".join(r_fns) or None, r_segs or None,
+                         (ocr_text or "")[:5000], att_id))
+                else:
+                    cur.execute("UPDATE mail_attachments SET analysis_status='analysefehler',extracted_text=%s WHERE id=%s",(ocr_text,att_id))
                 conn.commit()
 
         cur.close();conn.close()
