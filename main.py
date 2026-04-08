@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.33"
+APP_VERSION = "9.34"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 import os as _os
@@ -1733,176 +1733,189 @@ def _auto_fetch():
         time.sleep(300)  # 5 Minuten
 
 def _fetch_mails_internal():
-    """Kern-Logik Mail-Import mit robustem Duplikat-Check (UID + Message-ID) und Löschen nach Import."""
-    s3   = get_s3()
+    """Robuster Mail-Import: jede Mail einzeln abgesichert, niemals kompletter Abbruch."""
     conn = get_conn()
     cur  = conn.cursor()
+    imported = att_count = dupl = deleted = err = 0
 
-    mail = imaplib.IMAP4_SSL(IMAP_HOST)
-    mail.login(IMAP_USER, IMAP_PASS)
-    mail.select("INBOX")
-    _, data = mail.search(None, "ALL")  # Alle Mails – Duplikate via Message-ID gefiltert
-    ids = data[0].split()
-    if not ids:
-        cur.close(); conn.close(); mail.logout(); return
+    try:
+        mail = imaplib.IMAP4_SSL(IMAP_HOST)
+        mail.login(IMAP_USER, IMAP_PASS)
+        mail.select("INBOX")
+        _, data = mail.search(None, "ALL")
+        ids = data[0].split() if data and data[0] else []
+    except Exception as e:
+        print(f"[IMAP] Verbindungsfehler: {e}")
+        cur.close(); conn.close(); return
 
-    imported = att_count = dupl = deleted = 0
-    ids_to_delete = []  # UIDs erfolgreich importierter Mails → werden danach gelöscht
+    ids_to_delete = []
 
     for i in ids:
-        uid = i.decode()
+        try:
+            uid = i.decode()
 
-        # Duplikat-Check 1: IMAP-UID
-        cur.execute("SELECT id FROM mail_messages WHERE mail_uid=%s",(uid,))
-        if cur.fetchone():
-            # Mail war schon importiert → löschen (falls noch im Postfach)
-            ids_to_delete.append(i)
-            dupl += 1
-            continue
-
-        _, msg_data = mail.fetch(i,"(RFC822)")
-        msg      = email.message_from_bytes(msg_data[0][1])
-        subject  = decode_mime_header(msg.get("Subject",""))
-        sender   = decode_mime_header(msg.get("From",""))
-        msg_id   = (msg.get("Message-ID","") or "").strip()
-
-        # Duplikat-Check 2: Message-ID Header (robuster als UID)
-        if msg_id:
-            cur.execute("SELECT id FROM mail_messages WHERE message_id=%s",(msg_id,))
+            # Duplikat-Check 1: IMAP-UID
+            cur.execute("SELECT id FROM mail_messages WHERE mail_uid=%s",(uid,))
             if cur.fetchone():
                 ids_to_delete.append(i)
                 dupl += 1
                 continue
 
-        body = ""
-        html_body = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                ct = part.get_content_type()
-                cd = str(part.get("Content-Disposition") or "").lower()
-                if "attachment" in cd: continue
-                pl = part.get_payload(decode=True)
-                if not pl: continue
-                if ct == "text/plain" and not body:
-                    body = pl.decode(errors="ignore")
-                elif ct == "text/html" and not html_body:
-                    html_body = pl.decode(errors="ignore")
-        else:
-            pl = msg.get_payload(decode=True)
-            ct = msg.get_content_type()
-            if pl:
-                if ct == "text/html":
-                    html_body = pl.decode(errors="ignore")
-                else:
-                    body = pl.decode(errors="ignore")
+            _, msg_data = mail.fetch(i,"(RFC822)")
+            if not msg_data or not msg_data[0]:
+                err += 1; continue
+            msg      = email.message_from_bytes(msg_data[0][1])
+            subject  = decode_mime_header(msg.get("Subject",""))
+            sender   = decode_mime_header(msg.get("From",""))
+            msg_id   = (msg.get("Message-ID","") or "").strip()
 
-        # HTML → Plain Text Fallback wenn kein plain/text vorhanden
-        if not body and html_body:
-            # Einfaches HTML-Stripping: Tags entfernen, Whitespace normalisieren
-            import html as _html
-            text = _html.unescape(html_body)
-            text = re.sub(r'<style[^>]*>.*?</style>', ' ', text, flags=re.DOTALL|re.IGNORECASE)
-            text = re.sub(r'<script[^>]*>.*?</script>', ' ', text, flags=re.DOTALL|re.IGNORECASE)
-            text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
-            text = re.sub(r'<[^>]+>', ' ', text)
-            text = re.sub(r'[ \t]+', ' ', text)
-            text = re.sub(r'\n{3,}', '\n\n', text)
-            body = text.strip()[:20000]
-
-        full  = f"{subject}\n{body}"
-        code  = extract_trip_code(full)
-        pnr   = extract_pnr(full)
-
-        cur.execute("""INSERT INTO mail_messages
-            (mail_uid,message_id,sender,subject,body,trip_code,detected_type,pnr_code)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (uid,msg_id,sender,subject,body,code,detect_mail_type(full),pnr))
-
-        if code:
-            cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(code,))
-            # PNR in trip_meta speichern wenn gefunden
-            if pnr:
-                cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr,code))
-
-        # Anhaenge verarbeiten
-        if msg.is_multipart():
-            for part in msg.walk():
-                fn = part.get_filename()
-                cd = str(part.get("Content-Disposition") or "")
-                if not fn and "attachment" not in cd.lower(): continue
-                decoded_fn = decode_mime_header(fn) if fn else (
-                    "attachment" + {"application/pdf":".pdf","image/jpeg":".jpg","image/png":".png","text/calendar":".ics"}.get(part.get_content_type(),".bin"))
-                pl = part.get_payload(decode=True)
-                if not pl: continue
-
-                # Duplikat-Check per Hash
-                h = file_hash(pl)
-                cur.execute("SELECT id,trip_code FROM mail_attachments WHERE file_hash=%s",(h,))
-                existing = cur.fetchone()
-                if existing:
+            # Duplikat-Check 2: Message-ID
+            if msg_id:
+                cur.execute("SELECT id FROM mail_messages WHERE message_id=%s",(msg_id,))
+                if cur.fetchone():
+                    ids_to_delete.append(i)
                     dupl += 1
-                    print(f"[Duplikat] {decoded_fn} Hash:{h} – bereits als ID {existing[0]} vorhanden")
-                    mail.store(i,"+FLAGS","\\Seen")
                     continue
 
-                safe_fn = sanitize_filename(decoded_fn)
-
-                # ICS-Dateien überspringen – Flugdaten kommen aus Mail-Body
-                if safe_fn.lower().endswith(".ics"):
-                    # Flugnummer trotzdem aus ICS in trip_meta übernehmen (schneller Scan)
-                    if pl and code:
-                        try:
-                            ics_text = pl.decode(errors="ignore")
-                            ics_text = re.sub(r"\r?\n[ \t]", "", ics_text)
-                            for fn_m in re.finditer(r"\b([A-Z]{2}\d{3,4})\b", ics_text):
-                                fn_ics = fn_m.group(1)
-                                cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code=%s",(code,))
-                                row_fn = cur.fetchone()
-                                if row_fn:
-                                    existing = row_fn[0] or ""
-                                    if fn_ics not in existing:
-                                        cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",
-                                            (f"{existing},{fn_ics}".strip(","), code))
-                        except: pass
-                    continue  # ICS nicht in DB speichern
-
-                # S3-Upload
-                storage_key = f"mail_attachments/{uid}_{safe_fn}"
+            # Body extrahieren
+            body = ""; html_body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    ct = part.get_content_type()
+                    cd = str(part.get("Content-Disposition") or "").lower()
+                    if "attachment" in cd: continue
+                    try:
+                        pl = part.get_payload(decode=True)
+                        if not pl: continue
+                        if ct == "text/plain" and not body:
+                            body = pl.decode(errors="ignore")
+                        elif ct == "text/html" and not html_body:
+                            html_body = pl.decode(errors="ignore")
+                    except: continue
+            else:
                 try:
-                    s3 = get_s3()
-                    s3.put_object(Bucket=S3_BUCKET, Key=storage_key, Body=pl,
-                                  ContentType=part.get_content_type())
-                except Exception as s3e:
-                    storage_key = f"S3-FEHLER:{str(s3e)[:60]}"
+                    pl = msg.get_payload(decode=True)
+                    ct = msg.get_content_type()
+                    if pl:
+                        if ct == "text/html": html_body = pl.decode(errors="ignore")
+                        else: body = pl.decode(errors="ignore")
+                except: pass
 
-                cur.execute("""INSERT INTO mail_attachments
-                    (mail_uid,trip_code,original_filename,saved_filename,content_type,
-                     storage_key,detected_type,analysis_status,confidence,review_flag,
-                     file_hash)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (uid,code,safe_fn,f"{uid}_{safe_fn}",part.get_content_type(),
-                     storage_key,detect_type_with_rules(safe_fn,subject,body,load_custom_rules()),
-                     "ausstehend","niedrig","pruefen",h))
+            # HTML → Plaintext
+            if not body and html_body:
+                import html as _html
+                t = _html.unescape(html_body)
+                t = re.sub(r'<style[^>]*>.*?</style>', ' ', t, flags=re.DOTALL|re.IGNORECASE)
+                t = re.sub(r'<script[^>]*>.*?</script>', ' ', t, flags=re.DOTALL|re.IGNORECASE)
+                t = re.sub(r'<br\s*/?>', '\n', t, flags=re.IGNORECASE)
+                t = re.sub(r'<[^>]+>', ' ', t)
+                t = re.sub(r'[ \t]+', ' ', t)
+                t = re.sub(r'\n{3,}', '\n\n', t)
+                body = t.strip()[:20000]
 
-        # Mail erfolgreich importiert → für Löschung vormerken
-        ids_to_delete.append(i)
-        imported += 1
+            full  = f"{subject}\n{body}"
+            code  = extract_trip_code(full)
+            pnr_f = extract_pnr(full)
 
-    conn.commit(); cur.close(); conn.close()
+            # Reisecode über PNR suchen wenn nicht im Text
+            if not code and pnr_f:
+                cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(pnr_f,))
+                r=cur.fetchone()
+                if r: code=r[0]
 
-    # Mails löschen (nach commit, damit Daten sicher in DB)
+            cur.execute("""INSERT INTO mail_messages
+                (mail_uid,message_id,sender,subject,body,trip_code,detected_type,pnr_code,analysis_status)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (uid,msg_id,sender,subject,body,code,detect_mail_type(full),pnr_f,'ausstehend'))
+
+            if code:
+                cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(code,))
+                if pnr_f:
+                    cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr_f,code))
+
+            # Anhänge
+            if msg.is_multipart():
+                for part in msg.walk():
+                    try:
+                        fn = part.get_filename()
+                        cd = str(part.get("Content-Disposition") or "")
+                        if not fn and "attachment" not in cd.lower(): continue
+                        decoded_fn = decode_mime_header(fn) if fn else (
+                            "attachment" + {"application/pdf":".pdf","image/jpeg":".jpg",
+                            "image/png":".png","text/calendar":".ics"}.get(part.get_content_type(),".bin"))
+                        pl = part.get_payload(decode=True)
+                        if not pl: continue
+
+                        h = file_hash(pl)
+                        cur.execute("SELECT id FROM mail_attachments WHERE file_hash=%s",(h,))
+                        if cur.fetchone(): dupl+=1; continue
+
+                        safe_fn = sanitize_filename(decoded_fn)
+
+                        # ICS: nur Flugnummern extrahieren, nicht speichern
+                        if safe_fn.lower().endswith(".ics"):
+                            if code:
+                                ics_text = pl.decode(errors="ignore")
+                                ics_text = re.sub(r"\r?\n[ \t]", "", ics_text)
+                                for fn_m in re.finditer(r"\b([A-Z]{2}\d{3,4})\b", ics_text):
+                                    fn_ics = fn_m.group(1)
+                                    cur.execute("SELECT flight_numbers FROM trip_meta WHERE trip_code=%s",(code,))
+                                    row_fn = cur.fetchone()
+                                    if row_fn:
+                                        existing_fns = row_fn[0] or ""
+                                        if fn_ics not in existing_fns:
+                                            cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",
+                                                (f"{existing_fns},{fn_ics}".strip(","), code))
+                            continue
+
+                        # Inline-Bilder nicht speichern
+                        if re.match(r'image\d+\.(png|jpg|jpeg|gif|bmp|emz|wmz)$', safe_fn.lower()):
+                            continue
+
+                        storage_key = f"mail_attachments/{uid}_{safe_fn}"
+                        try:
+                            s3 = get_s3()
+                            s3.put_object(Bucket=S3_BUCKET, Key=storage_key, Body=pl,
+                                          ContentType=part.get_content_type())
+                        except Exception as s3e:
+                            storage_key = f"S3-FEHLER:{str(s3e)[:60]}"
+
+                        cur.execute("""INSERT INTO mail_attachments
+                            (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                             storage_key,detected_type,analysis_status,confidence,review_flag,file_hash)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (uid,code,safe_fn,f"{uid}_{safe_fn}",part.get_content_type(),
+                             storage_key,detect_type_with_rules(safe_fn,subject,body,load_custom_rules()),
+                             "ausstehend","niedrig","pruefen",h))
+                        att_count += 1
+                    except Exception as ae:
+                        print(f"[IMAP Anhang Fehler] {ae}")
+                        continue
+
+            conn.commit()
+            ids_to_delete.append(i)
+            imported += 1
+
+        except Exception as me:
+            print(f"[IMAP Mail Fehler] uid={i}: {me}")
+            err += 1
+            try: conn.rollback()
+            except: pass
+            continue
+
+    cur.close(); conn.close()
+
+    # Mails löschen
     for i in ids_to_delete:
-        try:
-            mail.store(i, "+FLAGS", "\\Deleted")
-            deleted += 1
-        except Exception:
-            pass
-    if ids_to_delete:
-        mail.expunge()
+        try: mail.store(i, "+FLAGS", "\\Deleted"); deleted+=1
+        except: pass
+    try:
+        if ids_to_delete: mail.expunge()
+    except: pass
+    try: mail.logout()
+    except: pass
 
-    mail.logout()
-    if imported or dupl:
-        print(f"[AutoIMAP] {imported} neu, {att_count} Anhänge, {dupl} Duplikate, {deleted} gelöscht")
+    print(f"[IMAP] {imported} neu · {att_count} Anhänge · {dupl} Duplikate · {deleted} gelöscht · {err} Fehler")
 
 # Thread starten
 _t = threading.Thread(target=_auto_fetch, daemon=True)
