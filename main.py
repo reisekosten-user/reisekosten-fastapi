@@ -244,7 +244,7 @@ AIRPORT_CC = {
     # Panama
     "PTY":"PA",
     # Costa Rica
-    "SJO":"CR","LIR":"CR",
+    "SJO":"CR","LIR":"CR","SJC":"CR",  # SJC oft fälschlich für San José CR
     # Mexiko
     "MEX":"MX","CUN":"MX","GDL":"MX","MTY":"MX","SJD":"MX",
     # Brasilien
@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.32"
+APP_VERSION = "9.33"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 import os as _os
@@ -6100,6 +6100,17 @@ async def upload_beleg(
                 ocr_text = await mistral_ocr(file_bytes, safe_fn)
         else:
             ocr_text = await mistral_ocr(file_bytes, safe_fn)
+
+        # Fallback: wenn OCR leer/Fehler → nochmal pypdf direkt versuchen
+        if (not ocr_text or ocr_text.startswith(("ERROR","KEIN","OCR_","NICHT"))) and ext=="pdf":
+            try:
+                import pypdf as _pypdf2
+                reader2=_pypdf2.PdfReader(io.BytesIO(file_bytes))
+                ocr_text="\n".join(p.extract_text() or "" for p in reader2.pages)
+                print(f"[PDF Fallback] {safe_fn}: {len(ocr_text)} Zeichen")
+            except Exception as pe2:
+                print(f"[PDF Fallback Fehler]: {pe2}")
+
         if True:  # Immer analysieren
             if ocr_text and not ocr_text.startswith(("ERROR","KEIN","OCR_","NICHT")):
                 # Regex-Extraktion
