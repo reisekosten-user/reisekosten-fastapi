@@ -1,4 +1,9 @@
-boto3
-fastapi[all]
-psycopg2-binary
-pdfplumber
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+psycopg2-binary>=2.9.9
+boto3>=1.34.0
+httpx>=0.27.0
+python-multipart>=0.0.9
+reportlab>=4.2.0
+pypdf>=4.3.0
+Pillow>=10.0.0
