@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.34"
+APP_VERSION = "9.35"
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 import os as _os
@@ -1891,6 +1891,75 @@ def _fetch_mails_internal():
                     except Exception as ae:
                         print(f"[IMAP Anhang Fehler] {ae}")
                         continue
+
+            # Sofort-Analyse: Beleg aus Mail-Body erstellen wenn Hotel/Flug erkannt
+            try:
+                mail_type = detect_mail_type(full)
+                regex_fns = extract_flight_numbers(full)
+                regex_pnr = extract_pnr(full) or ""
+
+                # Reisecode nochmal über PNR suchen
+                if not code and regex_pnr:
+                    cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(regex_pnr,))
+                    r=cur.fetchone()
+                    if r:
+                        code=r[0]
+                        cur.execute("UPDATE mail_messages SET trip_code=%s WHERE mail_uid=%s",(code,uid))
+
+                if code and (mail_type in ("Hotel","Flug") or regex_fns):
+                    # Beleg bereits vorhanden?
+                    cur.execute("SELECT id FROM mail_attachments WHERE mail_uid=%s AND storage_key LIKE 'mail_body_%'",(uid,))
+                    if not cur.fetchone():
+                        # Regex-Daten extrahieren
+                        regex_segs=extract_flight_segments_from_text(full) if regex_fns else []
+                        seg_s=segments_to_string(regex_segs) if regex_segs else ""
+
+                        # Hotel-Daten aus Text
+                        checkin=""; checkout=""; nights=0; vendor=""
+                        ci=re.search(r'(?:Check.in|Arrival|Anreise)[:\s]*(\w+,?\s+\w+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\w+\s+\w+\s+\d{2},\s+\d{4})',full,re.IGNORECASE)
+                        co=re.search(r'(?:Check.out|Departure|Abreise)[:\s]*(\w+,?\s+\w+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\w+\s+\w+\s+\d{2},\s+\d{4})',full,re.IGNORECASE)
+                        # Einfachere Datum-Pattern
+                        dates=re.findall(r'(\d{4}-\d{2}-\d{2})',full)
+                        if len(dates)>=2 and mail_type=="Hotel":
+                            checkin=dates[0]; checkout=dates[1]
+                            try:
+                                from datetime import date as _dt
+                                nights=((_dt.fromisoformat(checkout)-_dt.fromisoformat(checkin)).days)
+                            except: pass
+
+                        # Betrag
+                        betrag_m=re.search(r'(?:Total|Gesamt|EUR|USD|CHF)[:\s€$]*\s*([\d,\.]+)\s*(?:EUR|USD|CHF)?',full,re.IGNORECASE)
+                        betrag=betrag_m.group(1).replace(',','.') if betrag_m else ""
+                        waehrung="EUR"
+                        if "USD" in full.upper(): waehrung="USD"
+
+                        # Vendor aus Betreff/Body
+                        for hotel in ["Marriott","Sheraton","Hilton","Hyatt","Radisson","Intercontinental","NH ","Ibis","Novotel"]:
+                            if hotel.lower() in full.lower():
+                                vendor=hotel; break
+
+                        eff_typ = "Flug" if regex_fns else mail_type
+                        cur.execute("""INSERT INTO mail_attachments
+                            (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                             storage_key,detected_type,detected_amount,detected_currency,
+                             detected_vendor,detected_checkin,detected_checkout,detected_nights,
+                             detected_flight_numbers,flight_segments,
+                             analysis_status,confidence,review_flag,ki_bemerkung)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (uid,code,f"Mail: {subject[:60]}",f"Mail: {subject[:60]}","text/plain",
+                             f"mail_body_{uid}",eff_typ,
+                             betrag or None,waehrung,vendor or None,
+                             checkin or None,checkout or None,nights or None,
+                             ",".join(regex_fns) if regex_fns else None,
+                             seg_s or None,
+                             "ok (Mail-Body)","mittel","ok",
+                             f"Auto-Import: {subject[:50]}"))
+
+                        if regex_fns and code:
+                            cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(",".join(regex_fns),code))
+
+            except Exception as ae2:
+                print(f"[IMAP Sofort-Analyse Fehler]: {ae2}")
 
             conn.commit()
             ids_to_delete.append(i)
