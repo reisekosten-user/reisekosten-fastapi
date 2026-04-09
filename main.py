@@ -397,7 +397,165 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.35"
+APP_VERSION = "9.39"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MAIL-ANALYSE ENGINE v2 – Datum-basierte Zuordnung, kein Raten
+# ═══════════════════════════════════════════════════════════════════════════
+
+_MONTHS_MAP = {
+    'jan':'01','feb':'02','mar':'03','maer':'03','apr':'04',
+    'mai':'05','may':'05','jun':'06','jul':'07','aug':'08',
+    'sep':'09','okt':'10','oct':'10','nov':'11','dez':'12','dec':'12',
+    'january':'01','february':'02','march':'03','april':'04',
+    'june':'06','july':'07','august':'08','september':'09',
+    'october':'10','november':'11','december':'12',
+    'januar':'01','februar':'02','märz':'03','juni':'06',
+    'juli':'07','oktober':'10','dezember':'12',
+}
+
+def extract_all_dates(text: str) -> list:
+    """Extrahiert ALLE Datumsangaben aus Text. Gibt sortierte Liste zurück."""
+    from datetime import date as _date
+    dates = set()
+    # DD.MM.YYYY oder DD/MM/YYYY
+    for m in re.finditer(r'\b(\d{1,2})[./](\d{1,2})[./](\d{4})\b', text):
+        try: dates.add(_date(int(m.group(3)),int(m.group(2)),int(m.group(1))))
+        except: pass
+    # YYYY-MM-DD
+    for m in re.finditer(r'\b(\d{4})-(\d{2})-(\d{2})\b', text):
+        try: dates.add(_date(int(m.group(1)),int(m.group(2)),int(m.group(3))))
+        except: pass
+    # 25 Mai 2026 oder 25MAY2026
+    for m in re.finditer(r'\b(\d{1,2})\s*([A-Za-zä]{3,})\s*(\d{4})\b', text):
+        mo = _MONTHS_MAP.get(m.group(2).lower()[:3])
+        if mo:
+            try: dates.add(_date(int(m.group(3)),int(mo),int(m.group(1))))
+            except: pass
+    # April 22, 2026 oder April 22 2026
+    for m in re.finditer(r'\b([A-Za-zä]{4,})\s+(\d{1,2}),?\s+(\d{4})\b', text):
+        mo = _MONTHS_MAP.get(m.group(1).lower()[:3])
+        if mo:
+            try: dates.add(_date(int(m.group(3)),int(mo),int(m.group(2))))
+            except: pass
+    # Nur sinnvolle Reisedaten (2025-2028)
+    return sorted(d for d in dates if 2025 <= d.year <= 2028)
+
+def extract_pnr_safe(text: str) -> str:
+    """Extrahiert PNR NUR wenn explizit gelabelt. Kein Raten."""
+    m = re.search(
+        r'(?:Buchungsreferenz|Buchungscode|PNR|Booking\s*Ref(?:erence)?|' +
+        r'Record\s*Locator|Confirmation\s*(?:Number|Code|#))\s*[:\s#]*([A-Z0-9]{5,8})\b',
+        text or "", re.IGNORECASE)
+    if m:
+        val = m.group(1).upper()
+        # Filtere Wörter die zufällig matchen
+        if not re.match(r'^(RIGHTS|ALAFAVE|PANAMA|HOTEL|FLUG|BAHN|BOOKING|FLIGHT|TRAIN|REISE|ECMA)$', val, re.I):
+            return val
+    return ""
+
+def extract_amount_safe(text: str) -> tuple:
+    """Extrahiert Betrag und Währung. Gibt (betrag_str, waehrung) zurück."""
+    # Explizite Gesamtbeträge zuerst
+    patterns = [
+        (r'(?:Total for stay|Total cash rate|Grand Total|Endpreis|Gesamtpreis|Total amount)[^\d]*([\d\.]+)\s*([A-Z]{3})', 1, 2),
+        (r'([A-Z]{3})\s+([\d,\.]{3,})', 2, 1),
+        (r'([\d,\.]{4,})\s*(EUR|USD|CHF|GBP|JPY)', 1, 2),
+    ]
+    for pattern, amount_grp, curr_grp in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            try:
+                val_str = m.group(amount_grp).replace(',','.')
+                # Nur einen Dezimalpunkt behalten
+                parts = val_str.split('.')
+                if len(parts) > 2: val_str = '.'.join(parts[:-1]).replace('.','') + '.' + parts[-1]
+                val = float(val_str)
+                if 1 < val < 100000:
+                    curr = m.group(curr_grp).upper() if curr_grp <= m.lastindex else 'EUR'
+                    return f"{val:.2f}", curr
+            except: pass
+    return "", "EUR"
+
+def extract_hotel_dates(text: str) -> tuple:
+    """Extrahiert Check-in und Check-out Datum."""
+    all_dates = extract_all_dates(text)
+    checkin = checkout = ""
+    # Explizite Labels
+    ci_m = re.search(r'(?:Check.in|Arrival|Anreise|Eincheck)[^\n]{0,50}?(\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4})', text, re.IGNORECASE)
+    co_m = re.search(r'(?:Check.out|Departure|Abreise|Auscheck)[^\n]{0,50}?(\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4})', text, re.IGNORECASE)
+    if ci_m:
+        ci_dates = extract_all_dates(ci_m.group(1))
+        if ci_dates: checkin = str(ci_dates[0])
+    if co_m:
+        co_dates = extract_all_dates(co_m.group(1))
+        if co_dates: checkout = str(co_dates[0])
+    # Fallback: erste zwei Daten aus dem Text
+    if not checkin and len(all_dates) >= 1: checkin = str(all_dates[0])
+    if not checkout and len(all_dates) >= 2: checkout = str(all_dates[1])
+    return checkin, checkout
+
+def detect_mail_type(text: str) -> str:
+    """Typ-Erkennung via Keywords. Reihenfolge: spezifisch → allgemein."""
+    t = (text or "").lower()
+    if any(x in t for x in ['e-ticket','eticket','boarding','itinerary','flugbestaetigung',
+        'flugbestätigung','buchungsreferenz','buchungscode','pnr',
+        'lh ','lx ','os ','sk ','af ','kl ']): return "Flug"
+    if any(x in t for x in ['vielen dank für ihre buchung','danke für ihre buchung',
+        'thank you for your booking','flight confirmation','ihr flug']): return "Flug"
+    if any(x in t for x in ['hotel','check-in','check-out','reservation','zimmer',
+        'nacht','overnight','marriott','sheraton','hilton','hyatt',
+        'radisson','intercontinental','booking.com','accommodation',
+        'your stay','ihr aufenthalt']): return "Hotel"
+    if any(x in t for x in ['taxi','uber','lyft','cab','fahrschein']): return "Taxi"
+    if any(x in t for x in ['bahn','zug','ice','db ','rail','train','bahnticket']): return "Bahn"
+    if any(x in t for x in ['mietwagen','hertz','sixt','avis','rental car','car rental']): return "Mietwagen"
+    if any(x in t for x in ['restaurant','dinner','lunch','rechnung','speisen']): return "Essen"
+    return "Sonstiges"
+
+def assign_trip_by_date(subject: str, body: str, trips: list) -> tuple:
+    """
+    Ordnet Mail einer Reise zu.
+    NUR zwei zuverlässige Methoden – kein Datum-Raten:
+    1. Reisecode direkt im Text (26-001, 26-002, ...)
+    2. PNR explizit gelabelt (Buchungscode: 83WPJT)
+    Alles andere → unzugeordnet, Nutzer ordnet manuell zu.
+    """
+    full = f"{subject}\n{body}"
+
+    # 1. Reisecode direkt – höchste Priorität
+    m = re.search(r'\b(\d{2}-\d{3})\b', full)
+    if m:
+        code = m.group(1)
+        # Prüfen ob diese Reise existiert
+        for t in trips:
+            if t.get("code") == code:
+                return code, 100, "code-direkt"
+        # Code gefunden aber Reise existiert noch nicht → trotzdem zuordnen
+        return code, 100, "code-direkt-neu"
+
+    # 2. PNR explizit gelabelt
+    pnr = extract_pnr_safe(full)
+    if pnr:
+        for t in trips:
+            if t.get("pnr", "").upper() == pnr.upper():
+                return t["code"], 99, f"pnr:{pnr}"
+
+    # 3. Kein Match → unzugeordnet
+    return None, 0, "unzugeordnet"
+
+def load_trips_for_assignment() -> list:
+    """Lädt alle Reisen für die Zuordnung (Code, PNR, Zeitraum)."""
+    try:
+        conn=get_conn(); cur=conn.cursor()
+        cur.execute("SELECT trip_code,pnr_code,departure_date,return_date FROM trip_meta ORDER BY trip_code")
+        rows=cur.fetchall(); cur.close(); conn.close()
+        result=[]
+        for code,pnr,dep,ret in rows:
+            result.append({"code":code,"pnr":pnr or "","dep":dep,"ret":ret})
+        return result
+    except: return []
+
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 import os as _os
@@ -1279,15 +1437,6 @@ def extract_trip_code(text):
     m = re.search(r"\b\d{2}-\d{3}\b", text or "")
     return m.group(0) if m else None
 
-def extract_pnr(text):
-    """PNR/Buchungsreferenz: 6 alphanumerische Zeichen (Grossbuchstaben+Ziffern)."""
-    # Explizite Labels zuerst
-    labeled = re.search(r'(?:Buchungsreferenz|PNR|Booking\s*Ref(?:erence)?|Record\s*Locator)\s*[:\s#]*([A-Z0-9]{6})\b', text or "", re.IGNORECASE)
-    if labeled: return labeled.group(1).upper()
-    # Fallback: 6-stellige Sequenz aus Grossbuchstaben+Ziffern
-    m = re.search(r'\b([A-Z]{2}[A-Z0-9]{4}|[A-Z0-9]{2}[A-Z]{2}[A-Z0-9]{2})\b', text or "")
-    return m.group(1) if m else None
-
 def extract_flight_numbers(text: str) -> list:
     """Extrahiert Flugnummern aus Text. Schließt Ticketnummern (LH 220-xxx) aus."""
     if not text: return []
@@ -1555,90 +1704,6 @@ def decode_mime_header(value):
         p.decode(enc or "utf-8",errors="ignore") if isinstance(p,bytes) else p
         for p,enc in parts)
 
-def detect_mail_type(text):
-    t=(text or "").lower()
-    if any(x in t for x in ["flug","flight","boarding","pnr","ticket","airline","itinerary","eticket","buchungsreferenz","lx ","lh ","os ","sk ","af "]): return "Flug"
-    if any(x in t for x in ["hotel","booking.com","check-in","reservation","zimmer","accommodation","sheraton","marriott","hilton","hyatt","radisson","intercontinental"]): return "Hotel"
-    if any(x in t for x in ["taxi","uber","cab","ride"]): return "Taxi"
-    if any(x in t for x in ["bahn","zug","train","ice","db ","bahnticket"]): return "Bahn"
-    if any(x in t for x in ["restaurant","verpflegung","essen","dinner","lunch","breakfast"]): return "Essen"
-    if any(x in t for x in ["mietwagen","rental","hertz","sixt","avis"]): return "Mietwagen"
-    return "Unbekannt"
-
-# Stadt/Hotel-Vendor → ISO-Ländercode für automatische VMA-Berechnung
-HOTEL_CITY_CC = {
-    # Deutschland
-    "münchen":"DE","berlin":"DE","hamburg":"DE","frankfurt":"DE","köln":"DE","düsseldorf":"DE",
-    "nürnberg":"DE","stuttgart":"DE","leipzig":"DE","hannover":"DE","bremen":"DE",
-    # Frankreich
-    "paris":"FR","lyon":"FR","marseille":"FR","nizza":"FR","bordeaux":"FR","toulouse":"FR",
-    "strasbourg":"FR","lille":"FR","nantes":"FR","france":"FR","frankreich":"FR",
-    # UK
-    "london":"GB","manchester":"GB","edinburgh":"GB","birmingham":"GB","glasgow":"GB",
-    # Schweiz
-    "zürich":"CH","genf":"CH","bern":"CH","basel":"CH","zurich":"CH","geneva":"CH",
-    # Österreich
-    "wien":"AT","salzburg":"AT","innsbruck":"AT","graz":"AT","vienna":"AT",
-    # Italien
-    "rom":"IT","mailand":"IT","venedig":"IT","florenz":"IT","rom":"IT","neapel":"IT",
-    "rome":"IT","milan":"IT","venice":"IT","florence":"IT","naples":"IT",
-    # Spanien
-    "madrid":"ES","barcelona":"ES","sevilla":"ES","valencia":"ES","málaga":"ES",
-    # USA
-    "new york":"US","los angeles":"US","chicago":"US","miami":"US","san francisco":"US",
-    "boston":"US","washington":"US","las vegas":"US","seattle":"US","houston":"US",
-    # VAE
-    "dubai":"AE","abu dhabi":"AE",
-    # Singapur
-    "singapore":"SG","singapur":"SG",
-    # Japan
-    "tokyo":"JP","tokio":"JP","osaka":"JP","kyoto":"JP",
-    # China
-    "beijing":"CN","shanghai":"CN","peking":"CN","guangzhou":"CN","shenzhen":"CN",
-    # Indien
-    "delhi":"IN","mumbai":"IN","bangalore":"IN","hyderabad":"IN","chennai":"IN",
-    # Panama
-    "panama":"PA","panama city":"PA","ciudad de panama":"PA",
-    # Costa Rica
-    "san jose":"CR","costa rica":"CR","san josé":"CR",
-    # Katar
-    "doha":"QA",
-    # Türkei
-    "istanbul":"TR","ankara":"TR",
-    # Niederlande
-    "amsterdam":"NL","rotterdam":"NL",
-    # Belgien
-    "brüssel":"BE","brussels":"BE","bruxelles":"BE",
-    # Polen
-    "warschau":"PL","warsaw":"PL","krakau":"PL","krakow":"PL",
-    # Schweden
-    "stockholm":"SE","göteborg":"SE","gothenburg":"SE",
-    # Dänemark
-    "kopenhagen":"DK","copenhagen":"DK",
-    # Norwegen
-    "oslo":"NO","bergen":"NO",
-    # Finnland
-    "helsinki":"FI",
-    # Portugal
-    "lissabon":"PT","lisbon":"PT","porto":"PT",
-    # Griechenland
-    "athen":"GR","athens":"GR","thessaloniki":"GR",
-    # Australien
-    "sydney":"AU","melbourne":"AU","brisbane":"AU","perth":"AU",
-    # Kanada
-    "toronto":"CA","vancouver":"CA","montreal":"CA","calgary":"CA",
-    # Brasilien
-    "são paulo":"BR","sao paulo":"BR","rio de janeiro":"BR","brasilia":"BR",
-    # Mexiko
-    "mexico city":"MX","ciudad de mexico":"MX","cancun":"MX","guadalajara":"MX",
-    # Argentinien
-    "buenos aires":"AR",
-    # Chile
-    "santiago":"CL",
-    # Kolumbien
-    "bogota":"CO","medellin":"CO",
-}
-
 def hotel_city_to_cc(vendor_or_city: str) -> str:
     """Ermittelt ISO-Ländercode aus Hotel-Vendor oder Stadtname."""
     if not vendor_or_city: return ""
@@ -1814,14 +1879,12 @@ def _fetch_mails_internal():
                 body = t.strip()[:20000]
 
             full  = f"{subject}\n{body}"
-            code  = extract_trip_code(full)
-            pnr_f = extract_pnr(full)
 
-            # Reisecode über PNR suchen wenn nicht im Text
-            if not code and pnr_f:
-                cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(pnr_f,))
-                r=cur.fetchone()
-                if r: code=r[0]
+            # ── NEUE ZUORDNUNGSLOGIK: Datum > PNR > Code ──────────────
+            trips_for_assign = load_trips_for_assignment()
+            code, confidence, assign_method = assign_trip_by_date(subject, body, trips_for_assign)
+            pnr_f = extract_pnr_safe(full)
+            print(f"[IMAP] '{subject[:50]}' → {code or '?'} [{confidence}%] via {assign_method}")
 
             cur.execute("""INSERT INTO mail_messages
                 (mail_uid,message_id,sender,subject,body,trip_code,detected_type,pnr_code,analysis_status)
@@ -1892,71 +1955,88 @@ def _fetch_mails_internal():
                         print(f"[IMAP Anhang Fehler] {ae}")
                         continue
 
-            # Sofort-Analyse: Beleg aus Mail-Body erstellen wenn Hotel/Flug erkannt
+            # ── SOFORT-ANALYSE: Beleg aus Mail-Body ──────────────────────
             try:
                 mail_type = detect_mail_type(full)
-                regex_fns = extract_flight_numbers(full)
-                regex_pnr = extract_pnr(full) or ""
 
-                # Reisecode nochmal über PNR suchen
-                if not code and regex_pnr:
-                    cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(regex_pnr,))
-                    r=cur.fetchone()
-                    if r:
-                        code=r[0]
-                        cur.execute("UPDATE mail_messages SET trip_code=%s WHERE mail_uid=%s",(code,uid))
-
-                if code and (mail_type in ("Hotel","Flug") or regex_fns):
-                    # Beleg bereits vorhanden?
+                # Nur Hotel und Flug bekommen automatisch einen Beleg
+                if mail_type in ("Hotel","Flug","Bahn","Mietwagen"):
+                    # Duplikat-Check
                     cur.execute("SELECT id FROM mail_attachments WHERE mail_uid=%s AND storage_key LIKE 'mail_body_%'",(uid,))
                     if not cur.fetchone():
-                        # Regex-Daten extrahieren
-                        regex_segs=extract_flight_segments_from_text(full) if regex_fns else []
-                        seg_s=segments_to_string(regex_segs) if regex_segs else ""
 
-                        # Hotel-Daten aus Text
-                        checkin=""; checkout=""; nights=0; vendor=""
-                        ci=re.search(r'(?:Check.in|Arrival|Anreise)[:\s]*(\w+,?\s+\w+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\w+\s+\w+\s+\d{2},\s+\d{4})',full,re.IGNORECASE)
-                        co=re.search(r'(?:Check.out|Departure|Abreise)[:\s]*(\w+,?\s+\w+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\w+\s+\w+\s+\d{2},\s+\d{4})',full,re.IGNORECASE)
-                        # Einfachere Datum-Pattern
-                        dates=re.findall(r'(\d{4}-\d{2}-\d{2})',full)
-                        if len(dates)>=2 and mail_type=="Hotel":
-                            checkin=dates[0]; checkout=dates[1]
+                        # ── Daten extrahieren (zuverlässige Funktionen) ──
+                        betrag, waehrung = extract_amount_safe(full)
+                        checkin, checkout = extract_hotel_dates(full) if mail_type=="Hotel" else ("","")
+                        nights = 0
+                        if checkin and checkout:
                             try:
-                                from datetime import date as _dt
-                                nights=((_dt.fromisoformat(checkout)-_dt.fromisoformat(checkin)).days)
+                                from datetime import date as _dt2
+                                nights=(_dt2.fromisoformat(checkout)-_dt2.fromisoformat(checkin)).days
                             except: pass
 
-                        # Betrag
-                        betrag_m=re.search(r'(?:Total|Gesamt|EUR|USD|CHF)[:\s€$]*\s*([\d,\.]+)\s*(?:EUR|USD|CHF)?',full,re.IGNORECASE)
-                        betrag=betrag_m.group(1).replace(',','.') if betrag_m else ""
-                        waehrung="EUR"
-                        if "USD" in full.upper(): waehrung="USD"
+                        # Flugnummern
+                        regex_fns = extract_flight_numbers(full) if mail_type=="Flug" else []
+                        seg_s = segments_to_string(extract_flight_segments_from_text(full)) if regex_fns else ""
 
-                        # Vendor aus Betreff/Body
-                        for hotel in ["Marriott","Sheraton","Hilton","Hyatt","Radisson","Intercontinental","NH ","Ibis","Novotel"]:
-                            if hotel.lower() in full.lower():
-                                vendor=hotel; break
+                        # Vendor erkennen
+                        vendor = ""
+                        VENDORS = [
+                            ("Lufthansa","Flug"),("Swiss","Flug"),("Austrian","Flug"),
+                            ("Air France","Flug"),("KLM","Flug"),("British Airways","Flug"),
+                            ("Edelweiss","Flug"),("Eurowings","Flug"),("FLY AWAY","Flug"),
+                            ("Marriott","Hotel"),("Sheraton","Hotel"),("Hilton","Hotel"),
+                            ("Hyatt","Hotel"),("Radisson","Hotel"),("Intercontinental","Hotel"),
+                            ("Booking.com","Hotel"),("Hotels.com","Hotel"),("Expedia","Hotel"),
+                            ("NH Hotels","Hotel"),("Ibis","Hotel"),("Novotel","Hotel"),
+                            ("Hertz","Mietwagen"),("Sixt","Mietwagen"),("Avis","Mietwagen"),
+                            ("Deutsche Bahn","Bahn"),("DB Bahn","Bahn"),("Eurostar","Bahn"),
+                        ]
+                        for v, vtype in VENDORS:
+                            if v.lower() in full.lower():
+                                vendor = v; break
 
-                        eff_typ = "Flug" if regex_fns else mail_type
+                        # EUR-Betrag berechnen
+                        betrag_eur = ""
+                        if betrag:
+                            try:
+                                val = float(betrag)
+                                if waehrung == "USD": betrag_eur = f"{val*0.92:.2f}".replace(".",",")
+                                elif waehrung == "CHF": betrag_eur = f"{val*1.03:.2f}".replace(".",",")
+                                elif waehrung == "GBP": betrag_eur = f"{val*1.17:.2f}".replace(".",",")
+                                else: betrag_eur = f"{val:.2f}".replace(".",",")
+                            except: pass
+
                         cur.execute("""INSERT INTO mail_attachments
                             (mail_uid,trip_code,original_filename,saved_filename,content_type,
-                             storage_key,detected_type,detected_amount,detected_currency,
-                             detected_vendor,detected_checkin,detected_checkout,detected_nights,
+                             storage_key,detected_type,detected_amount,detected_amount_eur,
+                             detected_currency,detected_vendor,
+                             detected_checkin,detected_checkout,detected_nights,
                              detected_flight_numbers,flight_segments,
                              analysis_status,confidence,review_flag,ki_bemerkung)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                            (uid,code,f"Mail: {subject[:60]}",f"Mail: {subject[:60]}","text/plain",
-                             f"mail_body_{uid}",eff_typ,
-                             betrag or None,waehrung,vendor or None,
-                             checkin or None,checkout or None,nights or None,
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (uid, code,
+                             f"Mail: {subject[:60]}", f"Mail: {subject[:60]}",
+                             "text/plain", f"mail_body_{uid}",
+                             mail_type,
+                             betrag or None, betrag_eur or None, waehrung,
+                             vendor or None,
+                             checkin or None, checkout or None, nights or None,
                              ",".join(regex_fns) if regex_fns else None,
                              seg_s or None,
-                             "ok (Mail-Body)","mittel","ok",
-                             f"Auto-Import: {subject[:50]}"))
+                             "ok (Mail-Body)",
+                             "hoch" if (betrag and vendor) else "mittel",
+                             "ok" if (betrag and vendor) else "pruefen",
+                             f"Import: {vendor or mail_type} · {betrag or '?'} {waehrung}"))
 
-                        if regex_fns and code:
-                            cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(",".join(regex_fns),code))
+                        # trip_meta aktualisieren
+                        if code:
+                            if regex_fns:
+                                cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",
+                                    (",".join(regex_fns), code))
+                            if pnr_f:
+                                cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",
+                                    (pnr_f, code))
 
             except Exception as ae2:
                 print(f"[IMAP Sofort-Analyse Fehler]: {ae2}")
@@ -2572,24 +2652,25 @@ function suggestReturn(depVal){
   }
 }
 function submitTrip(){
-  const req=['fi-employee-code','fi-trip-title','fi-departure-date','fi-return-date'];
+  const req=['fi-employee-code','fi-traveler-name','fi-trip-title','fi-departure-date','fi-return-date'];
   for(const id of req){
     const el=document.getElementById(id);
     if(!el||!el.value.trim()){
       el&&el.focus();
       el&&(el.style.borderColor='var(--re6)');
-      alert('Bitte alle Pflichtfelder (*) ausfüllen: Mitarbeiterkürzel, Reisename, Abreise, Rückkehr');
+      alert('Bitte alle Pflichtfelder ausfüllen');
       return;
     }
     el.style.borderColor='';
   }
   const f=new FormData();
-  ['employee_code','trip_title','customer_code','traveler_name','colleagues',
-   'departure_date','return_date','departure_time_home','arrival_time_home',
-   'destinations','nights_planned','notes'].forEach(k=>{
-    const el=document.getElementById('fi-'+k.replace(/_/g,'-'));
-    if(el)f.append(k,el.value);
-  });
+  f.append('employee_code',document.getElementById('fi-employee-code').value);
+  f.append('traveler_name',document.getElementById('fi-traveler-name').value);
+  f.append('trip_title',document.getElementById('fi-trip-title').value);
+  f.append('departure_date',document.getElementById('fi-departure-date').value);
+  f.append('return_date',document.getElementById('fi-return-date').value);
+  f.append('departure_time_home','08:00');
+  f.append('arrival_time_home','18:00');
   fetch('/new-trip',{method:'POST',body:f}).then(()=>{window.location.href='/';});
   closeM('trip');
 }
@@ -2635,42 +2716,36 @@ def page_shell(title, content, active_tab=""):
 <!-- MODAL: NEUE REISE (vereinfacht, c) -->
 <div class="modal-ov" id="m-trip" onclick="closeM('trip')">
   <div class="modal" onclick="event.stopPropagation()">
-    <div class="m-hdr"><span class="m-title">Neue Reise anlegen</span><button class="m-close" onclick="closeM('trip')">×</button></div>
+    <div class="m-hdr"><span class="m-title">✈ Neue Reise anlegen</span><button class="m-close" onclick="closeM('trip')">×</button></div>
     <div class="m-body">
       <div class="code-prev" id="cprev">wird vergeben</div>
-      <div class="code-sub">Reisecode automatisch</div>
-      <div style="font-size:11px;color:var(--re6);margin-bottom:8px">* Pflichtfelder</div>
+      <div class="code-sub" style="margin-bottom:20px">Reisecode automatisch</div>
       <div class="fgrid">
-        <div class="fgrp"><label class="flbl">Mitarbeiterkürzel * <span style="color:var(--t300);font-weight:400">(z.B. MH)</span></label><input class="finp" id="fi-employee-code" type="text" placeholder="MH" maxlength="5" required></div>
-        <div class="fgrp"><label class="flbl">Reisename / Ziel *</label><input class="finp" id="fi-trip-title" type="text" placeholder="z.B. Lyon, Messe München" required></div>
-        <div class="fgrp"><label class="flbl">Kundenkürzel <span style="color:var(--t300);font-weight:400">(optional)</span></label><input class="finp" id="fi-customer-code" type="text" placeholder="z.B. BMW, intern"></div>
-        <div class="fgrp"><label class="flbl">Reisender (Klarname)</label><input class="finp" id="fi-traveler-name" type="text" placeholder="Vor- und Nachname"></div>
-        <div class="fgrp"><label class="flbl">Abreise *</label><input class="finp" id="fi-departure-date" type="date" required onchange="suggestReturn(this.value)"></div>
-        <div class="fgrp"><label class="flbl">Uhrzeit Abreise</label><input class="finp" id="fi-departure-time-home" type="time" value="08:00"></div>
-        <div class="fgrp"><label class="flbl">Rückkehr *</label><input class="finp" id="fi-return-date" type="date" required></div>
-        <div class="fgrp"><label class="flbl">Uhrzeit Ankunft</label><input class="finp" id="fi-arrival-time-home" type="time" value="18:00"></div>
-        <div class="fgrp ff">
-          <label class="flbl">Reiseziel(e) / Länder</label>
-          <input class="finp" id="fi-destinations" type="text" list="country-list" placeholder="z.B. Indien, Dubai, Frankfurt Messe">
-          <datalist id="country-list">
-            <option value="Deutschland (DE)"><option value="Frankreich (FR)"><option value="Großbritannien (GB)">
-            <option value="USA (US)"><option value="Indien (IN)"><option value="VAE / Dubai (AE)">
-            <option value="Aserbaidschan / Baku (AZ)"><option value="China (CN)"><option value="Japan (JP)">
-            <option value="Singapur (SG)"><option value="Schweiz (CH)"><option value="Österreich (AT)">
-            <option value="Italien (IT)"><option value="Spanien (ES)"><option value="Türkei (TR)">
-            <option value="Niederlande (NL)"><option value="Polen (PL)"><option value="Schweden (SE)">
-            <option value="Norwegen (NO)"><option value="Dänemark (DK)"><option value="Belgien (BE)">
-            <option value="Portugal (PT)"><option value="Tschechien (CZ)"><option value="Ungarn (HU)">
-            <option value="Rumänien (RO)"><option value="Saudi-Arabien (SA)"><option value="Katar (QR)">
-            <option value="Südkorea (KR)"><option value="Australien (AU)"><option value="Kanada (CA)">
-            <option value="Brasilien (BR)"><option value="Mexiko (MX)"><option value="Indonesien (ID)">
-          </datalist>
+        <div class="fgrp">
+          <label class="flbl">Kürzel * <span style="color:var(--t300);font-weight:400">(z.B. RD)</span></label>
+          <input class="finp" id="fi-employee-code" type="text" placeholder="RD" maxlength="5" required>
         </div>
-        <div class="fgrp"><label class="flbl">Kollegen</label><input class="finp" id="fi-colleagues" type="text" placeholder="z.B. T. Moser"></div>
-        <div class="fgrp"><label class="flbl">Geplante Nächte</label><input class="finp" id="fi-nights-planned" type="number" min="0" value="0"></div>
-        <div class="fgrp ff"><label class="flbl">Notiz</label><input class="finp" id="fi-notes" type="text" placeholder="z.B. Messebesuch, Kundentermin..."></div>
+        <div class="fgrp">
+          <label class="flbl">Klarname *</label>
+          <input class="finp" id="fi-traveler-name" type="text" placeholder="Ralf Diesslin" required>
+        </div>
+        <div class="fgrp ff">
+          <label class="flbl">Reisebeschreibung / Betreff *</label>
+          <input class="finp" id="fi-trip-title" type="text" placeholder="z.B. ECMA Lyon" required>
+        </div>
+        <div class="fgrp">
+          <label class="flbl">Abreise *</label>
+          <input class="finp" id="fi-departure-date" type="date" required onchange="suggestReturn(this.value)">
+        </div>
+        <div class="fgrp">
+          <label class="flbl">Rückkehr *</label>
+          <input class="finp" id="fi-return-date" type="date" required>
+        </div>
       </div>
-      <div class="mfooter"><button class="btn-mc" onclick="closeM('trip')">Abbrechen</button><button class="btn-mp" onclick="submitTrip()">Reise anlegen</button></div>
+      <div class="mfooter">
+        <button class="btn-mc" onclick="closeM('trip')">Abbrechen</button>
+        <button class="btn-mp" onclick="submitTrip()">Reise anlegen</button>
+      </div>
     </div>
   </div>
 </div>
@@ -3221,12 +3296,20 @@ async def _dashboard(request: Request, focus: str):
         done_t   =[t for t in all_trips if t["status"]=="done"]
         open_alerts=sum(1 for t in active_t if t["warnings"])
 
+        # Unzugeordnete Mails für Posteingang-Zähler
+        try:
+            cur.execute("SELECT COUNT(*) FROM mail_messages WHERE (trip_code IS NULL OR trip_code='')")
+            unassigned_count=cur.fetchone()[0]
+        except: unassigned_count=0
+        posteingang_badge=f'<a href="/posteingang" style="text-decoration:none"><div class="sum-item" style="border-color:var(--am6);background:#fffbeb"><div class="sum-val" style="color:var(--am6)">{unassigned_count}</div><div class="sum-lbl" style="color:var(--am6)">📬 Posteingang</div></div></a>' if unassigned_count>0 else ''
+
         # i) kein Belege-Betrag in Summary
         summary=f"""<div class="sum-bar sb">
           <div class="sum-item"><div class="sum-val blue">{len(active_t)}</div><div class="sum-lbl">Aktive Reisen</div></div>
           <div class="sum-item"><div class="sum-val">{len(planned_t)}</div><div class="sum-lbl">In Planung</div></div>
           <div class="sum-item"><div class="sum-val green">{len(done_t)}</div><div class="sum-lbl">Abgeschlossen</div></div>
           <div class="sum-item"><div class="sum-val {"red" if open_alerts else ""}">{open_alerts}</div><div class="sum-lbl">Offene Alerts</div></div>
+          {posteingang_badge}
         </div>"""
 
         def active_cards(trips):
@@ -3412,14 +3495,12 @@ async def _dashboard(request: Request, focus: str):
         content=summary+sections+f"""
         <div class="sb">
           <div class="acts">
-            <a class="btn" href="/fetch-mails">📥 Mails jetzt abrufen</a>
-            <a class="btn" href="/analyze-attachments">🔍 KI-Analyse starten</a>
-            <a class="btn" href="/mail-eingabe" style="background:linear-gradient(135deg,#7c3aed,#6d28d9)">📝 Mail manuell eingeben</a>
-            <a class="btn-l" href="/reanalyze-mails" onclick="return confirm('Alle Mail-Bodies nochmal analysieren?')">🔄 Mails re-analysieren</a>
+            <a class="btn" href="/fetch-mails">📥 Mails abrufen</a>
+            <a class="btn" href="/posteingang" style="background:linear-gradient(135deg,#d97706,#b45309)">📬 Posteingang</a>
+            <a class="btn-l" href="/upload-beleg">📎 Beleg hochladen</a>
             <a class="btn-l" href="/attachment-log">Anhang-Log</a>
-            <a class="btn-l" href="/mail-log">Mail-Log</a>
+            <a class="btn-l" href="/mail-log">Mail-Log (alle)</a>
             <a class="btn-l" href="/rules">⚙ Kategorie-Regeln</a>
-            <a class="btn-l" href="/ki-beispiele">🧠 KI-Beispiele</a>
             <a class="btn-l" href="/vma-rates" title="VMA-Sätze prüfen und aktualisieren">📋 VMA-Sätze 2026</a>
             <a class="btn-l" href="/reset-all" style="color:var(--re6)">Reset</a>
             <a class="btn-l" href="/init" style="color:var(--t300)">DB Init</a>
@@ -3498,9 +3579,9 @@ def edit_trip_form(tc: str):
               <div class="fgrp"><label class="flbl">Rückkehr (Datum)</label><input class="finp" type="date" name="return_date" value="{ret_v}"></div>
               <div class="fgrp"><label class="flbl">Uhrzeit Ankunft zu Hause</label><input class="finp" type="time" name="arrival_time_home" value="{ret_t or '18:00'}"></div>
               <div class="fgrp ff">
-                <label class="flbl">Reiseziel(e) / Länder (Freitext)</label>
-                <input class="finp" name="destinations" value="{destinations or ''}" placeholder="z.B. Baku (AZ) → Dubai (AE) → Los Angeles (US/CA)">
-                <div class="hint">Mehrere Länder und Zeitzonen möglich</div>
+                <label class="flbl">Reiseziel(e) / Keywords für Mail-Zuordnung</label>
+                <input class="finp" name="destinations" value="{destinations or ''}" placeholder="z.B. Lyon, Marriott, ECMA">
+                <div class="hint">⚠ Wichtig: Diese Keywords werden genutzt um eingehende Mails automatisch dieser Reise zuzuordnen. Stadtnamen, Hotelnamen, Veranstaltungsnamen eintragen.</div>
               </div>
               <div class="fgrp"><label class="flbl">Hauptland für VMA (ISO)</label><select class="fsel" name="country_code">{cc_opts}</select></div>
               <div class="fgrp"><label class="flbl">Geplante Nächte gesamt</label><input class="finp" type="number" name="nights_planned" value="{nights_p or 0}"></div>
@@ -3576,300 +3657,121 @@ async def analyze_attachments():
         mail_processed=0
         for mid,subj,body,tc in mail_rows:
             try:
-                # HTML → Plaintext wenn Body noch HTML enthält
+                # HTML → Plaintext
                 body_clean = body or ""
-                if body_clean and ("<html" in body_clean.lower() or "<div" in body_clean.lower() or "<td" in body_clean.lower()):
+                if body_clean and ("<html" in body_clean.lower() or "<div" in body_clean.lower()):
                     import html as _html
-                    body_clean = _html.unescape(body_clean)
-                    body_clean = re.sub(r'<style[^>]*>.*?</style>', ' ', body_clean, flags=re.DOTALL|re.IGNORECASE)
-                    body_clean = re.sub(r'<script[^>]*>.*?</script>', ' ', body_clean, flags=re.DOTALL|re.IGNORECASE)
-                    body_clean = re.sub(r'<br\s*/?>', '\n', body_clean, flags=re.IGNORECASE)
-                    body_clean = re.sub(r'<[^>]+>', ' ', body_clean)
-                    body_clean = re.sub(r'[ \t]+', ' ', body_clean)
-                    body_clean = re.sub(r'\n{3,}', '\n\n', body_clean).strip()
-                    cur.execute("UPDATE mail_messages SET body=%s WHERE id=%s", (body_clean[:20000], mid))
+                    t2 = _html.unescape(body_clean)
+                    t2 = re.sub(r'<style[^>]*>.*?</style>', ' ', t2, flags=re.DOTALL|re.IGNORECASE)
+                    t2 = re.sub(r'<script[^>]*>.*?</script>', ' ', t2, flags=re.DOTALL|re.IGNORECASE)
+                    t2 = re.sub(r'<br\s*/?>', '\n', t2, flags=re.IGNORECASE)
+                    t2 = re.sub(r'<[^>]+>', ' ', t2)
+                    t2 = re.sub(r'[ \t]+', ' ', t2)
+                    t2 = re.sub(r'\n{3,}', '\n\n', t2).strip()
+                    body_clean = t2[:20000]
+                    cur.execute("UPDATE mail_messages SET body=%s WHERE id=%s", (body_clean, mid))
 
-                full=f"{subj or ''}\n{body_clean}"
+                full = f"{subj or ''}\n{body_clean}"
 
-                # ── REGEX-PRE-EXTRAKTION (zuverlässiger als KI) ──────────────
+                # ── NEUE ENGINE: Zuordnung via Datum > PNR > Code ──────────
+                trips_for_assign = load_trips_for_assignment()
+                rc, confidence, assign_method = assign_trip_by_date(subj or "", body_clean, trips_for_assign)
+                if not rc: rc = tc or ""
+
+                if rc and rc != tc:
+                    cur.execute("UPDATE mail_messages SET trip_code=%s WHERE id=%s",(rc,mid))
+
+                # ── EXTRAKTION ─────────────────────────────────────────────
+                mail_type   = detect_mail_type(full)
                 regex_fns   = extract_flight_numbers(full)
-                regex_pnr   = extract_pnr(full) or ""
+                regex_pnr   = extract_pnr_safe(full) or ""
                 regex_segs  = extract_flight_segments_from_text(full) if regex_fns else []
                 regex_seg_s = segments_to_string(regex_segs) if regex_segs else ""
-                regex_type  = "Flug" if regex_fns else ""
-                # Reisecode aus Betreff
-                regex_tc    = extract_trip_code(full) or tc or ""
-                # PNR → Reisecode-Lookup
-                if not regex_tc and regex_pnr:
-                    cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(regex_pnr,))
-                    pnr_row=cur.fetchone()
-                    if pnr_row: regex_tc=pnr_row[0]
-                # Mail-Zuordnung aktualisieren wenn Regex mehr weiß als DB
-                if regex_tc and not tc:
-                    cur.execute("UPDATE mail_messages SET trip_code=%s WHERE id=%s AND (trip_code IS NULL OR trip_code='')",(regex_tc,mid))
-                if regex_pnr and regex_tc:
-                    cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(regex_pnr,regex_tc))
-                if regex_fns and regex_tc:
-                    fns_str=",".join(regex_fns)
-                    cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns_str,regex_tc))
-                    print(f"[Regex] {regex_tc}: {fns_str} | PNR:{regex_pnr}")
+                betrag, waehrung = extract_amount_safe(full)
+                eff_type = "Flug" if regex_fns else mail_type
 
-                fields=await mistral_extract(full,known_codes,"mail")
-                if fields:
-                    pnr=fields.get("pnr_code","") or ""
-                    fns=fields.get("flight_numbers","") or ""
-                    trains=fields.get("train_numbers","") or ""
-                    rc=fields.get("reisecode","") or tc or ""
-                    # Wenn kein Reisecode → über PNR in trip_meta suchen
-                    if not rc and pnr:
-                        cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(pnr,))
-                        pnr_row=cur.fetchone()
-                        if pnr_row: rc=pnr_row[0]
-                    # Fallback auf Regex-Ergebnis
-                    if not rc: rc=regex_tc
-                    # Wenn immer noch kein Code → Mail-Betreff nach Reisecode durchsuchen
-                    if not rc:
-                        rc_m=re.search(r'\b(\d{2}-\d{3})\b', subj or "")
-                        if rc_m: rc=rc_m.group(1)
-                    # Mail in DB auf gefundenen Code aktualisieren
-                    if rc and not tc:
-                        cur.execute("UPDATE mail_messages SET trip_code=%s WHERE id=%s AND (trip_code IS NULL OR trip_code='')",(rc,mid))
-                    traveler_ki=fields.get("traveler_name","") or ""
-                    dest_ki=fields.get("destination","") or ""
-                    betrag_ki=fields.get("betrag","") or ""
-                    waehrung_ki=fields.get("waehrung","EUR") or "EUR"
-                    typ_ki=fields.get("beleg_typ","") or ""
-                    datum_ki=fields.get("datum","") or ""
-                    vendor_ki=fields.get("anbieter","") or ""
-                    conf_ki=fields.get("confidence","niedrig") or "niedrig"
-                else:
-                    # Kein Mistral-Ergebnis → Regex-Daten verwenden
-                    pnr=regex_pnr; fns=",".join(regex_fns) if regex_fns else ""; trains=""
-                    rc=regex_tc; conf_ki="mittel"; vendor_ki=""; betrag_ki=""
-                    waehrung_ki="EUR"; typ_ki="Flug" if regex_fns else ""; datum_ki=""
-                    dest_ki=""; traveler_ki=""
-                if not rc and regex_tc: rc=regex_tc
+                # Hotel-Daten
+                checkin = checkout = ""; nights = 0
+                if eff_type == "Hotel":
+                    checkin, checkout = extract_hotel_dates(full)
+                    if checkin and checkout:
+                        try:
+                            from datetime import date as _d2
+                            nights = (_d2.fromisoformat(checkout) - _d2.fromisoformat(checkin)).days
+                        except: pass
 
-                if pnr and rc:
-                    cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr,rc))
-                if fns and rc:
-                    cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns,rc))
-                if trains and rc:
-                    cur.execute("UPDATE trip_meta SET train_numbers=%s WHERE trip_code=%s AND (train_numbers IS NULL OR train_numbers='')",(trains,rc))
-                if traveler_ki and rc:
-                    cur.execute("UPDATE trip_meta SET traveler_name=%s WHERE trip_code=%s AND (traveler_name IS NULL OR traveler_name='')",(traveler_ki,rc))
-                if dest_ki and rc:
-                    cur.execute("UPDATE trip_meta SET destinations=%s WHERE trip_code=%s AND (destinations IS NULL OR destinations='')",(dest_ki,rc))
+                # Vendor
+                vendor = ""
+                for h in ["Marriott","Sheraton","Hilton","Hyatt","Radisson","Intercontinental","Lufthansa","Swiss","FLY AWAY"]:
+                    if h.lower() in full.lower(): vendor=h.strip(); break
 
-                    # Mail-Body als Beleg anlegen:
-                    # - wenn Betrag + Typ erkannt, ODER
-                    # - wenn Flugnummern erkannt (auch ohne Betrag = Itinerary/Reiseangebot)
-                    has_fns = bool(fns or regex_fns)
-                    should_create = (
-                        (betrag_ki and typ_ki and typ_ki not in ("Sonstiges","")) or
-                        (has_fns and rc)
-                    )
-                    if should_create and rc:
-                        # Typ bestimmen wenn nur Flugnummern vorhanden
-                        eff_typ = typ_ki if typ_ki and typ_ki != "Sonstiges" else ("Flug" if has_fns else "")
-                        if not eff_typ: eff_typ = "Flug" if has_fns else typ_ki
-                        cur.execute(
-                            "SELECT id FROM mail_attachments WHERE trip_code=%s AND detected_type=%s "
-                            "AND storage_key LIKE 'mail_body_%%' AND detected_vendor=%s",
-                            (rc, eff_typ, vendor_ki or ""))
-                        if not cur.fetchone():
-                            betrag_eur_ki=""
+                # trip_meta aktualisieren
+                if rc:
+                    cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(rc,))
+                    if regex_pnr: cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(regex_pnr,rc))
+                    if regex_fns: cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(",".join(regex_fns),rc))
+
+                # Beleg erstellen
+                if eff_type in ("Flug","Hotel","Bahn","Taxi","Mietwagen") and rc:
+                    cur.execute("SELECT id FROM mail_attachments WHERE mail_uid=(SELECT mail_uid FROM mail_messages WHERE id=%s LIMIT 1) AND storage_key LIKE 'mail_body_%%'",(mid,))
+                    if not cur.fetchone():
+                        cur.execute("SELECT mail_uid FROM mail_messages WHERE id=%s",(mid,))
+                        muid_row=cur.fetchone()
+                        muid=muid_row[0] if muid_row else f"mail_{mid}"
+                        # EUR-Betrag berechnen
+                        betrag_eur=""
+                        if betrag:
                             try:
-                                val=float(betrag_ki.replace(",","."))
-                                eur,_=await convert_to_eur(val,waehrung_ki)
-                                betrag_eur_ki=f"{eur:.2f}".replace(".",",")
+                                val=float(betrag)
+                                eur_val,_=await convert_to_eur(val,waehrung)
+                                betrag_eur=f"{eur_val:.2f}".replace(".",",")
                             except: pass
-                            cur.execute("SELECT mail_uid FROM mail_messages WHERE id=%s",(mid,))
-                            mur=cur.fetchone()
-                            mail_uid_val=mur[0] if mur else f"mail_{mid}"
-                            safe_name=f"Mail: {(subj or 'Buchungsbestaetigung')[:60]}"
-                            # Segmente: Regex bevorzugen, dann KI
-                            seg_ki      = regex_seg_s or fields.get("flight_segments","") or ""
-                            # Segment-Vollständigkeit prüfen
-                            all_fns_str = fns or (",".join(regex_fns) if regex_fns else "")
-                            if all_fns_str and eff_typ == "Flug":
-                                fn_list=[f.strip() for f in all_fns_str.split(",") if f.strip()]
-                                seg_list=[s.strip() for s in seg_ki.split(";") if s.strip()] if seg_ki else []
-                                seg_fns=[s.split("|")[0].strip() for s in seg_list]
-                                for mfn in [f for f in fn_list if f not in seg_fns]:
-                                    seg_list.append(f"{mfn}|||||")
-                                if seg_list: seg_ki=";".join(seg_list)
-                            checkin_ki  = fields.get("checkin_date","") or ""
-                            checkout_ki = fields.get("checkout_date","") or ""
-                            cin_t_ki    = fields.get("checkin_time","") or ""
-                            cout_t_ki   = fields.get("checkout_time","") or ""
-                            nights_ki   = int(fields.get("nights",0) or 0)
-                            cur.execute(
-                                "INSERT INTO mail_attachments "
-                                "(mail_uid,trip_code,original_filename,saved_filename,content_type,"
-                                " storage_key,detected_type,detected_amount,detected_amount_eur,"
-                                " detected_currency,detected_date,detected_vendor,"
-                                " detected_nights,detected_checkin,detected_checkout,"
-                                " detected_checkin_time,detected_checkout_time,flight_segments,"
-                                " detected_flight_numbers,"
-                                " analysis_status,confidence,review_flag,ki_bemerkung) "
-                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                                (mail_uid_val,rc,safe_name,safe_name,"text/plain",
-                                 f"mail_body_{mid}",eff_typ,betrag_ki or None,betrag_eur_ki or None,
-                                 waehrung_ki,datum_ki,vendor_ki,
-                                 nights_ki,checkin_ki or None,checkout_ki or None,
-                                 cin_t_ki or None,cout_t_ki or None,seg_ki or None,
-                                 all_fns_str or None,
-                                 "ok (Mail-Body)",conf_ki,
-                                 "ok" if conf_ki=="hoch" else "pruefen",
-                                 f"Aus Mail-Text: {subj or ''}"))
-                            # Neue ID holen und sofort PDF generieren
-                            cur.execute("SELECT lastval()")
-                            new_att_id = cur.fetchone()[0]
-                            if HAS_PDF_LIBS():
-                                pdf_key = await generate_and_store_mail_pdf(
-                                    new_att_id, subj, body,
-                                    typ_ki, vendor_ki, betrag_ki,
-                                    datum_ki, rc, conn)
-                                if pdf_key:
-                                    cur.execute("UPDATE mail_attachments SET pdf_key=%s WHERE id=%s",
-                                        (pdf_key, new_att_id))
+                        cur.execute("""INSERT INTO mail_attachments
+                            (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                             storage_key,detected_type,detected_amount,detected_amount_eur,
+                             detected_currency,detected_vendor,
+                             detected_checkin,detected_checkout,detected_nights,
+                             detected_flight_numbers,flight_segments,
+                             analysis_status,confidence,review_flag,ki_bemerkung)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (muid,rc,f"Mail: {(subj or '')[:60]}",f"Mail: {(subj or '')[:60]}",
+                             "text/plain",f"mail_body_{mid}",eff_type,
+                             betrag or None,betrag_eur or None,waehrung,vendor or None,
+                             checkin or None,checkout or None,nights or None,
+                             ",".join(regex_fns) if regex_fns else None,
+                             regex_seg_s or None,
+                             "ok (Mail-Body)","hoch" if confidence>=95 else "mittel",
+                             "ok","Zuordnung: "+assign_method+f" [{confidence}%]"))
 
-                            # VMA aus Hotel-Ort berechnen
-                            if eff_typ == "Hotel" and rc and vendor_ki:
-                                hotel_cc = hotel_city_to_cc(vendor_ki)
-                                if not hotel_cc and dest_ki:
-                                    hotel_cc = hotel_city_to_cc(dest_ki)
-                                if hotel_cc and hotel_cc != "DE":
-                                    cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(rc,))
-                                    htr=cur.fetchone()
-                                    if htr and htr[0]:
-                                        try:
-                                            dep_hd=htr[0]; ret_hd=htr[1]
-                                            ci_d=date.fromisoformat(checkin_ki) if checkin_ki else (dep_hd+timedelta(days=1))
-                                            co_d=date.fromisoformat(checkout_ki) if checkout_ki else (ret_hd or ci_d)
-                                            parts=[f"{dep_hd}:DE"]
-                                            if ci_d>dep_hd: parts.append(f"{ci_d}:{hotel_cc}")
-                                            if co_d>ci_d: parts.append(f"{co_d}:DE")
-                                            vma_str=",".join(parts)
-                                            cur.execute("UPDATE trip_meta SET vma_destinations=%s,country_code=%s WHERE trip_code=%s AND (vma_destinations IS NULL OR vma_destinations='')",(vma_str,hotel_cc,rc))
-                                            if cur.rowcount: print(f"[VMA Hotel] {rc}: {vma_str}")
-                                        except Exception as ve: print(f"[VMA Hotel Fehler]: {ve}")
-                    # Quellen: flight_segments (Flughafen→Land), checkin/checkout, dest_ki
-                    if rc:
-                        cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(rc,))
-                        trip_row=cur.fetchone()
-                        if trip_row and trip_row[0] and not trip_row[2]:
-                            dep_d_str=str(trip_row[0])
-                            ret_d_str=str(trip_row[1]) if trip_row[1] else ""
-
-                            # Flughafen → Ländercode
-                            # AIRPORT_CC = globale Konstante (oben definiert)
-                            # Zielland aus flight_segments ableiten
-                            # Format: FN|DEP|ARR|DATE|TIME|DATE|TIME;...
-                            dest_cc_from_seg = None
-                            dep_date_in_dest = None  # wann man ankommt
-                            arr_date_back    = None  # wann man zurückfliegt
-                            seg_ki_vma = fields.get("flight_segments","") or seg_ki or ""
-                            if seg_ki_vma:
-                                segs = [s.strip().split("|") for s in seg_ki_vma.split(";") if s.strip()]
-                                # Hinflug: erstes Segment dessen Ankunftsflughafen nicht DE ist
-                                for seg in segs:
-                                    if len(seg) >= 3:
-                                        arr_apt = seg[2].strip().upper()
-                                        cc = AIRPORT_CC.get(arr_apt)
-                                        if cc and cc != "DE":
-                                            dest_cc_from_seg = cc
-                                            # Ankunftsdatum
-                                            if len(seg) >= 6 and seg[5].strip():
-                                                try:
-                                                    p=seg[5].strip().split(".")
-                                                    if len(p)==3:
-                                                        dep_date_in_dest = date(int(p[2]),int(p[1]),int(p[0]))
-                                                except: pass
-                                            if not dep_date_in_dest and len(seg) >= 4 and seg[3].strip():
-                                                try:
-                                                    p=seg[3].strip().split(".")
-                                                    if len(p)==3:
-                                                        dep_date_in_dest = date(int(p[2]),int(p[1]),int(p[0]))
-                                                except: pass
-                                            break
-                                # Rückflug: letztes Segment dessen Abflughafen nicht DE ist
-                                for seg in reversed(segs):
-                                    if len(seg) >= 2:
-                                        dep_apt = seg[1].strip().upper()
-                                        cc = AIRPORT_CC.get(dep_apt)
-                                        if cc and cc != "DE":
-                                            if len(seg) >= 4 and seg[3].strip():
-                                                try:
-                                                    p=seg[3].strip().split(".")
-                                                    if len(p)==3:
-                                                        arr_date_back = date(int(p[2]),int(p[1]),int(p[0]))
-                                                except: pass
-                                            break
-
-                            # Fallback: Zielland aus dest_ki Text
-                            if not dest_cc_from_seg and dest_ki:
-                                DEST_CC_MAP={
-                                    "frankreich":"FR","france":"FR","paris":"FR","lyon":"FR","nizza":"FR","marseille":"FR",
-                                    "indien":"IN","india":"IN","mumbai":"IN","delhi":"IN","bangalore":"IN",
-                                    "dubai":"AE","abu dhabi":"AE","uae":"AE","emirate":"AE",
-                                    "usa":"US","new york":"US","los angeles":"US","chicago":"US",
-                                    "grossbritannien":"GB","uk":"GB","london":"GB","england":"GB",
-                                    "schweiz":"CH","zuerich":"CH","genf":"CH",
-                                    "oesterreich":"AT","wien":"AT","salzburg":"AT",
-                                    "italien":"IT","rom":"IT","mailand":"IT","venedig":"IT",
-                                    "spanien":"ES","barcelona":"ES","madrid":"ES",
-                                    "tuerkei":"TR","istanbul":"TR","ankara":"TR",
-                                    "japan":"JP","tokio":"JP","osaka":"JP",
-                                    "singapur":"SG","singapore":"SG",
-                                    "china":"CN","peking":"CN","shanghai":"CN",
-                                    "katar":"QA","doha":"QA","saudi":"SA",
-                                    "niederlande":"NL","amsterdam":"NL",
-                                    "belgien":"BE","bruessel":"BE",
-                                    "portugal":"PT","lissabon":"PT",
-                                    "norwegen":"NO","schweden":"SE","daenemark":"DK","finnland":"FI",
-                                }
-                                dest_low = dest_ki.lower()
-                                for key,cc in DEST_CC_MAP.items():
-                                    if key in dest_low:
-                                        dest_cc_from_seg = cc; break
-
-                            # VMA-String aufbauen wenn Zielland != DE gefunden
-                            if dest_cc_from_seg and dest_cc_from_seg != "DE":
-                                try:
-                                    dep_d = date.fromisoformat(dep_d_str)
-                                    ret_d = date.fromisoformat(ret_d_str) if ret_d_str else None
-
-                                    # Tag des Eintreffens im Zielland
-                                    arrive_foreign = dep_date_in_dest or (dep_d + timedelta(days=1))
-                                    # Tag der Rückreise
-                                    leave_foreign  = arr_date_back or ret_d or (arrive_foreign + timedelta(days=1))
-
-                                    vma_parts = [f"{dep_d_str}:DE"]
-                                    if arrive_foreign > dep_d:
-                                        vma_parts.append(f"{arrive_foreign}:{dest_cc_from_seg}")
-                                    if leave_foreign and leave_foreign > arrive_foreign:
-                                        vma_parts.append(f"{leave_foreign}:DE")
-
-                                    vma_auto = ",".join(vma_parts)
-                                    cur.execute(
-                                        "UPDATE trip_meta SET vma_destinations=%s "
-                                        "WHERE trip_code=%s AND (vma_destinations IS NULL OR vma_destinations='')",
-                                        (vma_auto, rc))
-                                    print(f"[VMA] {rc}: {vma_auto}")
-                                except Exception as vma_e:
-                                    print(f"[VMA Fehler]: {vma_e}")
+                        # VMA aus Hotel-Ort
+                        if eff_type=="Hotel" and rc and checkin:
+                            hcc=hotel_city_to_cc(vendor) or hotel_city_to_cc(full[:1000])
+                            if hcc and hcc!="DE":
+                                cur.execute("SELECT departure_date,return_date FROM trip_meta WHERE trip_code=%s",(rc,))
+                                tr=cur.fetchone()
+                                if tr and tr[0]:
+                                    try:
+                                        from datetime import date as _d3,timedelta as _td3
+                                        dep3=tr[0]; ret3=tr[1]
+                                        ci3=_d3.fromisoformat(checkin)
+                                        co3=_d3.fromisoformat(checkout) if checkout else ret3
+                                        parts3=[f"{dep3}:DE"]
+                                        if ci3>dep3: parts3.append(f"{ci3}:{hcc}")
+                                        if co3 and co3>ci3: parts3.append(f"{co3}:DE")
+                                        cur.execute("UPDATE trip_meta SET vma_destinations=%s WHERE trip_code=%s AND (vma_destinations IS NULL OR vma_destinations='')",(",".join(parts3),rc))
+                                    except: pass
 
                 cur.execute("UPDATE mail_messages SET analysis_status='ok' WHERE id=%s",(mid,))
-                mail_processed+=1
-            except Exception as mail_err:
-                import traceback as _tb
-                print(f"[Mail-Analyse ID={mid}]: {_tb.format_exc()[:400]}")
-                try: cur.execute("UPDATE mail_messages SET analysis_status='fehler' WHERE id=%s",(mid,))
-                except: pass
+                conn.commit()
+                mail_processed += 1
+                print(f"[Analyse] Mail {mid}: {eff_type} → {rc} [{confidence}%] {assign_method}")
 
-        conn.commit()
+            except Exception as mail_ex:
+                print(f"[Analyse Fehler] Mail {mid}: {mail_ex}")
+                try: conn.rollback()
+                except: pass
+                continue
+
 
         # Anhänge analysieren – ausstehende, aber keine Inline-Bilder/ICS
         cur.execute("""SELECT id,storage_key,original_filename FROM mail_attachments
@@ -3988,47 +3890,183 @@ def attachment_log():
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
 
+@app.get("/posteingang", response_class=HTMLResponse)
+def posteingang():
+    """
+    Posteingang: Alle nicht zugeordneten Mails mit ausgelesenen Daten.
+    Klarer Workflow: Daten anzeigen → Reise zuordnen → fertig.
+    """
+    try:
+        conn=get_conn();cur=conn.cursor()
+
+        # Unzugeordnete Mails + ihre Belege
+        cur.execute("""
+            SELECT m.id, m.sender, m.subject, m.created_at,
+                   a.detected_type, a.detected_amount, a.detected_amount_eur,
+                   a.detected_currency, a.detected_vendor,
+                   a.detected_checkin, a.detected_checkout,
+                   a.detected_flight_numbers, a.ki_bemerkung, a.id as att_id
+            FROM mail_messages m
+            LEFT JOIN mail_attachments a ON a.mail_uid=m.mail_uid
+                AND a.storage_key LIKE 'mail_body_%'
+            WHERE (m.trip_code IS NULL OR m.trip_code='')
+            ORDER BY m.id DESC LIMIT 50""")
+        rows=cur.fetchall()
+
+        # Reisen für Dropdown
+        cur.execute("SELECT trip_code,trip_title,traveler_name,departure_date FROM trip_meta ORDER BY departure_date DESC LIMIT 30")
+        trips=cur.fetchall()
+        cur.close();conn.close()
+
+        def make_trip_opts():
+            opts="<option value=''>– Reise wählen –</option>"
+            for tc,tt,tn,td in trips:
+                label=f"{tc} · {tt or ''} · {tn or ''} · {str(td)[:10] if td else ''}"
+                opts+=f"<option value='{tc}'>{label}</option>"
+            return opts
+
+        trip_opts=make_trip_opts()
+
+        if not rows:
+            return page_shell("Posteingang","""
+            <div class="page-card" style="max-width:900px">
+              <h2>📬 Posteingang</h2>
+              <div class="empty" style="margin-top:20px">
+                ✓ Keine unzugeordneten Mails – alles erledigt!
+              </div>
+              <div class="acts" style="margin-top:16px">
+                <a class="btn-l" href="/">← Dashboard</a>
+                <a class="btn" href="/fetch-mails">📥 Mails abrufen</a>
+              </div>
+            </div>""")
+
+        cards=""
+        for r in rows:
+            mail_id,sender,subject,created,dtype,amt,amt_eur,curr,vendor,checkin,checkout,fns,bemerk,att_id=r
+
+            # Ausgelesene Daten anzeigen
+            data_rows=""
+            if dtype: data_rows+=f"<tr><td style='color:var(--t300);font-size:11px'>Typ</td><td><span class='bdg {'bdg-ok' if dtype in ('Hotel','Flug') else 'bdg-w'}'>{dtype}</span></td></tr>"
+            if vendor: data_rows+=f"<tr><td style='color:var(--t300);font-size:11px'>Anbieter</td><td><b>{vendor}</b></td></tr>"
+            if amt_eur: data_rows+=f"<tr><td style='color:var(--t300);font-size:11px'>Betrag</td><td><b style='color:var(--gr6)'>{amt_eur} €</b> ({amt} {curr or ''})</td></tr>"
+            if checkin: data_rows+=f"<tr><td style='color:var(--t300);font-size:11px'>Check-in</td><td>{checkin}</td></tr>"
+            if checkout: data_rows+=f"<tr><td style='color:var(--t300);font-size:11px'>Check-out</td><td>{checkout}</td></tr>"
+            if fns: data_rows+=f"<tr><td style='color:var(--t300);font-size:11px'>Flüge</td><td style='font-family:DM Mono,monospace;color:var(--b600)'>{fns}</td></tr>"
+            if not data_rows:
+                data_rows=f"<tr><td colspan='2' style='color:var(--t300);font-size:11px'>Noch nicht analysiert – nach Zuordnung wird analysiert</td></tr>"
+
+            cards+=f"""
+            <div style="background:white;border:1px solid var(--bd);border-radius:var(--r);padding:20px;margin-bottom:12px;box-shadow:var(--sh-sm)">
+              <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:12px">
+                <div style="font-size:24px">{'🏨' if dtype=='Hotel' else '✈' if dtype=='Flug' else '📧'}</div>
+                <div style="flex:1">
+                  <div style="font-weight:600;font-size:14px">{subject or '(kein Betreff)'}</div>
+                  <div style="font-size:11px;color:var(--t300);margin-top:2px">{sender or ''} · {str(created or '')[:16]}</div>
+                </div>
+                <a href="/mail-detail/{mail_id}" style="font-size:11px;color:var(--b600);text-decoration:none;white-space:nowrap">📄 Mail ansehen</a>
+              </div>
+              {'<table style="margin-bottom:12px;width:auto">'+data_rows+'</table>' if data_rows else ''}
+              <form method="post" action="/mail-assign/{mail_id}" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <select name="trip_code" style="flex:1;min-width:200px;padding:8px 12px;border:1.5px solid var(--b300);border-radius:var(--rs);font-size:13px;background:var(--b50)">
+                  {trip_opts}
+                </select>
+                <button type="submit" class="btn" style="white-space:nowrap">✓ Dieser Reise zuordnen</button>
+              </form>
+            </div>"""
+
+        return page_shell("Posteingang",f"""
+        <div class="page-card" style="max-width:900px">
+          <h2>📬 Posteingang <span style="font-size:14px;font-weight:normal;color:var(--am6)">({len(rows)} nicht zugeordnet)</span></h2>
+          <p style="color:var(--t500);font-size:12px;margin-bottom:20px">
+            Diese Mails wurden bereits analysiert. Bitte jeder Mail die richtige Reise zuordnen.
+          </p>
+          <div class="acts" style="margin-bottom:20px">
+            <a class="btn-l" href="/">← Dashboard</a>
+            <a class="btn" href="/fetch-mails">📥 Neue Mails abrufen</a>
+          </div>
+          {cards}
+        </div>""")
+    except Exception as e:
+        import traceback
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p><pre style="font-size:10px">{traceback.format_exc()[:300]}</pre></div>')
+
+
 @app.get("/mail-log", response_class=HTMLResponse)
 def mail_log():
     try:
         conn=get_conn();cur=conn.cursor()
         cur.execute("""SELECT id,sender,subject,trip_code,detected_type,pnr_code,
-            analysis_status,created_at,LENGTH(body) FROM mail_messages ORDER BY id DESC LIMIT 100""")
+            analysis_status,created_at,LENGTH(body) FROM mail_messages ORDER BY
+            CASE WHEN trip_code IS NULL OR trip_code='' THEN 0 ELSE 1 END,
+            id DESC LIMIT 100""")
         rows=cur.fetchall()
-        cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code DESC LIMIT 30")
-        all_codes=[r[0] for r in cur.fetchall()]
+        cur.execute("SELECT trip_code,trip_title FROM trip_meta ORDER BY trip_code DESC LIMIT 30")
+        all_trips=cur.fetchall()
         cur.close();conn.close()
-        code_opts="<option value=''>– zuordnen –</option>"+"".join(f"<option>{c}</option>" for c in all_codes)
-        html="".join(f"""<tr>
+
+        unassigned=[r for r in rows if not r[3]]
+        assigned=[r for r in rows if r[3]]
+
+        def make_opts(current_code):
+            opts="<option value=''>– Reise wählen –</option>"
+            for tc,tt in all_trips:
+                sel=" selected" if tc==current_code else ""
+                label=f"{tc} · {tt[:20]}" if tt else tc
+                opts+=f"<option value='{tc}'{sel}>{label}</option>"
+            return opts
+
+        def make_row(r, highlight=False):
+            bg="background:#fffbeb;" if highlight else ""
+            icon="⚠ " if highlight else ""
+            return f"""<tr style="{bg}">
             <td style="font-size:11px;color:var(--t300)">{str(r[7] or '')[:16]}</td>
-            <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">{r[1] or ''}</td>
-            <td><a href="/mail-detail/{r[0]}" style="color:var(--b600);text-decoration:none;font-weight:500">{(r[2] or '–')[:50]}</a></td>
-            <td class="cc">{r[3] or '<span style="color:var(--am6)">–</span>'}</td>
-            <td>{r[4] or ''}</td>
-            <td style="font-family:'DM Mono',monospace;color:var(--gr6)">{r[5] or ''}</td>
-            <td style="font-size:11px">{r[8] or 0} B</td>
-            <td><span class="bdg {"bdg-ok" if r[6]=="ok" else "bdg-w"}">{r[6] or 'ausstehend'}</span></td>
+            <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">{r[1] or ''}</td>
+            <td><a href="/mail-detail/{r[0]}" style="color:var(--b600);text-decoration:none;font-weight:500">{icon}{(r[2] or '–')[:50]}</a></td>
+            <td style="font-family:DM Mono,monospace;font-weight:600;color:{'var(--am6)' if not r[3] else 'var(--b700)'}">{r[3] or '–'}</td>
+            <td><span class="bdg {'bdg-ok' if r[4] in ('Hotel','Flug') else 'bdg-w'}">{r[4] or '?'}</span></td>
+            <td style="font-family:DM Mono,monospace;font-size:11px;color:var(--gr6)">{r[5] or ''}</td>
             <td>
-              <form method="post" action="/mail-assign/{r[0]}" style="display:flex;gap:4px">
-                <select name="trip_code" style="font-size:11px;padding:2px 4px;border:1px solid var(--bd);border-radius:4px">
-                  {code_opts.replace(f'<option>{r[3]}</option>',f'<option selected>{r[3]}</option>') if r[3] else code_opts}
+              <form method="post" action="/mail-assign/{r[0]}" style="display:flex;gap:4px;align-items:center">
+                <select name="trip_code" style="font-size:11px;padding:2px 6px;border:1px solid {'var(--am6)' if not r[3] else 'var(--bd)'};border-radius:4px;background:{'#fffbeb' if not r[3] else 'white'}">
+                  {make_opts(r[3])}
                 </select>
-                <button type="submit" style="font-size:11px;padding:2px 8px;background:var(--b600);color:white;border:none;border-radius:4px;cursor:pointer">✓</button>
+                <button type="submit" style="font-size:11px;padding:3px 10px;background:var(--b600);color:white;border:none;border-radius:4px;cursor:pointer;white-space:nowrap">✓ Zuordnen</button>
               </form>
-            </td>
-            </tr>""" for r in rows)
+            </td></tr>"""
+
+        unassigned_html = "".join(make_row(r, highlight=True) for r in unassigned)
+        assigned_html = "".join(make_row(r) for r in assigned)
+
+        unassigned_banner = ""
+        if unassigned:
+            unassigned_banner = f"""
+            <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:12px 16px;margin-bottom:16px">
+              <b style="color:#92400e">⚠ {len(unassigned)} Mail{'s' if len(unassigned)>1 else ''} nicht zugeordnet</b>
+              <p style="color:#78350f;font-size:12px;margin-top:4px">
+                Diese Mails konnten keiner Reise zugeordnet werden.<br>
+                <b>Tipp:</b> Beim Weiterleiten von Mails einfach <code>26-001</code> in den Betreff schreiben – dann wird automatisch zugeordnet.
+              </p>
+            </div>"""
+
         return page_shell("Mail-Log",f"""
-        <div class="page-card" style="max-width:1200px"><h2>Mail-Log ({len(rows)} Einträge)</h2>
-          <div class="acts">
-            <a class="btn-l" href="/">Zurück</a>
-            <a class="btn" href="/analyze-attachments">KI-Analyse</a>
-            <a class="btn-l" href="/reanalyze-mails" onclick="return confirm('Mails zurücksetzen?')">🔄 Reset+Reanalyse</a>
+        <div class="page-card" style="max-width:1100px">
+          <h2>📬 Mail-Log ({len(rows)} Einträge)</h2>
+          <div class="acts" style="margin-bottom:16px">
+            <a class="btn-l" href="/">← Dashboard</a>
+            <a class="btn" href="/fetch-mails">📥 Mails abrufen</a>
+            <a class="btn" href="/analyze-attachments">🔍 KI-Analyse</a>
           </div>
-          <p class="sub" style="margin-bottom:8px">Mails ohne Code (orange –) können hier manuell einer Reise zugeordnet werden.</p>
+          {unassigned_banner}
           <div style="overflow-x:auto"><table>
-            <tr><th>Zeit</th><th>Von</th><th>Betreff</th><th>Code</th><th>Typ</th><th>PNR</th><th>Größe</th><th>Status</th><th>Zuordnen</th></tr>
-            {html or '<tr><td colspan="9">Keine Mails</td></tr>'}
+            <tr><th>Zeit</th><th>Von</th><th>Betreff</th><th>Reise</th><th>Typ</th><th>PNR</th><th>Zuordnen</th></tr>
+            {unassigned_html}
+            {assigned_html or '<tr><td colspan="7" style="color:var(--t300);text-align:center;padding:16px">Keine weiteren Mails</td></tr>'}
           </table></div>
+          <div style="margin-top:16px;padding:12px;background:var(--b50);border-radius:8px;font-size:12px;color:var(--t500)">
+            <b>Automatische Zuordnung funktioniert wenn:</b><br>
+            1. Reisecode <code>26-001</code> im Betreff oder Body steht<br>
+            2. PNR-Code (<code>83WPJT</code>) in der Mail steht UND in der Reise hinterlegt ist
+          </div>
         </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
@@ -4036,20 +4074,75 @@ def mail_log():
 
 @app.post("/mail-assign/{mail_id}")
 async def mail_assign(mail_id: int, request: Request):
-    """Weist einer Mail manuell einen Reisecode zu und setzt Status auf ausstehend."""
+    """Weist Mail einer Reise zu und erstellt sofort einen Beleg."""
     try:
         form=await request.form()
         tc=(form.get("trip_code") or "").strip()
         if not tc:
             return RedirectResponse(url="/mail-log",status_code=303)
         conn=get_conn();cur=conn.cursor()
+
+        # Mail zuordnen
         cur.execute("UPDATE mail_messages SET trip_code=%s, analysis_status='ausstehend' WHERE id=%s",(tc,mail_id))
-        # Auch zugehörige Attachments zuordnen
-        cur.execute("SELECT mail_uid FROM mail_messages WHERE id=%s",(mail_id,))
+        cur.execute("SELECT mail_uid,subject,body FROM mail_messages WHERE id=%s",(mail_id,))
         row=cur.fetchone()
-        if row:
-            cur.execute("UPDATE mail_attachments SET trip_code=%s WHERE mail_uid=%s AND (trip_code IS NULL OR trip_code='')",(tc,row[0]))
+        if not row:
+            conn.commit();cur.close();conn.close()
+            return RedirectResponse(url="/mail-log",status_code=303)
+
+        mail_uid, subject, body = row
+
+        # Attachments zuordnen
+        cur.execute("UPDATE mail_attachments SET trip_code=%s WHERE mail_uid=%s AND (trip_code IS NULL OR trip_code='')",(tc,mail_uid))
         cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(tc,))
+
+        # Sofort Beleg erstellen wenn noch keiner vorhanden
+        cur.execute("SELECT id FROM mail_attachments WHERE mail_uid=%s AND storage_key LIKE 'mail_body_%'",(mail_uid,))
+        if not cur.fetchone():
+            full = f"{subject or ''}\n{body or ''}"
+            mail_type = detect_mail_type(full)
+            if mail_type in ("Hotel","Flug","Bahn","Mietwagen"):
+                betrag, waehrung = extract_amount_safe(full)
+                checkin, checkout = extract_hotel_dates(full) if mail_type=="Hotel" else ("","")
+                nights=0
+                if checkin and checkout:
+                    try:
+                        from datetime import date as _dt3
+                        nights=(_dt3.fromisoformat(checkout)-_dt3.fromisoformat(checkin)).days
+                    except: pass
+                regex_fns = extract_flight_numbers(full)
+                seg_s = segments_to_string(extract_flight_segments_from_text(full)) if regex_fns else ""
+                vendor=""
+                for v in ["Marriott","Sheraton","Hilton","Hyatt","Radisson","Intercontinental",
+                          "Lufthansa","Swiss","Austrian","Air France","KLM","Edelweiss","FLY AWAY"]:
+                    if v.lower() in full.lower(): vendor=v; break
+                betrag_eur=""
+                if betrag:
+                    try:
+                        val=float(betrag)
+                        rates={"USD":0.92,"CHF":1.03,"GBP":1.17}
+                        eur=val*rates.get(waehrung,1.0)
+                        betrag_eur=f"{eur:.2f}".replace(".",",")
+                    except: pass
+                cur.execute("""INSERT INTO mail_attachments
+                    (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                     storage_key,detected_type,detected_amount,detected_amount_eur,detected_currency,
+                     detected_vendor,detected_checkin,detected_checkout,detected_nights,
+                     detected_flight_numbers,flight_segments,
+                     analysis_status,confidence,review_flag,ki_bemerkung)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (mail_uid,tc,f"Mail: {(subject or '')[:60]}",f"Mail: {(subject or '')[:60]}",
+                     "text/plain",f"mail_body_{mail_uid}",mail_type,
+                     betrag or None,betrag_eur or None,waehrung,vendor or None,
+                     checkin or None,checkout or None,nights or None,
+                     ",".join(regex_fns) if regex_fns else None, seg_s or None,
+                     "ok (Mail-Body)","hoch" if (betrag and vendor) else "mittel",
+                     "ok" if (betrag and vendor) else "pruefen",
+                     f"Manuell zugeordnet: {vendor or mail_type}"))
+                if regex_fns:
+                    cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(",".join(regex_fns),tc))
+
+        cur.execute("UPDATE mail_messages SET analysis_status='ok', trip_code=%s WHERE id=%s",(tc,mail_id))
         conn.commit();cur.close();conn.close()
         return RedirectResponse(url="/mail-log",status_code=303)
     except Exception as e:
