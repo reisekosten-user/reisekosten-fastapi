@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.39.1"
+APP_VERSION = "9.40"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIL-ANALYSE ENGINE v2 – Datum-basierte Zuordnung, kein Raten
@@ -2852,6 +2852,88 @@ def debug_trip(tc: str):
         }
     except Exception as e:
         return {"error":str(e)}
+
+@app.get("/reanalyze-beleg/{att_id}")
+async def reanalyze_beleg(att_id: int):
+    """Analysiert einen Beleg neu – holt PDF von S3 und liest es mit pypdf."""
+    try:
+        conn=get_conn();cur=conn.cursor()
+        cur.execute("SELECT storage_key,original_filename,trip_code FROM mail_attachments WHERE id=%s",(att_id,))
+        row=cur.fetchone()
+        if not row: return {"status":"fehler","detail":"Beleg nicht gefunden"}
+        skey,fname,tc=row
+        if not skey or skey.startswith("S3-FEHLER"):
+            return {"status":"fehler","detail":"Kein S3-Key"}
+
+        # PDF von S3 laden
+        s3=get_s3()
+        obj=s3.get_object(Bucket=S3_BUCKET,Key=skey)
+        pdf_bytes=obj["Body"].read()
+
+        # pypdf lesen
+        import pypdf as _pypdf
+        reader=_pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        ocr_text="\n".join(page.extract_text() or "" for page in reader.pages)
+        print(f"[Reanalyze] {fname}: {len(ocr_text)} Zeichen")
+
+        if not ocr_text.strip():
+            return {"status":"fehler","detail":"pypdf liefert keinen Text (gescanntes PDF?)"}
+
+        # Regex-Extraktion
+        regex_fns=extract_flight_numbers(ocr_text)
+        regex_segs=extract_flight_segments_from_text(ocr_text) if regex_fns else []
+        seg_s=segments_to_string(regex_segs) if regex_segs else ""
+        regex_pnr=extract_pnr_safe(ocr_text) or ""
+        betrag,waehrung=extract_amount_safe(ocr_text)
+        checkin,checkout=extract_hotel_dates(ocr_text)
+        nights=0
+        if checkin and checkout:
+            try:
+                from datetime import date as _dt
+                nights=(_dt.fromisoformat(checkout)-_dt.fromisoformat(checkin)).days
+            except: pass
+        vendor=""
+        for v in ["Marriott","Sheraton","Hilton","Hyatt","Lufthansa","Swiss","FLY AWAY","Edelweiss"]:
+            if v.lower() in ocr_text.lower(): vendor=v; break
+        mail_type="Flug" if regex_fns else ("Hotel" if checkin else "Sonstiges")
+
+        betrag_eur=""
+        if betrag:
+            try:
+                val=float(betrag)
+                rates={"USD":0.92,"CHF":1.03,"GBP":1.17}
+                betrag_eur=f"{val*rates.get(waehrung,1.0):.2f}".replace(".",",")
+            except: pass
+
+        # Reisecode aus PNR
+        if not tc and regex_pnr:
+            cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(regex_pnr,))
+            r=cur.fetchone()
+            if r: tc=r[0]
+
+        cur.execute("""UPDATE mail_attachments SET
+            detected_type=%s,detected_amount=%s,detected_amount_eur=%s,detected_currency=%s,
+            detected_vendor=%s,detected_checkin=%s,detected_checkout=%s,detected_nights=%s,
+            detected_flight_numbers=%s,flight_segments=%s,pnr_code=%s,
+            extracted_text=%s,analysis_status=%s,confidence=%s,review_flag=%s,trip_code=%s
+            WHERE id=%s""",
+            (mail_type,betrag or None,betrag_eur or None,waehrung,vendor or None,
+             checkin or None,checkout or None,nights or None,
+             ",".join(regex_fns) if regex_fns else None,seg_s or None,regex_pnr or None,
+             ocr_text[:10000],"ok","hoch","ok",tc or None,att_id))
+
+        if tc and regex_fns:
+            cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(",".join(regex_fns),tc))
+        if tc and regex_pnr:
+            cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(regex_pnr,tc))
+
+        conn.commit();cur.close();conn.close()
+        return {"status":"ok","typ":mail_type,"vendor":vendor,"betrag":f"{betrag} {waehrung}",
+                "fns":",".join(regex_fns),"segmente":seg_s[:100],"pnr":regex_pnr,
+                "zeichen":len(ocr_text),"reise":tc}
+    except Exception as e:
+        import traceback
+        return {"status":"fehler","detail":str(e),"trace":traceback.format_exc()[:500]}
 
 @app.get("/fix-trips")
 def fix_trips():
@@ -6263,28 +6345,22 @@ async def upload_beleg(
         # ── SOFORT ANALYSIEREN ─────────────────────────────────────────────
         ocr_text=""
         fields={}
-        # Immer aus file_bytes lesen – unabhängig von S3
         if ext == "pdf":
+            # Schritt 1: pypdf direkt (schnell, zuverlässig, kostenlos)
             try:
                 import pypdf as _pypdf
                 reader = _pypdf.PdfReader(io.BytesIO(file_bytes))
                 ocr_text = "\n".join(page.extract_text() or "" for page in reader.pages)
-                if not ocr_text.strip():
-                    ocr_text = await mistral_ocr(file_bytes, safe_fn)
-            except Exception:
+                print(f"[PDF] pypdf: {len(ocr_text)} Zeichen aus {safe_fn}")
+            except Exception as pe:
+                print(f"[PDF] pypdf Fehler: {pe}")
+                ocr_text = ""
+            # Schritt 2: Nur wenn pypdf nichts liefert → Mistral OCR (gescannte PDFs)
+            if not ocr_text.strip():
+                print(f"[PDF] pypdf leer → Mistral OCR Fallback")
                 ocr_text = await mistral_ocr(file_bytes, safe_fn)
         else:
             ocr_text = await mistral_ocr(file_bytes, safe_fn)
-
-        # Fallback: wenn OCR leer/Fehler → nochmal pypdf direkt versuchen
-        if (not ocr_text or ocr_text.startswith(("ERROR","KEIN","OCR_","NICHT"))) and ext=="pdf":
-            try:
-                import pypdf as _pypdf2
-                reader2=_pypdf2.PdfReader(io.BytesIO(file_bytes))
-                ocr_text="\n".join(p.extract_text() or "" for p in reader2.pages)
-                print(f"[PDF Fallback] {safe_fn}: {len(ocr_text)} Zeichen")
-            except Exception as pe2:
-                print(f"[PDF Fallback Fehler]: {pe2}")
 
         if True:  # Immer analysieren
             if ocr_text and not ocr_text.startswith(("ERROR","KEIN","OCR_","NICHT")):
