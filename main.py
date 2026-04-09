@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.40"
+APP_VERSION = "9.41"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIL-ANALYSE ENGINE v2 – Datum-basierte Zuordnung, kein Raten
@@ -563,62 +563,9 @@ if not _os.path.exists("static"):
     _os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-@app.on_event("startup")
-async def seed_ki_examples():
-    """Seed-Beispiele beim Start einfügen wenn Tabelle leer ist."""
-    try:
-        conn=get_conn();cur=conn.cursor()
-        cur.execute("""CREATE TABLE IF NOT EXISTS ki_examples (
-            id SERIAL PRIMARY KEY, mail_type TEXT, input_text TEXT,
-            expected_json TEXT, description TEXT, approved BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT now())""")
-        cur.execute("SELECT COUNT(*) FROM ki_examples")
-        count=cur.fetchone()[0]
-        if count == 0:
-            import json as _json
-            # Seed 1: FLY AWAY Itinerary Format
-            seed_input = """Reiseangebot Buchungsreferenz: Z6INOT
-Datum City Flug von/bis Klasse
-25 Mai Frankfurt - Zurich LX 3613 06:35 - 07:30 Business
-25 Mai Zurich - San Jose LX 8038 09:00 - 12:55 Business
-29 Mai San Jose - Zurich LH 4515 15:55 - 10:55 (+1) Business
-30 Mai Zurich - Frankfurt LH 5739 12:50 - 13:55 Business
-Ticketnummer LH 220-2979545073"""
-            seed_output = _json.dumps({
-                "beleg_typ": "Flug",
-                "anbieter": "Swiss/Lufthansa",
-                "pnr_code": "Z6INOT",
-                "flight_numbers": "LX3613,LX8038,LH4515,LH5739",
-                "flight_segments": "LX3613|FRA|ZRH|25.05.2026|06:35|25.05.2026|07:30;LX8038|ZRH|SJO|25.05.2026|09:00|25.05.2026|12:55;LH4515|SJO|ZRH|29.05.2026|15:55|30.05.2026|10:55;LH5739|ZRH|FRA|30.05.2026|12:50|30.05.2026|13:55",
-                "confidence": "hoch"
-            }, ensure_ascii=False)
-            cur.execute("INSERT INTO ki_examples (mail_type,input_text,expected_json,description,approved) VALUES (%s,%s,%s,%s,%s)",
-                ("Flug", seed_input, seed_output, "FLY AWAY Reisebüro Itinerary Format", True))
+# KI-Seed wird beim ersten /init Aufruf gemacht, nicht beim Start
+# (verhindert Crash wenn DB beim Start nicht erreichbar)
 
-            # Seed 2: Lufthansa Buchungsbestätigung Format
-            seed2_input = """WG: Vielen Dank für Ihre Buchung | von Nürnberg nach Lyon am 20 April 2026
-PNR: 83WPJT
-LH3463 NUE→FRA 13:00→18:15 20.04.2026
-LH1078 FRA→LYS 16:55→18:15 20.04.2026
-Gesamtpreis: 496,50 EUR"""
-            seed2_output = _json.dumps({
-                "beleg_typ": "Flug",
-                "betrag": "496.50",
-                "waehrung": "EUR",
-                "anbieter": "Lufthansa",
-                "pnr_code": "83WPJT",
-                "flight_numbers": "LH3463,LH1078",
-                "flight_segments": "LH3463|NUE|FRA|20.04.2026|13:00|20.04.2026|18:15;LH1078|FRA|LYS|20.04.2026|16:55|20.04.2026|18:15",
-                "confidence": "hoch"
-            }, ensure_ascii=False)
-            cur.execute("INSERT INTO ki_examples (mail_type,input_text,expected_json,description,approved) VALUES (%s,%s,%s,%s,%s)",
-                ("Flug", seed2_input, seed2_output, "Lufthansa Buchungsbestätigung NUE-LYS", True))
-
-            conn.commit()
-            print(f"[KI-Seed] {2} Beispiele eingefügt")
-        cur.close();conn.close()
-    except Exception as e:
-        print(f"[KI-Seed] Fehler: {e}")
 
 # ── Umgebungsvariablen ─────────────────────────────────────────────────────────
 DATABASE_URL          = os.getenv("DATABASE_URL")
@@ -2066,9 +2013,12 @@ def _fetch_mails_internal():
 
     print(f"[IMAP] {imported} neu · {att_count} Anhänge · {dupl} Duplikate · {deleted} gelöscht · {err} Fehler")
 
-# Thread starten
-_t = threading.Thread(target=_auto_fetch, daemon=True)
-_t.start()
+# Auto-IMAP Thread starten (Fehler beim Start ignorieren)
+try:
+    _t = threading.Thread(target=_auto_fetch, daemon=True)
+    _t.start()
+except Exception as _te:
+    print(f"[IMAP-Thread] Konnte nicht gestartet werden: {_te}")
 
 
 # =========================================================
