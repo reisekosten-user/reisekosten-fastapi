@@ -296,7 +296,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.54"
+APP_VERSION = "9.55"
 
 _MONTHS_MAP = {
     'jan':'01','feb':'02','mar':'03','maer':'03','apr':'04',
