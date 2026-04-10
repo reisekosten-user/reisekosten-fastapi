@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.43"
+APP_VERSION = "9.44"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIL-ANALYSE ENGINE v2 – Datum-basierte Zuordnung, kein Raten
