@@ -4,7 +4,6 @@ from fastapi.staticfiles import StaticFiles
 import os, re, base64, json, httpx, imaplib, email, hashlib, threading, time, io, sys, subprocess
 from email.header import decode_header
 
-# ── Auto-Install PDF-Bibliotheken falls nicht vorhanden ──────────────────────
 def _ensure_pdf_libs():
     missing = []
     try: import reportlab
@@ -28,9 +27,6 @@ import psycopg2
 import boto3
 
 
-# =========================================================
-# PDF-HILFSFUNKTIONEN
-# =========================================================
 
 def _try_import_pdf():
     try:
@@ -66,7 +62,6 @@ def make_text_pdf(title: str, body_text: str, meta: dict = None) -> bytes:
     styles = getSampleStyleSheet()
     story = []
 
-    # Header
     header_style = ParagraphStyle('Header', parent=styles['Title'],
         fontSize=16, textColor=colors.HexColor('#1a3d96'), spaceAfter=4)
     sub_style = ParagraphStyle('Sub', parent=styles['Normal'],
@@ -80,7 +75,6 @@ def make_text_pdf(title: str, body_text: str, meta: dict = None) -> bytes:
     story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor('#1a3d96')))
     story.append(Spacer(1, 4*mm))
 
-    # Meta-Tabelle
     if meta:
         rows = [[Paragraph(html.escape(str(k)), label_style),
                  Paragraph(html.escape(str(v)), body_style)]
@@ -97,7 +91,6 @@ def make_text_pdf(title: str, body_text: str, meta: dict = None) -> bytes:
             story.append(t)
             story.append(Spacer(1, 6*mm))
 
-    # Body-Text
     if body_text:
         story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#dde4ef')))
         story.append(Spacer(1, 3*mm))
@@ -108,7 +101,6 @@ def make_text_pdf(title: str, body_text: str, meta: dict = None) -> bytes:
             else:
                 story.append(Spacer(1, 2*mm))
 
-    # Footer
     story.append(Spacer(1, 8*mm))
     story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#dde4ef')))
     footer_style = ParagraphStyle('Footer', parent=styles['Normal'],
@@ -162,7 +154,6 @@ async def generate_and_store_mail_pdf(att_id: int, subj: str, body: str,
         s3 = get_s3()
         s3.put_object(Bucket=S3_BUCKET, Key=key, Body=pdf_bytes,
                       ContentType="application/pdf")
-        # PDF-Key in DB speichern
         cur = conn.cursor()
         cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS pdf_key TEXT")
         cur.execute("UPDATE mail_attachments SET pdf_key=%s WHERE id=%s", (key, att_id))
@@ -175,157 +166,84 @@ async def generate_and_store_mail_pdf(att_id: int, subj: str, body: str,
 
 
 
-# ── Flughafen → ISO-Ländercode (global, einmalig gepflegt) ───────────────────
 AIRPORT_CC = {
-    # Deutschland
     "FRA":"DE","MUC":"DE","BER":"DE","HAM":"DE","DUS":"DE","STR":"DE",
     "CGN":"DE","NUE":"DE","LEJ":"DE","HAJ":"DE","FDH":"DE","HHN":"DE",
-    # Frankreich
     "CDG":"FR","ORY":"FR","LYS":"FR","NCE":"FR","MRS":"FR","BOD":"FR","TLS":"FR","NTE":"FR",
-    # Großbritannien
     "LHR":"GB","LGW":"GB","MAN":"GB","EDI":"GB","STN":"GB","BHX":"GB","GLA":"GB",
-    # USA
     "JFK":"US","LAX":"US","ORD":"US","MIA":"US","SFO":"US","BOS":"US",
     "IAH":"US","DFW":"US","ATL":"US","DCA":"US","IAD":"US","EWR":"US",
     "SEA":"US","LAS":"US","MCO":"US","PHX":"US","MSP":"US","DTW":"US",
-    # Indien
     "BOM":"IN","DEL":"IN","MAA":"IN","BLR":"IN","HYD":"IN","CCU":"IN","AMD":"IN",
-    # VAE
     "DXB":"AE","AUH":"AE","SHJ":"AE",
-    # Aserbaidschan
     "GYD":"AZ",
-    # Schweiz
     "ZRH":"CH","GVA":"CH","BSL":"CH","BRN":"CH",
-    # Österreich
     "VIE":"AT","SZG":"AT","INN":"AT","GRZ":"AT","LNZ":"AT",
-    # Italien
     "FCO":"IT","MXP":"IT","NAP":"IT","VCE":"IT","LIN":"IT","BLQ":"IT","PSA":"IT",
-    # Spanien
     "MAD":"ES","BCN":"ES","AGP":"ES","PMI":"ES","VLC":"ES","SVQ":"ES","TFS":"ES",
-    # Türkei
     "IST":"TR","SAW":"TR","AYT":"TR","ADB":"TR","ESB":"TR",
-    # Japan
     "NRT":"JP","HND":"JP","KIX":"JP","NGO":"JP","CTS":"JP",
-    # China/HK
     "PEK":"CN","PKX":"CN","PVG":"CN","CAN":"CN","CTU":"CN","SZX":"CN",
     "HKG":"CN",
-    # Korea
     "ICN":"KR","GMP":"KR","PUS":"KR",
-    # Singapur
     "SIN":"SG",
-    # Katar
     "DOH":"QA",
-    # Saudi-Arabien
     "RUH":"SA","JED":"SA","DMM":"SA",
-    # Niederlande
     "AMS":"NL","EIN":"NL",
-    # Belgien
     "BRU":"BE","CRL":"BE",
-    # Polen
     "WAW":"PL","KRK":"PL","WRO":"PL","GDN":"PL",
-    # Tschechien
     "PRG":"CZ",
-    # Ungarn
     "BUD":"HU",
-    # Rumänien
     "OTP":"RO","CLJ":"RO",
-    # Skandinavien
     "ARN":"SE","GOT":"SE","MMX":"SE",
     "CPH":"DK","BLL":"DK",
     "HEL":"FI","TMP":"FI",
     "OSL":"NO","BGO":"NO","TRD":"NO",
-    # Portugal
     "LIS":"PT","OPO":"PT","FAO":"PT",
-    # Griechenland
     "ATH":"GR","SKG":"GR","HER":"GR","RHO":"GR",
-    # Russland
     "SVO":"RU","DME":"RU","LED":"RU",
-    # ── LATEINAMERIKA ──────────────────────────────────────────────────────────
-    # Panama
     "PTY":"PA",
-    # Costa Rica
     "SJO":"CR","LIR":"CR","SJC":"CR",  # SJC oft fälschlich für San José CR
-    # Mexiko
     "MEX":"MX","CUN":"MX","GDL":"MX","MTY":"MX","SJD":"MX",
-    # Brasilien
     "GRU":"BR","GIG":"BR","BSB":"BR","SSA":"BR","FOR":"BR","REC":"BR",
-    # Argentinien
     "EZE":"AR","AEP":"AR","COR":"AR",
-    # Chile
     "SCL":"CL","PMC":"CL",
-    # Peru
     "LIM":"PE",
-    # Kolumbien
     "BOG":"CO","MDE":"CO","CLO":"CO",
-    # Ecuador
     "UIO":"EC","GYE":"EC",
-    # Venezuela
     "CCS":"VE",
-    # Dominikanische Republik
     "SDQ":"DO","PUJ":"DO",
-    # Kuba
     "HAV":"CU",
-    # Jamaika
     "KIN":"JM","MBJ":"JM",
-    # Bahamas
     "NAS":"BS",
-    # Trinidad
     "POS":"TT",
-    # Uruguay
     "MVD":"UY",
-    # Bolivien
     "VVI":"BO","LPB":"BO",
-    # Paraguay
     "ASU":"PY",
-    # Honduras
     "TGU":"HN",
-    # Guatemala
     "GUA":"GT",
-    # El Salvador
     "SAL":"SV",
-    # Nicaragua
     "MGA":"NI",
-    # Kanada
     "YYZ":"CA","YVR":"CA","YUL":"CA","YYC":"CA","YEG":"CA","YOW":"CA",
-    # Australien
     "SYD":"AU","MEL":"AU","BNE":"AU","PER":"AU","ADL":"AU",
-    # Neuseeland
     "AKL":"NZ","WLG":"NZ","CHC":"NZ",
-    # Südafrika
     "JNB":"ZA","CPT":"ZA","DUR":"ZA",
-    # Marokko
     "CMN":"MA","RAK":"MA","AGA":"MA",
-    # Ägypten
     "CAI":"EG","HRG":"EG","SSH":"EG","LXR":"EG",
-    # Israel
     "TLV":"IL",
-    # Iran
     "IKA":"IR","THR":"IR",
-    # Pakistan
     "KHI":"PK","LHE":"PK","ISB":"PK",
-    # Bangladesch
     "DAC":"BD",
-    # Sri Lanka
     "CMB":"LK",
-    # Thailand
     "BKK":"TH","DMK":"TH","HKT":"TH","CNX":"TH",
-    # Vietnam
     "HAN":"VN","SGN":"VN","DAD":"VN",
-    # Malaysia
     "KUL":"MY","PEN":"MY",
-    # Indonesien
     "CGK":"ID","DPS":"ID","SUB":"ID",
-    # Philippinen
     "MNL":"PH","CEB":"PH",
-    # Taiwan
     "TPE":"TW","TSA":"TW",
-    # Kasachstan
     "ALA":"KZ","TSE":"KZ",
 }
 
-# VMA-Sätze für Länder ohne eigenen Eintrag (Fallback auf Satz für "sonstige Länder" = DE)
-# Panama, Costa Rica etc. → kein BMF-Satz → DE-Satz als Fallback
-# Bitte jährlich mit BMF-Schreiben abgleichen!
 
 
 def anonymize_for_ki(text: str) -> str:
@@ -337,22 +255,13 @@ def anonymize_for_ki(text: str) -> str:
     """
     import re
     t = text
-    # E-Mail-Adressen
     t = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[E-MAIL]', t)
-    # Telefonnummern
     t = re.sub(r'(?:\+\d{1,3}[\s-]?)?\(?\d{3,5}\)?[\s.-]?\d{3,5}[\s.-]?\d{3,6}', '[TEL]', t)
-    # Vollständige Namen (Vor + Nachname, Titel)
     t = re.sub(r'\b(?:Mr|Mrs|Ms|Dr|Prof|Herr|Frau)\.?\s+[A-ZÄÖÜ][a-zäöüß]+\s+(?:[A-ZÄÖÜ][a-zäöüß]+\s+)?[A-ZÄÖÜ][a-zäöüß]+\b', '[NAME]', t)
-    # Häufige Name-Muster: "Diesslin Ralf" (Nachname Vorname)
     t = re.sub(r'\b[A-ZÄÖÜ][a-zäöüß]{3,}\s+[A-ZÄÖÜ][a-zäöüß]{3,}\b', '[NAME]', t)
-    # Hotelreservierungsnummern (lange Zahlen)
     t = re.sub(r'\b\d{8,}\b', '[RESERV-NR]', t)
-    # Straßenadressen
     t = re.sub(r'\b[A-ZÄÖÜ][a-zäöüß]+(?:straße|str\.|gasse|weg|allee|platz|ring)\s*\d+\b', '[ADRESSE]', t, flags=re.IGNORECASE)
-    # Vielfliegernummern (z.B. "CX1500100882")
     t = re.sub(r'\b(?:CX|LH|LX|BA|AF|KL|Miles|FF)\s*\d{8,}\b', '[FF-NR]', t, flags=re.IGNORECASE)
-    # Spezifische Buchungsreferenzen BEHALTEN (wichtig für KI-Training: PNR-Format)
-    # Adressen mit PLZ
     t = re.sub(r'\b[A-Z]{0,2}\d{4,5}\s+[A-ZÄÖÜ][a-zäöüß]+\b', '[ORT]', t)
     return t
 
@@ -369,7 +278,6 @@ def load_ki_examples(mail_type: str = None, limit: int = 3) -> list:
                 WHERE approved=TRUE
                 ORDER BY created_at DESC LIMIT %s""",(limit,))
         rows=cur.fetchall();cur.close();conn.close()
-        # Anonymisierung beim Laden – nie Rohdaten an Mistral
         return [{"input": anonymize_for_ki(r[0])[:1500],
                  "output":r[1],"desc":r[2] or ""} for r in rows]
     except Exception:
@@ -382,9 +290,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
     """
     try:
         import json as _json
-        # Anonymisieren vor Speicherung
         anon_text = anonymize_for_ki(input_text[:4000])
-        # Auch im JSON keine Namen
         result_clean = {k:v for k,v in result_json.items()
                        if k not in ("traveler_name",) and v}
         conn=get_conn();cur=conn.cursor()
@@ -399,9 +305,6 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
 
 APP_VERSION = "9.47"
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MAIL-ANALYSE ENGINE v2 – Datum-basierte Zuordnung, kein Raten
-# ═══════════════════════════════════════════════════════════════════════════
 
 _MONTHS_MAP = {
     'jan':'01','feb':'02','mar':'03','maer':'03','apr':'04',
@@ -418,27 +321,22 @@ def extract_all_dates(text: str) -> list:
     """Extrahiert ALLE Datumsangaben aus Text. Gibt sortierte Liste zurück."""
     from datetime import date as _date
     dates = set()
-    # DD.MM.YYYY oder DD/MM/YYYY
     for m in re.finditer(r'\b(\d{1,2})[./](\d{1,2})[./](\d{4})\b', text):
         try: dates.add(_date(int(m.group(3)),int(m.group(2)),int(m.group(1))))
         except: pass
-    # YYYY-MM-DD
     for m in re.finditer(r'\b(\d{4})-(\d{2})-(\d{2})\b', text):
         try: dates.add(_date(int(m.group(1)),int(m.group(2)),int(m.group(3))))
         except: pass
-    # 25 Mai 2026 oder 25MAY2026
     for m in re.finditer(r'\b(\d{1,2})\s*([A-Za-zä]{3,})\s*(\d{4})\b', text):
         mo = _MONTHS_MAP.get(m.group(2).lower()[:3])
         if mo:
             try: dates.add(_date(int(m.group(3)),int(mo),int(m.group(1))))
             except: pass
-    # April 22, 2026 oder April 22 2026
     for m in re.finditer(r'\b([A-Za-zä]{4,})\s+(\d{1,2}),?\s+(\d{4})\b', text):
         mo = _MONTHS_MAP.get(m.group(1).lower()[:3])
         if mo:
             try: dates.add(_date(int(m.group(3)),int(mo),int(m.group(2))))
             except: pass
-    # Nur sinnvolle Reisedaten (2025-2028)
     return sorted(d for d in dates if 2025 <= d.year <= 2028)
 
 def extract_pnr_safe(text: str) -> str:
@@ -449,22 +347,17 @@ def extract_pnr_safe(text: str) -> str:
         text or "", re.IGNORECASE)
     if m:
         val = m.group(1).upper()
-        # Rein numerisch = Hotel-Bestätigungsnummer, keine PNR
         if val.isdigit(): return ""
-        # Bekannte Nicht-PNRs filtern
         if re.match(r'^(RIGHTS|ALAFAVE|PANAMA|HOTEL|FLUG|BAHN|BOOKING|FLIGHT|TRAIN|REISE|ECMA)$', val, re.I):
             return ""
-        # PNR muss Buchstaben UND Ziffern enthalten (echte AMADEUS-PNR)
         if re.search(r'[A-Z]', val) and re.search(r'[0-9]', val):
             return val
-        # Nur Buchstaben ist auch ok (z.B. Z6INOT hat keine Zahl... warte)
         if len(val) == 6 and val.isalpha():
             return val
     return ""
 
 def extract_amount_safe(text: str) -> tuple:
     """Extrahiert Betrag und Währung. Gibt (betrag_str, waehrung) zurück."""
-    # Explizite Gesamtbeträge zuerst
     patterns = [
         (r'(?:Total for stay|Total cash rate|Grand Total|Endpreis|Gesamtpreis|Total amount)[^\d]*([\d\.]+)\s*([A-Z]{3})', 1, 2),
         (r'([A-Z]{3})\s+([\d,\.]{3,})', 2, 1),
@@ -475,7 +368,6 @@ def extract_amount_safe(text: str) -> tuple:
         if m:
             try:
                 val_str = m.group(amount_grp).replace(',','.')
-                # Nur einen Dezimalpunkt behalten
                 parts = val_str.split('.')
                 if len(parts) > 2: val_str = '.'.join(parts[:-1]).replace('.','') + '.' + parts[-1]
                 val = float(val_str)
@@ -489,7 +381,6 @@ def extract_hotel_dates(text: str) -> tuple:
     """Extrahiert Check-in und Check-out Datum."""
     all_dates = extract_all_dates(text)
     checkin = checkout = ""
-    # Explizite Labels
     ci_m = re.search(r'(?:Check.in|Arrival|Anreise|Eincheck)[^\n]{0,50}?(\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4})', text, re.IGNORECASE)
     co_m = re.search(r'(?:Check.out|Departure|Abreise|Auscheck)[^\n]{0,50}?(\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4})', text, re.IGNORECASE)
     if ci_m:
@@ -498,7 +389,6 @@ def extract_hotel_dates(text: str) -> tuple:
     if co_m:
         co_dates = extract_all_dates(co_m.group(1))
         if co_dates: checkout = str(co_dates[0])
-    # Fallback: erste zwei Daten aus dem Text
     if not checkin and len(all_dates) >= 1: checkin = str(all_dates[0])
     if not checkout and len(all_dates) >= 2: checkout = str(all_dates[1])
     return checkin, checkout
@@ -532,7 +422,6 @@ def assign_trip_by_date(subject: str, body: str, trips: list) -> tuple:
     from datetime import date as _date
     full = f"{subject}\n{body}"
 
-    # 1. Reisecode direkt
     m = re.search(r'\b(\d{2}-\d{3})\b', full)
     if m:
         code = m.group(1)
@@ -541,10 +430,8 @@ def assign_trip_by_date(subject: str, body: str, trips: list) -> tuple:
                 return code, 100, "code-direkt"
         return code, 100, "code-direkt-neu"
 
-    # Alle Daten aus Text extrahieren
     found_dates = extract_all_dates(full)
 
-    # 2. Name + Datum Kombination
     for t in trips:
         dep = t.get("dep"); ret = t.get("ret")
         traveler = t.get("traveler", "").lower()
@@ -558,7 +445,6 @@ def assign_trip_by_date(subject: str, body: str, trips: list) -> tuple:
         if name_found and date_in_range:
             return t["code"], 90, "name+datum"
 
-    # 3. Kein eindeutiger Match → Posteingang, manuell zuordnen
     return None, 0, "unzugeordnet"
 
 
@@ -582,11 +468,8 @@ if not _os.path.exists("static"):
     _os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# KI-Seed wird beim ersten /init Aufruf gemacht, nicht beim Start
-# (verhindert Crash wenn DB beim Start nicht erreichbar)
 
 
-# ── Umgebungsvariablen ─────────────────────────────────────────────────────────
 DATABASE_URL          = os.getenv("DATABASE_URL")
 IMAP_HOST             = os.getenv("IMAP_HOST")
 IMAP_USER             = os.getenv("IMAP_USER")
@@ -606,10 +489,8 @@ MISTRAL_BASE          = "https://api.mistral.ai/v1"
 MISTRAL_OCR_MODEL     = "mistral-ocr-2512"
 MISTRAL_EXTRACT_MODEL = "mistral-small-latest"
 
-# ── Feiertage Bayern (Herrhammer-Standort) ─────────────────────────────────────
 def feiertage_bayern(year: int) -> set:
     """Gesetzliche Feiertage Bayern fuer Trennungspauschale."""
-    # Ostern (Gauss)
     a = year % 19; b = year // 100; c = year % 100
     d = b // 4;    e = b % 4;       f = (b + 8) // 25
     g = (b - f + 1) // 3;           h = (19*a + b - d - g + 15) % 30
@@ -642,9 +523,6 @@ def ist_feiertag_oder_wochenende(d: date) -> bool:
     if d.weekday() >= 5: return True
     return d in feiertage_bayern(d.year)
 
-# ── BMF VMA §9 EStG ───────────────────────────────────────────────────────────
-# VMA-Sätze 2026 (§ 9 Abs. 4a EStG, BMF-Schreiben)
-# "partial" = An-/Abreisetag (8-24h), "full" = volle Reisetage (>24h)
 VMA = {
     "DE":  {"full": 28.0,  "partial": 14.0},
     "BE":  {"full": 59.0,  "partial": 40.0},
@@ -689,7 +567,6 @@ VMA = {
     "HU":  {"full": 35.0,  "partial": 17.5},
     "RO":  {"full": 30.0,  "partial": 15.0},
     "BR":  {"full": 40.0,  "partial": 20.0},
-    # Lateinamerika – BMF-Schreiben (§9 EStG, nicht gelistete Länder = 30€/15€)
     "PA":  {"full": 45.0,  "partial": 30.0},   # Panama (Richtwert, kein BMF-Satz)
     "CR":  {"full": 40.0,  "partial": 26.5},   # Costa Rica
     "MX":  {"full": 45.0,  "partial": 30.0},   # Mexiko
@@ -706,7 +583,6 @@ VMA = {
     "NI":  {"full": 35.0,  "partial": 17.5},   # Nicaragua
     "CU":  {"full": 35.0,  "partial": 17.5},   # Kuba
     "JM":  {"full": 35.0,  "partial": 17.5},   # Jamaika
-    # Sonstige (Sammelkategorie §9 EStG)
     "ZA":  {"full": 35.0,  "partial": 17.5},   # Südafrika
     "MA":  {"full": 35.0,  "partial": 17.5},   # Marokko
     "EG":  {"full": 35.0,  "partial": 17.5},   # Ägypten
@@ -720,9 +596,6 @@ VMA = {
     "NZ":  {"full": 40.0,  "partial": 20.0},   # Neuseeland
     "CN_HK": {"full": 83.0, "partial": 56.0},
 }
-# Mahlzeitenabzug 2026: 20%/40%/40% vom deutschen 24h-Satz (28 EUR)
-# Mahlzeitenabzug: prozentual vom Tagessatz (§ 9 Abs. 4a EStG)
-# Frühstück 20%, Mittagessen 40%, Abendessen 40%
 MEAL_DED_PCT = {"breakfast": 0.20, "lunch": 0.40, "dinner": 0.40}
 
 def get_vma(cc, day_type, meals, city_key=None):
@@ -730,10 +603,8 @@ def get_vma(cc, day_type, meals, city_key=None):
     cc_norm=(cc or "DE").upper().strip()
     key = city_key.upper() if city_key and city_key.upper() in VMA else cc_norm
     r = VMA.get(key, VMA.get(cc_norm, {"full":28.0,"partial":14.0}))
-    # Basis ist immer der volle 24h-Satz für den Abzug (BMF: Abzug vom Höchstbetrag)
     full_rate = r["full"]
     base = full_rate if day_type == "full" else r["partial"]
-    # Abzug prozentual vom vollen Tagessatz
     abzug = sum(full_rate * MEAL_DED_PCT.get(m, 0) for m in (meals or []))
     return max(0.0, round(base - abzug, 2))
 
@@ -773,11 +644,9 @@ def calc_vma_from_daily(dep_d, ret_d, daily_meals_dict: dict, vma_dest: dict, de
 
     for i,(lbl,dtype) in enumerate(tag_list):
         current_day=dep_d+timedelta(days=i)
-        # Land: aus daily_meals (manuell gesetzt) > vma_destinations > default
         day_data=daily_meals_dict.get(current_day)
         if day_data:
             ml, day_cc, vma_override = day_data
-            # Wenn kein manuelles Land gesetzt → aus vma_destinations
             if day_cc == "DE" and vma_dest:
                 day_cc = get_country_for_day(current_day, vma_dest, default_cc)
         else:
@@ -875,24 +744,20 @@ def trennungspauschale(dep_date, ret_date, dep_time_str="", ret_time_str=""):
     while current <= ret_date:
         if ist_feiertag_oder_wochenende(current):
             if current == dep_date:
-                # Abreisetag: vor 12 Uhr abgereist → halbe Pauschale
                 if dep_h < 12:
                     total += 40.0
                     details.append((str(current), "Abreise vor 12:00", 40.0))
             elif current == ret_date:
-                # Rueckkehrtag: nach 12 Uhr zurueck → halbe Pauschale
                 if ret_h >= 12:
                     total += 40.0
                     details.append((str(current), "Rueckkehr nach 12:00", 40.0))
             else:
-                # ganzer Tag → volle Pauschale
                 total += 80.0
                 wd = ["Mo","Di","Mi","Do","Fr","Sa","So"][current.weekday()]
                 details.append((str(current), wd, 80.0))
         current += timedelta(days=1)
     return total, details
 
-# ── DB / S3 ────────────────────────────────────────────────────────────────────
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
@@ -926,9 +791,6 @@ def next_trip_code(cur):
 def file_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
-# =========================================================
-# WÄHRUNGSKURSE – ECB Tageskurs (kostenlos, kein Key)
-# =========================================================
 
 _ecb_rates_cache: dict = {}  # {"USD": 1.08, ...}
 _ecb_rates_ts: float = 0.0
@@ -936,7 +798,6 @@ _ecb_rates_ts: float = 0.0
 async def get_ecb_rates() -> dict:
     """Holt aktuelle EUR-Wechselkurse von der EZB (täglich aktualisiert)."""
     global _ecb_rates_cache, _ecb_rates_ts
-    # Cache: 4 Stunden gültig
     if _ecb_rates_cache and (time.time() - _ecb_rates_ts) < 14400:
         return _ecb_rates_cache
     fallback = {"EUR":1.0,"USD":1.08,"GBP":0.86,"INR":89.5,"CHF":0.96,
@@ -974,7 +835,6 @@ async def convert_to_eur(amount: float, currency: str) -> tuple[float, str]:
     if currency == "EUR":
         return round(amount, 2), ""
     rates = await get_ecb_rates()
-    # ECB gibt Einheiten pro EUR an → umkehren für EUR-Betrag
     rate = rates.get(currency)
     if rate and rate > 0:
         eur = round(amount / rate, 2)
@@ -982,9 +842,6 @@ async def convert_to_eur(amount: float, currency: str) -> tuple[float, str]:
     return round(amount, 2), f"Kurs {currency} unbekannt"
 
 
-# =========================================================
-# MISTRAL KI  (DSGVO-konform, EU)
-# =========================================================
 
 async def mistral_ocr(file_bytes: bytes, filename: str) -> str:
     if not MISTRAL_API_KEY: return "KEIN_MISTRAL_KEY"
@@ -1083,7 +940,6 @@ STRENGE REGELN:
 4. Alle Felder die nicht relevant sind: leer lassen ("")
 5. Nur EUR wenn kein anderes Symbol im Text"""
 
-    # Few-Shot Beispiele aus DB laden
     examples = load_ki_examples(mail_type="Flug" if source=="mail" else None, limit=2)
     examples_text = ""
     if examples:
@@ -1094,7 +950,6 @@ STRENGE REGELN:
             examples_text += f"JSON: {ex['output']}\n"
         examples_text += "\n--- DEIN TEXT ---\n"
 
-    # Personendaten anonymisieren vor API-Call (DSGVO Art. 25 – Privacy by Design)
     anon_text = anonymize_for_ki(text)
     user = f"Bekannte Reisecodes: {codes_str}{examples_text}\n\nText:\n---\n{anon_text[:7000]}\n---\nJSON:"
     try:
@@ -1117,14 +972,12 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
     ext = (filename or "").lower().split(".")[-1]
     cur = conn.cursor()
 
-    # ICS-Dateien direkt parsen (kein OCR nötig)
     if ext == "ics":
         try:
             s3  = get_s3()
             obj = s3.get_object(Bucket=S3_BUCKET, Key=storage_key)
             ics_bytes = obj["Body"].read()
             ics_text  = ics_bytes.decode(errors="ignore")
-            # ICS Zeilenfortsetzungen auflösen (RFC 5545)
             ics_text  = re.sub(r"\r?\n[ \t]", "", ics_text)
 
             def ics_get(field):
@@ -1152,10 +1005,8 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
                 except:
                     return None, "", "", ""
 
-            # Alle VEVENT-Blöcke extrahieren (ICS kann mehrere haben)
             vevents = re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", ics_text, re.DOTALL)
 
-            # Für Flüge: oft mehrere VEVENTs (Hinflug + Rückflug)
             all_flights = []
             all_trains  = []
             first_date  = None
@@ -1163,7 +1014,6 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
             betrag_ics  = ""
 
             for vevent in vevents:
-                # Felder aus diesem VEVENT
                 def ev_get(f):
                     m=re.search(rf"^{f}(?:;[^:]*)?:(.*)", vevent, re.MULTILINE)
                     return m.group(1).strip() if m else ""
@@ -1186,27 +1036,22 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
 
                 ev_text = f"{summary} {location} {desc}"
 
-                # Flugnummer aus Summary/Description extrahieren
                 fn_m = re.search(r"\b([A-Z]{2}\d{3,4})\b", ev_text)
                 fn   = fn_m.group(1) if fn_m else ""
 
-                # Zugnummer
                 tn_m = re.search(r"\b(ICE|IC|EC|RE|RB|S)\s*(\d{1,4})\b", ev_text, re.IGNORECASE)
                 tn   = f"{tn_m.group(1).upper()} {tn_m.group(2)}" if tn_m else ""
 
-                # Abflug/Ankunft-Flughafen aus LOCATION (oft "FRA - Frankfurt" oder "FRA" oder "Frankfurt (FRA)")
                 airports = re.findall(r"\b([A-Z]{3})\b", location)
                 dep_apt = airports[0] if len(airports)>0 else ""
                 arr_apt = airports[1] if len(airports)>1 else ""
 
-                # Alternativ aus Summary: "FRA → CDG" oder "FRA-CDG"
                 if not dep_apt or not arr_apt:
                     rt_m = re.search(r"\b([A-Z]{3})\s*[-→>]\s*([A-Z]{3})\b", summary+desc)
                     if rt_m:
                         dep_apt=rt_m.group(1)
                         arr_apt=rt_m.group(2)
 
-                # Preis aus Description
                 price_m = re.search(r"(?:EUR|€|CHF|USD|GBP)\s*([\d,.]+)|([\d,.]+)\s*(?:EUR|€)", desc)
                 if price_m and not betrag_ics:
                     betrag_ics = (price_m.group(1) or price_m.group(2) or "").replace(",",".")
@@ -1226,7 +1071,6 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
                 elif summary:
                     ki_parts.append(f"{summary[:60]}")
 
-                # Datum/Zeit in ki_bemerkung
                 if start_d and start_utc:
                     ki_parts.append(f"Abflug: {start_d} {start_utc}")
                 if end_d and end_utc:
@@ -1237,7 +1081,6 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
             ics_date   = str(first_date) if first_date else ""
             ki_bemerkung = " | ".join(ki_parts) if ki_parts else "ICS ohne verwertbare Daten"
 
-            # Zeitinfo für Speicherung extrahieren
             flight_time_info = " | ".join(p for p in ki_parts if "Abflug:" in p or "Ankunft:" in p) or None
 
             cur.execute("""UPDATE mail_attachments SET
@@ -1251,7 +1094,6 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
                  train_str or None, ki_bemerkung,
                  flight_time_info, att_id))
 
-            # Flugnummern + Zugnummern in trip_meta übernehmen
             cur.execute("SELECT trip_code FROM mail_attachments WHERE id=%s",(att_id,))
             row_tc = cur.fetchone()
             if row_tc and row_tc[0]:
@@ -1285,7 +1127,6 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
                         (f"ics-fehler:{str(e)[:80]}", att_id))
             conn.commit(); cur.close(); return
 
-    # Inline-Bilder aus HTML-Mails direkt als irrelevant markieren
     fn_lower = (filename or "").lower()
     if re.match(r"image\d+\.(png|jpg|jpeg|gif|bmp|emz|wmz)$", fn_lower) or fn_lower.endswith(".emz") or fn_lower.endswith(".wmz"):
         cur.execute("UPDATE mail_attachments SET analysis_status=%s,confidence=%s,review_flag=%s WHERE id=%s",
@@ -1339,20 +1180,17 @@ async def _apply_fields(cur, att_id, fields, ocr_text=""):
     confidence = fields.get("confidence","niedrig") or "niedrig"
     bemerkung  = fields.get("bemerkung","") or ""
 
-    # Segment-Vollständigkeitsprüfung: jede Flugnummer braucht ein Segment
     if fns and beleg_typ == "Flug":
         fn_list = [f.strip() for f in fns.split(",") if f.strip()]
         seg_list = [s.strip() for s in segments.split(";") if s.strip()] if segments else []
         seg_fns  = [s.split("|")[0].strip() for s in seg_list if s]
         missing  = [f for f in fn_list if f not in seg_fns]
         if missing:
-            # Fehlende als Stub-Segmente anhängen (nur Flugnummer, Rest leer)
             for mfn in missing:
                 seg_list.append(f"{mfn}|||||| ")
             segments = ";".join(seg_list)
             bemerkung = (bemerkung + f" [Stub-Segmente für: {','.join(missing)}]").strip()
 
-    # Custom Rules: wenn KI "Sonstiges" oder kein Typ → eigene Regeln prüfen
     if beleg_typ in ("Sonstiges","") and anbieter:
         custom = load_custom_rules()
         ruled  = detect_type_with_rules(anbieter, "", "", custom)
@@ -1376,7 +1214,6 @@ async def _apply_fields(cur, att_id, fields, ocr_text=""):
 
     review = "ok" if confidence=="hoch" else "pruefen"
     status = "ok" if fields and "fehler" not in fields else "analysefehler"
-    # Kurs-Info in Bemerkung aufnehmen wenn Fremdwährung
     if kurs_info:
         bemerkung = f"{bemerkung} [{kurs_info}]".strip() if bemerkung else f"[{kurs_info}]"
     cur.execute("""UPDATE mail_attachments SET
@@ -1395,9 +1232,6 @@ async def _apply_fields(cur, att_id, fields, ocr_text=""):
          status,confidence,review,bemerkung,att_id))
 
 
-# =========================================================
-# MAIL-HILFSFUNKTIONEN
-# =========================================================
 
 def extract_trip_code(text):
     m = re.search(r"\b\d{2}-\d{3}\b", text or "")
@@ -1415,12 +1249,8 @@ def extract_flight_numbers(text: str) -> list:
     }
     result = []
     seen = set()
-    # Ticketnummern aus Text entfernen bevor wir suchen
-    # Ticketnummern: "220-2979545073" oder "LH 220-xxx" – enthalten Bindestrich nach Zahl
     clean = re.sub(r'\b\d{3}\s*-\s*\d{7,}\b', '', text)  # "220-2979545073"
     clean = re.sub(r'\b[A-Z]{2}\s+\d{3}\s*-\s*\d+', '', clean)  # "LH 220-xxx"
-    # Flugnummern: 2 Buchstaben + Leerzeichen (optional) + 3-4 Ziffern
-    # NICHT gefolgt von Bindestrich (wäre Ticketnummer)
     matches = re.findall(r'\b([A-Z]{2})\s*(\d{3,4})\b(?!\s*[-/]\s*\d)', clean)
     for airline, num in matches:
         if airline in AIRLINE_CODES:
@@ -1469,10 +1299,8 @@ def extract_flight_segments_from_text(text: str) -> list:
 
     def find_iata(city_text: str) -> str:
         c = city_text.strip()
-        # IATA in Klammern: "Frankfurt (FRA)"
         m = re.search(r"\(([A-Z]{3})\)", c)
         if m and m.group(1) in AIRPORT_CC: return m.group(1)
-        # Direkt 3 Grossbuchstaben
         if re.match(r"^[A-Z]{3}$", c) and c in AIRPORT_CC: return c
         cl = c.lower()
         for k in sorted(CITY_TO_IATA.keys(), key=len, reverse=True):
@@ -1491,13 +1319,11 @@ def extract_flight_segments_from_text(text: str) -> list:
         try: return f"{int(day):02d}.{mo}.{yr}"
         except: return ""
 
-    # Sophos-Links entfernen
     text = re.sub(r"https?://[\w.-]*sophos[\w./-]*", " ", text, flags=re.IGNORECASE)
 
     fns_all = extract_flight_numbers(text)
     if not fns_all: return []
 
-    # Codeshares herausfiltern
     codeshare = set()
     for m in re.finditer(r"\((?:Durchgeführt von|Operated by)[^,)]+,\s*([A-Z]{2})\s*(\d{3,4})\)", text, re.IGNORECASE):
         codeshare.add(f"{m.group(1)}{m.group(2)}")
@@ -1505,7 +1331,6 @@ def extract_flight_segments_from_text(text: str) -> list:
 
     result = []  # Liste, nicht Dict - erlaubt doppelte FN
 
-    # ── METHODE 1: "Flug LH3463: Stadt (FRA) → Stadt (LYS), DD.MM.YYYY, HH:MM → HH:MM" ──
     m1 = re.compile(
         r"(?:Flug\s+)?([A-Z]{2}\d{3,4})\s*[:\s]+"
         r"([A-Za-z\xc0-\xff][A-Za-z\xc0-\xff\s\-,\.\(\)]{2,35}?)\s*(?:→|->|nach)\s*"
@@ -1525,7 +1350,6 @@ def extract_flight_segments_from_text(text: str) -> list:
         result.append(seg)
         found_m1.add(f"{fn}_{d}")  # Merken welche schon gefunden
 
-    # ── METHODE 2: Itinerary-Tabelle "25 Mai Frankfurt - Zurich LX3613 06:35-07:30" ──
     m2 = re.compile(
         r"(\d{1,2})\s+(Jan|Feb|M[aä]r|Apr|Mai|May|Jun|Jul|Aug|Sep|Okt|Oct|Nov|Dez|Dec)\s+"
         r"([A-Za-z\xc0-\xff][A-Za-z\xc0-\xff\s\-,\.]*?)\s*-\s*"
@@ -1538,7 +1362,6 @@ def extract_flight_segments_from_text(text: str) -> list:
         fn = f"{m.group(5).upper()}{m.group(6)}"
         if fn not in main_fns: continue
         dep_date = parse_date_mon(m.group(1), m.group(2))
-        # Bereits durch Methode 1 gefunden?
         if f"{fn}_{dep_date}" in found_m1: continue
         arr_date = dep_date
         ctx = text[m.start():m.start()+150]
@@ -1551,11 +1374,9 @@ def extract_flight_segments_from_text(text: str) -> list:
         result.append({"fn":fn,"dep":find_iata(m.group(3)),"arr":find_iata(m.group(4)),
                        "date":dep_date,"arr_date":arr_date,"dep_time":m.group(7),"arr_time":m.group(8)})
 
-    # ── METHODE 3: IATA direkt "NUE→FRA" in Nähe der Flugnummer ──
     already_found = {(s["fn"],s["date"]) for s in result}
     for fn in main_fns:
         airline, num = fn[:2], fn[2:]
-        # Alle Vorkommen dieser Flugnummer suchen
         for m_pos in [m.start() for m in re.finditer(rf"\b{re.escape(airline)}\s*{re.escape(num)}\b", text)]:
             region = text[max(0,m_pos-60):m_pos+300]
             route_m = re.search(r"\b([A-Z]{3})\s*(?:→|->|–)\s*([A-Z]{3})\b", region)
@@ -1571,9 +1392,6 @@ def extract_flight_segments_from_text(text: str) -> list:
                 result.append(seg)
                 already_found.add((fn, d_str))
 
-    # ── METHODE 5: Lufthansa-Format – Abflugsort/Ankunftsort Blöcke ─────────
-    # Format: "DD.MM.YYYY - HH:MM ... Abflugsort STADT ... Ankunftsort STADT"
-    # Kommt vor wenn Flugnummern in Bilder eingebettet sind (typisch Lufthansa HTML-Mail)
     if len(result) < len(main_fns):
         lh_blocks = re.findall(
             r'(\d{2}\.\d{2}\.\d{4})\s*-\s*(\d{2}:\d{2}).*?'
@@ -1582,7 +1400,6 @@ def extract_flight_segments_from_text(text: str) -> list:
             text, re.DOTALL
         )
         if lh_blocks:
-            # Hub-Map: bei 1 Stopp über bekannte Hubs aufteilen
             HUB_MAP = {
                 ("NUE","LYS"):[("NUE","FRA"),("FRA","LYS")],
                 ("NUE","CDG"):[("NUE","FRA"),("FRA","CDG")],
@@ -1605,7 +1422,6 @@ def extract_flight_segments_from_text(text: str) -> list:
                 ("MUC","LHR"):[("MUC","FRA"),("FRA","LHR")],
                 ("MUC","CDG"):[("MUC","FRA"),("FRA","CDG")],
             }
-            # Anzahl Stopps aus Text
             stopps_list = [int(m) for m in re.findall(r'(\d+)\s*Stopp', text)]
             already_found = {(s["fn"],s["date"]) for s in result}
             fn_idx = len(result)  # Weitermachen wo aufgehört
@@ -1634,7 +1450,6 @@ def extract_flight_segments_from_text(text: str) -> list:
                             already_found.add((fn, date_str))
                         fn_idx += 1
 
-    # Reihenfolge: nach main_fns sortieren (Hin dann Rück)
     fn_order = {fn: i for i, fn in enumerate(main_fns)}
     result.sort(key=lambda s: (fn_order.get(s["fn"], 99), s.get("date",""), s.get("dep_time","")))
 
@@ -1682,12 +1497,10 @@ def detect_type_with_rules(filename, subject, body, custom_rules: dict = None) -
     text=f"{filename or ''} {subject or ''} {body or ''}".lower()
     if (filename or "").lower().endswith(".ics"): return "Kalendereintrag"
     if (filename or "").lower().endswith(".emz"): return "Inline-Grafik"
-    # Benutzerdefinierte Regeln zuerst
     if custom_rules:
         for typ, keywords in custom_rules.items():
             if any(kw in text for kw in keywords if kw):
                 return typ
-    # Standard-Regeln
     return detect_attachment_type(filename, subject, body)
 
 
@@ -1695,7 +1508,6 @@ def detect_attachment_type(filename,subject,body):
     text=f"{filename or ''} {subject or ''} {body or ''}".lower()
     if (filename or "").lower().endswith(".ics"): return "Kalendereintrag"
     if (filename or "").lower().endswith(".emz"): return "Inline-Grafik"
-    # Bekannte Anbieter → feste Kategorie (Regel vor allgemeinem Keyword-Check)
     VENDOR_RULES = {
         "Taxi":     ["uber","bolt","free now","freenow","mytaxi","cabify","lyft","gett","taxi"],
         "Bahn":     ["deutsche bahn","db bahn","eurostar","thalys","railjet","westbahn",
@@ -1720,7 +1532,6 @@ def detect_attachment_type(filename,subject,body):
     for typ, keywords in VENDOR_RULES.items():
         if any(kw in text for kw in keywords if kw):
             return typ
-    # Allgemeine Fallbacks
     if any(x in text for x in ["boarding","eticket","flight","flug","pnr","itinerary"]): return "Flug"
     if any(x in text for x in ["bahn","zug","train"]): return "Bahn"
     if any(x in text for x in ["cab","ride","fahrkosten"]): return "Taxi"
@@ -1731,9 +1542,6 @@ def sanitize_filename(name):
     name=re.sub(r"[^A-Za-z0-9._ -]","_",name)
     return name[:180] if name else "attachment.bin"
 
-# =========================================================
-# AUTO-IMAP HINTERGRUND-THREAD (alle 5 Minuten)
-# =========================================================
 
 _imap_lock = threading.Lock()
 
@@ -1771,7 +1579,6 @@ def _fetch_mails_internal():
         try:
             uid = i.decode()
 
-            # Duplikat-Check 1: IMAP-UID
             cur.execute("SELECT id FROM mail_messages WHERE mail_uid=%s",(uid,))
             if cur.fetchone():
                 ids_to_delete.append(i)
@@ -1786,7 +1593,6 @@ def _fetch_mails_internal():
             sender   = decode_mime_header(msg.get("From",""))
             msg_id   = (msg.get("Message-ID","") or "").strip()
 
-            # Duplikat-Check 2: Message-ID
             if msg_id:
                 cur.execute("SELECT id FROM mail_messages WHERE message_id=%s",(msg_id,))
                 if cur.fetchone():
@@ -1794,7 +1600,6 @@ def _fetch_mails_internal():
                     dupl += 1
                     continue
 
-            # Body extrahieren
             body = ""; html_body = ""
             if msg.is_multipart():
                 for part in msg.walk():
@@ -1818,7 +1623,6 @@ def _fetch_mails_internal():
                         else: body = pl.decode(errors="ignore")
                 except: pass
 
-            # HTML → Plaintext
             if not body and html_body:
                 import html as _html
                 t = _html.unescape(html_body)
@@ -1832,7 +1636,6 @@ def _fetch_mails_internal():
 
             full  = f"{subject}\n{body}"
 
-            # ── NEUE ZUORDNUNGSLOGIK: Datum > PNR > Code ──────────────
             trips_for_assign = load_trips_for_assignment()
             code, confidence, assign_method = assign_trip_by_date(subject, body, trips_for_assign)
             pnr_f = extract_pnr_safe(full)
@@ -1848,7 +1651,6 @@ def _fetch_mails_internal():
                 if pnr_f:
                     cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr_f,code))
 
-            # Anhänge
             if msg.is_multipart():
                 for part in msg.walk():
                     try:
@@ -1867,7 +1669,6 @@ def _fetch_mails_internal():
 
                         safe_fn = sanitize_filename(decoded_fn)
 
-                        # ICS: nur Flugnummern extrahieren, nicht speichern
                         if safe_fn.lower().endswith(".ics"):
                             if code:
                                 ics_text = pl.decode(errors="ignore")
@@ -1883,7 +1684,6 @@ def _fetch_mails_internal():
                                                 (f"{existing_fns},{fn_ics}".strip(","), code))
                             continue
 
-                        # Inline-Bilder nicht speichern
                         if re.match(r'image\d+\.(png|jpg|jpeg|gif|bmp|emz|wmz)$', safe_fn.lower()):
                             continue
 
@@ -1907,16 +1707,12 @@ def _fetch_mails_internal():
                         print(f"[IMAP Anhang Fehler] {ae}")
                         continue
 
-            # ── SOFORT-ANALYSE: Beleg aus Mail-Body ──────────────────────
             try:
                 mail_type = detect_mail_type(full)
 
-                # JEDE erkannte Mail bekommt ein Beleg-Blatt
-                # Typ: Hotel, Flug, Bahn, Mietwagen, Taxi, Essen, Tanken, Sonstiges
                 cur.execute("SELECT id FROM mail_attachments WHERE mail_uid=%s AND storage_key LIKE 'mail_body_%'",(uid,))
                 if not cur.fetchone():
 
-                    # ── Daten extrahieren ──────────────────────────────
                     betrag, waehrung = extract_amount_safe(full)
                     checkin, checkout = extract_hotel_dates(full) if mail_type=="Hotel" else ("","")
                     nights = 0
@@ -1928,7 +1724,6 @@ def _fetch_mails_internal():
                     regex_fns = extract_flight_numbers(full) if mail_type=="Flug" else []
                     seg_s = segments_to_string(extract_flight_segments_from_text(full)) if regex_fns else ""
 
-                    # Vendor erkennen
                     vendor = ""
                     VENDORS = [
                         ("Lufthansa","Flug"),("Swiss","Flug"),("Austrian","Flug"),
@@ -1952,7 +1747,6 @@ def _fetch_mails_internal():
                             if mail_type == "Sonstiges": mail_type = vtype
                             break
 
-                    # EUR-Betrag
                     betrag_eur = ""
                     if betrag:
                         try:
@@ -1961,7 +1755,6 @@ def _fetch_mails_internal():
                             betrag_eur = f"{val*rates.get(waehrung,1.0):.2f}".replace(".",",")
                         except: pass
 
-                    # Beleg anlegen
                     cur.execute("""INSERT INTO mail_attachments
                         (mail_uid,trip_code,original_filename,saved_filename,content_type,
                          storage_key,detected_type,detected_amount,detected_amount_eur,
@@ -1984,7 +1777,6 @@ def _fetch_mails_internal():
                          "ok" if (betrag and vendor) else "pruefen",
                          f"{vendor or mail_type} · {betrag or '?'} {waehrung}"))
 
-                    # trip_meta aktualisieren
                     if code:
                         if regex_fns:
                             cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(",".join(regex_fns),code))
@@ -2006,7 +1798,6 @@ def _fetch_mails_internal():
 
     cur.close(); conn.close()
 
-    # Mails löschen
     for i in ids_to_delete:
         try: mail.store(i, "+FLAGS", "\\Deleted"); deleted+=1
         except: pass
@@ -2018,7 +1809,6 @@ def _fetch_mails_internal():
 
     print(f"[IMAP] {imported} neu · {att_count} Anhänge · {dupl} Duplikate · {deleted} gelöscht · {err} Fehler")
 
-# Auto-IMAP Thread starten (Fehler beim Start ignorieren)
 try:
     _t = threading.Thread(target=_auto_fetch, daemon=True)
     _t.start()
@@ -2026,11 +1816,7 @@ except Exception as _te:
     print(f"[IMAP-Thread] Konnte nicht gestartet werden: {_te}")
 
 
-# =========================================================
-# AVIATIONSTACK – Buchungsänderungs-Check (100 req/Tag Free)
-# =========================================================
 
-# Letzter Check-Zeitpunkt pro Flugnummer – verhindert zu viele API-Calls
 _flight_check_cache: dict = {}  # key: "FN_DATUM" → last_checked timestamp
 
 async def check_aviationstack(fn: str, dep_date: str) -> dict:
@@ -2104,7 +1890,6 @@ async def auto_check_active_flights():
         today    = date.today()
         tomorrow = today + timedelta(days=1)
 
-        # Alle aktiven Reisen mit Flugnummern
         cur.execute("""SELECT trip_code, flight_numbers, departure_date, return_date
                        FROM trip_meta
                        WHERE flight_numbers IS NOT NULL AND flight_numbers != ''
@@ -2113,14 +1898,12 @@ async def auto_check_active_flights():
 
         checked = 0
         for tc, fns_raw, dep_d, ret_d in rows:
-            # Nur aktive Reisen
             status = compute_status(dep_d, ret_d)
             if status != "active":
                 continue
 
             fns = [f.strip() for f in (fns_raw or "").split(",") if f.strip()]
             for fn in fns:
-                # Nur Flüge heute oder morgen
                 flight_date = None
                 if dep_d == today or dep_d == tomorrow:
                     flight_date = str(dep_d)
@@ -2129,7 +1912,6 @@ async def auto_check_active_flights():
                 else:
                     continue
 
-                # Rate-Limit: max 1x alle 3h pro Flugnummer
                 cache_key = f"{fn}_{flight_date}"
                 last = _flight_check_cache.get(cache_key, 0)
                 if time.time() - last < 10800:  # 3 Stunden
@@ -2148,7 +1930,6 @@ async def auto_check_active_flights():
                 route         = result.get("route", "")
                 gate          = result.get("gate", "")
 
-                # Alert-Typen bestimmen
                 alert_type = "ok"
                 msg_parts  = []
 
@@ -2168,7 +1949,6 @@ async def auto_check_active_flights():
 
                 message = " · ".join(msg_parts) if msg_parts else flight_status
 
-                # Nur speichern wenn neu / geändert
                 cur.execute("""SELECT message FROM flight_alerts
                                WHERE trip_code=%s AND flight_number=%s AND flight_date=%s
                                ORDER BY checked_at DESC LIMIT 1""",
@@ -2204,11 +1984,9 @@ def _auto_flight_check():
         time.sleep(10800)  # 3 Stunden
 
 
-# Flight-Check Thread starten
 _ft = threading.Thread(target=_auto_flight_check, daemon=True)
 _ft.start()
 
-# =========================================================
 
 async def check_opensky(callsign: str) -> dict:
     """
@@ -2216,7 +1994,6 @@ async def check_opensky(callsign: str) -> dict:
     callsign: ICAO-Callsign z.B. 'DLH123' (Lufthansa LH123)
     Liefert: on_ground, altitude, velocity, last_seen
     """
-    # IATA → ICAO Carrier Mapping (häufigste Airlines)
     iata_to_icao = {
         "LH":"DLH","AZ":"AZA","LX":"SWR","OS":"AUA","BA":"BAW",
         "AF":"AFR","KL":"KLM","IB":"IBE","EK":"UAE","EW":"EWG",
@@ -2228,7 +2005,6 @@ async def check_opensky(callsign: str) -> dict:
         "MU":"CES","CZ":"CSN","HU":"CHH","9C":"CQH",
     }
     try:
-        # Callsign aus IATA-Flugnummer bauen: LH123 → DLH123
         m = re.match(r"^([A-Z]{2})(\d{1,4})$", callsign.upper().replace(" ",""))
         if not m:
             return {"status":"ungültige Flugnummer","source":"OpenSky","on_ground":None}
@@ -2251,7 +2027,6 @@ async def check_opensky(callsign: str) -> dict:
         data = resp.json()
         states = data.get("states") or []
 
-        # Suche nach Callsign (kann padded sein)
         match = None
         for s in states:
             cs = (s[1] or "").strip()
@@ -2259,7 +2034,6 @@ async def check_opensky(callsign: str) -> dict:
                 match = s; break
 
         if not match:
-            # Flug nicht live – entweder gelandet oder noch nicht gestartet
             return {
                 "status": "nicht aktiv (gelandet/nicht gestartet)",
                 "source": "OpenSky",
@@ -2303,10 +2077,8 @@ async def check_flight_status(fn: str, dep_date: str) -> dict:
     1. OpenSky: Live-Position (kostenlos, kein Key)
     2. Amadeus: Existenzcheck / Fahrplan (falls Key vorhanden)
     """
-    # OpenSky immer zuerst
     result = await check_opensky(fn)
 
-    # Amadeus als Ergänzung: Fahrplan-Existenzcheck
     if AMADEUS_CLIENT_ID and result.get("on_ground") is None:
         try:
             async with httpx.AsyncClient(timeout=8) as cl:
@@ -2334,9 +2106,6 @@ async def check_flight_status(fn: str, dep_date: str) -> dict:
     return result
 
 
-# =========================================================
-# BAHN PUENKTLICHKEIT (DB API)
-# =========================================================
 
 async def check_bahn_puenktlichkeit(zug_nr: str, datum: str, eva_nr: str = "8000105") -> dict:
     """
@@ -2347,17 +2116,14 @@ async def check_bahn_puenktlichkeit(zug_nr: str, datum: str, eva_nr: str = "8000
     """
     if not DB_CLIENT_ID or not DB_CLIENT_SECRET:
         return {"status": "kein DB_CLIENT_ID/SECRET", "delay_min": None, "source": "DB Timetables"}
-    # Zugnummer normieren: "ICE 597" → "597", "ICE597" → "597"
     zug_clean = re.sub(r"[^0-9]", "", zug_nr)
     if not zug_clean:
         return {"status": "ungültige Zugnummer", "delay_min": None, "source": "DB Timetables"}
     try:
-        # Datum für API: YYMMDD
         if datum and len(datum) == 10:  # YYYY-MM-DD
             api_date = datum[2:4] + datum[5:7] + datum[8:10]
         else:
             api_date = datetime.now().strftime("%y%m%d")
-        # Stunde für fchg (changes): aktuelle Stunde
         api_hour = datetime.now().strftime("%H")
 
         headers = {
@@ -2366,11 +2132,9 @@ async def check_bahn_puenktlichkeit(zug_nr: str, datum: str, eva_nr: str = "8000
             "accept": "application/xml"
         }
         async with httpx.AsyncClient(timeout=10.0) as cl:
-            # 1. Plan abrufen (planmäßige Abfahrten)
             plan_url = f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/plan/{eva_nr}/{api_date}/{api_hour}"
             resp_plan = await cl.get(plan_url, headers=headers)
 
-            # 2. Änderungen abrufen (aktuelle Verspätungen)
             fchg_url = f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/fchg/{eva_nr}"
             resp_fchg = await cl.get(fchg_url, headers=headers)
 
@@ -2380,21 +2144,15 @@ async def check_bahn_puenktlichkeit(zug_nr: str, datum: str, eva_nr: str = "8000
         plan_text = resp_plan.text
         fchg_text = resp_fchg.text if resp_fchg.status_code == 200 else ""
 
-        # Zugnummer im Plan suchen
         if zug_clean not in plan_text:
             return {"status": "nicht im Fahrplan", "delay_min": None, "source": "DB Timetables"}
 
-        # Verspätung aus fchg parsen: <dp ct="HHMM"> neben trip-id mit Zugnummer
         delay_min = None
         if fchg_text and zug_clean in fchg_text:
-            # Trip-ID Zeilen mit unserer Zugnummer finden
-            # Format: <s id="..."><tl c="ICE" n="597"...><dp ct="1423" ...>
-            # Suche nach n="597" in der Nähe von ct=
             pattern = rf'n="{zug_clean}"[^>]*>.*?ct="(\d{{4}})"'
             m = re.search(pattern, fchg_text, re.DOTALL)
             if m:
                 ct_time = m.group(1)  # aktuell geplante Abfahrt z.B. "1437"
-                # Plan-Abfahrt finden
                 pt_pattern = rf'n="{zug_clean}"[^>]*>.*?pt="(\d{{4}})"'
                 pm = re.search(pt_pattern, plan_text, re.DOTALL)
                 if pm:
@@ -2418,9 +2176,6 @@ async def check_bahn_puenktlichkeit(zug_nr: str, datum: str, eva_nr: str = "8000
         return {"status": f"Fehler: {str(e)[:80]}", "delay_min": None, "source": "DB Timetables"}
 
 
-# =========================================================
-# CSS + JS (identisch mit 6.1, Logo als Link)
-# =========================================================
 
 CSS = """
 :root{
@@ -2754,9 +2509,6 @@ def page_shell(title, content, active_tab=""):
 </html>"""
 
 
-# =========================================================
-# API HELPER
-# =========================================================
 
 @app.get("/api/next-code")
 def api_next_code():
@@ -2820,12 +2572,10 @@ async def reanalyze_beleg(att_id: int):
         if not skey or skey.startswith("S3-FEHLER"):
             return {"status":"fehler","detail":"Kein S3-Key"}
 
-        # PDF von S3 laden
         s3=get_s3()
         obj=s3.get_object(Bucket=S3_BUCKET,Key=skey)
         pdf_bytes=obj["Body"].read()
 
-        # pypdf lesen
         import pypdf as _pypdf
         reader=_pypdf.PdfReader(io.BytesIO(pdf_bytes))
         ocr_text="\n".join(page.extract_text() or "" for page in reader.pages)
@@ -2834,7 +2584,6 @@ async def reanalyze_beleg(att_id: int):
         if not ocr_text.strip():
             return {"status":"fehler","detail":"pypdf liefert keinen Text (gescanntes PDF?)"}
 
-        # Regex-Extraktion
         regex_fns=extract_flight_numbers(ocr_text)
         regex_segs=extract_flight_segments_from_text(ocr_text) if regex_fns else []
         seg_s=segments_to_string(regex_segs) if regex_segs else ""
@@ -2860,7 +2609,6 @@ async def reanalyze_beleg(att_id: int):
                 betrag_eur=f"{val*rates.get(waehrung,1.0):.2f}".replace(".",",")
             except: pass
 
-        # Reisecode aus PNR
         if not tc and regex_pnr:
             cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(regex_pnr,))
             r=cur.fetchone()
@@ -2900,7 +2648,6 @@ def fix_trips():
         conn=get_conn(); cur=conn.cursor()
         fixes=[]
 
-        # ── 1. Doppelte Flug-Belege entfernen ────────────────────────────────
         cur.execute("SELECT DISTINCT trip_code FROM mail_attachments WHERE detected_type='Flug'")
         trip_codes=[r[0] for r in cur.fetchall() if r[0]]
         for tc in trip_codes:
@@ -2913,7 +2660,6 @@ def fix_trips():
                        ELSE 1 END, id DESC""",(tc,))
             belege=cur.fetchall()
             if len(belege) <= 1: continue
-            # Besten Beleg: echter Upload mit Airports in Segmenten
             best_id=None
             for b in belege:
                 segs=[s.split('|') for s in (b[2] or '').split(';') if s.strip()]
@@ -2925,7 +2671,6 @@ def fix_trips():
                     cur.execute("DELETE FROM mail_attachments WHERE id=%s",(b[0],))
                     fixes.append(f"{tc}: Duplikat ID {b[0]} gelöscht")
 
-        # ── 2. 26-001: Korrekte Segmente direkt setzen ───────────────────────
         SEGS_26001 = "LH3463|NUE|FRA|20.04.2026|13:00|20.04.2026|14:15;LH1078|FRA|LYS|20.04.2026|16:55|20.04.2026|18:15;LH1077|LYS|FRA|24.04.2026|14:35|24.04.2026|17:19;LH3463|FRA|NUE|24.04.2026|17:19|24.04.2026|19:15"
         FNS_26001  = "LH3463,LH1078,LH1077,LH3463"
 
@@ -2953,7 +2698,6 @@ def fix_trips():
         cur.execute("UPDATE trip_meta SET vma_destinations='2026-04-20:DE,2026-04-20:FR,2026-04-24:DE' WHERE trip_code='26-001'")
         fixes.append("26-001: VMA auf Frankreich gesetzt")
 
-        # ── 3. 26-002: PNR + VMA korrigieren ────────────────────────────────
         cur.execute("UPDATE trip_meta SET pnr_code='Z6INOT' WHERE trip_code='26-002' AND pnr_code='RIGHTS'")
         if cur.rowcount: fixes.append("26-002: PNR RIGHTS→Z6INOT")
 
@@ -2963,14 +2707,12 @@ def fix_trips():
             cur.execute("UPDATE trip_meta SET vma_destinations='2026-05-25:DE,2026-05-25:CR,2026-05-29:DE' WHERE trip_code='26-002'")
             fixes.append("26-002: VMA auf Costa Rica (CR) gesetzt")
 
-        # ── 4. Betrag 26-001: Lufthansa-Beleg hat 0€ → aus Mail lesen ───────
         cur.execute("SELECT id,detected_amount FROM mail_attachments WHERE trip_code='26-001' AND detected_type='Flug'")
         beleg_26001=cur.fetchone()
         if beleg_26001 and not beleg_26001[1]:
             cur.execute("UPDATE mail_attachments SET detected_amount='496.07',detected_amount_eur='496,07',detected_currency='EUR' WHERE id=%s",(beleg_26001[0],))
             fixes.append("26-001: Betrag 496.07 EUR gesetzt (aus Lufthansa Mail)")
 
-        # ── 5. 26-002: analysefehler Beleg reparieren ───────────────────────
         cur.execute("""SELECT id,extracted_text,flight_segments,analysis_status
             FROM mail_attachments WHERE trip_code='26-002'
             AND detected_type IN ('Flug','Sonstiges','ausstehend')
@@ -2980,7 +2722,6 @@ def fix_trips():
         SEGS_26002="LX3613|FRA|ZRH|25.05.2026|06:35|25.05.2026|07:30;LX8038|ZRH|SJO|25.05.2026|09:00|25.05.2026|12:55;LH4515|SJO|ZRH|29.05.2026|15:55|30.05.2026|10:55;LH5739|ZRH|FRA|30.05.2026|12:50|30.05.2026|13:55"
         FNS_26002="LX3613,LX8038,LH4515,LH5739"
         for bid,ext_text,seg_s,astatus in fehler_belege:
-            # Versuche aus extracted_text zu parsen
             if ext_text:
                 segs=extract_flight_segments_from_text(ext_text)
                 seg_s2=segments_to_string(segs) if segs else ""
@@ -2996,22 +2737,18 @@ def fix_trips():
         cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code='26-002'",(FNS_26002,))
         cur.execute("UPDATE trip_meta SET vma_destinations='2026-05-25:DE,2026-05-25:CR,2026-05-29:DE' WHERE trip_code='26-002'")
         fixes.append("26-002: Segmente+VMA gesetzt")
-        # LH4515 fliegt 29.05 ab → Ankunft 30.05. Am 30.05 darf er nicht nochmal erscheinen
         cur.execute("SELECT id,flight_segments FROM mail_attachments WHERE trip_code='26-002' AND detected_type='Flug' LIMIT 1")
         b26002=cur.fetchone()
         if b26002 and b26002[1]:
             segs=[s for s in b26002[1].split(';') if s.strip()]
-            # LH4515 darf nur 1x vorkommen
             lh4515_segs=[s for s in segs if s.startswith('LH4515')]
             if len(lh4515_segs)>1:
-                # Behalte nur den mit Abflugdatum 29.05
                 segs_fixed=[s for s in segs if not s.startswith('LH4515')]
                 segs_fixed.append([s for s in lh4515_segs if '29.05' in s][0] if any('29.05' in s for s in lh4515_segs) else lh4515_segs[0])
                 segs_fixed.sort(key=lambda s: s.split('|')[3] if len(s.split('|'))>3 else '')
                 cur.execute("UPDATE mail_attachments SET flight_segments=%s WHERE id=%s",(';'.join(segs_fixed),b26002[0]))
                 fixes.append(f"26-002: LH4515-Duplikat entfernt")
 
-        # ── 6. 26-001: Marriott-Beleg wiederherstellen falls fehlend ────────
         cur.execute("SELECT id FROM mail_attachments WHERE trip_code='26-001' AND detected_type='Hotel'")
         if not cur.fetchone():
             uid="mail_body_marriott_26001"
@@ -3031,7 +2768,6 @@ def fix_trips():
                  "Wiederhergestellt: Lyon Marriott, 2 Nächte, 385€"))
             fixes.append("26-001: Marriott-Beleg wiederhergestellt (385€, 22.-24.04)")
 
-        # ── 7. 26-002: Sheraton-Beleg prüfen ────────────────────────────────
         cur.execute("SELECT id FROM mail_attachments WHERE trip_code='26-002' AND detected_type='Hotel'")
         if not cur.fetchone():
             uid2="mail_body_sheraton_26002"
@@ -3071,9 +2807,6 @@ def version():
             "auto_imap":"aktiv","pdf_libs":pdf_ok,"pdf_detail":pdf_detail}
 
 
-# =========================================================
-# /init
-# =========================================================
 
 @app.get("/init")
 def init():
@@ -3085,7 +2818,6 @@ def init():
                     "analysis_status TEXT DEFAULT 'ausstehend'",
                     "created_at TIMESTAMP DEFAULT now()"]:
             cur.execute(f"ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS {col}")
-        # Index für schnellen Duplikat-Check per Message-ID
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mail_message_id ON mail_messages(message_id)")
 
         cur.execute("CREATE TABLE IF NOT EXISTS mail_attachments (id SERIAL PRIMARY KEY, mail_uid TEXT)")
@@ -3133,14 +2865,12 @@ def init():
             flight_date TEXT, alert_type TEXT, message TEXT,
             source TEXT, delay_min INTEGER, checked_at TIMESTAMP DEFAULT now())""")
 
-        # Benutzerdefinierte Kategorie-Regeln
         cur.execute("""CREATE TABLE IF NOT EXISTS category_rules (
             id SERIAL PRIMARY KEY,
             keyword TEXT NOT NULL,
             category TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT now())""")
 
-        # KI-Lernbeispiele (Few-Shot Examples für Mistral)
         cur.execute("""CREATE TABLE IF NOT EXISTS ki_examples (
             id SERIAL PRIMARY KEY,
             mail_type TEXT NOT NULL,
@@ -3150,7 +2880,6 @@ def init():
             approved BOOLEAN DEFAULT TRUE,
             created_at TIMESTAMP DEFAULT now())""")
 
-        # Tagesbasierte Mahlzeiten-Erfassung für VMA
         cur.execute("""CREATE TABLE IF NOT EXISTS daily_meals (
             id SERIAL PRIMARY KEY,
             trip_code TEXT NOT NULL,
@@ -3172,9 +2901,6 @@ def init():
         return {"status":"fehler","detail":str(e)}
 
 
-# =========================================================
-# TRIPS LADEN
-# =========================================================
 
 def load_trips(conn, filter_status=None):
     cur=conn.cursor()
@@ -3191,7 +2917,6 @@ def load_trips(conn, filter_status=None):
                    FROM mail_attachments""")
     att_rows=cur.fetchall()
 
-    # Simpler Fallback: subject der ersten Mail als Hinweis
     cur.execute("""SELECT trip_code, subject FROM mail_messages
                    WHERE trip_code IS NOT NULL ORDER BY id""")
     mail_subjects = {}
@@ -3199,7 +2924,6 @@ def load_trips(conn, filter_status=None):
         if tc_m not in mail_subjects:
             mail_subjects[tc_m] = subj or ""
 
-    # Aktuelle Flight-Alerts (letzte 48h, nur kritische)
     cur.execute("""SELECT trip_code,flight_number,alert_type,message
                    FROM flight_alerts
                    WHERE checked_at > now() - interval '48 hours'
@@ -3241,7 +2965,6 @@ def load_trips(conn, filter_status=None):
         all_fns = list(set(([f.strip() for f in (fns or "").split(",") if f.strip()] + a["fns"])))
         all_trains = list(set(([t.strip() for t in (trains or "").split(",") if t.strip()] + a["trains"])))
         all_pnrs = list(set(([pnr] if pnr else []) + a["pnrs"]))
-        # Fallback: Mail-Betreff als Hinweis wenn Ziel/Name fehlt
         mail_hint = mail_subjects.get(tc,"")
         display_dest = destinations or trip_title or (mail_hint[:40] if mail_hint else "")
         display_traveler = traveler or ""
@@ -3279,10 +3002,8 @@ def _code_header(t):
     emp   = t.get("employee_code","")
     title = t.get("trip_title","")
     ccode = t.get("customer_code","")
-    # Hauptzeile: Kürzel · Reisename (oder Ziel als Fallback)
     main_parts = [x for x in [emp, title or t.get("destinations","")] if x]
     main_label = " · ".join(main_parts) if main_parts else ""
-    # Kundencode klein dahinter
     ccode_html = f' <span style="font-size:10px;color:var(--t300);font-weight:400">{ccode}</span>' if ccode else ""
     label_html = (f' <span style="font-family:\'Inter\',sans-serif;font-size:12px;'
                   f'font-weight:500;color:var(--t700);letter-spacing:0">{main_label}</span>{ccode_html}') if main_label else ""
@@ -3303,9 +3024,6 @@ def _progress(t):
     return f'<div class="prog-wrap"><div class="prog-lbl"><span>Vollständigkeit</span><span style="color:{lc};font-weight:500">{warn if sc<3 else "vollständig"}</span></div><div class="prog-bg"><div class="prog-fill {cls}" style="width:{pct}%"></div></div></div>'
 
 
-# =========================================================
-# DASHBOARD
-# =========================================================
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_main(request: Request):
@@ -3333,14 +3051,12 @@ async def _dashboard(request: Request, focus: str):
         done_t   =[t for t in all_trips if t["status"]=="done"]
         open_alerts=sum(1 for t in active_t if t["warnings"])
 
-        # Unzugeordnete Mails für Posteingang-Zähler
         try:
             cur.execute("SELECT COUNT(*) FROM mail_messages WHERE (trip_code IS NULL OR trip_code='')")
             unassigned_count=cur.fetchone()[0]
         except: unassigned_count=0
         posteingang_badge=f'<a href="/posteingang" style="text-decoration:none"><div class="sum-item" style="border-color:var(--am6);background:#fffbeb"><div class="sum-val" style="color:var(--am6)">{unassigned_count}</div><div class="sum-lbl" style="color:var(--am6)">📬 Posteingang</div></div></a>' if unassigned_count>0 else ''
 
-        # i) kein Belege-Betrag in Summary
         summary=f"""<div class="sum-bar sb">
           <div class="sum-item"><div class="sum-val blue">{len(active_t)}</div><div class="sum-lbl">Aktive Reisen</div></div>
           <div class="sum-item"><div class="sum-val">{len(planned_t)}</div><div class="sum-lbl">In Planung</div></div>
@@ -3356,7 +3072,6 @@ async def _dashboard(request: Request, focus: str):
                 ha=bool(t["warnings"])
                 fa=t.get("flight_alerts",[])
                 pnr_bar=f'<div class="pnr-bar">✈ PNR: {t["pnr"]}</div>' if t["pnr"] else ""
-                # Flight-Alert-Bar (rot, prominent) separat von Belege-Warnungen
                 flight_alert_bar=""
                 if fa:
                     for fal in fa[:2]:  # max 2 anzeigen
@@ -3365,7 +3080,6 @@ async def _dashboard(request: Request, focus: str):
                         bc = "rgba(220,38,38,.25)" if is_cancel else "rgba(201,124,10,.25)"
                         fc = "var(--re6)" if is_cancel else "var(--am6)"
                         flight_alert_bar += f'<div style="margin:0 12px 6px;padding:6px 12px;background:{bg};border:1px solid {bc};border-radius:var(--rs);font-size:12px;color:{fc};font-weight:500">{fal}</div>'
-                # Normale Warnungen (Kein Flugbeleg / Hotel fehlt)
                 doc_warnings=[w for w in t["warnings"] if w not in fa]
                 dep_s=str(t["dep"])[:10] if t["dep"] else ""
                 ret_s=str(t["ret"])[:10] if t["ret"] else ""
@@ -3409,7 +3123,6 @@ async def _dashboard(request: Request, focus: str):
             for t in trips:
                 dep=str(t["dep"])[:10] if t["dep"] else None
                 ret=str(t["ret"])[:10] if t["ret"] else None
-                # Kopfzeile: was wir wissen
                 dest_show = t["destinations"] or t["trip_title"] or t["cc"] or '<span style="color:var(--am6);font-size:11px">⚠ Ziel fehlt</span>'
                 date_line = f"{dep} – {ret}" if dep and ret else (f"Ab {dep}" if dep else '<span style="color:var(--am6);font-size:11px">⚠ Datum fehlt</span>')
                 fn_line=f'<div style="font-family:DM Mono,monospace;font-size:11px;color:var(--b600);margin-top:3px">✈ {t["fns"]}</div>' if t["fns"] else ""
@@ -3480,7 +3193,6 @@ async def _dashboard(request: Request, focus: str):
                 </div>"""
             return f'<div class="cards">{cards}</div>'
 
-        # Sektionen je nach Tab
         all_sections = f"""
         <div class="sb" id="active">
           <div class="sec-hdr"><div class="sec-dot active"></div><span class="sec-title">Laufende Reisen</span><span class="sec-cnt">{len(active_t)} aktiv</span></div>
@@ -3550,9 +3262,6 @@ async def _dashboard(request: Request, focus: str):
         return HTMLResponse(page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p><a class="btn" href="/init">DB init</a></div>'),status_code=500)
 
 
-# =========================================================
-# NEUE REISE / EDIT
-# =========================================================
 
 @app.post("/new-trip")
 async def new_trip(request: Request):
@@ -3676,9 +3385,6 @@ async def edit_trip_save(tc: str, request: Request):
         return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
 
 
-# =========================================================
-# KI-ANALYSE (Mail-Body + Anhaenge)
-# =========================================================
 
 @app.get("/analyze-attachments", response_class=HTMLResponse)
 async def analyze_attachments():
@@ -3687,7 +3393,6 @@ async def analyze_attachments():
         cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code")
         known_codes=[r[0] for r in cur.fetchall()]
 
-        # e) Auch Mail-Bodies analysieren
         cur.execute("""SELECT id,subject,body,trip_code FROM mail_messages
             WHERE (analysis_status IS NULL OR analysis_status='ausstehend')
             AND (body IS NOT NULL AND body != '') ORDER BY id LIMIT 50""")
@@ -3695,7 +3400,6 @@ async def analyze_attachments():
         mail_processed=0
         for mid,subj,body,tc in mail_rows:
             try:
-                # HTML → Plaintext
                 body_clean = body or ""
                 if body_clean and ("<html" in body_clean.lower() or "<div" in body_clean.lower()):
                     import html as _html
@@ -3711,7 +3415,6 @@ async def analyze_attachments():
 
                 full = f"{subj or ''}\n{body_clean}"
 
-                # ── NEUE ENGINE: Zuordnung via Datum > PNR > Code ──────────
                 trips_for_assign = load_trips_for_assignment()
                 rc, confidence, assign_method = assign_trip_by_date(subj or "", body_clean, trips_for_assign)
                 if not rc: rc = tc or ""
@@ -3719,7 +3422,6 @@ async def analyze_attachments():
                 if rc and rc != tc:
                     cur.execute("UPDATE mail_messages SET trip_code=%s WHERE id=%s",(rc,mid))
 
-                # ── EXTRAKTION ─────────────────────────────────────────────
                 mail_type   = detect_mail_type(full)
                 regex_fns   = extract_flight_numbers(full)
                 regex_pnr   = extract_pnr_safe(full) or ""
@@ -3728,7 +3430,6 @@ async def analyze_attachments():
                 betrag, waehrung = extract_amount_safe(full)
                 eff_type = "Flug" if regex_fns else mail_type
 
-                # Hotel-Daten
                 checkin = checkout = ""; nights = 0
                 if eff_type == "Hotel":
                     checkin, checkout = extract_hotel_dates(full)
@@ -3738,25 +3439,21 @@ async def analyze_attachments():
                             nights = (_d2.fromisoformat(checkout) - _d2.fromisoformat(checkin)).days
                         except: pass
 
-                # Vendor
                 vendor = ""
                 for h in ["Marriott","Sheraton","Hilton","Hyatt","Radisson","Intercontinental","Lufthansa","Swiss","FLY AWAY"]:
                     if h.lower() in full.lower(): vendor=h.strip(); break
 
-                # trip_meta aktualisieren
                 if rc:
                     cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(rc,))
                     if regex_pnr: cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(regex_pnr,rc))
                     if regex_fns: cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(",".join(regex_fns),rc))
 
-                # Beleg erstellen
                 if eff_type in ("Flug","Hotel","Bahn","Taxi","Mietwagen") and rc:
                     cur.execute("SELECT id FROM mail_attachments WHERE mail_uid=(SELECT mail_uid FROM mail_messages WHERE id=%s LIMIT 1) AND storage_key LIKE 'mail_body_%%'",(mid,))
                     if not cur.fetchone():
                         cur.execute("SELECT mail_uid FROM mail_messages WHERE id=%s",(mid,))
                         muid_row=cur.fetchone()
                         muid=muid_row[0] if muid_row else f"mail_{mid}"
-                        # EUR-Betrag berechnen
                         betrag_eur=""
                         if betrag:
                             try:
@@ -3781,7 +3478,6 @@ async def analyze_attachments():
                              "ok (Mail-Body)","hoch" if confidence>=95 else "mittel",
                              "ok","Zuordnung: "+assign_method+f" [{confidence}%]"))
 
-                        # VMA aus Hotel-Ort
                         if eff_type=="Hotel" and rc and checkin:
                             hcc=hotel_city_to_cc(vendor) or hotel_city_to_cc(full[:1000])
                             if hcc and hcc!="DE":
@@ -3811,7 +3507,6 @@ async def analyze_attachments():
                 continue
 
 
-        # Anhänge analysieren – ausstehende, aber keine Inline-Bilder/ICS
         cur.execute("""SELECT id,storage_key,original_filename FROM mail_attachments
             WHERE (analysis_status IN ('ausstehend','neu') OR analysis_status IS NULL)
             AND original_filename NOT SIMILAR TO 'image[0-9]+[.](png|jpg|jpeg|gif|bmp|emz|wmz)'
@@ -3844,15 +3539,11 @@ async def analyze_attachments():
         return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler bei KI-Analyse</h2><p><b>{e}</b></p><pre style="font-size:10px;overflow-x:auto;white-space:pre-wrap;background:var(--page);padding:12px;border-radius:8px">{tb}</pre></div>')
 
 
-# =========================================================
-# MAIL-IMPORT (manuell aufrufbar)
-# =========================================================
 
 @app.get("/fetch-mails", response_class=HTMLResponse)
 def fetch_mails():
     try:
         conn=get_conn();cur=conn.cursor()
-        # Zähle vor dem Fetch
         cur.execute("SELECT COUNT(*) FROM mail_messages"); before=cur.fetchone()[0]
         cur.close();conn.close()
 
@@ -3888,9 +3579,6 @@ def fetch_mails():
         return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p><pre style="font-size:10px;overflow-x:auto;white-space:pre-wrap">{tb[:500]}</pre></div>')
 
 
-# =========================================================
-# LOGS / DETAIL / ABRECHNUNG
-# =========================================================
 
 @app.get("/attachment-log", response_class=HTMLResponse)
 def attachment_log():
@@ -3938,7 +3626,6 @@ def duplikate():
     try:
         conn=get_conn(); cur=conn.cursor()
 
-        # Mails mit gleichem Betreff (normalisiert) – potenzielle Duplikate
         cur.execute("""
             SELECT m1.id, m1.sender, m1.subject, m1.trip_code, m1.created_at,
                    m2.id as dup_id, m2.created_at as dup_date
@@ -3951,7 +3638,6 @@ def duplikate():
             LIMIT 50""")
         dups = cur.fetchall()
 
-        # Belege ohne zugeordnete Mail (verwaist)
         cur.execute("""
             SELECT a.id, a.original_filename, a.detected_type,
                    a.detected_amount_eur, a.detected_vendor, a.trip_code, a.created_at
@@ -4059,7 +3745,6 @@ def posteingang():
     try:
         conn=get_conn();cur=conn.cursor()
 
-        # Unzugeordnete Mails + ihre Belege
         cur.execute("""
             SELECT m.id, m.sender, m.subject, m.created_at,
                    a.detected_type, a.detected_amount, a.detected_amount_eur,
@@ -4073,7 +3758,6 @@ def posteingang():
             ORDER BY m.id DESC LIMIT 50""")
         rows=cur.fetchall()
 
-        # Reisen für Dropdown
         cur.execute("SELECT trip_code,trip_title,traveler_name,departure_date FROM trip_meta ORDER BY departure_date DESC LIMIT 30")
         trips=cur.fetchall()
         cur.close();conn.close()
@@ -4104,7 +3788,6 @@ def posteingang():
         for r in rows:
             mail_id,sender,subject,created,dtype,amt,amt_eur,curr,vendor,checkin,checkout,fns,bemerk,att_id=r
 
-            # Ausgelesene Daten anzeigen
             data_rows=""
             if dtype: data_rows+=f"<tr><td style='color:var(--t300);font-size:11px'>Typ</td><td><span class='bdg {'bdg-ok' if dtype in ('Hotel','Flug') else 'bdg-w'}'>{dtype}</span></td></tr>"
             if vendor: data_rows+=f"<tr><td style='color:var(--t300);font-size:11px'>Anbieter</td><td><b>{vendor}</b></td></tr>"
@@ -4243,7 +3926,6 @@ async def mail_assign(mail_id: int, request: Request):
             return RedirectResponse(url="/mail-log",status_code=303)
         conn=get_conn();cur=conn.cursor()
 
-        # Mail zuordnen
         cur.execute("UPDATE mail_messages SET trip_code=%s, analysis_status='ausstehend' WHERE id=%s",(tc,mail_id))
         cur.execute("SELECT mail_uid,subject,body FROM mail_messages WHERE id=%s",(mail_id,))
         row=cur.fetchone()
@@ -4253,16 +3935,13 @@ async def mail_assign(mail_id: int, request: Request):
 
         mail_uid, subject, body = row
 
-        # Attachments zuordnen
         cur.execute("UPDATE mail_attachments SET trip_code=%s WHERE mail_uid=%s AND (trip_code IS NULL OR trip_code='')",(tc,mail_uid))
         cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(tc,))
 
-        # Sofort Beleg erstellen wenn noch keiner vorhanden
         cur.execute("SELECT id FROM mail_attachments WHERE mail_uid=%s AND storage_key LIKE 'mail_body_%'",(mail_uid,))
         if not cur.fetchone():
             full = f"{subject or ''}\n{body or ''}"
             mail_type = detect_mail_type(full)
-            # Beleg für ALLE Typen erstellen
             betrag, waehrung = extract_amount_safe(full)
             checkin, checkout = extract_hotel_dates(full) if mail_type=="Hotel" else ("","")
             nights=0
@@ -4318,7 +3997,6 @@ def mail_detail(mail_id: int):
         cur.execute("""SELECT sender,subject,body,trip_code,detected_type,
             pnr_code,analysis_status,created_at FROM mail_messages WHERE id=%s""",(mail_id,))
         row=cur.fetchone()
-        # Anhänge dieser Mail
         cur.execute("""SELECT original_filename,detected_type,detected_amount_eur,
             analysis_status,id FROM mail_attachments WHERE mail_uid=(
                 SELECT mail_uid FROM mail_messages WHERE id=%s)""",(mail_id,))
@@ -4326,7 +4004,6 @@ def mail_detail(mail_id: int):
         cur.close();conn.close()
         if not row: return HTMLResponse("Mail nicht gefunden",404)
         sender,subject,body,tc,dtype,pnr,astatus,created=row
-        # Body sicher escapen für Vorschau
         import html as htmllib
         body_safe=htmllib.escape(body or "").replace("\n","<br>")
         att_html="".join(f"""<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--bds)">
@@ -4400,7 +4077,6 @@ def trip_detail(tc: str):
                       "planned":"<span class='sbadge sb-planned'>Geplant</span>",
                       "done":"<span class='sbadge sb-done'>Abgeschlossen</span>"}.get(status,"")
 
-        # Reise-Typ automatisch ermitteln
         if customer_code and customer_code.upper() not in ("INTERN","INT",""):
             trip_type="👤 Kundenprojekt"
             trip_type_detail=customer_code
@@ -4414,18 +4090,13 @@ def trip_detail(tc: str):
             trip_type="📋 Reise"
             trip_type_detail=trip_title or "–"
 
-        # Header-Titel
         title_parts=list(filter(None,[trip_title, customer_code]))
         header_title=f"{tc}"
         if title_parts: header_title+=f" · {' · '.join(title_parts)}"
 
-        # ── CHRONOLOGISCHE TIMELINE ──────────────────────────────
-        # Ereignisse sammeln
         timeline_events=[]
-        # Flüge die bereits aus ICS/Belegen kommen – damit keine Doppeleinträge
         fns_from_belege=set()
 
-        # Abreise (nur Journeyzeile, ohne Flugnummern – kommen aus ICS)
         if dep_d:
             timeline_events.append({
                 "date": dep_d,
@@ -4438,20 +4109,15 @@ def trip_detail(tc: str):
                 "type": "journey"
             })
 
-        # Belege als Timeline-Einträge
         beleg_sum=0.0
         for a in atts:
             fn_a,dtype,amt_eur,curr,ddate,vendor,stat,conf,bemerk,att_id,apnr,afns,atrains,amt,det_nights,ft_info,checkin_s,checkout_s,checkin_t_s,checkout_t_s,seg_s,pdf_key_a=a
 
-            # ── Filter: Inline-Bilder, ICS-Reste, Irrelevantes ──
             fn_lower=(fn_a or "").lower()
-            # Inline-Bilder + EMZ/WMZ
             if re.match(r"image\d+\.", fn_lower) or fn_lower.endswith(".emz") or fn_lower.endswith(".wmz"):
                 continue
-            # ICS-Dateien
             if fn_lower.endswith(".ics") or dtype == "Kalendereintrag":
                 continue
-            # Nicht analysierbare ohne Betrag/Flugnummer
             if stat in ("nicht analysierbar","Inline-Grafik") and not amt_eur and not afns:
                 continue
 
@@ -4459,7 +4125,6 @@ def trip_detail(tc: str):
                 try: beleg_sum+=float(amt_eur.replace(".","").replace(",","."))
                 except: pass
 
-            # Datum parsen helper
             def parse_dd(s):
                 if not s: return None
                 s=str(s).strip()
@@ -4471,7 +4136,6 @@ def trip_detail(tc: str):
                 except: return None
 
             ev_date = parse_dd(ddate) or dep_d
-            # Für Flugbelege: Buchungsdatum ≠ Flugdatum → erstes Segment-Datum nutzen
             if dtype in ("Flug","Kalendereintrag") and seg_s:
                 first_seg = seg_s.split(";")[0].split("|")
                 if len(first_seg) > 3 and first_seg[3].strip():
@@ -4486,7 +4150,6 @@ def trip_detail(tc: str):
             amount_str=f"{amt_eur} €" if amt_eur else (f"{amt} {curr}" if amt else "–")
             edit_url=f"/beleg-edit/{att_id}"
             view_url=f"/beleg/{att_id}"
-            # PDF-Link: direktes PDF wenn vorhanden, sonst Beleg-Vorschau
             pdf_link=""
             if pdf_key_a:
                 pdf_view_url=f"/beleg-pdf/{att_id}"
@@ -4495,10 +4158,8 @@ def trip_detail(tc: str):
                     f'<a href="{view_url}" target="_blank" style="color:var(--b600);margin-right:6px" title="Beleg anzeigen">📄</a>'
                     f'<a href="{edit_url}" style="color:var(--t300)" title="KI-Ergebnis korrigieren">✏</a>')
 
-            # ── HOTEL: mehrtägig mit Check-in/out ──────────────────────
             if dtype == "Hotel":
                 hotel_name = vendor or "Hotel"
-                # Nächte zuerst bestimmen
                 n_nights = int(det_nights or 0)
                 if n_nights == 0 and checkin_d and checkout_d:
                     n_nights = max(0, (checkout_d - checkin_d).days)
@@ -4506,8 +4167,6 @@ def trip_detail(tc: str):
                     nm = re.search(r"(\d+)\s*(?:Nächte|Naechte|nights?)", bemerk, re.IGNORECASE)
                     if nm: n_nights = int(nm.group(1))
 
-                # Check-in: explizites Datum bevorzugen
-                # Wenn kein checkin aber checkout + nights → rückwärts berechnen
                 cin_d = checkin_d
                 if not cin_d and checkout_d and n_nights > 0:
                     cin_d = checkout_d - timedelta(days=n_nights)
@@ -4515,7 +4174,6 @@ def trip_detail(tc: str):
                     cin_d = dep_d or date.today()
                 cin_t = checkin_t_s or "15:00"
 
-                # Check-out
                 if checkout_d:
                     cout_d = checkout_d
                     if cin_d: n_nights = max(n_nights, (cout_d - cin_d).days)
@@ -4525,8 +4183,6 @@ def trip_detail(tc: str):
                     cout_d = None
                 cout_t = checkout_t_s or "11:00"
 
-                # Check-in Zeile
-                # Ort aus ki_bemerkung extrahieren (z.B. "3 Nächte Marriott Lyon")
                 hotel_city = ""
                 if bemerk:
                     city_m = re.search(r'(?:Naechte|Nächte|Naecht)\s+\w+\s+(\w+)', bemerk, re.IGNORECASE)
@@ -4540,7 +4196,6 @@ def trip_detail(tc: str):
                     "detail": f"{amount_str}{f' · {n_nights} Nächte' if n_nights else ''}",
                     "extra": actions, "status": stat, "att_id": att_id,
                 })
-                # Zwischennächte
                 if n_nights > 1 and cin_d:
                     for ni in range(1, n_nights):
                         nd = cin_d + timedelta(days=ni)
@@ -4551,7 +4206,6 @@ def trip_detail(tc: str):
                             "route": "", "timerange": f"Nacht {ni+1}/{n_nights}",
                             "detail": "", "extra": "", "status": "", "att_id": att_id,
                         })
-                # Check-out Zeile
                 if cout_d:
                     timeline_events.append({
                         "date": cout_d, "time": cout_t,
@@ -4561,16 +4215,13 @@ def trip_detail(tc: str):
                         "detail": "", "extra": "", "status": "", "att_id": att_id,
                     })
 
-            # ── FLUG: aus flight_segments oder ft_info ─────────────────
             elif dtype in ("Flug","Kalendereintrag"):
                 segs_added = False
-                # Flugnummern aus diesem Beleg für Deduplizierung merken
                 if afns:
                     for fn_x in afns.split(","):
                         fns_from_belege.add(fn_x.strip())
 
                 if seg_s:
-                    # Strukturierte Segmente aus Mistral-Extraktion
                     seen_seg_keys = set()  # Deduplizierung innerhalb aller Belege
                     for seg in seg_s.split(";"):
                         parts = seg.strip().split("|")
@@ -4583,9 +4234,7 @@ def trip_detail(tc: str):
                             arr_dt  = parse_dd(parts[5]) if len(parts)>5 and parts[5].strip() else dep_dt
                             arr_tm  = parts[6].strip() if len(parts)>6 else ""
                             route   = f"{dep_apt}→{arr_apt}" if dep_apt and arr_apt else (dep_apt or arr_apt or "")
-                            # Deduplizierung: gleiche FN + Datum + Route nicht doppelt
                             seg_key = f"{fn_seg}_{dep_dt}_{dep_apt}_{arr_apt}"
-                            # Prüfe ob dieses Segment bereits in timeline_events
                             already_in = any(
                                 e.get("task")==f"Flug {fn_seg}" and e.get("date")==dep_dt
                                 for e in timeline_events
@@ -4607,11 +4256,8 @@ def trip_detail(tc: str):
                             segs_added = True
 
                 elif afns or ft_info or dtype == "Kalendereintrag":
-                    # ICS oder Flug-Beleg ohne strukturierte Segmente
-                    # Route aus ki_bemerkung parsen: "✈ LH1234 FRA→LYS | Abflug: 2026-04-20 06:30 UTC"
                     all_routes = re.findall(r"([A-Z]{3}→[A-Z]{3})", bemerk or ft_info or "")
                     all_fn_in_bemerk = re.findall(r"\b([A-Z]{2}\d{3,4})\b", bemerk or "")
-                    # Zeitinfo aus ki_bemerkung
                     dep_time_m = re.search(r"Abflug:[^|]*(\d{2}:\d{2})", bemerk or "")
                     arr_time_m = re.search(r"Ankunft:[^|]*(\d{2}:\d{2})", bemerk or "")
                     dep_tm_ics = dep_time_m.group(1) if dep_time_m else ""
@@ -4639,7 +4285,6 @@ def trip_detail(tc: str):
                         segs_added = True
 
                 if not segs_added:
-                    # Letzter Fallback
                     timeline_events.append({
                         "date": ev_date or dep_d or date.today(),
                         "time": "", "icon": "✈", "type": "beleg",
@@ -4667,7 +4312,6 @@ def trip_detail(tc: str):
                     "detail": amount_str,
                     "extra": actions, "status": stat, "att_id": att_id,
                 })
-        # Verpflegung pro Tag direkt in Timeline einbauen
         if dep_d and ret_d:
             daily = load_daily_meals(tc)
             days_range = (ret_d - dep_d).days + 1
@@ -4694,7 +4338,6 @@ def trip_detail(tc: str):
                     "type": "meal"
                 })
 
-        # Rückkehr
         if ret_d:
             timeline_events.append({
                 "date": ret_d,
@@ -4707,12 +4350,9 @@ def trip_detail(tc: str):
                 "type": "journey"
             })
 
-        # Fallback: Flugnummern aus trip_meta die noch nicht in Segmenten erscheinen
-        # → auf Rückreisedatum platzieren mit direktem Beleg-Edit-Link
         all_meta_fns = [f.strip() for f in (fns or "").split(",") if f.strip()]
         missing_fns = [f for f in all_meta_fns if f not in fns_from_belege]
         if missing_fns:
-            # Finde den Flug-Beleg für Edit-Link
             edit_att_id = None
             for a in atts:
                 if a[1] in ("Flug","Kalendereintrag") and a[11]:  # afns not empty
@@ -4736,7 +4376,6 @@ def trip_detail(tc: str):
                     "att_id": edit_att_id,
                 })
 
-        # Chronologisch sortieren – Mahlzeiten nach Belegen, Journeys an Rand
         timeline_events.sort(key=lambda e: (
             e["date"] or date.today(),
             0 if e.get("type") == "journey" and e.get("icon","").startswith("🏠") else
@@ -4745,7 +4384,6 @@ def trip_detail(tc: str):
             e.get("time","")
         ))
 
-        # Timeline HTML mit Ein/Ausblenden
         tl_rows=""
         prev_date=None
         row_idx=0
@@ -4754,7 +4392,6 @@ def trip_detail(tc: str):
             row_id=f"tlrow_{tc}_{row_idx}"
             row_idx+=1
 
-            # Datums-Trennzeile
             if ev_date != prev_date:
                 wd=["Mo","Di","Mi","Do","Fr","Sa","So"][ev_date.weekday()] if ev_date else ""
                 wkend_bg="background:#eef4ff" if ev_date and ev_date.weekday()>=5 else "background:var(--page)"
@@ -4772,37 +4409,29 @@ def trip_detail(tc: str):
                 sc="bdg-ok" if stat in ("ok","ok (manuell)","ok (Mail-Body)") else "bdg-w"
                 stat_html=f'<span class="bdg {sc}" style="font-size:10px">{stat}</span>'
 
-            # Spalte 1: Icon
             icon_cell=f'<td style="width:32px;text-align:center;font-size:16px;padding:8px 4px">{ev["icon"]}</td>'
 
-            # Spalte 2: Task (Flug LH1234 / Check-in Marriott / Verpflegung)
             task=ev.get("task","")
             task_cell=f'<td style="font-weight:600;color:{col};padding:8px 6px;font-size:13px">{task}</td>'
 
-            # Spalte 3: Route / Ort (FRA→LYS / Lyon / –)
             route=ev.get("route","") or "–"
             route_style="font-family:DM Mono,monospace;font-size:12px;color:var(--b600)" if "→" in route else "font-size:12px;color:var(--t500)"
             route_cell=f'<td style="{route_style};padding:8px 6px;white-space:nowrap">{route}</td>'
 
-            # Spalte 4: Zeitraum (06:30→08:15 / ab 15:00 / Nacht 2/3)
             timerange=ev.get("timerange","") or ""
             if not timerange and ev.get("time"):
                 timerange=ev.get("time","")
             tr_cell=f'<td style="font-family:DM Mono,monospace;font-size:11px;color:var(--t500);padding:8px 6px;white-space:nowrap">{timerange}</td>'
 
-            # Spalte 5: Betrag / Info
             detail=ev.get("detail","") or ""
             detail_cell=f'<td style="font-family:DM Mono,monospace;font-size:12px;color:var(--t700);padding:8px 6px;text-align:right;white-space:nowrap">{detail}</td>'
 
-            # Spalte 6: Status + Aktionen
             extra=ev.get("extra","") or ""
             act_cell=f'<td style="padding:8px 6px;white-space:nowrap;text-align:right">{stat_html} {extra}</td>'
 
-            # Spalte 7: Toggle
             toggle_btn=f'<button onclick="toggleTLRow(\'{row_id}\')" title="Ausblenden" style="background:none;border:none;cursor:pointer;color:var(--t300);padding:0 4px;font-size:11px">👁</button>'
             tog_cell=f'<td style="width:26px;padding:4px 2px;text-align:right">{toggle_btn}</td>'
 
-            # Zeilenhintergrund je Typ
             row_bg=""
             if ev_type=="journey": row_bg=' style="background:var(--b50)"'
             elif ev_type=="meal":  row_bg=' style="background:#f9fdf9"'
@@ -4811,7 +4440,6 @@ def trip_detail(tc: str):
 
             tl_rows+=f'<tr id="{row_id}" data-tl-type="{ev_type}"{row_bg}>{icon_cell}{task_cell}{route_cell}{tr_cell}{detail_cell}{act_cell}{tog_cell}</tr>'
 
-        # Ausgeblendete Zeilen Sektion
         hidden_section=f"""
         <div id="tl-hidden" style="display:none">
           <h4 style="color:var(--t300);font-size:11px;margin:12px 0 6px;text-transform:uppercase;letter-spacing:.06em">Ausgeblendete Einträge</h4>
@@ -4846,9 +4474,7 @@ def trip_detail(tc: str):
         }}
         </script>"""
 
-        # Header-Info-Leiste
         info_items=[]
-        # Klarname prominent – mit Kürzel
         emp = employee_code or ""
         name_line = " · ".join(filter(None,[emp, traveler]))
         if name_line: info_items.append(f"<b>Reisender:</b> {name_line}{' · '+colleagues if colleagues else ''}")
@@ -4859,14 +4485,12 @@ def trip_detail(tc: str):
         if notes: info_items.append(f"<b>Notiz:</b> {notes}")
         info_bar="<br>".join(info_items) if info_items else "<span class='sub'>Keine Metadaten – bitte bearbeiten</span>"
 
-        # Warnung wenn Name/Ziel fehlt
         missing=[]
         if not employee_code: missing.append("Mitarbeiterkürzel fehlt")
         if not traveler: missing.append("Klarname fehlt")
         if not destinations and not trip_title: missing.append("Ziel/Titel fehlt")
         missing_html=f'<div class="alert-bar" style="margin-bottom:12px">⚠ {" · ".join(missing)} – <a href="/edit-trip/{tc}" style="color:var(--re6)">jetzt ergänzen</a></div>' if missing else ""
 
-        # Flight-Alert-Zeilen
         alert_rows="".join(f"""<tr>
             <td class="cc">{a[0]}</td><td>{a[1]}</td>
             <td><span class="bdg {"bdg-e" if a[2]=="cancelled" else "bdg-w"}">{a[2]}</span></td>
@@ -4935,19 +4559,16 @@ def trip_detail(tc: str):
     except Exception as e:
         import traceback
         return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler in Trip-Detail</h2><pre style="font-size:11px;overflow-x:auto">{traceback.format_exc()}</pre></div>')
-        # Anhänge
         cur.execute("""SELECT original_filename,detected_type,detected_amount_eur,detected_currency,
             detected_date,detected_vendor,analysis_status,confidence,ki_bemerkung,id,
             pnr_code,detected_flight_numbers,detected_train_numbers,detected_amount
             FROM mail_attachments WHERE trip_code=%s ORDER BY detected_date,id""",(tc,))
         atts=cur.fetchall()
-        # Letzte Flight-Alerts
         cur.execute("""SELECT flight_number,flight_date,alert_type,message,source,checked_at
             FROM flight_alerts WHERE trip_code=%s ORDER BY checked_at DESC LIMIT 10""",(tc,))
         alerts=cur.fetchall()
         cur.close();conn.close()
 
-        # Meta-Bereich
         if meta:
             (traveler,colleagues,dep,ret,dep_t,ret_t,destinations,cc,
              fns,trains,car,nights_p,nights_b,meals,pnr,notes,hm,
@@ -4976,7 +4597,6 @@ def trip_detail(tc: str):
             meta_html="<p class='sub'>Keine Metadaten gespeichert – <a href='/edit-trip/"+tc+"'>jetzt anlegen</a></p>"
             status_badge=""; title_line=""
 
-        # Anhänge-Tabelle
         beleg_sum=0.0
         for a in atts:
             if a[2]:
@@ -4991,7 +4611,6 @@ def trip_detail(tc: str):
             <td><span class="bdg {"bdg-ok" if a[6] in ("ok","ok (manuell)") else "bdg-w"}">{a[6] or ''}</span></td>
             <td style="font-size:11px;color:var(--t300)">{(a[8] or '')[:60]}</td>
             </tr>""" for a in atts)
-        # beleg_sum sauber berechnen
         beleg_sum=0.0
         for a in atts:
             if a[2]:
@@ -5012,7 +4631,6 @@ def trip_detail(tc: str):
             <tr style="background:var(--b50)"><td colspan="2"><b>Summe</b></td><td style="font-family:DM Mono,monospace"><b>{beleg_sum:.2f} €</b></td><td colspan="4"></td></tr>
         </table></div>"""
 
-        # Flight-Alerts
         alerts_html=""
         if alerts:
             arows="".join(f"""<tr>
@@ -5074,18 +4692,15 @@ def report(tc: str):
         days=(ret_d-dep_d).days+1 if dep_d and ret_d else 0
         ml=[m.strip() for m in (meals_reimb or "").split(",") if m.strip()]
 
-        # VMA – tagesbasiert (daily_meals) wenn vorhanden, sonst Multidest., sonst Standard
         vma_dest = parse_vma_destinations(vma_dest_str or "")
         daily = load_daily_meals(tc)
         if days > 0:
             if daily:
-                # Tagesgenaue Berechnung aus daily_meals Tabelle
                 vma_total, vma_tag_rows = calc_vma_from_daily(dep_d, ret_d, daily, vma_dest, cc)
                 vma_rows = "".join(f"<tr><td>{d}</td><td>{lbl}</td><td>{c_}</td><td>{m}</td><td>{v:.2f} €</td></tr>"
                                    for d,lbl,c_,m,v in vma_tag_rows)
                 vma_source = f'<span style="font-size:11px;color:var(--gr6)">✓ Tagesgenaue Erfassung ({len(daily)} Tage gepflegt)</span>'
             else:
-                # Fallback: alte Methode
                 vma_total, vma_tag_rows = calc_vma_multi(dep_d, ret_d, ml, vma_dest, cc)
                 vma_rows = "".join(f"<tr><td>{lbl}</td><td>{c_}</td><td>{m}</td><td>{v:.2f} €</td></tr>"
                                    for lbl,c_,m,v in vma_tag_rows)
@@ -5093,11 +4708,9 @@ def report(tc: str):
         else:
             vma_total = 0.0; vma_rows = ""; vma_source = ""
 
-        # k) Trennungspauschale
         trenn_total,trenn_details=trennungspauschale(dep_d,ret_d,dep_t or "08:00",ret_t or "18:00")
         trenn_rows="".join(f"<tr><td>{d}</td><td>{lbl}</td><td>{amt:.2f} €</td></tr>" for d,lbl,amt in trenn_details)
 
-        # Belege
         beleg_sum=0.0; beleg_rows=""
         all_fns_found=[]
         for a in atts:
@@ -5110,23 +4723,18 @@ def report(tc: str):
             edit_link=f'<a href="/beleg-edit/{att_id}" title="Korrigieren" style="color:var(--t300);text-decoration:none;margin-left:6px">✏</a>'
             beleg_rows+=f"<tr><td>{preview_link}{edit_link} {fn}</td><td>{dt or '–'}</td><td>{vendor or '–'}</td><td>{d or '–'}</td><td>{amt or '–'} {curr or ''}</td><td><b>{amt_eur} €</b></td></tr>"
 
-        # j) Fluganzahl
         all_fns_list = list(set(([f.strip() for f in (fns or "").split(",") if f.strip()] + all_fns_found)))
         flight_count = len(all_fns_list)
 
-        # ── Fehlende Belege ermitteln ──────────────────────────────────────────
         belegte_typen = set(a[1] for a in atts if a[1])
         fehlende_belege = []
 
-        # Flug: Bordkarte oder E-Ticket
         if all_fns_list and "Flug" not in belegte_typen and "Kalendereintrag" not in belegte_typen:
             fehlende_belege.append(f"✈ Flugbeleg / Bordkarte fehlt ({', '.join(all_fns_list)})")
-        # Hotel: Rechnung
         hotel_beleg = "Hotel" in belegte_typen
         hotel_geplant = nights_p and nights_p > 0
         if hotel_geplant and not hotel_beleg:
             fehlende_belege.append(f"🏨 Hotel-Rechnung fehlt ({nights_b or nights_p} Nächte geplant)")
-        # Mietwagen
         if trains and "Bahn" not in belegte_typen:
             fehlende_belege.append("🚆 Zugticket fehlt")
 
@@ -5182,9 +4790,6 @@ def report(tc: str):
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
 
 
-# =========================================================
-# PDF-EXPORT (druckfertiges HTML → Browser-PDF)
-# =========================================================
 
 @app.get("/report-pdf/{tc}", response_class=HTMLResponse)
 def report_pdf(tc: str):
@@ -5213,7 +4818,6 @@ def report_pdf(tc: str):
         days=(ret_d-dep_d).days+1 if dep_d and ret_d else 0
         ml=[m.strip() for m in (meals_reimb or "").split(",") if m.strip()]
 
-        # VMA – tagesbasiert (daily_meals) wenn vorhanden, sonst Multidest.
         vma_dest = parse_vma_destinations(vma_dest_str or "")
         daily = load_daily_meals(tc)
         if days > 0:
@@ -5330,9 +4934,6 @@ def report_pdf(tc: str):
         return HTMLResponse(f"<pre>Fehler: {e}</pre>",status_code=500)
 
 
-# =========================================================
-# FLUG + BAHN CHECK
-# =========================================================
 
 @app.get("/report-komplett/{tc}")
 async def report_komplett(tc: str):
@@ -5390,7 +4991,6 @@ async def report_komplett(tc: str):
         gesamt=beleg_sum+vma_total+trenn_total
         title_line=" · ".join(filter(None,[employee_code,trip_title,customer_code]))
 
-        # ── 1. DECKBLATT PDF ────────────────────────────────────────────
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.units import mm
@@ -5417,7 +5017,6 @@ async def report_komplett(tc: str):
         story.append(Paragraph(f"{tc} · {title_line}", SMN))
         story.append(HRFlowable(width="100%", thickness=2, color=BLU, spaceAfter=8))
 
-        # Meta-Grid
         meta_rows=[
             [Paragraph("Reisender", LBL), Paragraph(f"{employee_code or ''} {traveler or '–'}", VAL)],
             [Paragraph("Zeitraum", LBL), Paragraph(f"{dep} {dep_t or ''} – {ret} {ret_t or ''} ({days} Tage)", VAL)],
@@ -5437,7 +5036,6 @@ async def report_komplett(tc: str):
         story.append(t)
         story.append(Spacer(1,8*mm))
 
-        # Belege-Tabelle
         story.append(Paragraph("Belege", H2))
         brows=[[Paragraph(h,LBL) for h in ["#","Anbieter","Typ","Datum","Betrag","EUR","Status"]]]
         for i,(att_id,fn,dtype,amt,amt_eur,curr,ddate,vendor,stat,skey,ctype,pdf_k) in enumerate(atts,1):
@@ -5468,7 +5066,6 @@ async def report_komplett(tc: str):
         story.append(bt)
         story.append(Spacer(1,6*mm))
 
-        # VMA-Tabelle
         story.append(Paragraph("Verpflegungsmehraufwand §9 EStG", H2))
         vrows=[[Paragraph(h,LBL) for h in ["Datum","Tag","Land","Mahlzeiten-Abzug","VMA"]]]
         for d,lbl,cc_d,m_icons,v in vma_rows_data:
@@ -5488,7 +5085,6 @@ async def report_komplett(tc: str):
         story.append(vt)
         story.append(Spacer(1,8*mm))
 
-        # Gesamtsumme-Box
         summe_data=[[
             Paragraph("GESAMTBETRAG REISEKOSTENABRECHNUNG", LBL),
             Paragraph(f"{gesamt:,.2f} €", BIG),
@@ -5515,12 +5111,10 @@ async def report_komplett(tc: str):
         doc.build(story)
         deckblatt_pdf = buf_deckblatt.getvalue()
 
-        # ── 2. BELEGE SAMMELN ────────────────────────────────────────────
         s3=get_s3()
         beleg_pdfs=[]
         for att_id,fn,dtype,amt,amt_eur,curr,ddate,vendor,stat,skey,ctype,pdf_k in atts:
             pdf_bytes=None
-            # Priorität: generiertes PDF > Original-PDF > Original-Bild als PDF
             if pdf_k:
                 try:
                     obj=s3.get_object(Bucket=S3_BUCKET,Key=pdf_k)
@@ -5534,7 +5128,6 @@ async def report_komplett(tc: str):
                     if "pdf" in ctype_s:
                         pdf_bytes=raw
                     elif any(x in ctype_s for x in ["jpeg","jpg","png","webp"]):
-                        # Bild → PDF mit reportlab
                         from reportlab.platypus import Image as RLImage
                         img_buf=io.BytesIO(raw)
                         out_buf=io.BytesIO()
@@ -5559,7 +5152,6 @@ async def report_komplett(tc: str):
                 except: pass
 
             if not pdf_bytes and skey and skey.startswith("mail_body_"):
-                # Mail-Body-Beleg: Fallback-PDF generieren
                 pdf_bytes=make_text_pdf(
                     title=f"{dtype}: {vendor or '–'}",
                     body_text=f"Datum: {ddate or '–'}\nBetrag: {amt_eur or '–'} EUR\nStatus: {stat or '–'}",
@@ -5568,7 +5160,6 @@ async def report_komplett(tc: str):
             if pdf_bytes:
                 beleg_pdfs.append(pdf_bytes)
 
-        # ── 3. ALLES ZUSAMMENFÜHREN ──────────────────────────────────────
         all_pdfs=[deckblatt_pdf]+beleg_pdfs
         final_pdf=merge_pdfs(all_pdfs)
 
@@ -5596,15 +5187,12 @@ async def check_flights(tc: str):
         dep_str=str(dep_date) if dep_date else str(date.today())
         results_html=""
 
-        # Flüge: OpenSky (Live-Position) + AviationStack (Buchungsstatus)
         fns=[f.strip() for f in (fns_raw or "").split(",") if f.strip()]
         for fn in fns:
-            # OpenSky: Live-Position
             si      = await check_flight_status(fn, dep_str)
             on_ground = si.get("on_ground")
             opensky_status = si.get("status","–")
 
-            # AviationStack: Buchungsstatus (Umbuchung/Stornierung/Verspätung)
             av = await check_aviationstack(fn, dep_str)
             av_status   = av.get("status","")
             av_route    = av.get("route","")
@@ -5612,7 +5200,6 @@ async def check_flights(tc: str):
             av_gate     = av.get("gate","")
             av_cancelled = av.get("cancelled", False)
 
-            # Alert-Logik
             if av_cancelled:
                 alert = "cancelled"
                 display_status = "⚠ STORNIERT"
@@ -5639,7 +5226,6 @@ async def check_flights(tc: str):
                 VALUES (%s,%s,%s,%s,%s,%s,%s)""",
                 (tc,fn,dep_str,alert,display_status,"OpenSky+AviationStack",av_delay or si.get("delay_min")))
 
-            # Zusatzinfos zusammenbauen
             extras = []
             if av_route:
                 extras.append(f"🛤 {av_route}")
@@ -5660,7 +5246,6 @@ async def check_flights(tc: str):
                 <td>{av_delay or '–'}</td>
             </tr>"""
 
-        # g) Züge
         trains=[t.strip() for t in (trains_raw or "").split(",") if t.strip()]
         for tn in trains:
             bi=await check_bahn_puenktlichkeit(tn,dep_str)
@@ -5682,9 +5267,6 @@ async def check_flights(tc: str):
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
 
 
-# =========================================================
-# BELEG VORSCHAU (Signed URL aus Hetzner)
-# =========================================================
 
 @app.get("/beleg-pdf/{att_id}")
 def beleg_pdf(att_id: int):
@@ -5725,9 +5307,7 @@ def beleg_vorschau(att_id: int):
         (storage_key,filename,content_type,bemerk,dtype,amt,vendor,ddate,
          pdf_key,tc,amt_orig,curr,checkin,checkout,nights,subj,body)=row
 
-        # Mail-Body-Beleg → PDF generieren und direkt ausliefern
         if not storage_key or storage_key.startswith("mail_body_"):
-            # Prüfe ob PDF bereits in S3
             if pdf_key:
                 try:
                     s3=get_s3()
@@ -5739,7 +5319,6 @@ def beleg_vorschau(att_id: int):
                         headers={"Content-Disposition":f'inline; filename="{label}"'})
                 except: pass
 
-            # PDF on-the-fly generieren
             if HAS_PDF_LIBS():
                 meta={
                     "Typ": dtype or "–",
@@ -5751,9 +5330,7 @@ def beleg_vorschau(att_id: int):
                     "Nächte": str(nights) if nights else "",
                     "Reise": tc or "–",
                 }
-                # Leere Felder entfernen
                 meta={k:v for k,v in meta.items() if v and v not in ("–","0","")}
-                # Sophos-Links aus Body entfernen für bessere Lesbarkeit
                 clean_body=re.sub(r'https://[^\s]*sophos[^\s]*','[Link]',body or "")
                 clean_body=re.sub(r'https://[^\s]{80,}','[Link]',clean_body)
                 clean_body=clean_body[:8000]  # max 8000 Zeichen
@@ -5763,7 +5340,6 @@ def beleg_vorschau(att_id: int):
                     body_text=f"Betreff: {subj or '–'}\n\n{clean_body}",
                     meta=meta)
 
-                # In S3 speichern für künftige Aufrufe
                 try:
                     new_key=f"mail_pdfs/{tc}/mail_body_{att_id}.pdf"
                     s3=get_s3()
@@ -5823,7 +5399,6 @@ def beleg_edit_form(att_id: int, back: str = ""):
         code_opts="".join(f'<option value="{c}" {"selected" if tc==c else ""}>{c}</option>'
             for c in all_codes)
 
-        # Hotel-Felder nur anzeigen wenn Typ Hotel
         hotel_section=f"""
             <div id="hotel-fields">
               <div class="fgrp"><label class="flbl">Check-in Datum (DD.MM.YYYY)</label>
@@ -5851,7 +5426,6 @@ def beleg_edit_form(att_id: int, back: str = ""):
               </div>
             </div>"""
 
-        # Beleg-Vorschau wenn in S3
         preview_html=""
         if not is_mail_body and storage_key and not storage_key.startswith("S3-FEHLER"):
             preview_html=f'<div style="margin-bottom:16px"><a class="btn-l" href="/beleg/{att_id}" target="_blank">📄 Original anzeigen</a></div>'
@@ -5983,16 +5557,12 @@ async def beleg_edit_save(att_id: int, request: Request, back: str = ""):
             cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(tc,))
             conn.commit()
         cur.close();conn.close()
-        # Smart redirect: zurück zum Trip oder zur Log-Seite
         redirect_to = back or (f"/trip/{tc}" if tc else "/attachment-log")
         return RedirectResponse(url=redirect_to,status_code=303)
     except Exception as e:
         return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
 
 
-# =========================================================
-# RESET / HILFSFUNKTIONEN
-# =========================================================
 
 @app.get("/reset-all", response_class=HTMLResponse)
 def reset_all(confirm: str = ""):
@@ -6009,7 +5579,6 @@ def reset_all(confirm: str = ""):
         </div>""")
     try:
         conn=get_conn();cur=conn.cursor()
-        # Nur Reisedaten löschen – KI-Wissen bleibt erhalten
         for tbl in ["mail_attachments","mail_messages","flight_alerts","daily_meals","trip_meta"]:
             try:
                 cur.execute(f"TRUNCATE TABLE {tbl} RESTART IDENTITY CASCADE")
@@ -6073,9 +5642,6 @@ async def check_trains(tc: str):
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
 
 
-# =========================================================
-# BELEG MANUELL HOCHLADEN
-# =========================================================
 
 @app.get("/mail-eingabe", response_class=HTMLResponse)
 def mail_eingabe_form():
@@ -6123,7 +5689,6 @@ async def mail_eingabe_save(request: Request):
 
         full=f"{subj}\n{body}"
 
-        # Regex-Extraktion
         regex_fns  = extract_flight_numbers(full)
         regex_pnr  = extract_pnr(full) or ""
         regex_segs = extract_flight_segments_from_text(full) if regex_fns else []
@@ -6135,7 +5700,6 @@ async def mail_eingabe_save(request: Request):
         cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code")
         known_codes=[r[0] for r in cur.fetchall()]
 
-        # PNR → Reisecode
         if not regex_tc and regex_pnr:
             cur.execute("SELECT trip_code FROM trip_meta WHERE pnr_code=%s LIMIT 1",(regex_pnr,))
             row=cur.fetchone()
@@ -6143,7 +5707,6 @@ async def mail_eingabe_save(request: Request):
         if not regex_tc and tc:
             regex_tc=tc
 
-        # Duplikat-Check über Subject+PNR
         if regex_pnr:
             cur.execute("SELECT id FROM mail_messages WHERE body LIKE %s LIMIT 1",(f"%{regex_pnr}%",))
             if cur.fetchone():
@@ -6154,7 +5717,6 @@ async def mail_eingabe_save(request: Request):
                   <div class="acts"><a class="btn" href="/reanalyze-mails" onclick="window.location='/analyze-attachments';return false">Neu analysieren</a>
                   <a class="btn-l" href="/mail-log">Mail-Log</a></div></div>""")
 
-        # Mail einfügen
         uid=f"manual_{__import__('hashlib').md5(body[:100].encode()).hexdigest()[:8]}"
         mail_type="Flug" if regex_fns else detect_mail_type(full)
         cur.execute("""INSERT INTO mail_messages
@@ -6166,7 +5728,6 @@ async def mail_eingabe_save(request: Request):
              body,regex_tc or None,mail_type,regex_pnr or None,"ausstehend"))
         conn.commit()
 
-        # Direkt analysieren
         fields=await mistral_extract(full,known_codes,"mail")
         if not fields: fields={}
 
@@ -6182,14 +5743,12 @@ async def mail_eingabe_save(request: Request):
         rc       = fields.get("reisecode","") or regex_tc or tc or ""
         waehrung_ki = fields.get("waehrung","EUR") or "EUR"
 
-        # trip_meta aktualisieren
         if rc:
             cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(rc,))
             if pnr_ki: cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr_ki,rc))
             if fns_ki: cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns_ki,rc))
             if dest_ki: cur.execute("UPDATE trip_meta SET destinations=%s WHERE trip_code=%s AND (destinations IS NULL OR destinations='')",(dest_ki,rc))
 
-        # Beleg-Insert
         betrag_eur_ki=""
         if betrag_ki:
             try:
@@ -6198,7 +5757,6 @@ async def mail_eingabe_save(request: Request):
                 betrag_eur_ki=f"{eur:.2f}".replace(".",",")
             except: pass
 
-        # Segment-Vollständigkeit prüfen
         if fns_ki and typ_ki=="Flug":
             fn_list=[f.strip() for f in fns_ki.split(",") if f.strip()]
             seg_list=[s.strip() for s in seg_ki.split(";") if s.strip()] if seg_ki else []
@@ -6226,7 +5784,6 @@ async def mail_eingabe_save(request: Request):
 
         cur.execute("UPDATE mail_messages SET analysis_status='ok',trip_code=%s WHERE mail_uid=%s",(rc or None,uid))
 
-        # ── Lernbeispiel speichern wenn gutes Ergebnis ────────────────
         if typ_ki and typ_ki != "Sonstiges" and (fns_ki or betrag_ki) and conf_ki in ("hoch","mittel"):
             import json as _json
             example_result = {
@@ -6240,7 +5797,6 @@ async def mail_eingabe_save(request: Request):
                 "flight_segments": seg_ki,
                 "confidence": "hoch",
             }
-            # Nur relevante Felder
             example_result = {k:v for k,v in example_result.items() if v}
             save_ki_example(
                 mail_type=typ_ki,
@@ -6250,7 +5806,6 @@ async def mail_eingabe_save(request: Request):
             )
             print(f"[KI-Beispiel] Gespeichert: {typ_ki} · {vendor_ki}")
 
-        # VMA auto-berechnen
         if regex_segs and rc:
             cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(rc,))
             trip_row=cur.fetchone()
@@ -6293,7 +5848,6 @@ async def mail_eingabe_save(request: Request):
 
         conn.commit();cur.close();conn.close()
 
-        # PDF generieren
         pdf_key=None
         if HAS_PDF_LIBS() and rc:
             pdf_key=await generate_and_store_mail_pdf(0,subj,body,typ_ki,vendor_ki,betrag_ki,datum_ki,rc,get_conn())
@@ -6375,7 +5929,6 @@ async def upload_beleg(
         h = file_hash(file_bytes)
         conn=get_conn();cur=conn.cursor()
 
-        # Duplikat-Check – bei Duplikat neu analysieren statt ablehnen
         cur.execute("SELECT id,trip_code,flight_segments FROM mail_attachments WHERE file_hash=%s",(h,))
         existing=cur.fetchone()
         if existing and existing[2]:  # Segmente bereits vorhanden → wirklich Duplikat
@@ -6395,7 +5948,6 @@ async def upload_beleg(
         storage_key=f"mail_attachments/{uid}_{safe_fn}"
         if not code: code=trip_code.strip() or ""
 
-        # S3 Upload
         try:
             s3=get_s3()
             s3.put_object(Bucket=S3_BUCKET,Key=storage_key,Body=file_bytes,
@@ -6403,11 +5955,9 @@ async def upload_beleg(
         except Exception as s3e:
             storage_key=f"S3-FEHLER:{s3e}"
 
-        # DB eintragen oder aktualisieren
         if code:
             cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(code,))
         if att_id:
-            # Neu analysieren – storage_key aktualisieren
             cur.execute("UPDATE mail_attachments SET storage_key=%s,trip_code=%s,analysis_status='ausstehend' WHERE id=%s",
                 (storage_key,code or None,att_id))
             conn.commit()
@@ -6421,11 +5971,9 @@ async def upload_beleg(
             att_id=cur.fetchone()[0]
             conn.commit()
 
-        # ── SOFORT ANALYSIEREN ─────────────────────────────────────────────
         ocr_text=""
         fields={}
         if ext == "pdf":
-            # Schritt 1: pypdf direkt (schnell, zuverlässig, kostenlos)
             try:
                 import pypdf as _pypdf
                 reader = _pypdf.PdfReader(io.BytesIO(file_bytes))
@@ -6434,7 +5982,6 @@ async def upload_beleg(
             except Exception as pe:
                 print(f"[PDF] pypdf Fehler: {pe}")
                 ocr_text = ""
-            # Schritt 2: Nur wenn pypdf nichts liefert → Mistral OCR (gescannte PDFs)
             if not ocr_text.strip():
                 print(f"[PDF] pypdf leer → Mistral OCR Fallback")
                 ocr_text = await mistral_ocr(file_bytes, safe_fn)
@@ -6443,22 +5990,18 @@ async def upload_beleg(
 
         if True:  # Immer analysieren
             if ocr_text and not ocr_text.startswith(("ERROR","KEIN","OCR_","NICHT")):
-                # Regex-Extraktion
                 regex_fns=extract_flight_numbers(ocr_text)
                 regex_segs=extract_flight_segments_from_text(ocr_text) if regex_fns else []
                 regex_seg_s=segments_to_string(regex_segs) if regex_segs else ""
                 regex_pnr=extract_pnr(ocr_text) or ""
 
-                # KI-Extraktion
                 known_codes=[r[0] for r in cur.execute("SELECT trip_code FROM trip_meta") or []]
                 cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code")
                 known_codes=[r[0] for r in cur.fetchall()]
                 fields=await mistral_extract(ocr_text,known_codes,"anhang") or {}
 
-                # Felder zusammenführen (Regex gewinnt bei Flugnummern/Segmenten)
                 fns_ki=fields.get("flight_numbers","") or ""
                 seg_ki=fields.get("flight_segments","") or ""
-                # Regex überschreibt wenn besser
                 if regex_fns:
                     fns_final=",".join(regex_fns)
                 else:
@@ -6468,7 +6011,6 @@ async def upload_beleg(
                 else:
                     seg_final=seg_ki or regex_seg_s
 
-                # Segment-Vollständigkeit
                 if fns_final:
                     fn_list=[f.strip() for f in fns_final.split(",") if f.strip()]
                     seg_list=[s.strip() for s in seg_final.split(";") if s.strip()] if seg_final else []
@@ -6486,7 +6028,6 @@ async def upload_beleg(
                 conf=fields.get("confidence","mittel") or "mittel"
                 dest=fields.get("destination","") or ""
 
-                # Reisecode
                 if not code:
                     code=fields.get("reisecode","") or ""
                     if not code and pnr:
@@ -6496,7 +6037,6 @@ async def upload_beleg(
                     if code:
                         cur.execute("INSERT INTO trip_meta (trip_code) VALUES (%s) ON CONFLICT DO NOTHING",(code,))
 
-                # EUR-Betrag
                 betrag_eur=""
                 if betrag:
                     try:
@@ -6505,7 +6045,6 @@ async def upload_beleg(
                         betrag_eur=f"{eur:.2f}".replace(".",",")
                     except: pass
 
-                # UPDATE Beleg
                 cur.execute("""UPDATE mail_attachments SET
                     trip_code=%s,detected_type=%s,detected_amount=%s,detected_amount_eur=%s,
                     detected_currency=%s,detected_date=%s,detected_vendor=%s,
@@ -6518,13 +6057,11 @@ async def upload_beleg(
                      "ok" if conf=="hoch" else "pruefen",
                      f"Upload: {safe_fn}",att_id))
 
-                # trip_meta aktualisieren
                 if code:
                     if pnr: cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr,code))
                     if fns_final: cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(fns_final,code))
                     if dest: cur.execute("UPDATE trip_meta SET destinations=%s WHERE trip_code=%s AND (destinations IS NULL OR destinations='')",(dest,code))
 
-                # VMA automatisch berechnen - immer wenn Auslandsflüge erkannt
                 if regex_segs and code:
                     cur.execute("SELECT departure_date,return_date,vma_destinations FROM trip_meta WHERE trip_code=%s",(code,))
                     trip_row=cur.fetchone()
@@ -6566,7 +6103,6 @@ async def upload_beleg(
                                 print(f"[VMA Upload Fehler]: {ve}")
 
                 conn.commit()
-                # Alle synthetischen Flug-Belege löschen wenn echter Upload mit Segmenten da
                 if seg_final and code and att_id:
                     cur.execute("""DELETE FROM mail_attachments
                         WHERE trip_code=%s AND detected_type='Flug'
@@ -6578,7 +6114,6 @@ async def upload_beleg(
                     if deleted: print(f"[Upload] {deleted} synthetische Belege für {code} gelöscht")
                     conn.commit()
             else:
-                # OCR leer – trotzdem Regex-Ergebnisse speichern wenn vorhanden
                 r_fns=extract_flight_numbers(ocr_text or "")
                 r_segs=segments_to_string(extract_flight_segments_from_text(ocr_text or "")) if r_fns else ""
                 if r_fns or code:
@@ -6596,7 +6131,6 @@ async def upload_beleg(
 
         cur.close();conn.close()
 
-        # Ergebnis-Seite
         fns_show=fields.get("flight_numbers","") or ",".join(extract_flight_numbers(ocr_text)) if ocr_text else ""
         seg_show=(fields.get("flight_segments","") or "")[:200]
         return page_shell("Upload",f"""
@@ -6627,17 +6161,14 @@ def reanalyze_mails():
     """Setzt Mail-Status zurück. Löscht NUR leere Mail-Body-Belege, nie Hotel/Flug mit Betrag."""
     try:
         conn=get_conn();cur=conn.cursor()
-        # Mail-Status zurücksetzen
         cur.execute("UPDATE mail_messages SET analysis_status='ausstehend' WHERE analysis_status='ok'")
         n_mails=cur.rowcount
-        # Mail-Body-Belege löschen NUR wenn kein Betrag und kein Segment vorhanden
         cur.execute("""DELETE FROM mail_attachments
             WHERE storage_key LIKE 'mail_body_%'
             AND (detected_amount IS NULL OR detected_amount='')
             AND (flight_segments IS NULL OR flight_segments='')
             AND detected_type NOT IN ('Hotel','Flug','Bahn','Mietwagen')""")
         n_belege=cur.rowcount
-        # Inline-Bilder markieren
         cur.execute("""UPDATE mail_attachments SET
             analysis_status='Inline-Grafik', confidence='niedrig', review_flag='ok',
             detected_type='Inline-Grafik'
@@ -6645,7 +6176,6 @@ def reanalyze_mails():
             OR original_filename ILIKE '%.emz'
             OR original_filename ILIKE '%.wmz'""")
         n_images=cur.rowcount
-        # Ausstehende echte Anhänge zurücksetzen (aber nicht ok (manuell) und nicht Hotel/Flug mit Betrag)
         cur.execute("""UPDATE mail_attachments SET analysis_status='ausstehend'
             WHERE analysis_status NOT IN ('Inline-Grafik','ok (manuell)','ok (repariert)')
             AND NOT (detected_type IN ('Hotel','Flug','Bahn','Mietwagen') AND detected_amount IS NOT NULL AND detected_amount != '')
@@ -6685,17 +6215,14 @@ def set_segments_form(tc: str):
         current_fns=beleg[1] if beleg else fns_meta
         current_segs=beleg[2] if beleg else ""
 
-        # Segmente vorausfüllen wenn leer oder nur Stubs (ohne Airports)
         prefill_segs=current_segs or ""
         if not prefill_segs or "||||||" in prefill_segs:
-            # Generiere vorausgefüllte Segmente aus Flugnummern + Daten
             fn_list=[f.strip() for f in (current_fns or fns_meta or "").split(",") if f.strip()]
             half=len(fn_list)//2 or 1
             segs=[]
             for i,fn in enumerate(fn_list):
                 d=dep_d if i<half else ret_d
                 d_fmt=d.replace("-",".") if "-" in d else d
-                # DD.MM.YYYY aus YYYY-MM-DD
                 if d_fmt and "-" not in d_fmt:
                     pass
                 elif d_fmt:
@@ -6704,7 +6231,6 @@ def set_segments_form(tc: str):
                 segs.append(f"{fn}|||{d_fmt}|||")
             prefill_segs=";".join(segs)
 
-        # Jedes Segment als eigene Zeile im Textarea
         seg_lines="\n".join(s.strip() for s in prefill_segs.split(";") if s.strip())
 
         return page_shell(f"Segmente {tc}",f"""
@@ -6746,7 +6272,6 @@ async def set_segments_save(tc: str, att_id: str, request: Request):
         form=await request.form()
         fns=(form.get("fns") or "").strip()
         segs_raw=(form.get("segments") or "").strip()
-        # Normalisieren: Zeilenumbrüche → Semikolon
         segs=";".join(l.strip() for l in re.split(r'[;\n]', segs_raw) if l.strip())
 
         conn=get_conn();cur=conn.cursor()
@@ -6774,7 +6299,6 @@ async def set_segments_save(tc: str, att_id: str, request: Request):
         if fns:
             cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s",(fns,tc))
 
-        # VMA aus Segmenten berechnen
         if segs:
             seg_list=[s.strip().split("|") for s in segs.split(";") if s.strip()]
             dest_cc=None; arrive_d=None; leave_d=None
@@ -6824,18 +6348,15 @@ async def repair_segments(tc: str):
     try:
         conn=get_conn(); cur=conn.cursor()
 
-        # trip_meta
         cur.execute("SELECT flight_numbers,departure_date,return_date,pnr_code FROM trip_meta WHERE trip_code=%s",(tc,))
         meta=cur.fetchone()
         if not meta: return {"status":"fehler","detail":"Reise nicht gefunden"}
         meta_fns=[f.strip() for f in (meta[0] or "").split(",") if f.strip()]
         dep_d, ret_d, pnr_meta = meta[1], meta[2], meta[3]
 
-        # Alle Mails der Reise
         cur.execute("SELECT id,subject,body FROM mail_messages WHERE trip_code=%s ORDER BY id",(tc,))
         mails=cur.fetchall()
 
-        # Alle Anhänge (extracted_text + S3-PDFs)
         cur.execute("""SELECT id,storage_key,original_filename,extracted_text
             FROM mail_attachments WHERE trip_code=%s
             AND (content_type='application/pdf' OR original_filename ILIKE '%%.pdf')
@@ -6847,7 +6368,6 @@ async def repair_segments(tc: str):
 
         all_text_sources = []
 
-        # Mail-Bodies sammeln
         for mid, subj, body in mails:
             if not body: continue
             import html as _h
@@ -6856,12 +6376,10 @@ async def repair_segments(tc: str):
             t = re.sub(r'<[^>]+>', ' ', t)
             t = re.sub(r'[ \t]+', ' ', t)
             t = re.sub(r'\n{3,}', '\n\n', t).strip()
-            # Sophos-Links entfernen
             t = re.sub(r'https?://[\w.-]*sophos[\w./-]*', ' ', t, flags=re.IGNORECASE)
             full = f"{subj or ''}\n{t}"
             all_text_sources.append(("mail",mid,full))
 
-        # PDFs aus S3 lesen
         for att_id, skey, fname, ext_text in pdfs:
             if ext_text:
                 all_text_sources.append(("pdf_cached",att_id,ext_text))
@@ -6878,7 +6396,6 @@ async def repair_segments(tc: str):
                         all_text_sources.append(("pdf_s3",att_id,pdf_text))
                 except: pass
 
-        # Segmente aus allen Quellen extrahieren
         all_segs = []
         seen_seg_keys = set()
         sources_used = []
@@ -6886,14 +6403,12 @@ async def repair_segments(tc: str):
         for src_type, src_id, text in all_text_sources:
             segs = extract_flight_segments_from_text(text)
             for seg in segs:
-                # Eindeutigkeitsschlüssel: FN + Datum + Abflugzeit
                 key = f"{seg['fn']}_{seg['date']}_{seg['dep_time']}"
                 if key not in seen_seg_keys and (seg['dep'] or seg['arr'] or seg['date']):
                     seen_seg_keys.add(key)
                     all_segs.append(seg)
                     sources_used.append(f"{seg['fn']} von {src_type}#{src_id}")
 
-        # Fehlende meta_fns als Stubs hinzufügen (mit Datum)
         found_fns = [s["fn"] for s in all_segs]
         half = max(1, len(meta_fns)//2)
         for i, fn in enumerate(meta_fns):
@@ -6901,7 +6416,6 @@ async def repair_segments(tc: str):
                 d = str(dep_d) if dep_d and i < half else (str(ret_d) if ret_d else str(dep_d) if dep_d else "")
                 all_segs.append({"fn":fn,"dep":"","arr":"","date":d,"arr_date":d,"dep_time":"","arr_time":""})
 
-        # Segmente in Reihenfolge sortieren (Datum aufsteigend)
         def sort_key(s):
             d = s.get("date","")
             try:
@@ -6909,23 +6423,19 @@ async def repair_segments(tc: str):
             except: return (9999,1,1,"")
         all_segs.sort(key=sort_key)
 
-        # Segment-String bauen
         seg_string = ";".join(
             f"{s['fn']}|{s['dep']}|{s['arr']}|{s['date']}|{s['dep_time']}|{s.get('arr_date',s['date'])}|{s['arr_time']}"
             for s in all_segs
         )
-        # Flugnummern dedupliziert aber Reihenfolge bewahren
         seen=set(); fns_dedup=[]
         for s in all_segs:
             if s["fn"] not in seen: seen.add(s["fn"]); fns_dedup.append(s["fn"])
         fns_string = ",".join(fns_dedup)
 
-        # VMA automatisch berechnen
         non_de_segs = [s for s in all_segs if s.get("arr") and AIRPORT_CC.get(s["arr"]) and AIRPORT_CC.get(s["arr"]) != "DE"]
         if non_de_segs:
             first_abroad = non_de_segs[0]
             dest_cc = AIRPORT_CC.get(first_abroad["arr"],"")
-            # Letztes Segment im Ausland
             return_segs = [s for s in all_segs if s.get("dep") and AIRPORT_CC.get(s["dep"]) and AIRPORT_CC.get(s["dep"]) != "DE"]
             last_abroad_dep = return_segs[-1] if return_segs else None
 
@@ -6949,7 +6459,6 @@ async def repair_segments(tc: str):
                 except Exception as ve:
                     pass
 
-        # Existierenden Flug-Beleg suchen
         cur.execute("""SELECT id FROM mail_attachments
             WHERE trip_code=%s AND detected_type='Flug'
             ORDER BY CASE WHEN storage_key LIKE 'repaired%%' THEN 1 ELSE 0 END, id
@@ -6990,9 +6499,7 @@ def recalc_vma(tc: str):
     """Berechnet vma_destinations für eine Reise neu aus Flug-Segmenten und Ziel."""
     try:
         conn=get_conn();cur=conn.cursor()
-        # Reset vma_destinations
         cur.execute("UPDATE trip_meta SET vma_destinations=NULL WHERE trip_code=%s",(tc,))
-        # Hole flight_segments aus mail_attachments
         cur.execute("""SELECT flight_segments,detected_checkin,detected_checkout,detected_type
             FROM mail_attachments WHERE trip_code=%s AND flight_segments IS NOT NULL
             ORDER BY id""", (tc,))
@@ -7002,17 +6509,14 @@ def recalc_vma(tc: str):
         if not meta: return {"status":"fehler","detail":"Reise nicht gefunden"}
         dep_d_raw,ret_d_raw,destinations=meta
 
-        # AIRPORT_CC = globale Konstante (oben definiert)
 
         dest_cc=None
         arrive_date=None
         leave_date=None
 
-        # Aus flight_segments
         for seg_str,_,_,_ in segs_rows:
             if not seg_str: continue
             segs=[s.strip().split("|") for s in seg_str.split(";") if s.strip()]
-            # Hinflug: Ankunft nicht-DE
             for seg in segs:
                 if len(seg)>=3:
                     arr=seg[2].strip().upper()
@@ -7028,7 +6532,6 @@ def recalc_vma(tc: str):
                                 p=seg[3].split("."); arrive_date=date(int(p[2]),int(p[1]),int(p[0]))
                             except: pass
                         break
-            # Rückflug: Abflug nicht-DE
             for seg in reversed(segs):
                 if len(seg)>=2:
                     dep=seg[1].strip().upper()
@@ -7041,7 +6544,6 @@ def recalc_vma(tc: str):
                         break
             if dest_cc: break
 
-        # Fallback: Destinations-Text
         if not dest_cc and destinations:
             DEST_CC_MAP={"lyon":"FR","paris":"FR","frankreich":"FR","france":"FR",
                 "london":"GB","grossbritannien":"GB","indien":"IN","dubai":"AE",
@@ -7077,8 +6579,6 @@ def cleanup_duplicates():
     """Entfernt doppelte Mail-Body-Belege – behält jeweils den neuesten pro Typ+Reise."""
     try:
         conn=get_conn();cur=conn.cursor()
-        # Duplikate: gleiche trip_code + detected_type + storage_key LIKE mail_body_%
-        # Behalte den mit der höchsten ID (neuesten)
         cur.execute("""DELETE FROM mail_attachments WHERE id NOT IN (
             SELECT MAX(id) FROM mail_attachments
             WHERE storage_key LIKE 'mail_body_%'
@@ -7103,9 +6603,6 @@ def reset_mail_log():
         return {"status":"fehler","detail":str(e)}
 
 
-# =========================================================
-# STATISTIK-SEITE
-# =========================================================
 
 @app.get("/stats", response_class=HTMLResponse)
 def stats():
@@ -7184,16 +6681,12 @@ def stats():
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
 
 
-# =========================================================
-# KATEGORIE-REGELN ADMIN
-# =========================================================
 
 @app.get("/vma-rates", response_class=HTMLResponse)
 def vma_rates_page():
     """Zeigt aktuelle VMA-Sätze und ermöglicht Aktualisierung."""
     try:
         conn=get_conn();cur=conn.cursor()
-        # VMA-Sätze aus DB laden falls vorhanden (überschreiben Hardcode)
         cur.execute("""CREATE TABLE IF NOT EXISTS vma_settings (
             id SERIAL PRIMARY KEY, cc TEXT UNIQUE, full_rate NUMERIC, partial_rate NUMERIC,
             label TEXT, updated_at TIMESTAMP DEFAULT now())""")
@@ -7201,7 +6694,6 @@ def vma_rates_page():
         db_rates=cur.fetchall()
         cur.close();conn.close()
 
-        # Tabelle aus aktuellem VMA dict
         rows=""
         for cc, r in sorted(VMA.items()):
             db_row=next((x for x in db_rates if x[0]==cc),None)
@@ -7398,7 +6890,6 @@ def rules_page():
             <td><a href="/rules/delete/{r[0]}" onclick="return confirm('Regel löschen?')"
                style="color:var(--re6);font-size:12px;text-decoration:none">✕ löschen</a></td>
             </tr>""" for r in rows)
-        # Standard-Regeln zur Ansicht
         std_html=""
         std_rules={"Taxi":["uber","bolt","free now","mytaxi"],"Flug":["lufthansa","ryanair","boarding pass"],
                    "Hotel":["marriott","booking.com","hilton"],"Bahn":["deutsche bahn","eurostar"],
@@ -7494,9 +6985,6 @@ def reclassify():
 
 
 
-# =========================================================
-# TAGESBASIERTE MAHLZEITEN-ERFASSUNG (VMA-Grundlage)
-# =========================================================
 
 @app.get("/meals/{tc}", response_class=HTMLResponse)
 def meals_page(tc: str):
@@ -7523,7 +7011,6 @@ def meals_page(tc: str):
 
         days=(ret_d-dep_d).days+1
 
-        # Alle verfügbaren Länder aus VMA-Tabelle für Dropdown
         country_opts=""
         for cc_key, r in sorted(VMA.items()):
             if "_" not in cc_key:  # nur Länder-Codes, keine Städte
@@ -7539,9 +7026,7 @@ def meals_page(tc: str):
             l_chk="checked" if e and e[2] else ""
             di_chk="checked" if e and e[3] else ""
             notes_val=(e[4] if e and e[4] else "")
-            # Land für diesen Tag: manuelle Angabe > vma_destinations > default
             day_cc = (e[5] if e and e[5] else None) or get_country_for_day(d,vma_dest_dict,default_cc or "DE")
-            # VMA-Override manuell?
             vma_override = float(e[6]) if e and e[6] is not None else None
 
             dtype="partial" if i==0 or i==days-1 else "full"
@@ -7562,13 +7047,11 @@ def meals_page(tc: str):
             wd=["Mo","Di","Mi","Do","Fr","Sa","So"][d.weekday()]
             wkend_style=' style="background:var(--b50)"' if d.weekday()>=5 else ""
 
-            # Land-Dropdown für diesen Tag
             cc_options="".join(
                 f'<option value="{cc}" {"selected" if cc==day_cc else ""}>{cc}</option>'
                 for cc in sorted(set(k for k in VMA.keys() if "_" not in k))
             )
 
-            # VMA-Satz Info
             vma_r=VMA.get(day_cc,{"full":28.0,"partial":14.0})
             full_rate=vma_r["full"]
             base=full_rate if dtype=="full" else vma_r["partial"]
@@ -7599,7 +7082,6 @@ def meals_page(tc: str):
 
         title_str=f" · {title}" if title else ""
 
-        # VMA-Satz-Jahr-Hinweis
         current_year=datetime.now().year
         vma_warning=""
         if current_year > 2026:
