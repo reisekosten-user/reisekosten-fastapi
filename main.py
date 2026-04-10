@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.45"
+APP_VERSION = "9.46"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIL-ANALYSE ENGINE v2 – Datum-basierte Zuordnung, kein Raten
@@ -4230,8 +4230,9 @@ def mail_log():
           </table></div>
           <div style="margin-top:16px;padding:12px;background:var(--b50);border-radius:8px;font-size:12px;color:var(--t500)">
             <b>Automatische Zuordnung funktioniert wenn:</b><br>
-            1. Reisecode <code>26-001</code> im Betreff oder Body steht<br>
-            2. PNR-Code (<code>83WPJT</code>) in der Mail steht UND in der Reise hinterlegt ist
+            1. Reisecode <code>26-001</code> im Betreff oder Body steht → 100% sicher<br>
+            2. Name des Reisenden + Datum liegt im Reisezeitraum → 90% sicher<br>
+            <span style="color:var(--am6)">Sonst → Mail erscheint hier zur manuellen Zuordnung</span>
           </div>
         </div>""")
     except Exception as e:
