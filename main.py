@@ -303,7 +303,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.47"
+APP_VERSION = "9.48"
 
 
 _MONTHS_MAP = {
@@ -3861,22 +3861,21 @@ def mail_log():
         def make_row(r, highlight=False):
             bg="background:#fffbeb;" if highlight else ""
             icon="⚠ " if highlight else ""
-            return f"""<tr style="{bg}">
+            if not r[3]:
+                assign_cell=f'''<form method="post" action="/mail-assign/{r[0]}" style="display:flex;gap:4px;align-items:center">
+                  <select name="trip_code" style="font-size:11px;padding:2px 6px;border:1px solid var(--am6);border-radius:4px;background:#fffbeb">{make_opts(r[3])}</select>
+                  <button type="submit" style="font-size:11px;padding:3px 10px;background:var(--b600);color:white;border:none;border-radius:4px;cursor:pointer">✓</button>
+                </form>'''
+            else:
+                assign_cell='<span style="font-size:11px;color:var(--gr6)">✓</span>'
+            return f'''<tr style="{bg}">
             <td style="font-size:11px;color:var(--t300)">{str(r[7] or '')[:16]}</td>
             <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">{r[1] or ''}</td>
             <td><a href="/mail-detail/{r[0]}" style="color:var(--b600);text-decoration:none;font-weight:500">{icon}{(r[2] or '–')[:50]}</a></td>
-            <td style="font-family:DM Mono,monospace;font-weight:600;color:{'var(--am6)' if not r[3] else 'var(--b700)'}">{r[3] or '–'}</td>
-            <td><span class="bdg {'bdg-ok' if r[4] in ('Hotel','Flug') else 'bdg-w'}">{r[4] or '?'}</span></td>
+            <td style="font-family:DM Mono,monospace;font-weight:600;color:var(--am6) if not r[3] else var(--b700)">{r[3] or '–'}</td>
+            <td><span class="bdg bdg-ok" if r[4] in ('Hotel','Flug') else "bdg-w">{r[4] or '?'}</span></td>
             <td style="font-family:DM Mono,monospace;font-size:11px;color:var(--gr6)">{r[5] or ''}</td>
-            <td>
-              <form method="post" action="/mail-assign/{r[0]}" style="display:flex;gap:4px;align-items:center">
-                <select name="trip_code" style="font-size:11px;padding:2px 6px;border:1px solid {'var(--am6)' if not r[3] else 'var(--bd)'};border-radius:4px;background:{'#fffbeb' if not r[3] else 'white'}">
-                  {make_opts(r[3])}
-                </select>
-                <button type="submit" style="font-size:11px;padding:3px 10px;background:var(--b600);color:white;border:none;border-radius:4px;cursor:pointer;white-space:nowrap">✓ Zuordnen</button>
-              </form>
-            </td></tr>"""
-
+            <td>{assign_cell}</td></tr>'''
         unassigned_html = "".join(make_row(r, highlight=True) for r in unassigned)
         assigned_html = "".join(make_row(r) for r in assigned)
 
@@ -3986,10 +3985,8 @@ async def mail_assign(mail_id: int, request: Request):
         conn.commit();cur.close();conn.close()
         return RedirectResponse(url="/mail-log",status_code=303)
     except Exception as e:
-        return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
-
-
-@app.get("/mail-detail/{mail_id}", response_class=HTMLResponse)
+        import traceback
+        return JSONResponse({"status":"fehler","detail":str(e),"trace":traceback.format_exc()[:800]},status_code=500)
 def mail_detail(mail_id: int):
     """Zeigt den vollständigen Mail-Body als Vorschau."""
     try:
