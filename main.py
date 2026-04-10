@@ -304,7 +304,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.49"
+APP_VERSION = "9.52"
 
 
 _MONTHS_MAP = {
@@ -339,6 +339,71 @@ def extract_all_dates(text: str) -> list:
             try: dates.add(_date(int(m.group(3)),int(mo),int(m.group(2))))
             except: pass
     return sorted(d for d in dates if 2025 <= d.year <= 2028)
+
+def build_mail_overview(subject, body, mail_type, betrag, waehrung, betrag_eur,
+                         vendor, checkin, checkout, nights, regex_fns, seg_s, code, pnr_f):
+    """Erstellt strukturiertes Uebersichtsblatt fuer eine importierte Mail."""
+    TYPE_ICONS = {"Flug":"✈","Hotel":"🏨","Bahn":"🚆","Taxi":"🚕",
+                  "Mietwagen":"🚗","Essen":"🍽","Tanken":"⛽","Sonstiges":"📄"}
+    icon = TYPE_ICONS.get(mail_type, "📧")
+
+    def row(label, value, color=""):
+        if not value: return ""
+        style = f"color:{color};" if color else ""
+        return (f"<tr><td style='padding:5px 12px 5px 0;font-size:12px;color:#6b7280;"
+                f"white-space:nowrap;vertical-align:top'>{label}</td>"
+                f"<td style='padding:5px 0;font-size:13px;font-weight:500;{style}'>{value}</td></tr>")
+
+    seg_rows = ""
+    if seg_s:
+        for s in seg_s.split(";"):
+            parts = s.split("|")
+            if len(parts) >= 7:
+                fn,da,aa,dd,dt,ad,at = parts[:7]
+                seg_rows += (f"<tr style='font-size:12px'>"
+                             f"<td style='padding:2px 8px;font-weight:600;color:#1d4ed8'>{fn}</td>"
+                             f"<td style='padding:2px 8px'>{da}→{aa}</td>"
+                             f"<td style='padding:2px 8px;color:#6b7280'>{dd}</td>"
+                             f"<td style='padding:2px 8px'>{dt}→{at}</td></tr>")
+
+    seg_html = ""
+    if seg_rows:
+        seg_html = (f"<tr><td style='padding:5px 12px 5px 0;font-size:12px;color:#6b7280;vertical-align:top'>Segmente</td>"
+                    f"<td style='padding:5px 0'><table style='border-collapse:collapse'>{seg_rows}</table></td></tr>")
+
+    found = sum([bool(betrag), bool(vendor), bool(checkin or regex_fns), bool(code)])
+    if found >= 3: conf_c="#059669"; conf_l="Hoch – gut erkannt"
+    elif found >= 2: conf_c="#d97706"; conf_l="Mittel – bitte prüfen"
+    else: conf_c="#dc2626"; conf_l="Niedrig – manuell ergänzen"
+
+    bg = "#1e40af" if mail_type=="Flug" else "#065f46" if mail_type=="Hotel" else "#374151"
+    betrag_str = f"{betrag} {waehrung}" + (f" = {betrag_eur} €" if betrag_eur and waehrung!="EUR" else "")
+    not_assigned = "" if code else "<div style='margin-top:8px;padding:8px 12px;background:#fef3c7;border-radius:6px;font-size:11px;color:#92400e'><b>⚠ Nicht zugeordnet</b> – bitte im Posteingang einer Reise zuweisen</div>"
+
+    return (f"<div style='font-family:-apple-system,sans-serif;max-width:600px;background:white;"
+            f"border:1px solid #e5e7eb;border-radius:10px;overflow:hidden'>"
+            f"<div style='background:{bg};color:white;padding:16px 20px'>"
+            f"<span style='font-size:24px'>{icon}</span> "
+            f"<span style='font-size:16px;font-weight:700'>{mail_type}</span><br>"
+            f"<span style='font-size:11px;opacity:0.8'>{(subject or '')[:70]}</span></div>"
+            f"<div style='padding:16px 20px'>"
+            f"<table style='border-collapse:collapse;width:100%'>"
+            f"{row('Anbieter', vendor, '#111827')}"
+            f"{row('Betrag', betrag_str, '#059669')}"
+            f"{row('Check-in', checkin)}"
+            f"{row('Check-out', checkout)}"
+            f"{row('Nächte', str(nights) if nights else '')}"
+            f"{row('Flugnummern', ', '.join(regex_fns) if regex_fns else '')}"
+            f"{seg_html}"
+            f"{row('PNR', pnr_f)}"
+            f"{row('Reise', code, '#1d4ed8')}"
+            f"</table>"
+            f"<div style='margin-top:10px;padding:8px 12px;background:white;border:1px solid {conf_c};"
+            f"border-radius:6px;font-size:11px;color:{conf_c}'>"
+            f"<b>Erkennungsqualität: {conf_l}</b><br>"
+            f"<span style='color:#6b7280'>Erkannt: {found}/4 Felder</span></div>"
+            f"{not_assigned}</div></div>")
+
 
 def extract_pnr_safe(text: str) -> str:
     """Extrahiert PNR NUR wenn explizit gelabelt und alphanumerisch (nicht rein numerisch)."""
@@ -1759,17 +1824,18 @@ def _fetch_mails_internal():
                     cur.execute("""INSERT INTO mail_attachments
                         (mail_uid,trip_code,original_filename,saved_filename,content_type,
                          storage_key,detected_type,detected_amount,detected_amount_eur,
-                         detected_currency,detected_vendor,
+                         detected_currency,detected_vendor,detected_date,
                          detected_checkin,detected_checkout,detected_nights,
                          detected_flight_numbers,flight_segments,
                          analysis_status,confidence,review_flag,ki_bemerkung)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                         (uid, code,
                          f"Mail: {subject[:60]}", f"Mail: {subject[:60]}",
                          "text/plain", f"mail_body_{uid}",
                          mail_type,
                          betrag or None, betrag_eur or None, waehrung,
                          vendor or None,
+                         checkin or None,
                          checkin or None, checkout or None, nights or None,
                          ",".join(regex_fns) if regex_fns else None,
                          seg_s or None,
@@ -3617,6 +3683,54 @@ def attachment_log():
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
 
+@app.get("/mail-overview/{att_id}", response_class=HTMLResponse)
+def mail_overview(att_id: int):
+    """Übersichtsblatt für einen importierten Mail-Beleg."""
+    try:
+        conn=get_conn(); cur=conn.cursor()
+        cur.execute("""SELECT a.detected_type, a.detected_amount, a.detected_currency,
+            a.detected_amount_eur, a.detected_vendor, a.detected_checkin, a.detected_checkout,
+            a.detected_nights, a.detected_flight_numbers, a.flight_segments,
+            a.trip_code, a.analysis_status, a.confidence, a.ki_bemerkung,
+            m.subject, m.sender, m.created_at, m.body
+            FROM mail_attachments a
+            LEFT JOIN mail_messages m ON m.mail_uid=a.mail_uid
+            WHERE a.id=%s""",(att_id,))
+        row=cur.fetchone()
+        # PNR aus Mail-Body
+        cur.execute("SELECT body FROM mail_messages m JOIN mail_attachments a ON a.mail_uid=m.mail_uid WHERE a.id=%s",(att_id,))
+        body_row=cur.fetchone()
+        cur.close(); conn.close()
+
+        if not row: return HTMLResponse("Beleg nicht gefunden", 404)
+
+        dtype,amt,curr,amt_eur,vendor,checkin,checkout,nights,fns_str,seg_s,code,stat,conf,bemerk,subject,sender,created,body=row
+        pnr_f = extract_pnr_safe(f"{subject or ''}\n{body or ''}")
+        regex_fns = fns_str.split(",") if fns_str else []
+
+        overview_html = build_mail_overview(
+            subject or "", body or "", dtype or "Sonstiges",
+            amt or "", curr or "EUR", amt_eur or "",
+            vendor or "", checkin or "", checkout or "",
+            int(nights or 0), regex_fns, seg_s or "", code or "", pnr_f or "")
+
+        return page_shell(f"Übersicht: {dtype}", f"""
+        <div style="max-width:700px;margin:0 auto;padding:20px">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
+            <a href="javascript:history.back()" class="btn-l">← Zurück</a>
+            <span style="font-size:11px;color:var(--t300)">Von: {sender or ''} · {str(created or '')[:16]}</span>
+          </div>
+          {overview_html}
+          <div style="margin-top:16px;display:flex;gap:8px">
+            <a href="/beleg-edit/{att_id}" class="btn-l">✏ Daten korrigieren</a>
+            {"<a href='/trip/"+code+"' class='btn-l'>→ Zur Reise</a>" if code else ""}
+          </div>
+        </div>""")
+    except Exception as e:
+        import traceback
+        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p><pre style="font-size:10px">{traceback.format_exc()[:300]}</pre></div>')
+
+
 @app.get("/duplikate", response_class=HTMLResponse)
 def duplikate():
     """
@@ -3807,7 +3921,8 @@ def posteingang():
                   <div style="font-weight:600;font-size:14px">{subject or '(kein Betreff)'}</div>
                   <div style="font-size:11px;color:var(--t300);margin-top:2px">{sender or ''} · {str(created or '')[:16]}</div>
                 </div>
-                <a href="/mail-detail/{mail_id}" style="font-size:11px;color:var(--b600);text-decoration:none;white-space:nowrap">📄 Mail ansehen</a>
+                <a href="/mail-detail/{mail_id}" style="font-size:11px;color:var(--b600);text-decoration:none;white-space:nowrap">📄 Mail</a>
+                {f'<a href="/mail-overview/{att_id}" style="font-size:11px;color:var(--b600);text-decoration:none;margin-left:8px;white-space:nowrap">📋 Übersicht</a>' if att_id else ''}
               </div>
               {'<table style="margin-bottom:12px;width:auto">'+data_rows+'</table>' if data_rows else ''}
               <form method="post" action="/mail-assign/{mail_id}" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -4134,6 +4249,10 @@ def trip_detail(tc: str):
                 except: return None
 
             ev_date = parse_dd(ddate) or dep_d
+            # Wenn Datum außerhalb Reisezeitraum (z.B. Buchungsdatum) → Abreisetag
+            if ev_date and dep_d and ret_d:
+                if ev_date < dep_d or ev_date > ret_d:
+                    ev_date = dep_d
             if dtype in ("Flug","Kalendereintrag") and seg_s:
                 first_seg = seg_s.split(";")[0].split("|")
                 if len(first_seg) > 3 and first_seg[3].strip():
@@ -4153,6 +4272,7 @@ def trip_detail(tc: str):
                 pdf_view_url=f"/beleg-pdf/{att_id}"
                 pdf_link=f'<a href="{pdf_view_url}" target="_blank" style="color:var(--gr6);margin-right:6px" title="PDF anzeigen">📋</a>'
             actions=(pdf_link +
+                    f'<a href="/mail-overview/{att_id}" target="_blank" style="color:var(--b600);margin-right:6px" title="Übersichtsblatt">📋</a>'
                     f'<a href="{view_url}" target="_blank" style="color:var(--b600);margin-right:6px" title="Beleg anzeigen">📄</a>'
                     f'<a href="{edit_url}" style="color:var(--t300)" title="KI-Ergebnis korrigieren">✏</a>')
 
