@@ -27,8 +27,6 @@ from typing import Optional
 import psycopg2
 import boto3
 
-
-
 def _try_import_pdf():
     try:
         from reportlab.lib.pagesizes import A4
@@ -113,7 +111,6 @@ def make_text_pdf(title: str, body_text: str, meta: dict = None) -> bytes:
     doc.build(story)
     return buf.getvalue()
 
-
 def merge_pdfs(pdf_bytes_list: list) -> bytes:
     """Führt mehrere PDF-bytes zu einer einzigen PDF zusammen."""
     import pypdf
@@ -130,7 +127,6 @@ def merge_pdfs(pdf_bytes_list: list) -> bytes:
     out = io.BytesIO()
     writer.write(out)
     return out.getvalue()
-
 
 async def generate_and_store_mail_pdf(att_id: int, subj: str, body: str,
                                        typ: str, vendor: str, betrag: str,
@@ -164,8 +160,6 @@ async def generate_and_store_mail_pdf(att_id: int, subj: str, body: str,
     except Exception as e:
         print(f"[PDF gen error att {att_id}]: {e}")
         return None
-
-
 
 AIRPORT_CC = {
     "FRA":"DE","MUC":"DE","BER":"DE","HAM":"DE","DUS":"DE","STR":"DE",
@@ -245,8 +239,6 @@ AIRPORT_CC = {
     "ALA":"KZ","TSE":"KZ",
 }
 
-
-
 def anonymize_for_ki(text: str) -> str:
     """
     Anonymisiert Text bevor er als KI-Beispiel gespeichert oder an Mistral gesendet wird.
@@ -304,8 +296,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.52"
-
+APP_VERSION = "9.53"
 
 _MONTHS_MAP = {
     'jan':'01','feb':'02','mar':'03','maer':'03','apr':'04',
@@ -403,7 +394,6 @@ def build_mail_overview(subject, body, mail_type, betrag, waehrung, betrag_eur,
             f"<b>Erkennungsqualität: {conf_l}</b><br>"
             f"<span style='color:#6b7280'>Erkannt: {found}/4 Felder</span></div>"
             f"{not_assigned}</div></div>")
-
 
 def extract_pnr_safe(text: str) -> str:
     """Extrahiert PNR NUR wenn explizit gelabelt und alphanumerisch (nicht rein numerisch)."""
@@ -513,7 +503,6 @@ def assign_trip_by_date(subject: str, body: str, trips: list) -> tuple:
 
     return None, 0, "unzugeordnet"
 
-
 def load_trips_for_assignment() -> list:
     """Lädt alle Reisen mit Code, Zeitraum und Reisendem."""
     try:
@@ -526,15 +515,11 @@ def load_trips_for_assignment() -> list:
                 for code,pnr,dep,ret,traveler,emp in rows]
     except: return []
 
-
-
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 import os as _os
 if not _os.path.exists("static"):
     _os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-
 
 DATABASE_URL          = os.getenv("DATABASE_URL")
 IMAP_HOST             = os.getenv("IMAP_HOST")
@@ -857,7 +842,6 @@ def next_trip_code(cur):
 def file_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
-
 _ecb_rates_cache: dict = {}  # {"USD": 1.08, ...}
 _ecb_rates_ts: float = 0.0
 
@@ -907,8 +891,6 @@ async def convert_to_eur(amount: float, currency: str) -> tuple[float, str]:
         return eur, f"1 EUR = {rate:.4f} {currency}"
     return round(amount, 2), f"Kurs {currency} unbekannt"
 
-
-
 async def mistral_ocr(file_bytes: bytes, filename: str) -> str:
     if not MISTRAL_API_KEY: return "KEIN_MISTRAL_KEY"
     ext = filename.lower().split(".")[-1]
@@ -942,7 +924,6 @@ async def mistral_ocr(file_bytes: bytes, filename: str) -> str:
         return text[:20000] if text else "KEIN_TEXT_GEFUNDEN"
     except Exception as e:
         return f"ERROR:{e}"
-
 
 async def mistral_extract(text: str, known_codes: list, source: str = "anhang") -> dict:
     """
@@ -1032,7 +1013,6 @@ STRENGE REGELN:
         return json.loads(content)
     except Exception as e:
         return {"fehler":str(e)}
-
 
 async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
     ext = (filename or "").lower().split(".")[-1]
@@ -1226,7 +1206,6 @@ async def analyse_ki(att_id, storage_key, filename, conn, known_codes):
     await _apply_fields(cur, att_id, fields, ocr_text)
     conn.commit(); cur.close()
 
-
 async def _apply_fields(cur, att_id, fields, ocr_text=""):
     betrag     = fields.get("betrag","") or ""
     waehrung   = fields.get("waehrung","EUR") or "EUR"
@@ -1296,8 +1275,6 @@ async def _apply_fields(cur, att_id, fields, ocr_text=""):
          checkin or None,checkout or None,checkin_t or None,checkout_t or None,
          segments or None,
          status,confidence,review,bemerkung,att_id))
-
-
 
 def extract_trip_code(text):
     m = re.search(r"\b\d{2}-\d{3}\b", text or "")
@@ -1521,7 +1498,6 @@ def extract_flight_segments_from_text(text: str) -> list:
 
     return result
 
-
 def segments_to_string(segments: list) -> str:
     """Konvertiert Segment-Liste in DB-Format: FN|DEP|ARR|DATE|TIME|ARR_DATE|ARR_TIME;..."""
     parts = []
@@ -1569,7 +1545,6 @@ def detect_type_with_rules(filename, subject, body, custom_rules: dict = None) -
                 return typ
     return detect_attachment_type(filename, subject, body)
 
-
 def detect_attachment_type(filename,subject,body):
     text=f"{filename or ''} {subject or ''} {body or ''}".lower()
     if (filename or "").lower().endswith(".ics"): return "Kalendereintrag"
@@ -1607,7 +1582,6 @@ def sanitize_filename(name):
     name=(name or "").replace("\\","_").replace("/","_").strip()
     name=re.sub(r"[^A-Za-z0-9._ -]","_",name)
     return name[:180] if name else "attachment.bin"
-
 
 _imap_lock = threading.Lock()
 
@@ -1882,8 +1856,6 @@ try:
 except Exception as _te:
     print(f"[IMAP-Thread] Konnte nicht gestartet werden: {_te}")
 
-
-
 _flight_check_cache: dict = {}  # key: "FN_DATUM" → last_checked timestamp
 
 async def check_aviationstack(fn: str, dep_date: str) -> dict:
@@ -1941,7 +1913,6 @@ async def check_aviationstack(fn: str, dep_date: str) -> dict:
         }
     except Exception as e:
         return {"status": f"Fehler: {str(e)[:80]}", "source": "AviationStack"}
-
 
 async def auto_check_active_flights():
     """
@@ -2034,426 +2005,6 @@ async def auto_check_active_flights():
             print(f"[FlightCheck] {checked} Flüge geprüft")
     except Exception as e:
         print(f"[FlightCheckFehler] {e}")
-
-
-def _auto_flight_check():
-    """Daemon-Thread: prüft aktive Flüge alle 3 Stunden."""
-    time.sleep(60)  # Startup-Delay
-    while True:
-        try:
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(auto_check_active_flights())
-            loop.close()
-        except Exception as e:
-            print(f"[FlightThreadFehler] {e}")
-        time.sleep(10800)  # 3 Stunden
-
-
-_ft = threading.Thread(target=_auto_flight_check, daemon=True)
-_ft.start()
-
-
-async def check_opensky(callsign: str) -> dict:
-    """
-    Prüft ob ein Flug gerade aktiv ist via OpenSky Network REST API.
-    callsign: ICAO-Callsign z.B. 'DLH123' (Lufthansa LH123)
-    Liefert: on_ground, altitude, velocity, last_seen
-    """
-    iata_to_icao = {
-        "LH":"DLH","AZ":"AZA","LX":"SWR","OS":"AUA","BA":"BAW",
-        "AF":"AFR","KL":"KLM","IB":"IBE","EK":"UAE","EW":"EWG",
-        "FR":"RYR","U2":"EZY","W6":"WZZ","TK":"THY","SK":"SAS",
-        "AY":"FIN","SN":"BEL","VY":"VLG","VU":"VJT","QR":"QTR",
-        "ET":"ETH","MS":"MSR","SV":"SVA","AI":"AIC","9W":"JAI",
-        "6E":"IGO","SG":"SEJ","MH":"MAS","SQ":"SIA","CX":"CPA",
-        "NH":"ANA","JL":"JAL","OZ":"AAR","KE":"KAL","CA":"CCA",
-        "MU":"CES","CZ":"CSN","HU":"CHH","9C":"CQH",
-    }
-    try:
-        m = re.match(r"^([A-Z]{2})(\d{1,4})$", callsign.upper().replace(" ",""))
-        if not m:
-            return {"status":"ungültige Flugnummer","source":"OpenSky","on_ground":None}
-        iata_carrier = m.group(1)
-        flight_num   = m.group(2)
-        icao_carrier = iata_to_icao.get(iata_carrier, iata_carrier + "X")  # Fallback
-        icao_callsign = f"{icao_carrier}{flight_num}"
-
-        async with httpx.AsyncClient(timeout=10.0) as cl:
-            resp = await cl.get(
-                "https://opensky-network.org/api/states/all",
-                params={"callsign": icao_callsign.ljust(8)},  # OpenSky padded auf 8 Zeichen
-            )
-
-        if resp.status_code == 429:
-            return {"status":"Rate Limit (OpenSky)","source":"OpenSky","on_ground":None}
-        if resp.status_code != 200:
-            return {"status":f"HTTP {resp.status_code}","source":"OpenSky","on_ground":None}
-
-        data = resp.json()
-        states = data.get("states") or []
-
-        match = None
-        for s in states:
-            cs = (s[1] or "").strip()
-            if cs.upper() == icao_callsign.upper():
-                match = s; break
-
-        if not match:
-            return {
-                "status": "nicht aktiv (gelandet/nicht gestartet)",
-                "source": "OpenSky",
-                "on_ground": None,
-                "callsign": icao_callsign,
-            }
-
-        on_ground  = match[8]        # bool
-        altitude   = match[7]        # Barometric altitude in m
-        velocity   = match[9]        # m/s
-        lat        = match[6]
-        lon        = match[5]
-        last_seen  = match[4]        # Unix timestamp
-
-        if on_ground:
-            status = "am Boden"
-        else:
-            alt_ft = int((altitude or 0) * 3.281)
-            spd_kmh = int((velocity or 0) * 3.6)
-            status = f"in der Luft · {alt_ft:,} ft · {spd_kmh} km/h"
-
-        return {
-            "status": status,
-            "source": "OpenSky",
-            "on_ground": on_ground,
-            "altitude_m": altitude,
-            "velocity_ms": velocity,
-            "lat": lat,
-            "lon": lon,
-            "callsign": icao_callsign,
-            "delay_min": None,  # OpenSky liefert keine Verspätungsminuten
-        }
-
-    except Exception as e:
-        return {"status":f"Fehler: {str(e)[:80]}","source":"OpenSky","on_ground":None}
-
-
-async def check_flight_status(fn: str, dep_date: str) -> dict:
-    """
-    Kombinierter Flugstatus:
-    1. OpenSky: Live-Position (kostenlos, kein Key)
-    2. Amadeus: Existenzcheck / Fahrplan (falls Key vorhanden)
-    """
-    result = await check_opensky(fn)
-
-    if AMADEUS_CLIENT_ID and result.get("on_ground") is None:
-        try:
-            async with httpx.AsyncClient(timeout=8) as cl:
-                tr = await cl.post(
-                    "https://test.api.amadeus.com/v1/security/oauth2/token",
-                    data={"grant_type":"client_credentials",
-                          "client_id":AMADEUS_CLIENT_ID,
-                          "client_secret":AMADEUS_CLIENT_SECRET})
-                token = tr.json().get("access_token","")
-                if token:
-                    carrier = fn[:2].upper()
-                    num     = re.sub(r"[^0-9]","",fn)
-                    fr = await cl.get(
-                        "https://test.api.amadeus.com/v2/schedule/flights",
-                        headers={"Authorization":f"Bearer {token}"},
-                        params={"carrierCode":carrier,"flightNumber":num,
-                                "scheduledDepartureDate":dep_date})
-                    if fr.status_code == 200 and fr.json().get("data"):
-                        result["amadeus"] = "im Fahrplan ✓"
-                    else:
-                        result["amadeus"] = "nicht im Fahrplan"
-        except Exception:
-            pass
-
-    return result
-
-
-
-async def check_bahn_puenktlichkeit(zug_nr: str, datum: str, eva_nr: str = "8000105") -> dict:
-    """
-    Prueft Zugverspaetung via DB Timetables API v1.
-    Benoetigt DB_CLIENT_ID + DB_CLIENT_SECRET (developers.deutschebahn.com).
-    eva_nr: EVA-Bahnhofsnummer, Standard Frankfurt Hbf = 8000105
-    Nur Fernverkehr (ICE/IC/EC).
-    """
-    if not DB_CLIENT_ID or not DB_CLIENT_SECRET:
-        return {"status": "kein DB_CLIENT_ID/SECRET", "delay_min": None, "source": "DB Timetables"}
-    zug_clean = re.sub(r"[^0-9]", "", zug_nr)
-    if not zug_clean:
-        return {"status": "ungültige Zugnummer", "delay_min": None, "source": "DB Timetables"}
-    try:
-        if datum and len(datum) == 10:  # YYYY-MM-DD
-            api_date = datum[2:4] + datum[5:7] + datum[8:10]
-        else:
-            api_date = datetime.now().strftime("%y%m%d")
-        api_hour = datetime.now().strftime("%H")
-
-        headers = {
-            "DB-Client-Id": DB_CLIENT_ID,
-            "DB-Api-Key": DB_CLIENT_SECRET,
-            "accept": "application/xml"
-        }
-        async with httpx.AsyncClient(timeout=10.0) as cl:
-            plan_url = f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/plan/{eva_nr}/{api_date}/{api_hour}"
-            resp_plan = await cl.get(plan_url, headers=headers)
-
-            fchg_url = f"https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/fchg/{eva_nr}"
-            resp_fchg = await cl.get(fchg_url, headers=headers)
-
-        if resp_plan.status_code != 200:
-            return {"status": f"Plan HTTP {resp_plan.status_code}", "delay_min": None, "source": "DB Timetables", "raw": resp_plan.text[:200]}
-
-        plan_text = resp_plan.text
-        fchg_text = resp_fchg.text if resp_fchg.status_code == 200 else ""
-
-        if zug_clean not in plan_text:
-            return {"status": "nicht im Fahrplan", "delay_min": None, "source": "DB Timetables"}
-
-        delay_min = None
-        if fchg_text and zug_clean in fchg_text:
-            pattern = rf'n="{zug_clean}"[^>]*>.*?ct="(\d{{4}})"'
-            m = re.search(pattern, fchg_text, re.DOTALL)
-            if m:
-                ct_time = m.group(1)  # aktuell geplante Abfahrt z.B. "1437"
-                pt_pattern = rf'n="{zug_clean}"[^>]*>.*?pt="(\d{{4}})"'
-                pm = re.search(pt_pattern, plan_text, re.DOTALL)
-                if pm:
-                    pt_time = pm.group(1)
-                    try:
-                        ct_h, ct_m = int(ct_time[:2]), int(ct_time[2:])
-                        pt_h, pt_m = int(pt_time[:2]), int(pt_time[2:])
-                        delay_min = (ct_h * 60 + ct_m) - (pt_h * 60 + pt_m)
-                        if delay_min < 0: delay_min += 1440  # Mitternacht überschritten
-                    except Exception:
-                        delay_min = None
-
-        if delay_min is not None and delay_min > 15:
-            return {"status": "verspätet", "delay_min": delay_min, "source": "DB Timetables"}
-        elif delay_min is not None:
-            return {"status": "pünktlich", "delay_min": delay_min, "source": "DB Timetables"}
-        else:
-            return {"status": "im Fahrplan", "delay_min": 0, "source": "DB Timetables"}
-
-    except Exception as e:
-        return {"status": f"Fehler: {str(e)[:80]}", "delay_min": None, "source": "DB Timetables"}
-
-
-
-CSS = """
-:root{
-  --page:#f0f4f9;--white:#fff;
-  --b900:#0e2650;--b700:#1a3d96;--b600:#2152c4;--b500:#2e63e8;
-  --b400:#4d7ef5;--b300:#7aa3fa;--b100:#dde9ff;--b50:#eef4ff;
-  --t900:#0d1b33;--t700:#2c3e5e;--t500:#5a6e8a;--t300:#9bafc8;
-  --bd:#dde4ef;--bds:#eaeef5;
-  --gr6:#0f9e6e;--gr1:#d4f5eb;
-  --am6:#c97c0a;--am1:#fef3d6;
-  --re6:#dc2626;--re1:#fee2e2;
-  --sh-sm:0 1px 4px rgba(14,38,80,.07),0 1px 2px rgba(14,38,80,.04);
-  --sh:0 4px 20px rgba(14,38,80,.10),0 2px 6px rgba(14,38,80,.05);
-  --sh-lg:0 16px 48px rgba(14,38,80,.16),0 4px 16px rgba(14,38,80,.08);
-  --r:12px;--rs:8px;
-}
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Inter',sans-serif;background:var(--page);color:var(--t900);min-height:100vh;font-size:13.5px;line-height:1.6;-webkit-font-smoothing:antialiased}
-/* ── Topbar ── */
-.topbar{position:sticky;top:0;z-index:100;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--bd);box-shadow:var(--sh-sm);height:60px;display:flex;align-items:center;padding:0 28px;gap:0}
-.logo-wrap{display:flex;align-items:center;margin-right:32px;text-decoration:none;cursor:pointer}
-.logo-wrap img{height:38px;width:auto;display:block;transition:opacity .15s}
-.logo-wrap:hover img{opacity:.8}
-.nav-tabs{display:flex;align-items:center;gap:3px;flex:1}
-.nav-tab{padding:6px 16px;border-radius:var(--rs);font-size:13px;font-weight:400;color:var(--t500);cursor:pointer;transition:all .15s;text-decoration:none;border:none;background:none;white-space:nowrap;letter-spacing:.01em}
-.nav-tab:hover{color:var(--t900);background:var(--b50)}
-.nav-tab.active{color:var(--b600);background:var(--b50);font-weight:600;box-shadow:inset 0 -2px 0 var(--b500)}
-.topbar-right{display:flex;align-items:center;gap:10px;margin-left:auto}
-.ki-pill{font-size:11px;padding:3px 10px;border-radius:20px;border:1px solid;font-weight:500}
-.ver-pill{font-family:'DM Mono',monospace;font-size:10px;color:var(--t300);background:var(--page);border:1px solid var(--bd);border-radius:4px;padding:2px 8px}
-/* ── Dropdown ── */
-.dd-wrap{position:relative}
-.add-btn{display:flex;align-items:center;gap:6px;background:linear-gradient(135deg,var(--b600),var(--b500));color:white;border:none;border-radius:var(--rs);padding:8px 16px;font-family:'Inter',sans-serif;font-size:13px;font-weight:500;cursor:pointer;box-shadow:0 2px 8px rgba(33,82,196,.35);transition:all .15s}
-.add-btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(33,82,196,.4)}
-.add-btn:active{transform:translateY(0)}
-.dd-menu{position:absolute;top:calc(100% + 10px);right:0;background:var(--white);border:1px solid var(--bd);border-radius:var(--r);box-shadow:var(--sh-lg);min-width:240px;overflow:hidden;opacity:0;pointer-events:none;transform:translateY(-8px) scale(.97);transition:opacity .16s,transform .16s;z-index:200}
-.dd-menu.open{opacity:1;pointer-events:all;transform:translateY(0) scale(1)}
-.dd-item{display:flex;align-items:center;gap:12px;padding:11px 16px;cursor:pointer;transition:background .1s;border:none;background:none;width:100%;text-align:left;color:var(--t900);font-family:'Inter',sans-serif;font-size:13px;text-decoration:none}
-.dd-item:hover{background:var(--b50)}
-.dd-icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0}
-.di-b{background:var(--b50)} .di-g{background:var(--gr1)} .di-a{background:var(--am1)}
-.dd-sub{font-size:11.5px;color:var(--t300);margin-top:1px}
-.dd-div{height:1px;background:var(--bds);margin:4px 0}
-/* ── Layout ── */
-.wrap{max-width:1400px;margin:0 auto;padding:28px 28px 60px;display:flex;flex-direction:column;gap:32px}
-/* ── Summary Bar ── */
-.sum-bar{display:flex;gap:12px;flex-wrap:wrap}
-.sum-item{background:var(--white);border:1px solid var(--bd);border-radius:var(--r);padding:16px 22px;box-shadow:var(--sh-sm);min-width:130px;transition:all .15s}
-.sum-item:hover{box-shadow:var(--sh);transform:translateY(-1px)}
-.sum-val{font-family:'DM Mono',monospace;font-size:24px;font-weight:600;color:var(--t900);letter-spacing:-.5px}
-.sum-val.blue{color:var(--b600)} .sum-val.green{color:var(--gr6)} .sum-val.red{color:var(--re6)}
-.sum-lbl{font-size:11px;color:var(--t300);margin-top:4px;font-weight:500;text-transform:uppercase;letter-spacing:.04em}
-/* ── Section headers ── */
-.sec-hdr{display:flex;align-items:center;gap:10px;margin-bottom:14px}
-.sec-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-.sec-dot.active{background:var(--re6);box-shadow:0 0 0 3px rgba(220,38,38,.15)}
-.sec-dot.planned{background:var(--b500);box-shadow:0 0 0 3px rgba(46,99,232,.15)}
-.sec-dot.done{background:var(--gr6);box-shadow:0 0 0 3px rgba(15,158,110,.15)}
-.sec-title{font-size:11px;font-weight:700;color:var(--t500);letter-spacing:.08em;text-transform:uppercase}
-.sec-cnt{font-size:11px;font-family:'DM Mono',monospace;color:var(--t300);background:var(--white);border:1px solid var(--bd);border-radius:20px;padding:2px 10px;margin-left:auto}
-/* ── Cards ── */
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:14px}
-.card{background:var(--white);border:1px solid var(--bd);border-radius:var(--r);box-shadow:var(--sh-sm);overflow:hidden;transition:box-shadow .18s,transform .18s,border-color .18s;cursor:pointer;position:relative}
-.card:hover{box-shadow:var(--sh);transform:translateY(-3px);border-color:var(--b300)}
-.card.alert{border-color:rgba(220,38,38,.4)}
-.card.alert::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--re6),#f87171)}
-.c-top{padding:16px 16px 12px;display:flex;align-items:flex-start;gap:12px}
-.c-code{font-family:'DM Mono',monospace;font-size:11.5px;font-weight:600;color:var(--b700);background:var(--b50);border:1px solid var(--b100);border-radius:6px;padding:4px 10px;white-space:nowrap;flex-shrink:0;letter-spacing:.02em}
-.c-info{flex:1;min-width:0}
-.c-traveler{font-size:14px;font-weight:600;color:var(--t900);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4}
-.c-dest{font-size:12px;color:var(--t500);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sbadge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;white-space:nowrap;flex-shrink:0;letter-spacing:.02em}
-.sb-active{background:var(--re1);color:var(--re6);border:1px solid rgba(220,38,38,.2)}
-.sb-planned{background:var(--b50);color:var(--b600);border:1px solid var(--b100)}
-.sb-done{background:var(--gr1);color:var(--gr6);border:1px solid rgba(15,158,110,.2)}
-.adot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--re6);margin-right:5px;animation:pr 1.5s ease-in-out infinite}
-@keyframes pr{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(220,38,38,.4)}50%{box-shadow:0 0 0 4px rgba(220,38,38,0)}}
-.alert-bar{margin:0 12px 10px;padding:8px 12px;background:#fff5f5;border:1px solid rgba(220,38,38,.2);border-radius:var(--rs);font-size:12px;color:var(--re6);display:flex;align-items:center;gap:8px;font-weight:500}
-.pnr-bar{margin:0 12px 10px;padding:5px 12px;background:#f0fdf8;border:1px solid rgba(15,158,110,.2);border-radius:var(--rs);font-size:11.5px;color:var(--gr6);font-weight:500;font-family:'DM Mono',monospace}
-.c-div{height:1px;background:var(--bds);margin:0 12px}
-.c-meta{padding:10px 12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.mpill{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--t700);background:var(--page);border:1px solid var(--bd);border-radius:6px;padding:3px 9px;font-weight:500}
-.mpill.ok{color:var(--gr6);background:#f0fdf8;border-color:rgba(15,158,110,.2)}
-.mpill.warn{color:var(--am6);background:#fffbeb;border-color:rgba(201,124,10,.2)}
-.mpill.err{color:var(--re6);background:#fff5f5;border-color:rgba(220,38,38,.2)}
-.mdate{margin-left:auto;font-size:11px;color:var(--t300);white-space:nowrap}
-.prog-wrap{padding:0 12px 10px}
-.prog-lbl{font-size:11px;color:var(--t300);display:flex;justify-content:space-between;margin-bottom:5px}
-.prog-bg{height:5px;background:var(--page);border-radius:3px;overflow:hidden}
-.prog-fill{height:100%;border-radius:3px;transition:width .4s}
-.pf-full{background:linear-gradient(90deg,var(--b500),var(--b300))}
-.pf-mid{background:linear-gradient(90deg,var(--am6),#fbbf24)}
-.pf-low{background:var(--re6)}
-.c-foot{padding:10px 12px 14px;display:flex;align-items:center;gap:10px}
-.c-amt{font-family:'DM Mono',monospace;font-size:15px;font-weight:600;color:var(--t900)}
-.c-amt-sub{font-size:10px;color:var(--t300);margin-top:2px;font-weight:500}
-.c-acts{margin-left:auto;display:flex;gap:6px}
-.vma-row{padding:0 12px 10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.vma-tag{font-size:11px;font-weight:600;color:var(--gr6);background:#f0fdf8;border:1px solid rgba(15,158,110,.2);border-radius:4px;padding:2px 9px}
-.vma-detail{font-family:'DM Mono',monospace;font-size:11.5px;color:var(--t500)}
-.trenn-tag{font-size:11px;font-weight:600;color:var(--am6);background:var(--am1);border:1px solid rgba(201,124,10,.2);border-radius:4px;padding:2px 9px}
-/* ── Buttons ── */
-.btn-g{font-size:12px;font-weight:500;color:var(--b600);background:var(--b50);border:1px solid var(--b100);border-radius:6px;padding:5px 13px;cursor:pointer;transition:all .12s;text-decoration:none;font-family:'Inter',sans-serif}
-.btn-g:hover{background:var(--b100);border-color:var(--b300)}
-.btn-s{font-size:12px;font-weight:600;color:white;background:var(--b600);border:none;border-radius:6px;padding:5px 13px;cursor:pointer;transition:all .12s;font-family:'Inter',sans-serif}
-.btn-s:hover{background:var(--b500)}
-.btn-dg{font-size:12px;font-weight:500;color:var(--re6);background:#fff5f5;border:1px solid rgba(220,38,38,.2);border-radius:6px;padding:5px 13px;cursor:pointer;transition:all .12s;font-family:'Inter',sans-serif}
-.btn-dg:hover{background:var(--re1)}
-/* ── Page cards ── */
-.page-card{background:var(--white);border:1px solid var(--bd);border-radius:var(--r);padding:28px;box-shadow:var(--sh-sm)}
-.page-card h2{font-size:1.15rem;font-weight:700;margin-bottom:18px;color:var(--t900)}
-.btn{background:linear-gradient(135deg,var(--b600),var(--b500));color:white;padding:9px 18px;border:none;border-radius:var(--rs);font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block;transition:all .15s;font-family:'Inter',sans-serif;box-shadow:0 2px 6px rgba(33,82,196,.25)}
-.btn:hover{transform:translateY(-1px);box-shadow:0 4px 10px rgba(33,82,196,.35)}
-.btn-l{background:var(--white);color:var(--b600);padding:9px 18px;border:1.5px solid var(--b100);border-radius:var(--rs);font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;display:inline-block;transition:all .12s;font-family:'Inter',sans-serif}
-.btn-l:hover{background:var(--b50);border-color:var(--b300)}
-.acts{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
-/* ── Tables ── */
-table{width:100%;border-collapse:collapse}
-th,td{border:1px solid var(--bd);padding:9px 11px;text-align:left;vertical-align:top;font-size:12.5px}
-th{background:linear-gradient(180deg,var(--b50),#e8f0fe);font-weight:600;color:var(--t700);font-size:12px;letter-spacing:.02em}
-tr:hover td{background:#f7faff}
-.cc{font-family:'DM Mono',monospace;font-weight:600;color:var(--b700)}
-.ok-t{color:var(--gr6);font-weight:600} .warn-t{color:var(--am6);font-weight:600} .err-t{color:var(--re6);font-weight:600}
-.bdg{padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600}
-.bdg-ok{background:var(--gr1);color:var(--gr6)} .bdg-w{background:var(--am1);color:var(--am6)} .bdg-e{background:var(--re1);color:var(--re6)}
-/* ── Forms ── */
-.fgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-.ff{grid-column:1/-1}
-.fgrp{display:flex;flex-direction:column;gap:5px}
-.flbl{font-size:11.5px;font-weight:600;color:var(--t700)}
-.finp,.fsel{background:var(--page);border:1.5px solid var(--bd);border-radius:var(--rs);padding:9px 12px;color:var(--t900);font-family:'Inter',sans-serif;font-size:13px;transition:all .15s;width:100%}
-.finp:focus,.fsel:focus{outline:none;border-color:var(--b400);background:var(--white);box-shadow:0 0 0 3px rgba(33,82,196,.1)}
-.finp::placeholder{color:var(--t300)}
-.mfooter{display:flex;gap:8px;justify-content:flex-end;padding-top:16px;border-top:1px solid var(--bds);margin-top:16px}
-/* ── Modal ── */
-.modal-ov{position:fixed;inset:0;z-index:300;background:rgba(14,38,80,.4);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}
-.modal-ov.open{opacity:1;pointer-events:all}
-.modal{background:var(--white);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--sh-lg);width:100%;max-width:540px;transform:translateY(12px) scale(.98);transition:transform .22s;max-height:90vh;overflow-y:auto}
-.modal-ov.open .modal{transform:translateY(0) scale(1)}
-.m-hdr{padding:22px 26px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--bds)}
-.m-title{font-size:16px;font-weight:700;color:var(--t900)}
-.m-close{width:30px;height:30px;border-radius:7px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--t300);background:none;border:none;font-size:18px;transition:all .12s}
-.m-close:hover{background:var(--page);color:var(--t700)}
-.m-body{padding:22px 26px 10px}
-.code-prev{text-align:center;font-family:'DM Mono',monospace;font-size:24px;font-weight:600;color:var(--b700);background:linear-gradient(135deg,var(--b50),#e8f0fe);border:1px solid var(--b100);border-radius:var(--rs);padding:14px 0;margin-bottom:4px;letter-spacing:2px}
-.code-sub{text-align:center;font-size:11px;color:var(--t300);margin-bottom:18px}
-.btn-mp{background:linear-gradient(135deg,var(--b600),var(--b500));color:white;border:none;border-radius:var(--rs);padding:10px 24px;font-size:13px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;box-shadow:0 2px 8px rgba(33,82,196,.3)}
-.btn-mp:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(33,82,196,.4)}
-.btn-mc{background:var(--page);color:var(--t700);border:1.5px solid var(--bd);border-radius:var(--rs);padding:10px 20px;font-size:13px;cursor:pointer;font-family:'Inter',sans-serif}
-.btn-mc:hover{background:var(--bds)}
-/* ── Misc ── */
-.empty{text-align:center;padding:36px;color:var(--t300);font-size:13px;border:2px dashed var(--bd);border-radius:var(--r);background:var(--white)}
-.sub{color:var(--t500);font-size:12px}
-.hint{font-size:11px;color:var(--t300);font-style:italic;margin-top:3px}
-::-webkit-scrollbar{width:5px} ::-webkit-scrollbar-thumb{background:var(--bd);border-radius:3px}
-@keyframes fu{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
-.sb{animation:fu .28s ease both}
-.sb:nth-child(2){animation-delay:.07s} .sb:nth-child(3){animation-delay:.14s} .sb:nth-child(4){animation-delay:.21s}
-"""
-JS = """
-function toggleDD(e){e.stopPropagation();document.getElementById('dd').classList.toggle('open')}
-document.addEventListener('click',()=>document.getElementById('dd').classList.remove('open'));
-function openM(t){
-  document.getElementById('dd').classList.remove('open');
-  if(t==='trip'){fetch('/api/next-code').then(r=>r.json()).then(d=>{document.getElementById('cprev').textContent=d.code}).catch(()=>{})}
-  if(t==='event'||t==='upload'){
-    fetch('/api/active-codes').then(r=>r.json()).then(d=>{
-      const sel=document.getElementById(t==='event'?'ev-code':'up-code');
-      if(sel){sel.innerHTML=(t==='upload'?'<option value="">– KI zuordnen lassen –</option>':'');d.codes.forEach(c=>{sel.innerHTML+=`<option>${c}</option>`});}
-    }).catch(()=>{});
-  }
-  document.getElementById('m-'+t).classList.add('open');
-  document.body.style.overflow='hidden';
-}
-function closeM(t){document.getElementById('m-'+t).classList.remove('open');document.body.style.overflow='';}
-function suggestReturn(depVal){
-  if(!depVal) return;
-  const ret=document.getElementById('fi-return-date');
-  if(ret && !ret.value){
-    // Vorschlag: 3 Tage nach Abflug, gleicher Monat
-    const d=new Date(depVal);
-    d.setDate(d.getDate()+3);
-    ret.value=d.toISOString().split('T')[0];
-  }
-}
-function submitTrip(){
-  const req=['fi-employee-code','fi-traveler-name','fi-trip-title','fi-departure-date','fi-return-date'];
-  for(const id of req){
-    const el=document.getElementById(id);
-    if(!el||!el.value.trim()){
-      el&&el.focus();
-      el&&(el.style.borderColor='var(--re6)');
-      alert('Bitte alle Pflichtfelder ausfüllen');
-      return;
-    }
-    el.style.borderColor='';
-  }
-  const f=new FormData();
-  f.append('employee_code',document.getElementById('fi-employee-code').value);
-  f.append('traveler_name',document.getElementById('fi-traveler-name').value);
-  f.append('trip_title',document.getElementById('fi-trip-title').value);
-  f.append('departure_date',document.getElementById('fi-departure-date').value);
-  f.append('return_date',document.getElementById('fi-return-date').value);
-  f.append('departure_time_home','08:00');
-  f.append('arrival_time_home','18:00');
-  fetch('/new-trip',{method:'POST',body:f}).then(()=>{window.location.href='/';});
-  closeM('trip');
-}
-function showFile(inp){if(inp.files[0])document.getElementById('fname').textContent='✓ '+inp.files[0].name;}
-function dropFile(e){e.preventDefault();document.getElementById('uz').classList.remove('drag');const f=e.dataTransfer.files[0];if(f)document.getElementById('fname').textContent='✓ '+f.name;}
-"""
 
 def page_shell(title, content, active_tab=""):
     tabs=[("active","Laufende Reisen","/"),("planned","Vorplanung","/planned"),("done","Abgeschlossen","/done"),("stats","Statistik","/stats")]
@@ -2574,8 +2125,6 @@ def page_shell(title, content, active_tab=""):
 <script>{JS}</script>
 </body>
 </html>"""
-
-
 
 @app.get("/api/next-code")
 def api_next_code():
@@ -2873,8 +2422,6 @@ def version():
     return {"version":APP_VERSION,"ki":"mistral-eu" if MISTRAL_API_KEY else "keine",
             "auto_imap":"aktiv","pdf_libs":pdf_ok,"pdf_detail":pdf_detail}
 
-
-
 @app.get("/init")
 def init():
     try:
@@ -2966,8 +2513,6 @@ def init():
         return {"status":"ok","version":APP_VERSION}
     except Exception as e:
         return {"status":"fehler","detail":str(e)}
-
-
 
 def load_trips(conn, filter_status=None):
     cur=conn.cursor()
@@ -3072,8 +2617,7 @@ def _code_header(t):
     main_parts = [x for x in [emp, title or t.get("destinations","")] if x]
     main_label = " · ".join(main_parts) if main_parts else ""
     ccode_html = f' <span style="font-size:10px;color:var(--t300);font-weight:400">{ccode}</span>' if ccode else ""
-    label_html = (f' <span style="font-family:\'Inter\',sans-serif;font-size:12px;'
-                  f'font-weight:500;color:var(--t700);letter-spacing:0">{main_label}</span>{ccode_html}') if main_label else ""
+    label_html = (f' <span style="font-family:\'Inter\',sans-serif;font-size:12px;' f'font-weight:500;color:var(--t700);letter-spacing:0">{main_label}</span>{ccode_html}') if main_label else ""
     return f'<div class="c-code">{t["tc"]}{label_html}</div>'
 
 def _hotel_badge(t):
@@ -3089,8 +2633,6 @@ def _progress(t):
     lc="var(--gr6)" if sc==3 else ("var(--am6)" if sc>=1 else "var(--re6)")
     warn=t["warnings"][0] if t["warnings"] else "vollständig"
     return f'<div class="prog-wrap"><div class="prog-lbl"><span>Vollständigkeit</span><span style="color:{lc};font-weight:500">{warn if sc<3 else "vollständig"}</span></div><div class="prog-bg"><div class="prog-fill {cls}" style="width:{pct}%"></div></div></div>'
-
-
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_main(request: Request):
@@ -3328,8 +2870,6 @@ async def _dashboard(request: Request, focus: str):
     except Exception as e:
         return HTMLResponse(page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p><a class="btn" href="/init">DB init</a></div>'),status_code=500)
 
-
-
 @app.post("/new-trip")
 async def new_trip(request: Request):
     try:
@@ -3451,8 +2991,6 @@ async def edit_trip_save(tc: str, request: Request):
     except Exception as e:
         return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
 
-
-
 @app.get("/analyze-attachments", response_class=HTMLResponse)
 async def analyze_attachments():
     try:
@@ -3573,7 +3111,6 @@ async def analyze_attachments():
                 except: pass
                 continue
 
-
         cur.execute("""SELECT id,storage_key,original_filename FROM mail_attachments
             WHERE (analysis_status IN ('ausstehend','neu') OR analysis_status IS NULL)
             AND original_filename NOT SIMILAR TO 'image[0-9]+[.](png|jpg|jpeg|gif|bmp|emz|wmz)'
@@ -3604,8 +3141,6 @@ async def analyze_attachments():
         import traceback
         tb=traceback.format_exc()
         return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler bei KI-Analyse</h2><p><b>{e}</b></p><pre style="font-size:10px;overflow-x:auto;white-space:pre-wrap;background:var(--page);padding:12px;border-radius:8px">{tb}</pre></div>')
-
-
 
 @app.get("/fetch-mails", response_class=HTMLResponse)
 def fetch_mails():
@@ -3644,8 +3179,6 @@ def fetch_mails():
         import traceback
         tb = traceback.format_exc()
         return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p><pre style="font-size:10px;overflow-x:auto;white-space:pre-wrap">{tb[:500]}</pre></div>')
-
-
 
 @app.get("/attachment-log", response_class=HTMLResponse)
 def attachment_log():
@@ -3729,7 +3262,6 @@ def mail_overview(att_id: int):
     except Exception as e:
         import traceback
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p><pre style="font-size:10px">{traceback.format_exc()[:300]}</pre></div>')
-
 
 @app.get("/duplikate", response_class=HTMLResponse)
 def duplikate():
@@ -3834,7 +3366,6 @@ def duplikate():
     except Exception as e:
         return page_shell("Fehler", f'<div class="page-card"><p>{e}</p></div>')
 
-
 @app.get("/mail-delete/{mail_id}")
 def mail_delete(mail_id: int):
     """Löscht eine Mail und ihre Belege."""
@@ -3849,7 +3380,6 @@ def mail_delete(mail_id: int):
         return RedirectResponse(url="/duplikate",status_code=303)
     except Exception as e:
         return JSONResponse({"status":"fehler","detail":str(e)})
-
 
 @app.get("/posteingang", response_class=HTMLResponse)
 def posteingang():
@@ -3949,7 +3479,6 @@ def posteingang():
         import traceback
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p><pre style="font-size:10px">{traceback.format_exc()[:300]}</pre></div>')
 
-
 @app.get("/mail-log", response_class=HTMLResponse)
 def mail_log():
     try:
@@ -4029,7 +3558,6 @@ def mail_log():
         </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
-
 
 @app.post("/mail-assign/{mail_id}")
 async def mail_assign(mail_id: int, request: Request):
@@ -4907,8 +4435,6 @@ def report(tc: str):
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
 
-
-
 @app.get("/report-pdf/{tc}", response_class=HTMLResponse)
 def report_pdf(tc: str):
     """Druckfertiges HTML – Browser-Druckdialog öffnet sich automatisch."""
@@ -5050,8 +4576,6 @@ def report_pdf(tc: str):
         return HTMLResponse(html)
     except Exception as e:
         return HTMLResponse(f"<pre>Fehler: {e}</pre>",status_code=500)
-
-
 
 @app.get("/report-komplett/{tc}")
 async def report_komplett(tc: str):
@@ -5292,8 +4816,6 @@ async def report_komplett(tc: str):
         import traceback
         return HTMLResponse(f"<pre style='padding:24px'>{traceback.format_exc()}</pre>",status_code=500)
 
-
-
 @app.get("/check-flights/{tc}", response_class=HTMLResponse)
 async def check_flights(tc: str):
     try:
@@ -5384,8 +4906,6 @@ async def check_flights(tc: str):
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
 
-
-
 @app.get("/beleg-pdf/{att_id}")
 def beleg_pdf(att_id: int):
     """Liefert das generierte PDF eines Belegs direkt aus S3."""
@@ -5404,7 +4924,6 @@ def beleg_pdf(att_id: int):
             headers={"Content-Disposition":f'inline; filename="{label}"'})
     except Exception as e:
         return HTMLResponse(f"Fehler: {e}",status_code=500)
-
 
 @app.get("/beleg/{att_id}")
 def beleg_vorschau(att_id: int):
@@ -5488,7 +5007,6 @@ def beleg_vorschau(att_id: int):
     except Exception as e:
         import traceback
         return HTMLResponse(f"<pre>Fehler: {traceback.format_exc()}</pre>",status_code=500)
-
 
 @app.get("/beleg-edit/{att_id}", response_class=HTMLResponse)
 def beleg_edit_form(att_id: int, back: str = ""):
@@ -5680,8 +5198,6 @@ async def beleg_edit_save(att_id: int, request: Request, back: str = ""):
     except Exception as e:
         return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
 
-
-
 @app.get("/reset-all", response_class=HTMLResponse)
 def reset_all(confirm: str = ""):
     if confirm != "ja":
@@ -5714,7 +5230,6 @@ def reset_all(confirm: str = ""):
         </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p></div>')
-
 
 @app.get("/check-trains/{tc}", response_class=HTMLResponse)
 async def check_trains(tc: str):
@@ -5756,41 +5271,6 @@ async def check_trains(tc: str):
           <table><tr><th>Zug</th><th>Datum</th><th>Status</th><th>Verspätung</th><th>Quelle</th></tr>
           {results_html or "<tr><td colspan='5'>Keine Ergebnisse</td></tr>"}</table>
         </div>""",active_tab="active")
-    except Exception as e:
-        return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
-
-
-
-@app.get("/mail-eingabe", response_class=HTMLResponse)
-def mail_eingabe_form():
-    """Manuelle Mail-Eingabe – Text direkt einfügen wenn IMAP nicht funktioniert."""
-    try:
-        conn=get_conn();cur=conn.cursor()
-        cur.execute("SELECT trip_code FROM trip_meta ORDER BY trip_code DESC LIMIT 30")
-        codes=[r[0] for r in cur.fetchall()]
-        cur.close();conn.close()
-        code_opts="<option value=''>– KI zuordnen lassen –</option>"+"".join(f"<option>{c}</option>" for c in codes)
-        return page_shell("Mail manuell einfügen",f"""
-        <div class="page-card" style="max-width:800px">
-          <h2>📧 Mail-Text manuell einfügen</h2>
-          <p class="sub" style="margin-bottom:16px">Mail-Text hier einfügen wenn der automatische Import nicht funktioniert.
-          Der Text wird sofort analysiert.</p>
-          <form method="post" action="/mail-eingabe">
-            <div class="fgrid">
-              <div class="fgrp"><label class="flbl">Reisecode zuordnen</label>
-                <select class="fsel" name="trip_code">{code_opts}</select></div>
-              <div class="fgrp"><label class="flbl">Betreff (optional)</label>
-                <input class="finp" name="subject" placeholder="z.B. Reiseangebot Z6INOT"></div>
-              <div class="fgrp ff"><label class="flbl">Mail-Text *</label>
-                <textarea class="finp" name="body" rows="20" style="font-family:DM Mono,monospace;font-size:11px"
-                  placeholder="Gesamten Mail-Text hier einfügen..."></textarea></div>
-            </div>
-            <div class="mfooter">
-              <a class="btn-mc" href="/">Abbrechen</a>
-              <button type="submit" class="btn-mp">📨 Importieren &amp; analysieren</button>
-            </div>
-          </form>
-        </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
 
@@ -5991,7 +5471,6 @@ async def mail_eingabe_save(request: Request):
     except Exception as e:
         import traceback
         return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Fehler</h2><p>{e}</p><pre style="font-size:10px">{traceback.format_exc()}</pre></div>')
-
 
 @app.get("/upload-beleg", response_class=HTMLResponse)
 async def upload_beleg_form(request: Request):
@@ -6273,7 +5752,6 @@ async def upload_beleg(
         import traceback
         return page_shell("Fehler",f'<div class="page-card"><h2 class="err-t">Upload-Fehler</h2><p>{e}</p><pre style="font-size:10px">{traceback.format_exc()[:500]}</pre><a class="btn-l" href="/">Zurück</a></div>')
 
-
 @app.get("/reanalyze-mails")
 def reanalyze_mails():
     """Setzt Mail-Status zurück. Löscht NUR leere Mail-Body-Belege, nie Hotel/Flug mit Betrag."""
@@ -6456,7 +5934,6 @@ async def set_segments_save(tc: str, att_id: str, request: Request):
     except Exception as e:
         return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
 
-
 @app.get("/repair-segments/{tc}")
 async def repair_segments(tc: str):
     """
@@ -6611,7 +6088,6 @@ async def repair_segments(tc: str):
         import traceback
         return {"status":"fehler","detail":str(e),"trace":traceback.format_exc()[:1000]}
 
-
 @app.get("/recalc-vma/{tc}")
 def recalc_vma(tc: str):
     """Berechnet vma_destinations für eine Reise neu aus Flug-Segmenten und Ziel."""
@@ -6626,7 +6102,6 @@ def recalc_vma(tc: str):
         meta=cur.fetchone()
         if not meta: return {"status":"fehler","detail":"Reise nicht gefunden"}
         dep_d_raw,ret_d_raw,destinations=meta
-
 
         dest_cc=None
         arrive_date=None
@@ -6691,7 +6166,6 @@ def recalc_vma(tc: str):
     except Exception as e:
         return {"status":"fehler","detail":str(e)}
 
-
 @app.get("/cleanup-duplicates")
 def cleanup_duplicates():
     """Entfernt doppelte Mail-Body-Belege – behält jeweils den neuesten pro Typ+Reise."""
@@ -6708,8 +6182,6 @@ def cleanup_duplicates():
     except Exception as e:
         return {"status":"fehler","detail":str(e)}
 
-
-
 def reset_mail_log():
     try:
         conn=get_conn();cur=conn.cursor()
@@ -6719,8 +6191,6 @@ def reset_mail_log():
         return {"status":"ok"}
     except Exception as e:
         return {"status":"fehler","detail":str(e)}
-
-
 
 @app.get("/stats", response_class=HTMLResponse)
 def stats():
@@ -6797,8 +6267,6 @@ def stats():
         </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
-
-
 
 @app.get("/vma-rates", response_class=HTMLResponse)
 def vma_rates_page():
@@ -6885,7 +6353,6 @@ def vma_rates_save():
     except Exception as e:
         return {"status":"fehler","detail":str(e)}
 
-
 @app.get("/dsgvo", response_class=HTMLResponse)
 def dsgvo_info():
     return page_shell("Datenschutz",f"""
@@ -6936,7 +6403,6 @@ def dsgvo_info():
         <a class="btn-l" href="/ki-beispiele">KI-Beispiele ansehen</a>
       </div>
     </div>""")
-
 
 @app.get("/ki-beispiele", response_class=HTMLResponse)
 def ki_beispiele():
@@ -6991,7 +6457,6 @@ def ki_beispiel_delete(ex_id: int):
         return RedirectResponse(url="/ki-beispiele",status_code=303)
     except Exception as e:
         return JSONResponse({"status":"fehler","detail":str(e)})
-
 
 @app.get("/rules", response_class=HTMLResponse)
 def rules_page():
@@ -7100,9 +6565,6 @@ def reclassify():
         </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
-
-
-
 
 @app.get("/meals/{tc}", response_class=HTMLResponse)
 def meals_page(tc: str):
@@ -7247,8 +6709,6 @@ def meals_page(tc: str):
         import traceback
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p><pre style="font-size:10px">{traceback.format_exc()}</pre></div>')
 
-
-
 @app.post("/meals/{tc}")
 async def meals_save(tc: str, request: Request):
     try:
@@ -7284,7 +6744,6 @@ async def meals_save(tc: str, request: Request):
         return RedirectResponse(url=f"/meals/{tc}",status_code=303)
     except Exception as e:
         return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
-
 
 @app.get("/set-hotel")
 def set_hotel(code: str, mode: str):
