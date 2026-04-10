@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.42"
+APP_VERSION = "9.43"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIL-ANALYSE ENGINE v2 – Datum-basierte Zuordnung, kein Raten
@@ -3529,6 +3529,7 @@ async def _dashboard(request: Request, focus: str):
           <div class="acts">
             <a class="btn" href="/fetch-mails">📥 Mails abrufen</a>
             <a class="btn" href="/posteingang" style="background:linear-gradient(135deg,#d97706,#b45309)">📬 Posteingang</a>
+            <a class="btn-l" href="/duplikate">🔍 Duplikate</a>
             <a class="btn-l" href="/upload-beleg">📎 Beleg hochladen</a>
             <a class="btn-l" href="/attachment-log">Anhang-Log</a>
             <a class="btn-l" href="/mail-log">Mail-Log (alle)</a>
@@ -3921,6 +3922,128 @@ def attachment_log():
         </div>""")
     except Exception as e:
         return page_shell("Fehler",f'<div class="page-card"><p>{e}</p></div>')
+
+@app.get("/duplikate", response_class=HTMLResponse)
+def duplikate():
+    """
+    Zeigt Mails die möglicherweise Duplikate sind –
+    gleicher Absender + ähnlicher Betreff oder gleicher Hash.
+    Händisch prüfen und löschen oder behalten.
+    """
+    try:
+        conn=get_conn(); cur=conn.cursor()
+
+        # Mails mit gleichem Betreff (normalisiert) – potenzielle Duplikate
+        cur.execute("""
+            SELECT m1.id, m1.sender, m1.subject, m1.trip_code, m1.created_at,
+                   m2.id as dup_id, m2.created_at as dup_date
+            FROM mail_messages m1
+            JOIN mail_messages m2
+              ON m1.id < m2.id
+             AND m1.sender = m2.sender
+             AND LOWER(TRIM(m1.subject)) = LOWER(TRIM(m2.subject))
+            ORDER BY m1.subject, m1.id
+            LIMIT 50""")
+        dups = cur.fetchall()
+
+        # Belege ohne zugeordnete Mail (verwaist)
+        cur.execute("""
+            SELECT a.id, a.original_filename, a.detected_type,
+                   a.detected_amount_eur, a.detected_vendor, a.trip_code, a.created_at
+            FROM mail_attachments a
+            WHERE a.storage_key LIKE 'mail_body_%'
+            AND NOT EXISTS (
+                SELECT 1 FROM mail_messages m
+                WHERE m.mail_uid = a.mail_uid)
+            ORDER BY a.id DESC LIMIT 30""")
+        orphans = cur.fetchall()
+
+        cur.close(); conn.close()
+
+        dup_html = ""
+        for orig_id,sender,subject,tc,created,dup_id,dup_date in dups:
+            dup_html += f"""
+            <tr style="background:#fff8f0">
+              <td style="font-size:11px;color:var(--t300)">{str(created)[:16]}</td>
+              <td style="font-size:11px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{sender or ''}</td>
+              <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{subject or ''}</td>
+              <td class="cc">{tc or '–'}</td>
+              <td>
+                <a href="/mail-detail/{orig_id}" style="font-size:11px;color:var(--b600)">Original #{orig_id}</a>
+              </td>
+              <td style="font-size:11px;color:var(--t300)">{str(dup_date)[:16]}</td>
+              <td>
+                <a href="/mail-detail/{dup_id}" style="font-size:11px;color:var(--b600)">Duplikat #{dup_id}</a>
+                <a href="/mail-delete/{dup_id}" onclick="return confirm('Duplikat #{dup_id} löschen?')"
+                   style="font-size:11px;color:var(--re6);margin-left:8px">🗑 Löschen</a>
+              </td>
+            </tr>"""
+
+        orphan_html = ""
+        for att_id,fname,dtype,eur,vendor,tc,created in orphans:
+            orphan_html += f"""
+            <tr>
+              <td style="font-size:11px;color:var(--t300)">{str(created)[:16]}</td>
+              <td>{fname or ''}</td>
+              <td><span class="bdg bdg-w">{dtype or '?'}</span></td>
+              <td>{vendor or '–'}</td>
+              <td style="font-family:DM Mono,monospace">{eur or '–'} €</td>
+              <td class="cc">{tc or '–'}</td>
+              <td>
+                <a href="/beleg-edit/{att_id}" style="font-size:11px;color:var(--b600)">✏ Bearbeiten</a>
+                <a href="/beleg-delete/{att_id}" onclick="return confirm('Beleg löschen?')"
+                   style="font-size:11px;color:var(--re6);margin-left:8px">🗑 Löschen</a>
+              </td>
+            </tr>"""
+
+        return page_shell("Duplikate & Verwaiste", f"""
+        <div class="page-card" style="max-width:1100px">
+          <h2>🔍 Duplikate & Verwaiste Belege</h2>
+          <div class="acts" style="margin-bottom:20px">
+            <a class="btn-l" href="/">← Dashboard</a>
+            <a class="btn-l" href="/posteingang">📬 Posteingang</a>
+          </div>
+
+          <h3 style="font-size:14px;font-weight:600;margin-bottom:10px;color:var(--am6)">
+            ⚠ Mögliche Duplikat-Mails ({len(dups)})
+          </h3>
+          {"<p style='color:var(--gr6);margin-bottom:16px'>✓ Keine Duplikate gefunden</p>" if not dups else f"""
+          <p style="font-size:12px;color:var(--t500);margin-bottom:10px">
+            Gleicher Absender + gleicher Betreff. Bitte prüfen und Duplikate löschen.
+          </p>
+          <div style="overflow-x:auto;margin-bottom:24px"><table>
+            <tr><th>Zeit</th><th>Von</th><th>Betreff</th><th>Reise</th><th>Original</th><th>Duplikat-Datum</th><th>Aktion</th></tr>
+            {dup_html}
+          </table></div>"""}
+
+          <h3 style="font-size:14px;font-weight:600;margin-bottom:10px;color:var(--t500)">
+            Verwaiste Belege ({len(orphans)})
+          </h3>
+          {"<p style='color:var(--gr6)'>✓ Keine verwaisten Belege</p>" if not orphans else f"""
+          <div style="overflow-x:auto"><table>
+            <tr><th>Erstellt</th><th>Datei</th><th>Typ</th><th>Anbieter</th><th>Betrag</th><th>Reise</th><th>Aktion</th></tr>
+            {orphan_html}
+          </table></div>"""}
+        </div>""")
+    except Exception as e:
+        return page_shell("Fehler", f'<div class="page-card"><p>{e}</p></div>')
+
+
+@app.get("/mail-delete/{mail_id}")
+def mail_delete(mail_id: int):
+    """Löscht eine Mail und ihre Belege."""
+    try:
+        conn=get_conn(); cur=conn.cursor()
+        cur.execute("SELECT mail_uid FROM mail_messages WHERE id=%s",(mail_id,))
+        row=cur.fetchone()
+        if row:
+            cur.execute("DELETE FROM mail_attachments WHERE mail_uid=%s AND storage_key LIKE 'mail_body_%'",(row[0],))
+        cur.execute("DELETE FROM mail_messages WHERE id=%s",(mail_id,))
+        conn.commit(); cur.close(); conn.close()
+        return RedirectResponse(url="/duplikate",status_code=303)
+    except Exception as e:
+        return JSONResponse({"status":"fehler","detail":str(e)})
+
 
 @app.get("/posteingang", response_class=HTMLResponse)
 def posteingang():
