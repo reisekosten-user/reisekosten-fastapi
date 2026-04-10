@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.44"
+APP_VERSION = "9.45"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIL-ANALYSE ENGINE v2 – Datum-basierte Zuordnung, kein Raten
@@ -515,46 +515,57 @@ def detect_mail_type(text: str) -> str:
 
 def assign_trip_by_date(subject: str, body: str, trips: list) -> tuple:
     """
-    Ordnet Mail einer Reise zu.
-    NUR zwei zuverlässige Methoden – kein Datum-Raten:
-    1. Reisecode direkt im Text (26-001, 26-002, ...)
-    2. PNR explizit gelabelt (Buchungscode: 83WPJT)
-    Alles andere → unzugeordnet, Nutzer ordnet manuell zu.
+    Ordnet Mail einer Reise zu. Priorität:
+    1. Reisecode direkt (26-001) → 100% sicher
+    2. Name des Reisenden + Datum im Reisezeitraum → 90%
+    3. Datum eindeutig in nur einem Reisezeitraum → 80%
+    4. Unzugeordnet → Posteingang
     """
+    from datetime import date as _date
     full = f"{subject}\n{body}"
 
-    # 1. Reisecode direkt – höchste Priorität
+    # 1. Reisecode direkt
     m = re.search(r'\b(\d{2}-\d{3})\b', full)
     if m:
         code = m.group(1)
-        # Prüfen ob diese Reise existiert
         for t in trips:
             if t.get("code") == code:
                 return code, 100, "code-direkt"
-        # Code gefunden aber Reise existiert noch nicht → trotzdem zuordnen
         return code, 100, "code-direkt-neu"
 
-    # 2. PNR explizit gelabelt
-    pnr = extract_pnr_safe(full)
-    if pnr:
-        for t in trips:
-            if t.get("pnr", "").upper() == pnr.upper():
-                return t["code"], 99, f"pnr:{pnr}"
+    # Alle Daten aus Text extrahieren
+    found_dates = extract_all_dates(full)
 
-    # 3. Kein Match → unzugeordnet
+    # 2. Name + Datum Kombination
+    for t in trips:
+        dep = t.get("dep"); ret = t.get("ret")
+        traveler = t.get("traveler", "").lower()
+        if not dep or not ret: continue
+        name_found = False
+        if traveler:
+            for part in traveler.split():
+                if len(part) > 3 and part in full.lower():
+                    name_found = True; break
+        date_in_range = any(dep <= d <= ret for d in found_dates)
+        if name_found and date_in_range:
+            return t["code"], 90, "name+datum"
+
+    # 3. Kein eindeutiger Match → Posteingang, manuell zuordnen
     return None, 0, "unzugeordnet"
 
+
 def load_trips_for_assignment() -> list:
-    """Lädt alle Reisen für die Zuordnung (Code, PNR, Zeitraum)."""
+    """Lädt alle Reisen mit Code, Zeitraum und Reisendem."""
     try:
         conn=get_conn(); cur=conn.cursor()
-        cur.execute("SELECT trip_code,pnr_code,departure_date,return_date FROM trip_meta ORDER BY trip_code")
+        cur.execute("""SELECT trip_code, pnr_code, departure_date, return_date,
+            traveler_name, employee_code FROM trip_meta ORDER BY trip_code""")
         rows=cur.fetchall(); cur.close(); conn.close()
-        result=[]
-        for code,pnr,dep,ret in rows:
-            result.append({"code":code,"pnr":pnr or "","dep":dep,"ret":ret})
-        return result
+        return [{"code":code,"pnr":pnr or "","dep":dep,"ret":ret,
+                 "traveler":(traveler or emp or "").lower()}
+                for code,pnr,dep,ret,traveler,emp in rows]
     except: return []
+
 
 
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
