@@ -1,3 +1,4 @@
+# Build: 2026-04-10T18:06:12
 from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -303,7 +304,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.48"
+APP_VERSION = "9.49"
 
 
 _MONTHS_MAP = {
