@@ -397,7 +397,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.41"
+APP_VERSION = "9.42"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIL-ANALYSE ENGINE v2 – Datum-basierte Zuordnung, kein Raten
@@ -1906,85 +1906,85 @@ def _fetch_mails_internal():
             try:
                 mail_type = detect_mail_type(full)
 
-                # Nur Hotel und Flug bekommen automatisch einen Beleg
-                if mail_type in ("Hotel","Flug","Bahn","Mietwagen"):
-                    # Duplikat-Check
-                    cur.execute("SELECT id FROM mail_attachments WHERE mail_uid=%s AND storage_key LIKE 'mail_body_%'",(uid,))
-                    if not cur.fetchone():
+                # JEDE erkannte Mail bekommt ein Beleg-Blatt
+                # Typ: Hotel, Flug, Bahn, Mietwagen, Taxi, Essen, Tanken, Sonstiges
+                cur.execute("SELECT id FROM mail_attachments WHERE mail_uid=%s AND storage_key LIKE 'mail_body_%'",(uid,))
+                if not cur.fetchone():
 
-                        # ── Daten extrahieren (zuverlässige Funktionen) ──
-                        betrag, waehrung = extract_amount_safe(full)
-                        checkin, checkout = extract_hotel_dates(full) if mail_type=="Hotel" else ("","")
-                        nights = 0
-                        if checkin and checkout:
-                            try:
-                                from datetime import date as _dt2
-                                nights=(_dt2.fromisoformat(checkout)-_dt2.fromisoformat(checkin)).days
-                            except: pass
+                    # ── Daten extrahieren ──────────────────────────────
+                    betrag, waehrung = extract_amount_safe(full)
+                    checkin, checkout = extract_hotel_dates(full) if mail_type=="Hotel" else ("","")
+                    nights = 0
+                    if checkin and checkout:
+                        try:
+                            from datetime import date as _dt4
+                            nights=(_dt4.fromisoformat(checkout)-_dt4.fromisoformat(checkin)).days
+                        except: pass
+                    regex_fns = extract_flight_numbers(full) if mail_type=="Flug" else []
+                    seg_s = segments_to_string(extract_flight_segments_from_text(full)) if regex_fns else ""
 
-                        # Flugnummern
-                        regex_fns = extract_flight_numbers(full) if mail_type=="Flug" else []
-                        seg_s = segments_to_string(extract_flight_segments_from_text(full)) if regex_fns else ""
+                    # Vendor erkennen
+                    vendor = ""
+                    VENDORS = [
+                        ("Lufthansa","Flug"),("Swiss","Flug"),("Austrian","Flug"),
+                        ("Air France","Flug"),("KLM","Flug"),("British Airways","Flug"),
+                        ("Edelweiss","Flug"),("Eurowings","Flug"),("FLY AWAY","Flug"),
+                        ("Ryanair","Flug"),("easyJet","Flug"),("Wizz Air","Flug"),
+                        ("Marriott","Hotel"),("Sheraton","Hotel"),("Hilton","Hotel"),
+                        ("Hyatt","Hotel"),("Radisson","Hotel"),("Intercontinental","Hotel"),
+                        ("Booking.com","Hotel"),("Hotels.com","Hotel"),("Expedia","Hotel"),
+                        ("NH Hotels","Hotel"),("Ibis","Hotel"),("Novotel","Hotel"),
+                        ("Melia","Hotel"),("Accor","Hotel"),
+                        ("Hertz","Mietwagen"),("Sixt","Mietwagen"),("Avis","Mietwagen"),
+                        ("Europcar","Mietwagen"),("Enterprise","Mietwagen"),
+                        ("Deutsche Bahn","Bahn"),("DB Bahn","Bahn"),("Eurostar","Bahn"),
+                        ("Uber","Taxi"),("Lyft","Taxi"),("Bolt","Taxi"),
+                        ("Shell","Tanken"),("BP","Tanken"),("Aral","Tanken"),("Total","Tanken"),
+                    ]
+                    for v, vtype in VENDORS:
+                        if v.lower() in full.lower():
+                            vendor = v
+                            if mail_type == "Sonstiges": mail_type = vtype
+                            break
 
-                        # Vendor erkennen
-                        vendor = ""
-                        VENDORS = [
-                            ("Lufthansa","Flug"),("Swiss","Flug"),("Austrian","Flug"),
-                            ("Air France","Flug"),("KLM","Flug"),("British Airways","Flug"),
-                            ("Edelweiss","Flug"),("Eurowings","Flug"),("FLY AWAY","Flug"),
-                            ("Marriott","Hotel"),("Sheraton","Hotel"),("Hilton","Hotel"),
-                            ("Hyatt","Hotel"),("Radisson","Hotel"),("Intercontinental","Hotel"),
-                            ("Booking.com","Hotel"),("Hotels.com","Hotel"),("Expedia","Hotel"),
-                            ("NH Hotels","Hotel"),("Ibis","Hotel"),("Novotel","Hotel"),
-                            ("Hertz","Mietwagen"),("Sixt","Mietwagen"),("Avis","Mietwagen"),
-                            ("Deutsche Bahn","Bahn"),("DB Bahn","Bahn"),("Eurostar","Bahn"),
-                        ]
-                        for v, vtype in VENDORS:
-                            if v.lower() in full.lower():
-                                vendor = v; break
+                    # EUR-Betrag
+                    betrag_eur = ""
+                    if betrag:
+                        try:
+                            val = float(betrag)
+                            rates = {"USD":0.92,"CHF":1.03,"GBP":1.17,"JPY":0.006}
+                            betrag_eur = f"{val*rates.get(waehrung,1.0):.2f}".replace(".",",")
+                        except: pass
 
-                        # EUR-Betrag berechnen
-                        betrag_eur = ""
-                        if betrag:
-                            try:
-                                val = float(betrag)
-                                if waehrung == "USD": betrag_eur = f"{val*0.92:.2f}".replace(".",",")
-                                elif waehrung == "CHF": betrag_eur = f"{val*1.03:.2f}".replace(".",",")
-                                elif waehrung == "GBP": betrag_eur = f"{val*1.17:.2f}".replace(".",",")
-                                else: betrag_eur = f"{val:.2f}".replace(".",",")
-                            except: pass
+                    # Beleg anlegen
+                    cur.execute("""INSERT INTO mail_attachments
+                        (mail_uid,trip_code,original_filename,saved_filename,content_type,
+                         storage_key,detected_type,detected_amount,detected_amount_eur,
+                         detected_currency,detected_vendor,
+                         detected_checkin,detected_checkout,detected_nights,
+                         detected_flight_numbers,flight_segments,
+                         analysis_status,confidence,review_flag,ki_bemerkung)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (uid, code,
+                         f"Mail: {subject[:60]}", f"Mail: {subject[:60]}",
+                         "text/plain", f"mail_body_{uid}",
+                         mail_type,
+                         betrag or None, betrag_eur or None, waehrung,
+                         vendor or None,
+                         checkin or None, checkout or None, nights or None,
+                         ",".join(regex_fns) if regex_fns else None,
+                         seg_s or None,
+                         "ok (Mail-Body)",
+                         "hoch" if (betrag and vendor) else "mittel",
+                         "ok" if (betrag and vendor) else "pruefen",
+                         f"{vendor or mail_type} · {betrag or '?'} {waehrung}"))
 
-                        cur.execute("""INSERT INTO mail_attachments
-                            (mail_uid,trip_code,original_filename,saved_filename,content_type,
-                             storage_key,detected_type,detected_amount,detected_amount_eur,
-                             detected_currency,detected_vendor,
-                             detected_checkin,detected_checkout,detected_nights,
-                             detected_flight_numbers,flight_segments,
-                             analysis_status,confidence,review_flag,ki_bemerkung)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                            (uid, code,
-                             f"Mail: {subject[:60]}", f"Mail: {subject[:60]}",
-                             "text/plain", f"mail_body_{uid}",
-                             mail_type,
-                             betrag or None, betrag_eur or None, waehrung,
-                             vendor or None,
-                             checkin or None, checkout or None, nights or None,
-                             ",".join(regex_fns) if regex_fns else None,
-                             seg_s or None,
-                             "ok (Mail-Body)",
-                             "hoch" if (betrag and vendor) else "mittel",
-                             "ok" if (betrag and vendor) else "pruefen",
-                             f"Import: {vendor or mail_type} · {betrag or '?'} {waehrung}"))
-
-                        # trip_meta aktualisieren
-                        if code:
-                            if regex_fns:
-                                cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",
-                                    (",".join(regex_fns), code))
-                            if pnr_f:
-                                cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",
-                                    (pnr_f, code))
-
+                    # trip_meta aktualisieren
+                    if code:
+                        if regex_fns:
+                            cur.execute("UPDATE trip_meta SET flight_numbers=%s WHERE trip_code=%s AND (flight_numbers IS NULL OR flight_numbers='')",(",".join(regex_fns),code))
+                        if pnr_f:
+                            cur.execute("UPDATE trip_meta SET pnr_code=%s WHERE trip_code=%s AND (pnr_code IS NULL OR pnr_code='')",(pnr_f,code))
             except Exception as ae2:
                 print(f"[IMAP Sofort-Analyse Fehler]: {ae2}")
 
