@@ -296,7 +296,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.55"
+APP_VERSION = "9.56"
 
 _MONTHS_MAP = {
     'jan':'01','feb':'02','mar':'03','maer':'03','apr':'04',
@@ -3104,6 +3104,21 @@ def duplikate():
               </td>
             </tr>"""
 
+        if not dups:
+            dup_section = "<p style='color:var(--gr6);margin-bottom:16px'>✓ Keine Duplikate gefunden</p>"
+        else:
+            dup_section = ("<p style='font-size:12px;color:var(--t500);margin-bottom:10px'>Gleicher Absender + gleicher Betreff.</p>"
+                          "<div style='overflow-x:auto;margin-bottom:24px'><table>"
+                          "<tr><th>Zeit</th><th>Von</th><th>Betreff</th><th>Reise</th><th>Original</th><th>Duplikat</th><th>Aktion</th></tr>"
+                          + dup_html + "</table></div>")
+
+        if not orphans:
+            orphan_section = "<p style='color:var(--gr6)'>✓ Keine verwaisten Belege</p>"
+        else:
+            orphan_section = ("<div style='overflow-x:auto'><table>"
+                             "<tr><th>Erstellt</th><th>Datei</th><th>Typ</th><th>Anbieter</th><th>Betrag</th><th>Reise</th><th>Aktion</th></tr>"
+                             + orphan_html + "</table></div>")
+
         return page_shell("Duplikate & Verwaiste", f"""
         <div class="page-card" style="max-width:1100px">
           <h2>🔍 Duplikate & Verwaiste Belege</h2>
@@ -3115,23 +3130,12 @@ def duplikate():
           <h3 style="font-size:14px;font-weight:600;margin-bottom:10px;color:var(--am6)">
             ⚠ Mögliche Duplikat-Mails ({len(dups)})
           </h3>
-          {"<p style='color:var(--gr6);margin-bottom:16px'>✓ Keine Duplikate gefunden</p>" if not dups else f"""
-          <p style="font-size:12px;color:var(--t500);margin-bottom:10px">
-            Gleicher Absender + gleicher Betreff. Bitte prüfen und Duplikate löschen.
-          </p>
-          <div style="overflow-x:auto;margin-bottom:24px"><table>
-            <tr><th>Zeit</th><th>Von</th><th>Betreff</th><th>Reise</th><th>Original</th><th>Duplikat-Datum</th><th>Aktion</th></tr>
-            {dup_html}
-          </table></div>"""}
+          {dup_section}
 
           <h3 style="font-size:14px;font-weight:600;margin-bottom:10px;color:var(--t500)">
             Verwaiste Belege ({len(orphans)})
           </h3>
-          {"<p style='color:var(--gr6)'>✓ Keine verwaisten Belege</p>" if not orphans else f"""
-          <div style="overflow-x:auto"><table>
-            <tr><th>Erstellt</th><th>Datei</th><th>Typ</th><th>Anbieter</th><th>Betrag</th><th>Reise</th><th>Aktion</th></tr>
-            {orphan_html}
-          </table></div>"""}
+          {orphan_section}
         </div>""")
     except Exception as e:
         return page_shell("Fehler", f'<div class="page-card"><p>{e}</p></div>')
