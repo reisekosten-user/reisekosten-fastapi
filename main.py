@@ -624,20 +624,7 @@ def fetch_mails_now() -> dict:
 
     return {"importiert": imported, "duplikate": dupl, "belege": belege_erstellt, "fehler": fehler, "fehler_details": fehler_details}
 
-# ─── Auto-Fetch Thread ────────────────────────────────────────────────────────
-def _auto_fetch():
-    time.sleep(60)
-    while True:
-        if IMAP_HOST:
-            with _imap_lock:
-                try: fetch_mails_now()
-                except Exception as e: print(f"[AutoFetch] {e}")
-        time.sleep(300)
-
-try:
-    _t = threading.Thread(target=_auto_fetch, daemon=True)
-    _t.start()
-except: pass
+# Auto-Fetch deaktiviert - nur manuell via /mails-abrufen
 
 # ─── FastAPI App ──────────────────────────────────────────────────────────────
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
