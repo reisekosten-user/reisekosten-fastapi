@@ -296,7 +296,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.56"
+APP_VERSION = "9.57"
 
 _MONTHS_MAP = {
     'jan':'01','feb':'02','mar':'03','maer':'03','apr':'04',
@@ -5246,7 +5246,7 @@ def stats():
                     if i==2:
                         cells.append(f"<td style='text-align:right;font-family:DM Mono,monospace'>{float(v or 0):,.2f} \u20ac</td>")
                     else:
-                        cells.append(f"<td>{v or '\u2013'}</td>")
+                        cells.append("<td>" + (v or '–') + "</td>")
                 trs+=f"<tr>{'  '.join(cells)}</tr>"
             return f"<div style='overflow-x:auto'><table><tr>{ths}</tr>{trs or '<tr><td colspan=3>Keine Daten</td></tr>'}</table></div>"
 
