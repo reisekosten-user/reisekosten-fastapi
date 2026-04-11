@@ -451,7 +451,13 @@ def fetch_mails_now() -> dict:
 
             # Reisecode aus Betreff+Body
             full_text = betreff + "\n" + body
-            rcode = extract_trip_code(full_text)
+            rcode_raw = extract_trip_code(full_text)
+            # Nur zuordnen wenn Reise existiert
+            rcode = None
+            if rcode_raw:
+                cur.execute("SELECT code FROM reisen WHERE code=%s", (rcode_raw,))
+                if cur.fetchone():
+                    rcode = rcode_raw
 
             # Beleg aus Mail-Body erstellen
             info = analyse_beleg(full_text, betreff)
