@@ -366,6 +366,7 @@ def fetch_mails_now() -> dict:
 
     db = get_db(); cur = db.cursor()
     imported = dupl = fehler = belege_erstellt = 0
+    fehler_details = []
 
     try:
         mail = imaplib.IMAP4_SSL(IMAP_HOST)
@@ -540,7 +541,10 @@ def fetch_mails_now() -> dict:
             imported += 1
 
         except Exception as e:
-            print(f"[Mail Fehler] {e}")
+            import traceback
+            msg = f"{type(e).__name__}: {e}"
+            print(f"[Mail Fehler] {msg}")
+            fehler_details.append(msg[:200])
             fehler += 1
             try: db.rollback()
             except: pass
@@ -555,7 +559,7 @@ def fetch_mails_now() -> dict:
         mail.logout()
     except: pass
 
-    return {"importiert": imported, "duplikate": dupl, "belege": belege_erstellt, "fehler": fehler}
+    return {"importiert": imported, "duplikate": dupl, "belege": belege_erstellt, "fehler": fehler, "fehler_details": fehler_details}
 
 # ─── Auto-Fetch Thread ────────────────────────────────────────────────────────
 def _auto_fetch():
@@ -791,15 +795,21 @@ def mails_abrufen_page():
     with _imap_lock:
         result = fetch_mails_now()
     if "error" in result:
-        body = f'<div class="card"><div class="alert alert-w">Fehler: {result["error"]}</div><a href="/" class="btn btn-s">← Zurück</a></div>'
+        body = f'<div class="card"><div class="alert alert-w"><b>Fehler:</b> {result["error"]}</div><a href="/" class="btn btn-s" style="margin-top:12px">← Zurück</a></div>'
     else:
+        details = result.get("fehler_details", [])
+        details_html = ""
+        if details:
+            items = "".join(f"<li style='margin:4px 0'>{d}</li>" for d in details)
+            details_html = f'<div class="alert alert-w" style="margin-top:12px"><b>Fehlerdetails:</b><ul style="margin-top:8px;padding-left:16px">{items}</ul></div>'
         body = (f'<div class="card">'
                 f'<h1>📥 Mails abgerufen</h1>'
-                f'<div class="alert alert-ok" style="margin-bottom:16px">'
+                f'<div class="alert alert-ok" style="margin-bottom:12px">'
                 f'✓ {result["importiert"]} neue Mails · {result["belege"]} Belege erstellt · '
                 f'{result["duplikate"]} Duplikate · {result["fehler"]} Fehler'
                 f'</div>'
-                f'<div class="acts">'
+                f'{details_html}'
+                f'<div class="acts" style="margin-top:16px">'
                 f'<a href="/belege" class="btn">📋 Belege ansehen</a>'
                 f'<a href="/posteingang" class="btn btn-o">📬 Posteingang</a>'
                 f'<a href="/" class="btn btn-s">← Dashboard</a>'
