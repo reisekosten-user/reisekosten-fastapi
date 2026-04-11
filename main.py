@@ -296,7 +296,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.57"
+APP_VERSION = "9.58"
 
 _MONTHS_MAP = {
     'jan':'01','feb':'02','mar':'03','maer':'03','apr':'04',
@@ -2760,6 +2760,96 @@ async def edit_trip_save(tc: str, request: Request):
         return RedirectResponse(url="/",status_code=303)
     except Exception as e:
         return JSONResponse({"status":"fehler","detail":str(e)},status_code=500)
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard():
+    try:
+        conn=get_conn(); cur=conn.cursor()
+        cur.execute("""SELECT trip_code,trip_title,traveler_name,employee_code,
+            departure_date,return_date,pnr_code FROM trip_meta ORDER BY departure_date DESC""")
+        trips=cur.fetchall()
+        cur.execute("SELECT COUNT(*) FROM mail_messages WHERE (trip_code IS NULL OR trip_code='')")
+        unassigned=cur.fetchone()[0]
+        cur.close(); conn.close()
+
+        active_t=[]; planned_t=[]; done_t=[]
+        for t in trips:
+            tc,title,traveler,emp,dep,ret,pnr=t
+            dep_d=dep if isinstance(dep,date) else (date.fromisoformat(str(dep)) if dep else None)
+            ret_d=ret if isinstance(ret,date) else (date.fromisoformat(str(ret)) if ret else None)
+            st=compute_status(dep_d,ret_d)
+            item={"code":tc,"title":title or tc,"traveler":traveler or emp or "","dep":dep_d,"ret":ret_d,"status":st}
+            if st=="active": active_t.append(item)
+            elif st=="planned": planned_t.append(item)
+            else: done_t.append(item)
+
+        def trip_card(t):
+            dep_s=t["dep"].strftime("%d.%m.%Y") if t["dep"] else "–"
+            ret_s=t["ret"].strftime("%d.%m.%Y") if t["ret"] else "–"
+            badge={"active":"<span style='background:#dcfce7;color:#166534;padding:2px 8px;border-radius:4px;font-size:11px'>● Aktiv</span>",
+                   "planned":"<span style='background:#e0f2fe;color:#075985;padding:2px 8px;border-radius:4px;font-size:11px'>Geplant</span>",
+                   "done":"<span style='background:#f3f4f6;color:#6b7280;padding:2px 8px;border-radius:4px;font-size:11px'>Fertig</span>"}.get(t["status"],"")
+            return (f'<a href="/trip/{t["code"]}" style="text-decoration:none;color:inherit">'
+                    f'<div style="background:white;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin-bottom:8px;'
+                    f'box-shadow:0 1px 3px rgba(0,0,0,.07);transition:box-shadow .15s" '
+                    f'onmouseover="this.style.boxShadow=\'0 4px 12px rgba(0,0,0,.12)\'" '
+                    f'onmouseout="this.style.boxShadow=\'0 1px 3px rgba(0,0,0,.07)\'">'
+                    f'<div style="display:flex;justify-content:space-between;align-items:center">'
+                    f'<div><span style="font-family:monospace;font-size:12px;color:#6b7280">{t["code"]}</span> '
+                    f'{badge}</div></div>'
+                    f'<div style="font-weight:600;font-size:15px;margin:6px 0 2px">{t["title"]}</div>'
+                    f'<div style="font-size:12px;color:#6b7280">{t["traveler"]} · {dep_s} – {ret_s}</div>'
+                    f'</div></a>')
+
+        active_html = "".join(trip_card(t) for t in active_t) or '<p style="color:#9ca3af;padding:20px 0">Keine aktiven Reisen</p>'
+        planned_html = "".join(trip_card(t) for t in planned_t) or '<p style="color:#9ca3af">Keine Reisen in Planung</p>'
+        done_html = "".join(trip_card(t) for t in done_t) or '<p style="color:#9ca3af">Keine abgeschlossenen Reisen</p>'
+
+        posteingang_badge = ""
+        if unassigned > 0:
+            posteingang_badge = (f'<a href="/posteingang" style="text-decoration:none">'
+                                 f'<div style="background:#fffbeb;border:1px solid #f59e0b;border-radius:8px;'
+                                 f'padding:12px 16px;margin-bottom:16px">'
+                                 f'<b style="color:#92400e">📬 {unassigned} Mail{"s" if unassigned>1 else ""} im Posteingang</b>'
+                                 f'<span style="color:#78350f;font-size:12px;margin-left:8px">→ Reise zuordnen</span>'
+                                 f'</div></a>')
+
+        return page_shell("Dashboard", f"""
+        <div style="max-width:900px;margin:0 auto;padding:0 16px">
+          {posteingang_badge}
+          <div style="display:flex;gap:8px;margin-bottom:24px;flex-wrap:wrap">
+            <a href="/fetch-mails" class="btn">📥 Mails abrufen</a>
+            <a href="/posteingang" class="btn" style="background:#d97706">📬 Posteingang</a>
+            <a href="/upload-beleg" class="btn-l">📎 Beleg hochladen</a>
+            <a href="/duplikate" class="btn-l">🔍 Duplikate</a>
+            <a href="/mail-log" class="btn-l">Mail-Log</a>
+            <a href="/fix-trips" class="btn-l">🔧 Fix-Trips</a>
+            <button class="btn" onclick="openM('trip')" style="background:#059669">+ Neue Reise</button>
+          </div>
+          <h2 style="font-size:16px;font-weight:600;margin-bottom:12px;color:#374151">
+            ✈ Laufende Reisen ({len(active_t)})
+          </h2>
+          {active_html}
+          <h2 style="font-size:16px;font-weight:600;margin:20px 0 12px;color:#374151">
+            📋 In Planung ({len(planned_t)})
+          </h2>
+          {planned_html}
+          <h2 style="font-size:16px;font-weight:600;margin:20px 0 12px;color:#374151">
+            ✓ Abgeschlossen ({len(done_t)})
+          </h2>
+          {done_html}
+        </div>""", active_tab="active")
+    except Exception as e:
+        import traceback
+        return page_shell("Fehler", f'<div style="padding:20px"><h2>Fehler</h2><p>{e}</p>'
+                          f'<pre style="font-size:11px;overflow-x:auto">{traceback.format_exc()[:500]}</pre>'
+                          f'<a href="/init">→ /init aufrufen</a></div>')
+
+@app.get("/planned", response_class=HTMLResponse)
+def planned(): return RedirectResponse(url="/", status_code=303)
+
+@app.get("/done", response_class=HTMLResponse)
+def done(): return RedirectResponse(url="/", status_code=303)
 
 @app.get("/analyze-attachments", response_class=HTMLResponse)
 async def analyze_attachments():
