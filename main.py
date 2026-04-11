@@ -296,7 +296,7 @@ def save_ki_example(mail_type: str, input_text: str, result_json: dict, descript
         print(f"[KI-Beispiel] Fehler: {e}")
         return False
 
-APP_VERSION = "9.59"
+APP_VERSION = "9.60"
 
 _MONTHS_MAP = {
     'jan':'01','feb':'02','mar':'03','maer':'03','apr':'04',
@@ -2840,19 +2840,29 @@ def dashboard():
         def trip_card(t):
             dep_s=t["dep"].strftime("%d.%m.%Y") if t["dep"] else "–"
             ret_s=t["ret"].strftime("%d.%m.%Y") if t["ret"] else "–"
-            badge={"active":"<span style='background:#dcfce7;color:#166534;padding:2px 8px;border-radius:4px;font-size:11px'>● Aktiv</span>",
-                   "planned":"<span style='background:#e0f2fe;color:#075985;padding:2px 8px;border-radius:4px;font-size:11px'>Geplant</span>",
-                   "done":"<span style='background:#f3f4f6;color:#6b7280;padding:2px 8px;border-radius:4px;font-size:11px'>Fertig</span>"}.get(t["status"],"")
-            return (f'<a href="/trip/{t["code"]}" style="text-decoration:none;color:inherit">'
-                    f'<div style="background:white;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin-bottom:8px;'
-                    f'box-shadow:0 1px 3px rgba(0,0,0,.07);transition:box-shadow .15s" '
-                    f'onmouseover="this.style.boxShadow=\'0 4px 12px rgba(0,0,0,.12)\'" '
-                    f'onmouseout="this.style.boxShadow=\'0 1px 3px rgba(0,0,0,.07)\'">'
-                    f'<div style="display:flex;justify-content:space-between;align-items:center">'
-                    f'<div><span style="font-family:monospace;font-size:12px;color:#6b7280">{t["code"]}</span> '
-                    f'{badge}</div></div>'
-                    f'<div style="font-weight:600;font-size:15px;margin:6px 0 2px">{t["title"]}</div>'
-                    f'<div style="font-size:12px;color:#6b7280">{t["traveler"]} · {dep_s} – {ret_s}</div>'
+            days=(t["ret"]-t["dep"]).days+1 if t["dep"] and t["ret"] else 0
+            badges={"active":("🟢","#dcfce7","#166534","Aktiv"),
+                    "planned":("🔵","#dbeafe","#1e40af","Geplant"),
+                    "done":("⚪","#f3f4f6","#6b7280","Fertig")}
+            em,bg,fc,lbl=badges.get(t["status"],("","#f3f4f6","#6b7280","–"))
+            return (f'<a href="/trip/{t["code"]}" style="text-decoration:none;color:inherit;display:block;'
+                    f'background:white;border:1px solid #e5e7eb;border-left:4px solid {fc};'
+                    f'border-radius:8px;padding:16px 20px;margin-bottom:10px;'
+                    f'box-shadow:0 1px 3px rgba(0,0,0,.06);transition:box-shadow .15s" '
+                    f'onmouseover="this.style.boxShadow=\'0 4px 12px rgba(0,0,0,.1)\'" '
+                    f'onmouseout="this.style.boxShadow=\'0 1px 3px rgba(0,0,0,.06)\'">'
+                    f'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
+                    f'<div style="display:flex;align-items:center;gap:8px">'
+                    f'<span style="font-family:monospace;font-size:12px;background:#f1f5f9;'
+                    f'padding:2px 8px;border-radius:4px;color:#64748b">{t["code"]}</span>'
+                    f'<span style="font-size:11px;font-weight:600;background:{bg};color:{fc};'
+                    f'padding:2px 8px;border-radius:4px">{em} {lbl}</span>'
+                    f'</div>'
+                    f'<span style="font-size:12px;color:#9ca3af">{days} Tage</span>'
+                    f'</div>'
+                    f'<div style="font-weight:700;font-size:16px;color:#1e293b;margin-bottom:4px">{t["title"]}</div>'
+                    f'<div style="font-size:12px;color:#6b7280">'
+                    f'👤 {t["traveler"]} &nbsp;·&nbsp; 📅 {dep_s} – {ret_s}'
                     f'</div></a>')
 
         active_html = "".join(trip_card(t) for t in active_t) or '<p style="color:#9ca3af;padding:20px 0">Keine aktiven Reisen</p>'
