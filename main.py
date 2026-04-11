@@ -194,27 +194,38 @@ def extract_vendor(text: str) -> str:
     return ""
 
 def detect_type(text: str, filename: str = "") -> str:
-    """Erkennt Belegtyp."""
+    """Erkennt Belegtyp. Flug hat höchste Priorität."""
     t = text.lower()
     fn = filename.lower()
-    if any(x in t for x in ['e-ticket','boarding pass','flight confirmation','flugnummer',
-                              'flugbestätigung','lh ','lx ','os ','buchungsreferenz']):
+    fns = extract_flight_numbers(text)
+    # Flug: Flugnummern ODER explizite Flug-Keywords
+    if fns:
         return "Flug"
-    if any(x in t for x in ['hotel','check-in','check-out','reservation','zimmer','nacht',
-                              'marriott','sheraton','hilton','hyatt','overnight','your stay']):
-        return "Hotel"
-    if any(x in t for x in ['taxi','uber','lyft','bolt','fahrschein','fahrt']):
-        return "Taxi"
-    if any(x in t for x in ['bahn','zug','ice','rail','bahnticket','sitzplatz']):
+    if any(x in t for x in ['e-ticket','eticket','boarding pass','flight confirmation',
+                              'flugbestätigung','flugticket','ihr flug','your flight',
+                              'itinerary','reiseangebot']):
+        return "Flug"
+    if any(x in fn for x in ['itinerary','ticket','flug','flight']):
+        return "Flug"
+    # Bahn VOR Hotel (hat auch "ticket")
+    if any(x in t for x in ['deutsche bahn','db bahn','bahnticket','sitzplatz reservierung',
+                              'zugticket','ice ','ice-']):
         return "Bahn"
+    # Hotel: NUR wenn keine Flugnummern und explizite Hotel-Keywords
+    if any(x in t for x in ['marriott','sheraton','hilton','hyatt','radisson',
+                              'intercontinental','ibis','novotel','booking.com']):
+        return "Hotel"
+    if any(x in t for x in ['hotel reservation','hotel booking','zimmer reservierung',
+                              'your stay at','ihr aufenthalt']):
+        return "Hotel"
+    if any(x in t for x in ['taxi','uber','lyft','bolt','fahrschein']):
+        return "Taxi"
     if any(x in t for x in ['mietwagen','rental car','car rental','hertz','sixt','avis']):
         return "Mietwagen"
-    if any(x in t for x in ['restaurant','dinner','lunch','speisen','bewirtung','gaststätte']):
+    if any(x in t for x in ['restaurant','dinner','lunch','speisen','bewirtung']):
         return "Bewirtung"
-    if any(x in t for x in ['tankstelle','tanken','kraftstoff','shell','bp','aral','benzin']):
+    if any(x in t for x in ['tankstelle','tanken','kraftstoff','shell','bp','aral']):
         return "Tanken"
-    if 'itinerary' in fn or 'reiseangebot' in fn or 'ticket' in fn:
-        return "Flug"
     return "Sonstiges"
 
 def extract_hotel_dates(text: str) -> tuple:
@@ -247,6 +258,50 @@ def extract_trip_code(text: str) -> str:
     m = re.search(r'\b(\d{2}-\d{3})\b', text)
     return m.group(1) if m else ""
 
+def extract_segments(text: str) -> list:
+    """Extrahiert Flugsegmente. Gibt Liste von dicts zurueck."""
+    segs = []
+    seen = set()
+    APT = {
+        "FRA":"Frankfurt","MUC":"Muenchen","NUE":"Nuernberg","BER":"Berlin",
+        "HAM":"Hamburg","LYS":"Lyon","CDG":"Paris","LHR":"London","ZRH":"Zuerich",
+        "VIE":"Wien","FCO":"Rom","MAD":"Madrid","AMS":"Amsterdam","GVA":"Genf",
+        "SJO":"San Jose CR","PTY":"Panama City","JFK":"New York","LAX":"Los Angeles",
+        "DXB":"Dubai","SIN":"Singapur","NRT":"Tokio","DOH":"Doha","IST":"Istanbul",
+        "SFO":"San Francisco","MIA":"Miami","ORD":"Chicago","YYZ":"Toronto",
+    }
+
+    # Format 1: LH3463 NUE->FRA 13:00->14:15 20.04.2026
+    p1 = re.compile(r"([A-Z]{2}\d{3,4})\s+([A-Z]{3})[->]+([A-Z]{3})\s+(\d{1,2}:\d{2})[->]+(\d{1,2}:\d{2})\s+(\d{1,2}[./]\d{1,2}[./]\d{4}|\d{4}-\d{2}-\d{2})")
+    for m in p1.finditer(text):
+        fn,von,nach,ab,an,dat = m.groups()
+        key = fn+dat
+        if key not in seen:
+            seen.add(key)
+            segs.append({"fn":fn,"von":von,"von_name":APT.get(von,""),"nach":nach,"nach_name":APT.get(nach,""),"datum":dat,"abflug":ab,"ankunft":an})
+
+    # Format 2: LH 3463 | NUE | FRA | 20.04.2026 | 13:00 | 14:15
+    p2 = re.compile(r"([A-Z]{2}\s*\d{3,4})\s*[|]\s*([A-Z]{3})\s*[|]\s*([A-Z]{3})\s*[|]\s*(\d{1,2}[./]\d{1,2}[./]\d{4})\s*[|]\s*(\d{1,2}:\d{2})\s*[|]\s*(\d{1,2}:\d{2})")
+    for m in p2.finditer(text):
+        fn,von,nach,dat,ab,an = m.groups()
+        fn = fn.replace(" ","")
+        key = fn+dat
+        if key not in seen:
+            seen.add(key)
+            segs.append({"fn":fn,"von":von,"von_name":APT.get(von,""),"nach":nach,"nach_name":APT.get(nach,""),"datum":dat,"abflug":ab,"ankunft":an})
+
+    # Format 3: "25 Mai Frankfurt - Zurich LX3613 06:35-07:30"
+    p3 = re.compile(r"(\d{1,2})\s+(Jan|Feb|Mar|Apr|Mai|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Mrz|Okt|Dez)\b[^\n]{0,80}?([A-Z]{2}\d{3,4})\s+(\d{1,2}:\d{2})\s*[-]\s*(\d{1,2}:\d{2})", re.IGNORECASE)
+    for m in p3.finditer(text):
+        tag,mon,fn,ab,an = m.groups()
+        key = fn+tag+mon
+        if key not in seen:
+            seen.add(key)
+            segs.append({"fn":fn,"von":"","von_name":"","nach":"","nach_name":"","datum":f"{tag} {mon}","abflug":ab,"ankunft":an})
+
+    return segs
+
+
 def analyse_beleg(text: str, filename: str = "") -> dict:
     """
     Analysiert einen Belegtext und gibt alle erkannten Felder zurück.
@@ -277,6 +332,7 @@ def analyse_beleg(text: str, filename: str = "") -> dict:
     name_m = re.search(r'(?:Guest|Gast|Passenger|Reisender|Name)[:\s]+([A-ZÜÖÄ][a-züöä]+\s+[A-ZÜÖÄ][a-züöä]+)', text)
     reisender = name_m.group(1) if name_m else ""
 
+    segs = extract_segments(text) if (typ == "Flug" or fns) else []
     return {
         "typ": typ,
         "vendor": vendor,
@@ -292,6 +348,7 @@ def analyse_beleg(text: str, filename: str = "") -> dict:
         "checkout": str(checkout) if checkout else "",
         "naechte": naechte,
         "konfirmation": konfirmation,
+        "segmente": segs,
     }
 
 # ─── Datenbank-Schema ─────────────────────────────────────────────────────────
@@ -921,8 +978,42 @@ def beleg_detail(bid: int):
 
         # IATA mit Klarname
         iata_list = [i.strip() for i in (iatas or "").split(",") if i.strip()]
-        iata_html = " → ".join(f'<b>{c}</b> <span style="color:#64748b;font-size:12px">({IATA.get(c,"")})</span>'
-                                for c in iata_list) if iata_list else "–"
+        iata_html = " → ".join(f'<b>{code2}</b> <span style="color:#64748b;font-size:12px">({IATA.get(code2,"")})</span>'
+                                for code2 in iata_list) if iata_list else "–"
+
+        # Segmente aus analyse_json
+        segs = []
+        if analyse_json:
+            try:
+                aj = json.loads(analyse_json)
+                segs = aj.get("segmente", [])
+            except: pass
+
+        seg_table = ""
+        if segs:
+            rows_s = ""
+            for s in segs:
+                von_s = s.get("von","")
+                von_n = s.get("von_name","")
+                nach_s = s.get("nach","")
+                nach_n = s.get("nach_name","")
+                von_full = f"{von_s} ({von_n})" if von_n else von_s
+                nach_full = f"{nach_s} ({nach_n})" if nach_n else nach_s
+                rows_s += (f"<tr>"
+                           f"<td style='font-family:monospace;font-weight:700;color:#1d4ed8'>{s.get('fn','')}</td>"
+                           f"<td>{von_full or '–'}</td>"
+                           f"<td style='color:#64748b'>→</td>"
+                           f"<td>{nach_full or '–'}</td>"
+                           f"<td style='font-family:monospace'>{s.get('datum','')}</td>"
+                           f"<td style='font-family:monospace'>{s.get('abflug','')}</td>"
+                           f"<td style='font-family:monospace'>{s.get('ankunft','')}</td>"
+                           f"</tr>")
+            seg_table = (f"<div style='margin-top:16px'>"
+                         f"<h2 style='margin-bottom:8px'>✈ Flugsegmente ({len(segs)})</h2>"
+                         f"<div style='overflow-x:auto'><table>"
+                         f"<thead><tr><th>Flug</th><th>Von</th><th></th><th>Nach</th>"
+                         f"<th>Datum</th><th>Abflug</th><th>Ankunft</th></tr></thead>"
+                         f"<tbody>{rows_s}</tbody></table></div></div>")
 
         # Reise-Dropdown Options
         opts = '<option value="">– Keine Reise –</option>'
@@ -1025,6 +1116,8 @@ def beleg_detail(bid: int):
           </form>
         </div>
         </div>
+
+        {seg_table}
 
         <!-- Rohtext -->
         <div class="card" style="margin-top:16px">
