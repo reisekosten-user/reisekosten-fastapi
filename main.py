@@ -229,16 +229,26 @@ def detect_type(text: str, filename: str = "") -> str:
     return "Sonstiges"
 
 def extract_hotel_dates(text: str) -> tuple:
-    """Findet Check-in und Check-out Datum."""
-    checkin = checkout = None
-    ci = re.search(r'(?:Check.?in|Arrival|Anreise|Eincheck)[^\n]{0,80}?'
-                   r'(\w+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{4})',
-                   text, re.IGNORECASE)
-    co = re.search(r'(?:Check.?out|Departure|Abreise|Auscheck)[^\n]{0,80}?'
-                   r'(\w+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{4})',
-                   text, re.IGNORECASE)
-    if ci: checkin = parse_date(ci.group(1))
-    if co: checkout = parse_date(co.group(1))
+    """
+    Findet Check-in und Check-out Datum.
+    Unterstützt: "Check-in: Wednesday, April 22, 2026"
+                 "Anreise: 22.04.2026"
+                 "Check-in: 2026-04-22"
+    """
+    # Datum-Pattern: erlaubt Wochentag davor
+    DATE_PAT = (r'(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|'
+                r'Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag),?\s+)?'
+                r'(\w+\s+\d{1,2},?\s+\d{4}'  # April 22, 2026
+                r'|\d{1,2}[./]\d{1,2}[./]\d{4}'  # 22.04.2026
+                r'|\d{4}-\d{2}-\d{2}'             # 2026-04-22
+                r'|\d{1,2}\.?\s+\w+\s+\d{4})'  # 22. April 2026
+               )
+    ci_m = re.search(r'(?:Check.?in|Arrival|Anreise|Eincheck)[^\n]{0,50}?' + DATE_PAT,
+                     text, re.IGNORECASE)
+    co_m = re.search(r'(?:Check.?out|Departure|Abreise|Auscheck)[^\n]{0,50}?' + DATE_PAT,
+                     text, re.IGNORECASE)
+    checkin = parse_date(ci_m.group(1)) if ci_m else None
+    checkout = parse_date(co_m.group(1)) if co_m else None
     return checkin, checkout
 
 def extract_pnr(text: str) -> str:
@@ -258,46 +268,145 @@ def extract_trip_code(text: str) -> str:
     m = re.search(r'\b(\d{2}-\d{3})\b', text)
     return m.group(1) if m else ""
 
+MONTHS_SHORT_MAP = {
+    "jan":1,"feb":2,"mar":3,"mrz":3,"apr":4,"may":5,"mai":5,"jun":6,
+    "jul":7,"aug":8,"sep":9,"okt":10,"oct":10,"nov":11,"dec":12,"dez":12
+}
+
+CITY_TO_IATA = {
+    "frankfurt":"FRA","muenchen":"MUC","munich":"MUC","nuernberg":"NUE","nuremberg":"NUE",
+    "nürnberg":"NUE","münchen":"MUC",
+    "berlin":"BER","hamburg":"HAM","stuttgart":"STR","duesseldorf":"DUS","koeln":"CGN",
+    "düsseldorf":"DUS","köln":"CGN","cologne":"CGN",
+    "lyon":"LYS","paris":"CDG","london":"LHR","zuerich":"ZRH","zurich":"ZRH",
+    "zürich":"ZRH","genf":"GVA","geneva":"GVA",
+    "wien":"VIE","vienna":"VIE","rom":"FCO","rome":"FCO",
+    "madrid":"MAD","barcelona":"BCN","amsterdam":"AMS",
+    "san jose":"SJO","san josé":"SJO","costa rica":"SJO",
+    "panama city":"PTY","panama":"PTY",
+    "new york":"JFK","los angeles":"LAX","miami":"MIA","chicago":"ORD",
+    "dubai":"DXB","singapur":"SIN","singapore":"SIN","tokio":"NRT","tokyo":"NRT",
+    "doha":"DOH","istanbul":"IST","athen":"ATH","athens":"ATH",
+}
+
+IATA_TO_CITY = {
+    "FRA":"Frankfurt","MUC":"München","NUE":"Nürnberg","BER":"Berlin","HAM":"Hamburg",
+    "STR":"Stuttgart","DUS":"Düsseldorf","CGN":"Köln","LYS":"Lyon","CDG":"Paris",
+    "LHR":"London Heathrow","ZRH":"Zürich","GVA":"Genf","VIE":"Wien","FCO":"Rom",
+    "MAD":"Madrid","BCN":"Barcelona","AMS":"Amsterdam","BRU":"Brüssel",
+    "SJO":"San José (CR)","PTY":"Panama City","JFK":"New York","LAX":"Los Angeles",
+    "MIA":"Miami","ORD":"Chicago","SFO":"San Francisco","BOS":"Boston",
+    "DXB":"Dubai","AUH":"Abu Dhabi","DOH":"Doha","SIN":"Singapur",
+    "NRT":"Tokio","HKG":"Hongkong","PEK":"Peking","PVG":"Shanghai",
+    "IST":"Istanbul","ATH":"Athen","WAW":"Warschau","PRG":"Prag",
+    "OSL":"Oslo","ARN":"Stockholm","HEL":"Helsinki","CPH":"Kopenhagen",
+    "LIS":"Lissabon","DUB":"Dublin","SYD":"Sydney","MEL":"Melbourne",
+    "YYZ":"Toronto","YVR":"Vancouver","GRU":"São Paulo","EZE":"Buenos Aires",
+    "MEX":"Mexico City","BOG":"Bogotá","SCL":"Santiago",
+}
+
+def city_name_to_iata(name: str) -> str:
+    key = name.lower().strip()
+    return CITY_TO_IATA.get(key, "")
+
+def iata_to_name(code: str) -> str:
+    return IATA_TO_CITY.get(code.upper(), "")
+
 def extract_segments(text: str) -> list:
-    """Extrahiert Flugsegmente. Gibt Liste von dicts zurueck."""
+    """
+    Extrahiert Flugsegmente aus beliebigen Formaten.
+    Gibt Liste von dicts zurück: fn, von, von_name, nach, nach_name, datum, abflug, ankunft
+    Unterstützt beliebig viele Segmente.
+    """
     segs = []
     seen = set()
-    APT = {
-        "FRA":"Frankfurt","MUC":"Muenchen","NUE":"Nuernberg","BER":"Berlin",
-        "HAM":"Hamburg","LYS":"Lyon","CDG":"Paris","LHR":"London","ZRH":"Zuerich",
-        "VIE":"Wien","FCO":"Rom","MAD":"Madrid","AMS":"Amsterdam","GVA":"Genf",
-        "SJO":"San Jose CR","PTY":"Panama City","JFK":"New York","LAX":"Los Angeles",
-        "DXB":"Dubai","SIN":"Singapur","NRT":"Tokio","DOH":"Doha","IST":"Istanbul",
-        "SFO":"San Francisco","MIA":"Miami","ORD":"Chicago","YYZ":"Toronto",
-    }
 
-    # Format 1: LH3463 NUE->FRA 13:00->14:15 20.04.2026
-    p1 = re.compile(r"([A-Z]{2}\d{3,4})\s+([A-Z]{3})[->]+([A-Z]{3})\s+(\d{1,2}:\d{2})[->]+(\d{1,2}:\d{2})\s+(\d{1,2}[./]\d{1,2}[./]\d{4}|\d{4}-\d{2}-\d{2})")
+    # Jahr aus Text ermitteln
+    jm = re.search(r"\b(202\d)\b", text)
+    default_year = jm.group(1) if jm else "2026"
+
+    # ── Pattern 1: Itinerary-Format ──────────────────────────────────────────
+    # "20 Apr Nürnberg - Frankfurt LH 3463 13:00 - 14:15"
+    # "25 Mai Frankfurt - Zurich LX 3613 06:35 - 07:30"
+    p1 = re.compile(
+        r"(\d{1,2})\s+(Jan|Feb|M[äa]r|Apr|Mai|May|Jun|Jul|Aug|Sep|Okt|Oct|Nov|Dez|Dec)\s+"
+        r"([A-Za-z\xc4\xd6\xdc\xe4\xf6\xfc\xdf\s]+?)\s*-\s*([A-Za-z\xc4\xd6\xdc\xe4\xf6\xfc\xdf\s]+?)\s+"
+        r"([A-Z]{2})\s*(\d{3,4})\s+"
+        r"(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})",
+        re.IGNORECASE)
     for m in p1.finditer(text):
-        fn,von,nach,ab,an,dat = m.groups()
-        key = fn+dat
+        tag, mon, von_s, nach_s, al, num, ab, an = m.groups()
+        fn = al.upper() + num
+        mon_num = MONTHS_SHORT_MAP.get(mon.lower()[:3], 1)
+        dat = f"{int(tag):02d}.{mon_num:02d}.{default_year}"
+        von_iata = city_name_to_iata(von_s.strip()) or von_s.strip()[:3].upper()
+        nach_iata = city_name_to_iata(nach_s.strip()) or nach_s.strip()[:3].upper()
+        key = fn + dat
         if key not in seen:
             seen.add(key)
-            segs.append({"fn":fn,"von":von,"von_name":APT.get(von,""),"nach":nach,"nach_name":APT.get(nach,""),"datum":dat,"abflug":ab,"ankunft":an})
+            segs.append({
+                "fn": fn, "datum": dat,
+                "von": von_iata, "von_name": von_s.strip(),
+                "nach": nach_iata, "nach_name": nach_s.strip(),
+                "abflug": ab, "ankunft": an
+            })
 
-    # Format 2: LH 3463 | NUE | FRA | 20.04.2026 | 13:00 | 14:15
-    p2 = re.compile(r"([A-Z]{2}\s*\d{3,4})\s*[|]\s*([A-Z]{3})\s*[|]\s*([A-Z]{3})\s*[|]\s*(\d{1,2}[./]\d{1,2}[./]\d{4})\s*[|]\s*(\d{1,2}:\d{2})\s*[|]\s*(\d{1,2}:\d{2})")
+    # ── Pattern 2: IATA-Code Format ──────────────────────────────────────────
+    # "LH3463 NUE→FRA 13:00→14:15" oder "LH3463 NUE->FRA 13:00->14:15"
+    # Optional: mit Datum danach oder davor
+    p2 = re.compile(
+        r"([A-Z]{2}\d{3,4})\s+([A-Z]{3})\s*[→>\->–]+\s*([A-Z]{3})\s+"
+        r"(\d{1,2}:\d{2})\s*[→>\->–]+\s*(\d{1,2}:\d{2})"
+        r"(?:\s+(\d{1,2}[./]\d{1,2}[./]\d{4}|\d{4}-\d{2}-\d{2}))?",
+        re.IGNORECASE)
     for m in p2.finditer(text):
-        fn,von,nach,dat,ab,an = m.groups()
-        fn = fn.replace(" ","")
-        key = fn+dat
+        fn, von, nach, ab, an, dat = m.groups()
+        dat = dat or default_year
+        key = fn + (dat or ab)
         if key not in seen:
             seen.add(key)
-            segs.append({"fn":fn,"von":von,"von_name":APT.get(von,""),"nach":nach,"nach_name":APT.get(nach,""),"datum":dat,"abflug":ab,"ankunft":an})
+            segs.append({
+                "fn": fn, "datum": dat or "",
+                "von": von, "von_name": iata_to_name(von),
+                "nach": nach, "nach_name": iata_to_name(nach),
+                "abflug": ab, "ankunft": an
+            })
 
-    # Format 3: "25 Mai Frankfurt - Zurich LX3613 06:35-07:30"
-    p3 = re.compile(r"(\d{1,2})\s+(Jan|Feb|Mar|Apr|Mai|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Mrz|Okt|Dez)\b[^\n]{0,80}?([A-Z]{2}\d{3,4})\s+(\d{1,2}:\d{2})\s*[-]\s*(\d{1,2}:\d{2})", re.IGNORECASE)
+    # ── Pattern 3: Pipe-Format ───────────────────────────────────────────────
+    # "LH3463|NUE|FRA|20.04.2026|13:00|14:15"
+    p3 = re.compile(
+        r"([A-Z]{2}\d{3,4})[|]([A-Z]{3})[|]([A-Z]{3})[|]"
+        r"(\d{1,2}[./]\d{1,2}[./]\d{4}|\d{4}-\d{2}-\d{2})[|]"
+        r"(\d{1,2}:\d{2})[|](\d{1,2}:\d{2})")
     for m in p3.finditer(text):
-        tag,mon,fn,ab,an = m.groups()
-        key = fn+tag+mon
+        fn, von, nach, dat, ab, an = m.groups()
+        key = fn + dat
         if key not in seen:
             seen.add(key)
-            segs.append({"fn":fn,"von":"","von_name":"","nach":"","nach_name":"","datum":f"{tag} {mon}","abflug":ab,"ankunft":an})
+            segs.append({
+                "fn": fn, "datum": dat,
+                "von": von, "von_name": iata_to_name(von),
+                "nach": nach, "nach_name": iata_to_name(nach),
+                "abflug": ab, "ankunft": an
+            })
+
+    # ── Pattern 4: Tabellenformat mit Datum vorne ────────────────────────────
+    # "20.04.2026  LH3463  NUE  FRA  13:00  14:15"
+    p4 = re.compile(
+        r"(\d{1,2}[./]\d{1,2}[./]\d{4}|\d{4}-\d{2}-\d{2})\s+"
+        r"([A-Z]{2}\d{3,4})\s+([A-Z]{3})\s+([A-Z]{3})\s+"
+        r"(\d{1,2}:\d{2})\s+(\d{1,2}:\d{2})")
+    for m in p4.finditer(text):
+        dat, fn, von, nach, ab, an = m.groups()
+        key = fn + dat
+        if key not in seen:
+            seen.add(key)
+            segs.append({
+                "fn": fn, "datum": dat,
+                "von": von, "von_name": iata_to_name(von),
+                "nach": nach, "nach_name": iata_to_name(nach),
+                "abflug": ab, "ankunft": an
+            })
 
     return segs
 
