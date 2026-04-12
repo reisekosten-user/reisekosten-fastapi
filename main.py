@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 # ─── Konstanten ───────────────────────────────────────────────────────────────
-APP_VERSION     = "1.0"
+APP_VERSION     = "1.1"
 DATABASE_URL    = os.getenv("DATABASE_URL", "")
 IMAP_HOST       = os.getenv("IMAP_HOST", "")
 IMAP_USER       = os.getenv("IMAP_USER", "")
@@ -1127,6 +1127,8 @@ def beleg_detail(bid: int):
         body = f"""
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
           <a href="/belege" class="btn btn-s">← Belege</a>
+          <a href="/beleg/{bid}/reanalyse" class="btn btn-s">🔄 Neu analysieren</a>
+          <a href="/alle-reanalyse" class="btn btn-s" onclick="return confirm('Alle Belege neu analysieren?')">🔄 Alle neu</a>
           <h1 style="margin:0">{icon} Beleg #{bid} – {typ}</h1>
           <span class="badge {bc}">{typ}</span>
         </div>
@@ -1653,6 +1655,109 @@ async def beleg_upload(file: UploadFile = File(...), reise_code: str = Form(""))
         return RedirectResponse(f"/beleg/{new_id}", status_code=303)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/beleg/{bid}/reanalyse", response_class=HTMLResponse)
+def beleg_reanalyse(bid: int):
+    """Analysiert einen Beleg neu aus dem gespeicherten Rohtext."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT rohtext, dateiname, reise_code FROM belege WHERE id=%s", (bid,))
+        r = cur.fetchone()
+        if not r:
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler", '<div class="card">Beleg nicht gefunden</div>'))
+
+        rohtext, dateiname, rcode = r
+        if not rohtext:
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler", '<div class="card">Kein Rohtext vorhanden – Beleg kann nicht neu analysiert werden</div>'))
+
+        info = analyse_beleg(rohtext, dateiname or "")
+        eur = to_eur(info["betrag"], info["waehrung"]) if info["betrag"] else None
+        ci = parse_date(info["checkin"]) if info["checkin"] else None
+        co = parse_date(info["checkout"]) if info["checkout"] else None
+        bd = parse_date(info["alle_daten"][0]) if info["alle_daten"] else None
+        if bd and ci and bd.year == ci.year: bd = ci
+        naechte = (co - ci).days if ci and co else None
+
+        cur.execute("""UPDATE belege SET
+            typ=%s, vendor=%s, reisender=%s,
+            betrag=%s, waehrung=%s, betrag_eur=%s,
+            pnr=%s, konfirmation=%s,
+            flugnummern=%s, iata_codes=%s,
+            checkin=%s, checkout=%s, naechte=%s,
+            belegdatum=%s, alle_daten=%s,
+            analyse_json=%s
+            WHERE id=%s""",
+            (info["typ"], info["vendor"] or None, info["reisender"] or None,
+             info["betrag"] or None, info["waehrung"], eur,
+             info["pnr"] or None, info["konfirmation"] or None,
+             ",".join(info["flugnummern"]) or None,
+             ",".join(info["iata_codes"]) or None,
+             ci, co, naechte, bd,
+             ",".join(info["alle_daten"]) or None,
+             json.dumps(info, ensure_ascii=False),
+             bid))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler", f'<div class="card"><p>{e}</p><pre>{traceback.format_exc()[:300]}</pre></div>'))
+
+
+@app.get("/alle-reanalyse", response_class=HTMLResponse)
+def alle_reanalyse():
+    """Analysiert ALLE Belege neu aus ihrem Rohtext."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT id, rohtext, dateiname FROM belege WHERE rohtext IS NOT NULL ORDER BY id")
+        rows = cur.fetchall()
+        ok = fehler = 0
+        for bid, rohtext, dateiname in rows:
+            try:
+                info = analyse_beleg(rohtext, dateiname or "")
+                eur = to_eur(info["betrag"], info["waehrung"]) if info["betrag"] else None
+                ci = parse_date(info["checkin"]) if info["checkin"] else None
+                co = parse_date(info["checkout"]) if info["checkout"] else None
+                bd = parse_date(info["alle_daten"][0]) if info["alle_daten"] else None
+                if bd and ci and bd.year == ci.year: bd = ci
+                naechte = (co - ci).days if ci and co else None
+                cur.execute("""UPDATE belege SET
+                    typ=%s, vendor=%s, reisender=%s,
+                    betrag=%s, waehrung=%s, betrag_eur=%s,
+                    pnr=%s, konfirmation=%s,
+                    flugnummern=%s, iata_codes=%s,
+                    checkin=%s, checkout=%s, naechte=%s,
+                    belegdatum=%s, alle_daten=%s, analyse_json=%s
+                    WHERE id=%s""",
+                    (info["typ"], info["vendor"] or None, info["reisender"] or None,
+                     info["betrag"] or None, info["waehrung"], eur,
+                     info["pnr"] or None, info["konfirmation"] or None,
+                     ",".join(info["flugnummern"]) or None,
+                     ",".join(info["iata_codes"]) or None,
+                     ci, co, naechte, bd,
+                     ",".join(info["alle_daten"]) or None,
+                     json.dumps(info, ensure_ascii=False),
+                     bid))
+                ok += 1
+            except Exception as e2:
+                fehler += 1
+                print(f"[Reanalyse] Beleg {bid}: {e2}")
+        db.commit(); cur.close(); db.close()
+        return HTMLResponse(shell("Reanalyse", f'''
+        <div class="card">
+          <h1>🔄 Reanalyse abgeschlossen</h1>
+          <div class="alert alert-ok" style="margin:16px 0">
+            ✓ {ok} Belege neu analysiert · {fehler} Fehler
+          </div>
+          <div class="acts">
+            <a href="/belege" class="btn">📋 Belege ansehen</a>
+            <a href="/" class="btn btn-s">← Dashboard</a>
+          </div>
+        </div>'''))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="card"><p>{e}</p></div>'))
+
 
 @app.get("/reset-all")
 def reset_all(confirm: str = ""):
