@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 # ─── Konstanten ───────────────────────────────────────────────────────────────
-APP_VERSION     = "1.1"
+APP_VERSION     = "1.2"
 DATABASE_URL    = os.getenv("DATABASE_URL", "")
 IMAP_HOST       = os.getenv("IMAP_HOST", "")
 IMAP_USER       = os.getenv("IMAP_USER", "")
@@ -1758,6 +1758,38 @@ def alle_reanalyse():
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="card"><p>{e}</p></div>'))
 
+
+@app.get("/debug-mail/{uid_or_id}")
+def debug_mail(uid_or_id: str):
+    """Zeigt gespeicherten Mail-Body zur Diagnose."""
+    try:
+        db = get_db(); cur = db.cursor()
+        # Versuche als Beleg-ID
+        try:
+            bid = int(uid_or_id)
+            cur.execute("SELECT mail_uid FROM belege WHERE id=%s", (bid,))
+            r = cur.fetchone()
+            if r:
+                cur.execute("SELECT uid, absender, betreff, body FROM mails WHERE uid=%s", (r[0],))
+            else:
+                cur.execute("SELECT uid, absender, betreff, body FROM mails WHERE id=%s", (bid,))
+        except:
+            cur.execute("SELECT uid, absender, betreff, body FROM mails WHERE uid=%s", (uid_or_id,))
+        row = cur.fetchone()
+        cur.close(); db.close()
+        if not row:
+            return {"error": "nicht gefunden"}
+        uid, absender, betreff, body = row
+        return {
+            "uid": uid,
+            "absender": absender,
+            "betreff": betreff,
+            "body_laenge": len(body or ""),
+            "body_preview": (body or "")[:2000],
+            "hat_html": "<html" in (body or "").lower(),
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/reset-all")
 def reset_all(confirm: str = ""):
