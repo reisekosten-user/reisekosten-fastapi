@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 # ─── Konstanten ───────────────────────────────────────────────────────────────
-APP_VERSION     = "1.3"
+APP_VERSION     = "1.7"
 DATABASE_URL    = os.getenv("DATABASE_URL", "")
 IMAP_HOST       = os.getenv("IMAP_HOST", "")
 IMAP_USER       = os.getenv("IMAP_USER", "")
@@ -305,6 +305,25 @@ IATA_TO_CITY = {
     "MEX":"Mexico City","BOG":"Bogotá","SCL":"Santiago",
 }
 
+# Lufthansa-spezifische falsche IATA-Codes → echte IATA-Codes
+IATA_CODE_FIX = {
+    "ZAQ": "NUE",  # Nürnberg (Lufthansa-interner Code)
+    "QGZ": "NUE",
+    "ZMB": "HAM",
+    "ZRB": "FRA",
+}
+
+def fix_iata_code(code: str, city_name: str = "") -> str:
+    """Korrigiert falsche IATA-Codes anhand von Klarnamen."""
+    if code in IATA_CODE_FIX:
+        return IATA_CODE_FIX[code]
+    if city_name:
+        cl = city_name.lower().strip()
+        fixed = CITY_TO_IATA.get(cl)
+        if fixed: return fixed
+    return code
+
+
 def city_name_to_iata(name: str) -> str:
     key = name.lower().strip()
     return CITY_TO_IATA.get(key, "")
@@ -409,35 +428,203 @@ def extract_segments(text: str) -> list:
             })
 
     # ── Pattern 5: Lufthansa Bestätigungsmail ───────────────────────────────
-    # Blöcke mit: "Datum der Abreise XX.XX.XXXX Abflugzeit HH:MM"
-    #             "IATA-Code des Abflughafens XXX"
-    #             "Abflugsort STADTNAME"
-    if not segs and "IATA-Code des Abflughafens" in text:
-        blocks = re.split(r"(?=\d{2}\.\d{2}\.\d{4}\s*-\s*\d{2}:\d{2})", text)
-        for block in blocks:
-            dm = re.search(r"(\d{2}\.\d{2}\.\d{4})\s*[–\-]\s*(\d{2}:\d{2})", block)
-            if not dm: continue
-            datum, abflug = dm.group(1), dm.group(2)
+    # Datum-Blöcke: "20.04.2026 - 13:00" + IATA-Labels + Ortsnames
+    if "IATA-Code des Abflughafens" in text:
+        block_starts = [(m.start(), m.group(1), m.group(2))
+                        for m in re.finditer(r"(\d{2}\.\d{2}\.\d{4})\s*-\s*(\d{2}:\d{2})", text)]
+        for i, (pos, datum, abflug) in enumerate(block_starts):
+            end = block_starts[i+1][0] if i+1 < len(block_starts) else len(text)
+            block = text[pos:end]
             id_m = re.search(r"IATA-Code des Abflughafens\s+([A-Z]{3})", block)
             ia_m = re.search(r"IATA-Code des Ankunftsflughafens\s+([A-Z]{3})", block)
             vn_m = re.search(r"Abflugsort\s+([^\r\n]+)", block)
             nm_m = re.search(r"Ankunftsort\s+([^\r\n]+)", block)
-            iata_dep = id_m.group(1) if id_m else ""
-            iata_arr = ia_m.group(1) if ia_m else ""
-            von_name = vn_m.group(1).strip() if vn_m else iata_to_name(iata_dep)
-            nach_name = nm_m.group(1).strip() if nm_m else iata_to_name(iata_arr)
-            key = datum + iata_dep + iata_arr
+            raw_dep = id_m.group(1) if id_m else ""
+            raw_arr = ia_m.group(1) if ia_m else ""
+            von_name = vn_m.group(1).strip() if vn_m else ""
+            nach_name = nm_m.group(1).strip() if nm_m else ""
+            # Korrigiere falsche LH-interne IATA-Codes
+            von_iata = fix_iata_code(raw_dep, von_name)
+            nach_iata = fix_iata_code(raw_arr, nach_name)
+            key = datum + von_iata + nach_iata
             if key not in seen:
                 seen.add(key)
                 segs.append({
-                    "fn": "",
-                    "datum": datum,
-                    "von": iata_dep, "von_name": von_name,
-                    "nach": iata_arr, "nach_name": nach_name,
+                    "fn": "", "datum": datum,
+                    "von": von_iata, "von_name": von_name,
+                    "nach": nach_iata, "nach_name": nach_name,
                     "abflug": abflug, "ankunft": "–"
                 })
 
     return segs
+
+
+async def mistral_analyse_beleg(text: str, filename: str = "") -> dict:
+    """Analysiert JEDEN Beleg mit Mistral KI – Mail, PDF, Bild-Text."""
+    if not MISTRAL_KEY or not (text or "").strip():
+        return {}
+
+    prompt = (
+        "Du bist ein Reisekostenexperte. Analysiere das folgende Dokument (Email oder PDF) "
+        "und extrahiere ALLE relevanten Informationen. "
+        "Antworte NUR mit einem validen JSON-Objekt, kein Text davor oder danach.\n\n"
+        "Dokument:\n---\n"
+        + text[:8000]
+        + "\n---\n\n"
+        "JSON (fehlende Felder = null, Zahlen ohne Anführungszeichen):\n"
+        '{'
+        '"belegdatum": "DD.MM.YYYY",'
+        '"dokumenttyp": "Flug|Hotel|Bahn|Taxi|Mietwagen|Bewirtung|Tanken|Sonstiges",'
+        '"buchungscode": "Buchungsreferenz oder Confirmation Number",'
+        '"reisender": "Vollständiger Name",'
+        '"ticketnummer": "Ticketnummer",'
+        '"vendor": "Name Airline/Hotel/Bahn",'
+        '"betrag": 123.45,'
+        '"waehrung": "EUR",'
+        '"hotel_name": "Vollständiger Hotelname",'
+        '"hotel_checkin": "DD.MM.YYYY",'
+        '"hotel_checkout": "DD.MM.YYYY",'
+        '"hotel_naechte": 2,'
+        '"hotel_zimmer": 1,'
+        '"hotel_gaeste": 1,'
+        '"zimmerpreise": [{"datum": "DD.MM.YYYY", "preis": 190.00}],'
+        '"steuern": 5.00,'
+        '"segmente": ['
+        '{"nr": 1,'
+        '"abreise_datum": "DD.MM.YYYY",'
+        '"abreise_zeit": "HH:MM",'
+        '"abreise_zeitzone": "MEZ|UTC|EST|CR",'
+        '"ankunft_datum": "DD.MM.YYYY",'
+        '"ankunft_zeit": "HH:MM",'
+        '"ankunft_zeitzone": "MEZ|UTC|EST|CR",'
+        '"von_ort": "Stadtname",'
+        '"von_iata": "FRA",'
+        '"nach_ort": "Stadtname",'
+        '"nach_iata": "LYS",'
+        '"transport_name": "Lufthansa|Swiss|DB|Hotel",'
+        '"transport_nummer": "LH3463",'
+        '"klasse": "Business|Economy|1.Klasse",'
+        '"hinweis": "operated by Edelweiss WK38"}'
+        ']}'
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            resp = await client.post(
+                MISTRAL_URL,
+                headers={"Authorization": f"Bearer {MISTRAL_KEY}",
+                         "Content-Type": "application/json"},
+                json={"model": MISTRAL_MODEL,
+                      "messages": [{"role": "user", "content": prompt}],
+                      "temperature": 0.0,
+                      "max_tokens": 2000})
+            if resp.status_code != 200:
+                print(f"[Mistral] HTTP {resp.status_code}: {resp.text[:200]}")
+                return {}
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+            m = re.search(r'\{.*\}', raw, re.DOTALL)
+            if m:
+                return json.loads(m.group(0))
+    except Exception as e:
+        print(f"[Mistral] Fehler: {e}")
+    return {}
+
+
+def merge_analyse(regex_info: dict, ki_info: dict) -> dict:
+    """Kombiniert Regex + KI Ergebnis. KI hat Vorrang bei Segmenten."""
+    merged = dict(regex_info)
+
+    # Einfache Felder: KI uebernehmen wenn Regex leer
+    for rk, kk in [("pnr","buchungscode"),("reisender","reisender"),
+                    ("vendor","vendor"),("betrag","betrag"),("waehrung","waehrung"),
+                    ("konfirmation","ticketnummer")]:
+        if not merged.get(rk) and ki_info.get(kk):
+            merged[rk] = ki_info[kk]
+
+    if ki_info.get("dokumenttyp") and ki_info["dokumenttyp"] != "Sonstiges":
+        merged["typ"] = ki_info["dokumenttyp"]
+    if not merged.get("belegdatum") and ki_info.get("belegdatum"):
+        merged["belegdatum"] = ki_info["belegdatum"]
+    if not merged.get("checkin") and ki_info.get("hotel_checkin"):
+        merged["checkin"] = ki_info["hotel_checkin"]
+    if not merged.get("checkout") and ki_info.get("hotel_checkout"):
+        merged["checkout"] = ki_info["hotel_checkout"]
+    if not merged.get("naechte") and ki_info.get("hotel_naechte"):
+        merged["naechte"] = ki_info["hotel_naechte"]
+    if not merged.get("vendor") and ki_info.get("hotel_name"):
+        merged["vendor"] = ki_info["hotel_name"]
+
+    # Segmente: KI hat Vorrang
+    ki_segs = ki_info.get("segmente") or []
+    if ki_segs:
+        merged["segmente"] = [{
+            "fn":           s.get("transport_nummer") or "",
+            "datum":        s.get("abreise_datum") or "",
+            "von":          s.get("von_iata") or "",
+            "von_name":     s.get("von_ort") or "",
+            "nach":         s.get("nach_iata") or "",
+            "nach_name":    s.get("nach_ort") or "",
+            "abflug":       s.get("abreise_zeit") or "",
+            "abflug_tz":    s.get("abreise_zeitzone") or "",
+            "ankunft":      s.get("ankunft_zeit") or "",
+            "ankunft_tz":   s.get("ankunft_zeitzone") or "",
+            "ankunft_datum":s.get("ankunft_datum") or "",
+            "transport":    s.get("transport_name") or "",
+            "klasse":       s.get("klasse") or "",
+            "hinweis":      s.get("hinweis") or "",
+        } for s in ki_segs]
+    return merged
+
+
+def save_beleg_info(cur, bid: int, info: dict):
+    """Speichert analysierte Felder in DB."""
+    betrag = info.get("betrag") or ""
+    waehrung = info.get("waehrung") or "EUR"
+    eur = to_eur(str(betrag), waehrung) if betrag else None
+    ci = parse_date(info.get("checkin") or info.get("hotel_checkin") or "")
+    co = parse_date(info.get("checkout") or info.get("hotel_checkout") or "")
+    bd_s = info.get("belegdatum") or ""
+    bd = parse_date(bd_s) or (parse_date((info.get("alle_daten") or [""])[0]) if info.get("alle_daten") else None)
+    if bd and ci and bd.year == ci.year: bd = ci
+    naechte = None
+    try: naechte = int(info.get("naechte") or info.get("hotel_naechte") or 0) or None
+    except: pass
+    if not naechte and ci and co: naechte = (co-ci).days or None
+
+    fns_set = list(dict.fromkeys(info.get("flugnummern") or []))
+    for s in (info.get("segmente") or []):
+        fn = s.get("fn","")
+        if fn and fn not in fns_set: fns_set.append(fn)
+    fns_str = ",".join(fns_set) or None
+
+    iata_set = list(dict.fromkeys(info.get("iata_codes") or []))
+    for s in (info.get("segmente") or []):
+        for code in [s.get("von",""), s.get("nach","")]:
+            if code and code not in iata_set: iata_set.append(code)
+    iatas_str = ",".join(iata_set) or None
+
+    alle_d = info.get("alle_daten") or []
+    alle_d_str = ",".join(alle_d) if isinstance(alle_d, list) else None
+
+    cur.execute("""UPDATE belege SET
+        typ=%s, vendor=%s, reisender=%s,
+        betrag=%s, waehrung=%s, betrag_eur=%s,
+        pnr=%s, konfirmation=%s,
+        flugnummern=%s, iata_codes=%s,
+        checkin=%s, checkout=%s, naechte=%s,
+        belegdatum=%s, alle_daten=%s, analyse_json=%s
+        WHERE id=%s""",
+        (info.get("typ") or "Sonstiges",
+         info.get("vendor") or None,
+         info.get("reisender") or None,
+         str(betrag) or None, waehrung, eur,
+         info.get("pnr") or info.get("buchungscode") or None,
+         info.get("konfirmation") or info.get("ticketnummer") or None,
+         fns_str, iatas_str,
+         ci, co, naechte, bd, alle_d_str,
+         json.dumps(info, ensure_ascii=False), bid))
+
+
 
 
 def analyse_beleg(text: str, filename: str = "") -> dict:
@@ -1106,38 +1293,72 @@ def beleg_detail(bid: int):
         iata_html = " → ".join(f'<b>{code2}</b> <span style="color:#64748b;font-size:12px">({IATA.get(code2,"")})</span>'
                                 for code2 in iata_list) if iata_list else "–"
 
-        # Segmente aus analyse_json
+        # Alle KI-Felder aus analyse_json laden
         segs = []
+        ki_extra_html = ""
+        aj = {}
         if analyse_json:
             try:
                 aj = json.loads(analyse_json)
                 segs = aj.get("segmente", [])
+                # Zusatzfelder aus KI anzeigen
+                extras = []
+                if aj.get("hotel_name"): extras.append(("Hotelname", aj["hotel_name"]))
+                if aj.get("hotel_zimmer"): extras.append(("Zimmer", str(aj["hotel_zimmer"])))
+                if aj.get("hotel_gaeste"): extras.append(("Gäste", str(aj["hotel_gaeste"])))
+                if aj.get("steuern"): extras.append(("Steuern/Gebühren", f"{aj['steuern']} {aj.get('waehrung','EUR')}"))
+                if aj.get("zimmerpreise"):
+                    for zp in aj["zimmerpreise"]:
+                        extras.append((f"Zimmerpreis {zp.get('datum','')}",
+                                       f"{zp.get('preis','')} {aj.get('waehrung','EUR')}"))
+                if aj.get("alle_daten"): extras.append(("Alle Daten", ", ".join(aj["alle_daten"])))
+                ki_extra_html = "".join(
+                    f"<dt style='color:#94a3b8'>{k}</dt><dd style='font-size:12px;color:#475569'>{v}</dd>"
+                    for k,v in extras)
             except: pass
 
         seg_table = ""
         if segs:
             rows_s = ""
-            for s in segs:
-                von_s = s.get("von","")
-                von_n = s.get("von_name","")
-                nach_s = s.get("nach","")
-                nach_n = s.get("nach_name","")
-                von_full = f"{von_s} ({von_n})" if von_n else von_s
-                nach_full = f"{nach_s} ({nach_n})" if nach_n else nach_s
+            for i, s in enumerate(segs):
+                fn = s.get("fn","") or s.get("transport_nummer","") or ""
+                transport = s.get("transport","") or s.get("transport_name","") or ""
+                fn_full = f"{transport} {fn}".strip() if transport and fn else (fn or transport or "–")
+                von = s.get("von","") or ""
+                von_n = s.get("von_name","") or ""
+                nach = s.get("nach","") or ""
+                nach_n = s.get("nach_name","") or ""
+                von_full = f"{von} – {von_n}" if von and von_n else (von or von_n or "–")
+                nach_full = f"{nach} – {nach_n}" if nach and nach_n else (nach or nach_n or "–")
+                ab = s.get("abflug","") or "–"
+                ab_tz = s.get("abflug_tz","") or ""
+                an = s.get("ankunft","") or "–"
+                an_tz = s.get("ankunft_tz","") or ""
+                an_dat = s.get("ankunft_datum","") or s.get("datum","") or ""
+                dat = s.get("datum","") or "–"
+                klasse = s.get("klasse","") or ""
+                hinweis = s.get("hinweis","") or ""
+                ab_str = f"{ab} {ab_tz}".strip() if ab_tz else ab
+                an_str = f"{an} {an_tz}".strip() if an_tz else an
+                if an_dat and an_dat != dat:
+                    an_str += f" ({an_dat})"
                 rows_s += (f"<tr>"
-                           f"<td style='font-family:monospace;font-weight:700;color:#1d4ed8'>{s.get('fn','')}</td>"
-                           f"<td>{von_full or '–'}</td>"
-                           f"<td style='color:#64748b'>→</td>"
-                           f"<td>{nach_full or '–'}</td>"
-                           f"<td style='font-family:monospace'>{s.get('datum','')}</td>"
-                           f"<td style='font-family:monospace'>{s.get('abflug','')}</td>"
-                           f"<td style='font-family:monospace'>{s.get('ankunft','')}</td>"
-                           f"</tr>")
-            seg_table = (f"<div style='margin-top:16px'>"
-                         f"<h2 style='margin-bottom:8px'>✈ Flugsegmente ({len(segs)})</h2>"
+                    f"<td style='text-align:center;color:#94a3b8;font-size:11px'>{i+1}</td>"
+                    f"<td style='font-family:monospace;font-weight:700;color:#1d4ed8;white-space:nowrap'>{fn_full}</td>"
+                    f"<td><b>{von}</b><br><span style='font-size:11px;color:#64748b'>{von_n}</span></td>"
+                    f"<td style='color:#94a3b8;text-align:center'>→</td>"
+                    f"<td><b>{nach}</b><br><span style='font-size:11px;color:#64748b'>{nach_n}</span></td>"
+                    f"<td style='font-family:monospace;white-space:nowrap'>{dat}<br><span style='color:#2563eb'>{ab_str}</span></td>"
+                    f"<td style='font-family:monospace;white-space:nowrap'>{an_dat or dat}<br><span style='color:#059669'>{an_str}</span></td>"
+                    f"<td style='font-size:11px;color:#64748b'>{klasse}</td>"
+                    f"<td style='font-size:11px;color:#94a3b8;max-width:150px'>{hinweis}</td>"
+                    f"</tr>")
+            seg_table = (f"<div class='card' style='margin-top:16px;padding:0;overflow:hidden'>"
+                         f"<div style='padding:12px 16px;border-bottom:1px solid #e2e8f0'>"
+                         f"<h2 style='margin:0'>✈ Reisesegmente ({len(segs)})</h2></div>"
                          f"<div style='overflow-x:auto'><table>"
-                         f"<thead><tr><th>Flug</th><th>Von</th><th></th><th>Nach</th>"
-                         f"<th>Datum</th><th>Abflug</th><th>Ankunft</th></tr></thead>"
+                         f"<thead><tr><th>#</th><th>Flug/Transport</th><th>Von</th><th></th><th>Nach</th>"
+                         f"<th>Abflug</th><th>Ankunft</th><th>Klasse</th><th>Hinweis</th></tr></thead>"
                          f"<tbody>{rows_s}</tbody></table></div></div>")
 
         # Reise-Dropdown Options
@@ -1180,7 +1401,7 @@ def beleg_detail(bid: int):
             <dt>Check-out</dt><dd>{fmt(co)}</dd>
             <dt>Nächte</dt><dd>{naechte or '–'}</dd>
             <dt>Belegdatum</dt><dd>{fmt(bd)}</dd>
-            <dt>Alle Daten</dt><dd style="font-size:11px;color:#64748b">{alle_d or '–'}</dd>
+            {ki_extra_html}
           </dl>
           <div style="margin-top:12px;padding:8px 12px;border-radius:6px;border:1px solid {qual_farbe};
                background:{qual_farbe}11;font-size:12px;color:{qual_farbe}">
@@ -1644,7 +1865,9 @@ async def beleg_upload(file: UploadFile = File(...), reise_code: str = Form(""))
                 text = "\n".join(p.extract_text() or "" for p in reader.pages)
             except: pass
 
-        info = analyse_beleg(text or fn, fn)
+        regex_info = analyse_beleg(text or fn, fn)
+        ki_info = await mistral_analyse_beleg(text or fn, fn)
+        info = merge_analyse(regex_info, ki_info)
         eur = to_eur(info["betrag"], info["waehrung"]) if info["betrag"] else None
         ci = parse_date(info["checkin"]) if info["checkin"] else None
         co = parse_date(info["checkout"]) if info["checkout"] else None
@@ -1841,3 +2064,57 @@ def reset_all(confirm: str = ""):
     except Exception as e:
         return JSONResponse({"error": str(e)})
 
+async def beleg_reanalyse(bid: int):
+    """Analysiert einen Beleg neu – Regex + Mistral KI."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT rohtext, dateiname, reise_code FROM belege WHERE id=%s", (bid,))
+        r = cur.fetchone()
+        if not r:
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler", '<div class="card">Beleg nicht gefunden</div>'))
+        rohtext, dateiname, rcode = r
+        if not rohtext:
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler", '<div class="card">Kein Rohtext vorhanden</div>'))
+        regex_info = analyse_beleg(rohtext, dateiname or "")
+        ki_info = await mistral_analyse_beleg(rohtext, dateiname or "")
+        info = merge_analyse(regex_info, ki_info)
+        save_beleg_info(cur, bid, info)
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler", f'<div class="card"><p>{e}</p><pre>{traceback.format_exc()[:300]}</pre></div>'))
+async def alle_reanalyse():
+    """Analysiert ALLE Belege neu – Regex + Mistral KI."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT id, rohtext, dateiname FROM belege WHERE rohtext IS NOT NULL ORDER BY id")
+        rows = cur.fetchall()
+        ok = fehler = 0
+        for bid, rohtext, dateiname in rows:
+            try:
+                regex_info = analyse_beleg(rohtext, dateiname or "")
+                ki_info = await mistral_analyse_beleg(rohtext, dateiname or "")
+                info = merge_analyse(regex_info, ki_info)
+                save_beleg_info(cur, bid, info)
+                db.commit()
+                ok += 1
+            except Exception as e2:
+                fehler += 1
+                print(f"[Reanalyse #{bid}] {e2}")
+        cur.close(); db.close()
+        return HTMLResponse(shell("Reanalyse", f'''
+        <div class="card">
+          <h1>🔄 Reanalyse abgeschlossen</h1>
+          <div class="alert alert-ok" style="margin:16px 0">
+            ✓ {ok} Belege neu analysiert · {fehler} Fehler
+          </div>
+          <div class="acts">
+            <a href="/belege" class="btn">📋 Belege ansehen</a>
+            <a href="/" class="btn btn-s">← Dashboard</a>
+          </div>
+        </div>'''))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="card"><p>{e}</p></div>'))
