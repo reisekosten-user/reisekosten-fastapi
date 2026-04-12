@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 # ─── Konstanten ───────────────────────────────────────────────────────────────
-APP_VERSION     = "1.2"
+APP_VERSION     = "1.3"
 DATABASE_URL    = os.getenv("DATABASE_URL", "")
 IMAP_HOST       = os.getenv("IMAP_HOST", "")
 IMAP_USER       = os.getenv("IMAP_USER", "")
@@ -407,6 +407,35 @@ def extract_segments(text: str) -> list:
                 "nach": nach, "nach_name": iata_to_name(nach),
                 "abflug": ab, "ankunft": an
             })
+
+    # ── Pattern 5: Lufthansa Bestätigungsmail ───────────────────────────────
+    # Blöcke mit: "Datum der Abreise XX.XX.XXXX Abflugzeit HH:MM"
+    #             "IATA-Code des Abflughafens XXX"
+    #             "Abflugsort STADTNAME"
+    if not segs and "IATA-Code des Abflughafens" in text:
+        blocks = re.split(r"(?=\d{2}\.\d{2}\.\d{4}\s*-\s*\d{2}:\d{2})", text)
+        for block in blocks:
+            dm = re.search(r"(\d{2}\.\d{2}\.\d{4})\s*[–\-]\s*(\d{2}:\d{2})", block)
+            if not dm: continue
+            datum, abflug = dm.group(1), dm.group(2)
+            id_m = re.search(r"IATA-Code des Abflughafens\s+([A-Z]{3})", block)
+            ia_m = re.search(r"IATA-Code des Ankunftsflughafens\s+([A-Z]{3})", block)
+            vn_m = re.search(r"Abflugsort\s+([^\r\n]+)", block)
+            nm_m = re.search(r"Ankunftsort\s+([^\r\n]+)", block)
+            iata_dep = id_m.group(1) if id_m else ""
+            iata_arr = ia_m.group(1) if ia_m else ""
+            von_name = vn_m.group(1).strip() if vn_m else iata_to_name(iata_dep)
+            nach_name = nm_m.group(1).strip() if nm_m else iata_to_name(iata_arr)
+            key = datum + iata_dep + iata_arr
+            if key not in seen:
+                seen.add(key)
+                segs.append({
+                    "fn": "",
+                    "datum": datum,
+                    "von": iata_dep, "von_name": von_name,
+                    "nach": iata_arr, "nach_name": nach_name,
+                    "abflug": abflug, "ankunft": "–"
+                })
 
     return segs
 
