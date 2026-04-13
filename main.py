@@ -7,11 +7,13 @@ import imaplib
 import email
 from email.header import decode_header
 import re
+import json
+import requests
 import boto3
 import pdfplumber
 from io import BytesIO
 
-APP_VERSION = "5.4"
+APP_VERSION = "5.5"
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -27,7 +29,10 @@ S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
 S3_REGION = os.getenv("S3_REGION")
 
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+
+MISTRAL_CHAT_URL = "https://api.mistral.ai/v1/chat/completions"
+MISTRAL_MODEL = "mistral-small-latest"
 
 
 def get_conn():
@@ -60,6 +65,9 @@ def ensure_schema():
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS trip_code TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_type TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_destination TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS ai_json TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS confidence TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS review_flag TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
 
     cur.execute("""
@@ -85,6 +93,7 @@ def ensure_schema():
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS confidence TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS review_flag TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS duplicate_flag TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS ai_json TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
 
     cur.execute("""
@@ -155,7 +164,7 @@ def detect_destination(text: str):
     places = [
         "delhi", "mumbai", "bangalore", "new york", "london", "paris",
         "dubai", "shanghai", "beijing", "tokyo", "singapore", "mexico city",
-        "lyon", "frankfurt", "zaq"
+        "lyon", "frankfurt", "zaq", "zürich", "zurich", "san josé", "san jose"
     ]
     for place in places:
         if place in t:
@@ -224,7 +233,7 @@ def extract_text_from_s3_object(storage_key: str, filename: str):
                 for page in pdf.pages:
                     text += (page.extract_text() or "") + "\n"
             text = text.strip()
-            return text[:15000] if text else "KEIN_TEXT_GEFUNDEN"
+            return text[:30000] if text else "KEIN_TEXT_GEFUNDEN"
 
         return "NICHT_ANALYSIERBAR"
 
@@ -232,38 +241,15 @@ def extract_text_from_s3_object(storage_key: str, filename: str):
         return f"ERROR: {e}"
 
 
-def detect_currency(text: str, detected_type: str):
-    t = (text or "").lower()
-
-    if detected_type == "Taxi":
-        if "₹" in t or " inr" in t or "inr " in t:
-            return "INR"
-        if "$" in t or " usd" in t or "usd " in t:
-            return "USD"
-        if "£" in t or " gbp" in t or "gbp " in t:
-            return "GBP"
-        return "EUR"
-
-    if " inr" in t or "inr " in t or "₹" in t:
-        return "INR"
-    if " usd" in t or "usd " in t or "$" in t:
-        return "USD"
-    if " gbp" in t or "gbp " in t or "£" in t:
-        return "GBP"
-    if " eur" in t or "eur " in t or "€" in t:
-        return "EUR"
-
-    return "EUR"
-
-
 def convert_to_eur(amount_str: str, currency: str):
     if not amount_str:
         return ""
     try:
-        amount = float(amount_str.replace(".", "").replace(",", "."))
+        amount = float(str(amount_str).replace(".", "").replace(",", "."))
     except Exception:
         return ""
 
+    # Stabile Fallback-Raten in 5.5.
     rates_to_eur = {
         "EUR": 1.0,
         "USD": 0.93,
@@ -271,138 +257,9 @@ def convert_to_eur(amount_str: str, currency: str):
         "INR": 0.011
     }
 
-    rate = rates_to_eur.get(currency or "EUR", 1.0)
+    rate = rates_to_eur.get((currency or "EUR").upper(), 1.0)
     eur = round(amount * rate, 2)
     return f"{eur:.2f}".replace(".", ",")
-
-
-def extract_date(text: str):
-    if not text:
-        return ""
-
-    patterns = [
-        r"\b\d{2}[./]\d{2}[./]\d{4}\b",
-        r"\b\d{1,2}\s+[A-Za-zäöüÄÖÜ]+\s+\d{4}\b"
-    ]
-
-    for p in patterns:
-        match = re.search(p, text)
-        if match:
-            return match.group(0)
-
-    return ""
-
-
-def extract_vendor(text: str, detected_type: str):
-    if not text:
-        return ""
-
-    lower = text.lower()
-
-    vendor_groups = {
-        "Flug": [
-            "lufthansa", "air france", "klm", "ryanair", "austrian",
-            "azerbaijan airlines", "azal", "turkish airlines", "emirates",
-            "qatar airways", "air india"
-        ],
-        "Taxi": [
-            "uber", "bolt", "taxi", "free now", "lyft"
-        ],
-        "Hotel": [
-            "marriott", "hilton", "booking", "novotel", "ibis",
-            "hyatt", "radisson", "holiday inn", "hotel"
-        ],
-        "Bahn": [
-            "deutsche bahn", "db", "sncf", "trenitalia", "rail"
-        ],
-        "Mietwagen": [
-            "hertz", "sixt", "avis", "europcar", "enterprise"
-        ],
-        "Essen": [
-            "restaurant", "mcdonald", "burger king", "starbucks", "cafe"
-        ]
-    }
-
-    keywords = vendor_groups.get(detected_type, [])
-    for k in keywords:
-        if k in lower:
-            return k.title()
-
-    bad_starts = [
-        "ihre", "booking reference", "buchungsreferenz",
-        "receipt", "invoice number", "datum", "date"
-    ]
-    for line in text.split("\n")[:15]:
-        l = line.strip()
-        if len(l) < 4:
-            continue
-        if any(l.lower().startswith(x) for x in bad_starts):
-            continue
-        if re.search(r"\d{2}[./]\d{2}[./]\d{4}", l):
-            continue
-        return l[:100]
-
-    return ""
-
-
-def find_best_amount_and_currency(text: str, detected_type: str):
-    if not text:
-        return "", ""
-
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    priority_markers = [
-        "total", "gesamt", "summe", "amount paid", "paid",
-        "you paid", "fare", "trip fare", "grand total", "total due"
-    ]
-    amount_pattern = r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b"
-
-    prioritized_hits = []
-    all_hits = []
-
-    for line in lines:
-        amounts = re.findall(amount_pattern, line)
-        if not amounts:
-            continue
-
-        currency = detect_currency(line, detected_type)
-        for amount in amounts:
-            try:
-                value = float(amount.replace(".", "").replace(",", "."))
-            except Exception:
-                continue
-
-            hit = {
-                "amount": amount,
-                "currency": currency,
-                "value": value,
-                "line": line.lower()
-            }
-            all_hits.append(hit)
-
-            if any(marker in line.lower() for marker in priority_markers):
-                prioritized_hits.append(hit)
-
-    def pick_by_type(hits):
-        if not hits:
-            return "", ""
-
-        if detected_type == "Taxi":
-            hits = [h for h in hits if 2 <= h["value"] <= 300] or hits
-        elif detected_type == "Essen":
-            hits = [h for h in hits if 2 <= h["value"] <= 300] or hits
-        elif detected_type == "Hotel":
-            hits = [h for h in hits if 20 <= h["value"] <= 5000] or hits
-        elif detected_type == "Flug":
-            hits = [h for h in hits if 20 <= h["value"] <= 5000] or hits
-
-        chosen = hits[-1]
-        return chosen["amount"], chosen["currency"]
-
-    amount, currency = pick_by_type(prioritized_hits)
-    if amount:
-        return amount, currency
-
-    return pick_by_type(all_hits)
 
 
 def compute_confidence(detected_type: str, amount: str, date: str, vendor: str, status: str):
@@ -427,7 +284,7 @@ def compute_confidence(detected_type: str, amount: str, date: str, vendor: str, 
 
 
 def compute_review_flag(confidence: str, status: str):
-    if status in ["analysefehler", "datei fehlt", "kein text"]:
+    if status in ["analysefehler", "datei fehlt", "kein text", "nicht analysierbar"]:
         return "pruefen"
     if confidence == "niedrig":
         return "pruefen"
@@ -450,6 +307,220 @@ def maybe_mark_duplicate(cur, trip_code, detected_type, detected_amount, detecte
     """, (trip_code, detected_type, detected_amount, detected_date, detected_vendor, attachment_id))
     count = cur.fetchone()[0]
     return "ja" if count > 0 else ""
+
+
+def mistral_schema():
+    return {
+        "name": "reisekosten_extraction",
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "belegdatum": {"type": "string"},
+                "art_des_dokuments": {
+                    "type": "string",
+                    "enum": ["Flug", "Hotel", "Zug", "Taxi", "Essen", "Bahn", "Mietwagen", "Kalendereintrag", "Unbekannt"]
+                },
+                "buchungsnummer_code": {"type": "string"},
+                "name_des_reisenden": {"type": "string"},
+                "anzahl_reisesegmente": {"type": "integer"},
+                "ticketnummer": {"type": "string"},
+                "kosten_mit_steuern": {"type": "string"},
+                "waehrung": {"type": "string"},
+                "segmente": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "segment_nr": {"type": "integer"},
+                            "abreise_datum_zeit": {"type": "string"},
+                            "ankunft_datum_zeit": {"type": "string"},
+                            "abreise_zeitzone": {"type": "string"},
+                            "ankunft_zeitzone": {"type": "string"},
+                            "abreiseort": {"type": "string"},
+                            "ankunftsort": {"type": "string"},
+                            "abreiseort_code": {"type": "string"},
+                            "ankunftsort_code": {"type": "string"},
+                            "transportunternehmen_oder_unterkunft": {"type": "string"},
+                            "transportnummer": {"type": "string"}
+                        },
+                        "required": [
+                            "segment_nr",
+                            "abreise_datum_zeit",
+                            "ankunft_datum_zeit",
+                            "abreise_zeitzone",
+                            "ankunft_zeitzone",
+                            "abreiseort",
+                            "ankunftsort",
+                            "abreiseort_code",
+                            "ankunftsort_code",
+                            "transportunternehmen_oder_unterkunft",
+                            "transportnummer"
+                        ]
+                    }
+                },
+                "zusatzinfos": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "properties": {
+                        "anzahl_naechte": {"type": "string"},
+                        "anzahl_zimmer": {"type": "string"},
+                        "anzahl_gaeste": {"type": "string"},
+                        "positionsliste": {"type": "array", "items": {"type": "string"}},
+                        "hinweise": {"type": "array", "items": {"type": "string"}},
+                        "validierungen": {"type": "array", "items": {"type": "string"}}
+                    }
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["hoch", "mittel", "niedrig"]
+                },
+                "review_flag": {
+                    "type": "string",
+                    "enum": ["ok", "pruefen"]
+                }
+            },
+            "required": [
+                "belegdatum",
+                "art_des_dokuments",
+                "buchungsnummer_code",
+                "name_des_reisenden",
+                "anzahl_reisesegmente",
+                "ticketnummer",
+                "kosten_mit_steuern",
+                "waehrung",
+                "segmente",
+                "zusatzinfos",
+                "confidence",
+                "review_flag"
+            ]
+        }
+    }
+
+
+def call_mistral_structured(document_text: str, source_type: str):
+    if not MISTRAL_API_KEY:
+        return {
+            "error": "MISTRAL_API_KEY fehlt"
+        }
+
+    schema = mistral_schema()
+
+    system_prompt = (
+        "Du bist ein Extraktionsmodul für ein deutsches Reisekosten-System. "
+        "Extrahiere strukturierte Daten nur aus dem übergebenen Dokumenttext. "
+        "Erfinde keine Werte. "
+        "Wenn ein Feld nicht vorhanden ist, gib leeren String oder leeres Array zurück. "
+        "Hotels sollen als Aufenthalt mit einem Segment modelliert werden. "
+        "Bei Flug/Zug sollen echte Segmente erkannt werden. "
+        "Kosten_mit_steuern soll der Gesamtbetrag sein, wenn vorhanden. "
+        "Gib nur JSON zurück, das exakt dem Schema entspricht."
+    )
+
+    user_prompt = (
+        f"Quelle: {source_type}\n\n"
+        "Analysiere den folgenden Text für das Reisekosten-System.\n"
+        "Extrahiere:\n"
+        "- belegdatum\n"
+        "- art_des_dokuments\n"
+        "- buchungsnummer_code\n"
+        "- name_des_reisenden\n"
+        "- anzahl_reisesegmente\n"
+        "- ticketnummer\n"
+        "- kosten_mit_steuern\n"
+        "- waehrung\n"
+        "- segmente[]\n"
+        "- zusatzinfos{}\n"
+        "- confidence\n"
+        "- review_flag\n\n"
+        "Text:\n"
+        f"{document_text[:24000]}"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {MISTRAL_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": MISTRAL_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": schema
+        }
+    }
+
+    try:
+        response = requests.post(MISTRAL_CHAT_URL, headers=headers, json=payload, timeout=90)
+        response.raise_for_status()
+        data = response.json()
+
+        content = data["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            # defensive handling
+            content = "".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in content])
+
+        parsed = json.loads(content)
+        return parsed
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def heuristic_extract(text: str, detected_type: str):
+    """
+    Fallback, falls Mistral nicht verfügbar ist.
+    """
+    date = ""
+    patterns = [
+        r"\b\d{2}[./]\d{2}[./]\d{4}\b",
+        r"\b\d{1,2}\s+[A-Za-zäöüÄÖÜ]+\s+\d{4}\b"
+    ]
+    for p in patterns:
+        m = re.search(p, text or "")
+        if m:
+            date = m.group(0)
+            break
+
+    amounts = re.findall(r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b", text or "")
+    amount = amounts[-1] if amounts else ""
+    currency = "EUR"
+    lower = (text or "").lower()
+    if " inr" in lower or "₹" in lower:
+        currency = "INR"
+    elif " usd" in lower or "$" in lower:
+        currency = "USD"
+    elif " gbp" in lower or "£" in lower:
+        currency = "GBP"
+
+    vendor = ""
+    vendor_words = ["uber", "lufthansa", "marriott", "booking", "hotel", "air france", "swiss"]
+    for w in vendor_words:
+        if w in lower:
+            vendor = w.title()
+            break
+
+    return {
+        "belegdatum": date,
+        "art_des_dokuments": detected_type or "Unbekannt",
+        "buchungsnummer_code": "",
+        "name_des_reisenden": "",
+        "anzahl_reisesegmente": 0,
+        "ticketnummer": "",
+        "kosten_mit_steuern": amount,
+        "waehrung": currency,
+        "segmente": [],
+        "zusatzinfos": {},
+        "confidence": "niedrig",
+        "review_flag": "pruefen",
+        "_vendor_fallback": vendor
+    }
 
 
 def page_shell(title: str, content: str):
@@ -563,6 +634,14 @@ def page_shell(title: str, content: str):
                 color: #567;
                 font-size: 14px;
             }}
+            pre {{
+                white-space: pre-wrap;
+                word-break: break-word;
+                background: #f7f9fc;
+                padding: 12px;
+                border-radius: 8px;
+                border: 1px solid #d9e2ec;
+            }}
         </style>
     </head>
     <body>
@@ -585,7 +664,21 @@ def page_shell(title: str, content: str):
 
 @app.get("/version")
 def version():
-    return {"version": APP_VERSION, "mistral_configured": bool(MISTRAL_API_KEY)}
+    return {
+        "version": APP_VERSION,
+        "mistral_configured": bool(MISTRAL_API_KEY),
+        "mistral_model": MISTRAL_MODEL
+    }
+
+
+@app.get("/init")
+def init():
+    ensure_schema()
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "mistral_configured": bool(MISTRAL_API_KEY)
+    }
 
 
 @app.get("/")
@@ -704,8 +797,8 @@ def dashboard():
 
         return HTMLResponse(page_shell("Dashboard", f"""
         <div class="card">
-            <h2>Dashboard 5.4</h2>
-            <div class="sub">Stabiler Bugfix-Stand mit KI-Vorbereitung.</div>
+            <h2>Dashboard 5.5</h2>
+            <div class="sub">Mistral-Strukturextraktion für PDFs und E-Mail-Texte vorbereitet und aktiv.</div>
             <p>
                 <a class="btn" href="/fetch-mails">Mails abrufen</a>
                 <a class="btn" href="/analyze-attachments">Anhänge analysieren</a>
@@ -795,6 +888,7 @@ def fetch_mails():
         imported = 0
         skipped = 0
         attachment_count = 0
+        ai_processed_emails = 0
 
         for i in ids:
             uid = i.decode()
@@ -831,11 +925,43 @@ def fetch_mails():
             detected_type = detect_mail_type(full_text)
             detected_destination = detect_destination(full_text)
 
+            ai_result = {}
+            confidence = "niedrig"
+            review_flag = "pruefen"
+
+            # KI nur auf E-Mail-Text anwenden, wenn genug Inhalt da ist
+            if body and len(body) > 80:
+                ai_result = call_mistral_structured(
+                    document_text=full_text,
+                    source_type="email"
+                )
+
+                if "error" in ai_result:
+                    ai_result = heuristic_extract(full_text, detected_type)
+                else:
+                    detected_type = ai_result.get("art_des_dokuments", detected_type) or detected_type
+                    confidence = ai_result.get("confidence", "mittel")
+                    review_flag = ai_result.get("review_flag", "pruefen")
+                    ai_processed_emails += 1
+            else:
+                ai_result = heuristic_extract(full_text, detected_type)
+
             cur.execute("""
                 INSERT INTO mail_messages
-                (mail_uid, sender, subject, body, trip_code, detected_type, detected_destination)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
-            """, (uid, sender, subject, body, code, detected_type, detected_destination))
+                (mail_uid, sender, subject, body, trip_code, detected_type, detected_destination, ai_json, confidence, review_flag)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (
+                uid,
+                sender,
+                subject,
+                body,
+                code,
+                detected_type,
+                detected_destination,
+                json.dumps(ai_result, ensure_ascii=False),
+                confidence,
+                review_flag
+            ))
 
             if msg.is_multipart():
                 for part in msg.walk():
@@ -886,8 +1012,9 @@ def fetch_mails():
 
                     cur.execute("""
                         INSERT INTO mail_attachments
-                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path, detected_type, analysis_status, storage_key, confidence, review_flag, duplicate_flag)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path,
+                         detected_type, analysis_status, storage_key, confidence, review_flag, duplicate_flag, ai_json)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (
                         uid,
                         code,
@@ -900,6 +1027,7 @@ def fetch_mails():
                         storage_key,
                         "niedrig",
                         "pruefen",
+                        "",
                         ""
                     ))
 
@@ -918,6 +1046,7 @@ def fetch_mails():
             <p><b>Neu importierte Mails:</b> {imported}</p>
             <p><b>Übersprungen:</b> {skipped}</p>
             <p><b>Gespeicherte Anhänge im Bucket:</b> {attachment_count}</p>
+            <p><b>Mit Mistral analysierte E-Mails:</b> {ai_processed_emails}</p>
             <a class="btn" href="/">Zum Dashboard</a>
             <a class="btn-light" href="/attachment-log">Zum Anhang Log</a>
         </div>
@@ -948,6 +1077,7 @@ def analyze_attachments():
         rows = cur.fetchall()
 
         processed = 0
+        ai_processed = 0
 
         for row in rows:
             attachment_id = row[0]
@@ -1006,14 +1136,6 @@ def analyze_attachments():
 
             text = extract_text_from_s3_object(storage_key, original_filename)
 
-            amount, currency = find_best_amount_and_currency(text, detected_type)
-            if not currency:
-                currency = detect_currency(text, detected_type)
-
-            amount_eur = convert_to_eur(amount, currency)
-            date = extract_date(text)
-            vendor = extract_vendor(text, detected_type)
-
             status = "ok"
             if text == "NICHT_ANALYSIERBAR":
                 status = "nicht analysierbar"
@@ -1022,8 +1144,50 @@ def analyze_attachments():
             elif text == "KEIN_TEXT_GEFUNDEN":
                 status = "kein text"
 
-            confidence = compute_confidence(detected_type, amount, date, vendor, status)
-            review_flag = compute_review_flag(confidence, status)
+            ai_result = {}
+            amount = ""
+            currency = ""
+            amount_eur = ""
+            date = ""
+            vendor = ""
+            confidence = "niedrig"
+            review_flag = "pruefen"
+
+            if status == "ok":
+                ai_result = call_mistral_structured(
+                    document_text=text,
+                    source_type="pdf"
+                )
+
+                if "error" in ai_result:
+                    fallback = heuristic_extract(text, detected_type)
+                    ai_result = fallback
+                    detected_type = fallback.get("art_des_dokuments", detected_type)
+                    amount = fallback.get("kosten_mit_steuern", "")
+                    currency = fallback.get("waehrung", "EUR")
+                    amount_eur = convert_to_eur(amount, currency)
+                    date = fallback.get("belegdatum", "")
+                    vendor = fallback.get("_vendor_fallback", "")
+                    confidence = fallback.get("confidence", "niedrig")
+                    review_flag = fallback.get("review_flag", "pruefen")
+                else:
+                    detected_type = ai_result.get("art_des_dokuments", detected_type) or detected_type
+                    amount = ai_result.get("kosten_mit_steuern", "") or ""
+                    currency = ai_result.get("waehrung", "EUR") or "EUR"
+                    amount_eur = convert_to_eur(amount, currency)
+                    date = ai_result.get("belegdatum", "") or ""
+                    segments = ai_result.get("segmente", []) or []
+                    if segments:
+                        vendor = segments[0].get("transportunternehmen_oder_unterkunft", "") or ""
+                    if not vendor:
+                        vendor = ""
+                    confidence = ai_result.get("confidence", "mittel") or "mittel"
+                    review_flag = ai_result.get("review_flag", "pruefen") or "pruefen"
+                    ai_processed += 1
+            else:
+                confidence = "niedrig"
+                review_flag = "pruefen"
+
             duplicate_flag = maybe_mark_duplicate(
                 cur, trip_code, detected_type, amount, date, vendor, attachment_id
             )
@@ -1031,6 +1195,7 @@ def analyze_attachments():
             cur.execute("""
                 UPDATE mail_attachments
                 SET extracted_text=%s,
+                    detected_type=%s,
                     detected_amount=%s,
                     detected_amount_eur=%s,
                     detected_currency=%s,
@@ -1039,10 +1204,12 @@ def analyze_attachments():
                     analysis_status=%s,
                     confidence=%s,
                     review_flag=%s,
-                    duplicate_flag=%s
+                    duplicate_flag=%s,
+                    ai_json=%s
                 WHERE id=%s
             """, (
                 text,
+                detected_type,
                 amount,
                 amount_eur,
                 currency,
@@ -1052,6 +1219,7 @@ def analyze_attachments():
                 confidence,
                 review_flag,
                 duplicate_flag,
+                json.dumps(ai_result, ensure_ascii=False),
                 attachment_id
             ))
 
@@ -1064,6 +1232,7 @@ def analyze_attachments():
         return page_shell("Analyse", f"""
         <div class="card">
             <h2>{processed} Anhänge analysiert</h2>
+            <p><b>Mit Mistral analysierte PDFs:</b> {ai_processed}</p>
             <a class="btn" href="/">Zum Dashboard</a>
             <a class="btn-light" href="/attachment-log">Zum Anhang Log</a>
         </div>
@@ -1153,7 +1322,7 @@ def trip_review():
 
         return page_shell("Reisebewertung", f"""
         <div class="card">
-            <h2>Reisebewertung v5.4</h2>
+            <h2>Reisebewertung v5.5</h2>
             <table>
                 <tr>
                     <th>Code</th>
@@ -1188,7 +1357,7 @@ def mail_log():
         cur = conn.cursor()
 
         cur.execute("""
-            SELECT sender, subject, trip_code, detected_type, detected_destination
+            SELECT sender, subject, trip_code, detected_type, detected_destination, confidence, review_flag
             FROM mail_messages
             ORDER BY id DESC
             LIMIT 50
@@ -1204,6 +1373,8 @@ def mail_log():
                 <td class="code">{r[2] or ''}</td>
                 <td>{r[3] or ''}</td>
                 <td>{r[4] or ''}</td>
+                <td>{r[5] or ''}</td>
+                <td>{r[6] or ''}</td>
             </tr>
             """
 
@@ -1220,6 +1391,8 @@ def mail_log():
                     <th>Code</th>
                     <th>Typ erkannt</th>
                     <th>Ziel erkannt</th>
+                    <th>Confidence</th>
+                    <th>Review</th>
                 </tr>
                 {html}
             </table>
@@ -1277,7 +1450,7 @@ def attachment_log():
 
         return page_shell("Anhang Log", f"""
         <div class="card">
-            <h2>Anhang Log mit Analyse v5.4</h2>
+            <h2>Anhang Log mit Analyse v5.5</h2>
             <table>
                 <tr>
                     <th>Code</th>
@@ -1302,6 +1475,43 @@ def attachment_log():
         return page_shell("Fehler", f"""
         <div class="card">
             <h2>Anhang-Log-Fehler</h2>
+            <p>{str(e)}</p>
+        </div>
+        """)
+
+
+@app.get("/attachment-ai/{attachment_id}", response_class=HTMLResponse)
+def attachment_ai(attachment_id: int):
+    try:
+        ensure_schema()
+
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT original_filename, ai_json
+            FROM mail_attachments
+            WHERE id = %s
+        """, (attachment_id,))
+        row = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        if not row:
+            return page_shell("Nicht gefunden", "<div class='card'><h2>Anhang nicht gefunden</h2></div>")
+
+        filename, ai_json = row
+        return page_shell("AI JSON", f"""
+        <div class="card">
+            <h2>AI JSON für {filename}</h2>
+            <pre>{ai_json or ''}</pre>
+        </div>
+        """)
+    except Exception as e:
+        return page_shell("Fehler", f"""
+        <div class="card">
+            <h2>AI-JSON-Fehler</h2>
             <p>{str(e)}</p>
         </div>
         """)
