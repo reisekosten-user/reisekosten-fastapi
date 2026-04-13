@@ -13,7 +13,7 @@ import boto3
 import pdfplumber
 from io import BytesIO
 
-APP_VERSION = "5.5"
+APP_VERSION = "5.6"
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -249,7 +249,6 @@ def convert_to_eur(amount_str: str, currency: str):
     except Exception:
         return ""
 
-    # Stabile Fallback-Raten in 5.5.
     rates_to_eur = {
         "EUR": 1.0,
         "USD": 0.93,
@@ -401,9 +400,7 @@ def mistral_schema():
 
 def call_mistral_structured(document_text: str, source_type: str):
     if not MISTRAL_API_KEY:
-        return {
-            "error": "MISTRAL_API_KEY fehlt"
-        }
+        return {"error": "MISTRAL_API_KEY fehlt"}
 
     schema = mistral_schema()
 
@@ -463,7 +460,6 @@ def call_mistral_structured(document_text: str, source_type: str):
 
         content = data["choices"][0]["message"]["content"]
         if isinstance(content, list):
-            # defensive handling
             content = "".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in content])
 
         parsed = json.loads(content)
@@ -474,9 +470,6 @@ def call_mistral_structured(document_text: str, source_type: str):
 
 
 def heuristic_extract(text: str, detected_type: str):
-    """
-    Fallback, falls Mistral nicht verfügbar ist.
-    """
     date = ""
     patterns = [
         r"\b\d{2}[./]\d{2}[./]\d{4}\b",
@@ -538,7 +531,7 @@ def page_shell(title: str, content: str):
             .topbar {{
                 background: #12365f;
                 color: white;
-                padding: 20px;
+                padding: 18px 22px;
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
@@ -547,18 +540,17 @@ def page_shell(title: str, content: str):
             .topbar-left {{
                 display: flex;
                 align-items: center;
-                gap: 15px;
-            }}
-            .topbar .logo-wrap {{
-                background: rgba(255,255,255,0.55);
-                padding: 10px 14px;
-                border-radius: 12px;
-                display: inline-flex;
-                align-items: center;
+                gap: 16px;
             }}
             .topbar img {{
-                height: 60px;
+                height: 66px;
                 display: block;
+                filter: grayscale(1) brightness(1.75) contrast(0.9);
+            }}
+            .tool-title {{
+                font-size: 30px;
+                font-weight: 700;
+                letter-spacing: 0.2px;
             }}
             .version {{
                 font-size: 13px;
@@ -647,10 +639,8 @@ def page_shell(title: str, content: str):
     <body>
         <div class="topbar">
             <div class="topbar-left">
-                <div class="logo-wrap">
-                    <img src="/static/herrhammer-logo.png" alt="Herrhammer Logo">
-                </div>
-                <h2>Herrhammer Reisekosten</h2>
+                <img src="/static/herrhammer-logo.png" alt="Herrhammer Logo">
+                <div class="tool-title">Reisekosten-Tool</div>
             </div>
             <div class="version">Version {APP_VERSION}</div>
         </div>
@@ -797,8 +787,8 @@ def dashboard():
 
         return HTMLResponse(page_shell("Dashboard", f"""
         <div class="card">
-            <h2>Dashboard 5.5</h2>
-            <div class="sub">Mistral-Strukturextraktion für PDFs und E-Mail-Texte vorbereitet und aktiv.</div>
+            <h2>Dashboard 5.6</h2>
+            <div class="sub">UI-Anpassung mit silbernem Logo und neuem Titel.</div>
             <p>
                 <a class="btn" href="/fetch-mails">Mails abrufen</a>
                 <a class="btn" href="/analyze-attachments">Anhänge analysieren</a>
@@ -929,7 +919,6 @@ def fetch_mails():
             confidence = "niedrig"
             review_flag = "pruefen"
 
-            # KI nur auf E-Mail-Text anwenden, wenn genug Inhalt da ist
             if body and len(body) > 80:
                 ai_result = call_mistral_structured(
                     document_text=full_text,
@@ -1322,7 +1311,7 @@ def trip_review():
 
         return page_shell("Reisebewertung", f"""
         <div class="card">
-            <h2>Reisebewertung v5.5</h2>
+            <h2>Reisebewertung v5.6</h2>
             <table>
                 <tr>
                     <th>Code</th>
@@ -1450,7 +1439,7 @@ def attachment_log():
 
         return page_shell("Anhang Log", f"""
         <div class="card">
-            <h2>Anhang Log mit Analyse v5.5</h2>
+            <h2>Anhang Log mit Analyse v5.6</h2>
             <table>
                 <tr>
                     <th>Code</th>
