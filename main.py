@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import os
 import psycopg2
@@ -13,7 +13,10 @@ import boto3
 import pdfplumber
 from io import BytesIO
 
-APP_VERSION = "5.6"
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+
+APP_VERSION = "6.2"
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -64,11 +67,24 @@ def ensure_schema():
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS body TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS trip_code TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_type TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_role TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_destination TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS ai_json TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS confidence TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS review_flag TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trip_events (
+            id SERIAL PRIMARY KEY,
+            trip_code TEXT,
+            event_code TEXT,
+            event_type TEXT,
+            event_status TEXT,
+            event_key TEXT,
+            created_at TIMESTAMP DEFAULT now()
+        )
+    """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS mail_attachments (
@@ -77,15 +93,21 @@ def ensure_schema():
         )
     """)
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS trip_code TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS event_code TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS original_filename TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS saved_filename TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS content_type TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS file_path TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_type TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_role TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS extracted_text TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_amount TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_amount_eur TEXT")
-    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_currency TEXT")
+
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS original_amount TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS original_currency TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS eur_amount_display TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS eur_amount_final TEXT")
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS fx_status TEXT")
+
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_date TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_vendor TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS analysis_status TEXT")
@@ -216,6 +238,22 @@ def detect_attachment_type(filename: str, subject: str, body: str):
     return "Unbekannt"
 
 
+def detect_document_role(text: str, filename: str = ""):
+    combined = f"{filename} {text or ''}".lower()
+
+    if filename.lower().endswith(".ics"):
+        return "calendar_entry"
+    if any(x in combined for x in ["invoice", "receipt", "quittung", "rechnung"]):
+        if "uber" in combined or "taxi" in combined:
+            return "receipt"
+        return "invoice"
+    if any(x in combined for x in ["itinerary", "e-ticket", "ticket", "flight details"]):
+        return "itinerary"
+    if any(x in combined for x in ["booking confirmation", "reservation", "check-in", "check-out", "booked"]):
+        return "booking_confirmation"
+    return "unknown"
+
+
 def is_supported_analysis_file(filename: str):
     f = (filename or "").lower()
     return f.endswith(".pdf")
@@ -241,24 +279,16 @@ def extract_text_from_s3_object(storage_key: str, filename: str):
         return f"ERROR: {e}"
 
 
-def convert_to_eur(amount_str: str, currency: str):
+def handle_currency(amount_str: str, currency: str):
     if not amount_str:
-        return ""
-    try:
-        amount = float(str(amount_str).replace(".", "").replace(",", "."))
-    except Exception:
-        return ""
+        return "", "", "", "manuelle_korrektur_offen"
 
-    rates_to_eur = {
-        "EUR": 1.0,
-        "USD": 0.93,
-        "GBP": 1.17,
-        "INR": 0.011
-    }
+    currency = (currency or "").upper()
 
-    rate = rates_to_eur.get((currency or "EUR").upper(), 1.0)
-    eur = round(amount * rate, 2)
-    return f"{eur:.2f}".replace(".", ",")
+    if currency == "EUR":
+        return amount_str, amount_str, amount_str, "direkt_eur"
+
+    return "", "", "", "manuelle_korrektur_offen"
 
 
 def compute_confidence(detected_type: str, amount: str, date: str, vendor: str, status: str):
@@ -290,8 +320,8 @@ def compute_review_flag(confidence: str, status: str):
     return "ok"
 
 
-def maybe_mark_duplicate(cur, trip_code, detected_type, detected_amount, detected_date, detected_vendor, attachment_id):
-    if not detected_amount or not detected_date or not detected_vendor:
+def maybe_mark_duplicate(cur, trip_code, detected_type, original_amount, detected_date, detected_vendor, attachment_id):
+    if not original_amount or not detected_date or not detected_vendor:
         return ""
 
     cur.execute("""
@@ -299,13 +329,46 @@ def maybe_mark_duplicate(cur, trip_code, detected_type, detected_amount, detecte
         FROM mail_attachments
         WHERE COALESCE(trip_code, '') = COALESCE(%s, '')
           AND COALESCE(detected_type, '') = COALESCE(%s, '')
-          AND COALESCE(detected_amount, '') = COALESCE(%s, '')
+          AND COALESCE(original_amount, '') = COALESCE(%s, '')
           AND COALESCE(detected_date, '') = COALESCE(%s, '')
           AND COALESCE(detected_vendor, '') = COALESCE(%s, '')
           AND id <> %s
-    """, (trip_code, detected_type, detected_amount, detected_date, detected_vendor, attachment_id))
+    """, (trip_code, detected_type, original_amount, detected_date, detected_vendor, attachment_id))
     count = cur.fetchone()[0]
     return "ja" if count > 0 else ""
+
+
+def assign_event(cur, trip_code, doc_type, booking_code, person_name, vendor_name):
+    if not trip_code:
+        return None
+
+    event_anchor = booking_code or person_name or vendor_name or "generic"
+    event_key = f"{trip_code}_{doc_type}_{event_anchor}"
+
+    cur.execute("""
+        SELECT event_code
+        FROM trip_events
+        WHERE trip_code=%s AND event_type=%s AND event_key=%s
+    """, (trip_code, doc_type, event_key))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM trip_events
+        WHERE trip_code=%s
+    """, (trip_code,))
+    count = cur.fetchone()[0] + 1
+
+    event_code = f"{count:02d}"
+
+    cur.execute("""
+        INSERT INTO trip_events (trip_code, event_code, event_type, event_status, event_key)
+        VALUES (%s,%s,%s,%s,%s)
+    """, (trip_code, event_code, doc_type, "in_planung", event_key))
+
+    return event_code
 
 
 def mistral_schema():
@@ -315,18 +378,22 @@ def mistral_schema():
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "belegdatum": {"type": "string"},
-                "art_des_dokuments": {
+                "document_type": {
                     "type": "string",
-                    "enum": ["Flug", "Hotel", "Zug", "Taxi", "Essen", "Bahn", "Mietwagen", "Kalendereintrag", "Unbekannt"]
+                    "enum": ["Flug", "Hotel", "Zug", "Taxi", "Essen", "Bahn", "Mietwagen", "Kalendereintrag", "Sonstiges", "Unbekannt"]
                 },
-                "buchungsnummer_code": {"type": "string"},
-                "name_des_reisenden": {"type": "string"},
-                "anzahl_reisesegmente": {"type": "integer"},
-                "ticketnummer": {"type": "string"},
-                "kosten_mit_steuern": {"type": "string"},
-                "waehrung": {"type": "string"},
-                "segmente": {
+                "document_role": {
+                    "type": "string",
+                    "enum": ["booking_confirmation", "itinerary", "invoice", "receipt", "calendar_entry", "unknown"]
+                },
+                "person_name": {"type": "string"},
+                "booking_code": {"type": "string"},
+                "document_date": {"type": "string"},
+                "travel_reference": {"type": "string"},
+                "trip_segments_count": {"type": "integer"},
+                "currency": {"type": "string"},
+                "total_amount": {"type": "string"},
+                "segments": {
                     "type": "array",
                     "items": {
                         "type": "object",
@@ -359,17 +426,13 @@ def mistral_schema():
                         ]
                     }
                 },
-                "zusatzinfos": {
+                "line_items": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "extras": {
                     "type": "object",
-                    "additionalProperties": True,
-                    "properties": {
-                        "anzahl_naechte": {"type": "string"},
-                        "anzahl_zimmer": {"type": "string"},
-                        "anzahl_gaeste": {"type": "string"},
-                        "positionsliste": {"type": "array", "items": {"type": "string"}},
-                        "hinweise": {"type": "array", "items": {"type": "string"}},
-                        "validierungen": {"type": "array", "items": {"type": "string"}}
-                    }
+                    "additionalProperties": True
                 },
                 "confidence": {
                     "type": "string",
@@ -381,16 +444,18 @@ def mistral_schema():
                 }
             },
             "required": [
-                "belegdatum",
-                "art_des_dokuments",
-                "buchungsnummer_code",
-                "name_des_reisenden",
-                "anzahl_reisesegmente",
-                "ticketnummer",
-                "kosten_mit_steuern",
-                "waehrung",
-                "segmente",
-                "zusatzinfos",
+                "document_type",
+                "document_role",
+                "person_name",
+                "booking_code",
+                "document_date",
+                "travel_reference",
+                "trip_segments_count",
+                "currency",
+                "total_amount",
+                "segments",
+                "line_items",
+                "extras",
                 "confidence",
                 "review_flag"
             ]
@@ -402,43 +467,24 @@ def call_mistral_structured(document_text: str, source_type: str):
     if not MISTRAL_API_KEY:
         return {"error": "MISTRAL_API_KEY fehlt"}
 
-    schema = mistral_schema()
-
     system_prompt = (
         "Du bist ein Extraktionsmodul für ein deutsches Reisekosten-System. "
         "Extrahiere strukturierte Daten nur aus dem übergebenen Dokumenttext. "
         "Erfinde keine Werte. "
         "Wenn ein Feld nicht vorhanden ist, gib leeren String oder leeres Array zurück. "
-        "Hotels sollen als Aufenthalt mit einem Segment modelliert werden. "
-        "Bei Flug/Zug sollen echte Segmente erkannt werden. "
-        "Kosten_mit_steuern soll der Gesamtbetrag sein, wenn vorhanden. "
+        "Unterscheide IMMER document_type und document_role. "
+        "Hotels können booking_confirmation oder invoice sein. "
+        "Flug-/Zug-Dokumente mit mehreren Segmenten bleiben ein zusammengehöriger Vorgang. "
         "Gib nur JSON zurück, das exakt dem Schema entspricht."
     )
 
     user_prompt = (
         f"Quelle: {source_type}\n\n"
-        "Analysiere den folgenden Text für das Reisekosten-System.\n"
-        "Extrahiere:\n"
-        "- belegdatum\n"
-        "- art_des_dokuments\n"
-        "- buchungsnummer_code\n"
-        "- name_des_reisenden\n"
-        "- anzahl_reisesegmente\n"
-        "- ticketnummer\n"
-        "- kosten_mit_steuern\n"
-        "- waehrung\n"
-        "- segmente[]\n"
-        "- zusatzinfos{}\n"
-        "- confidence\n"
-        "- review_flag\n\n"
-        "Text:\n"
-        f"{document_text[:24000]}"
+        "Analysiere den folgenden Text für ein Reisekosten-System.\n"
+        "Extrahiere document_type, document_role, person_name, booking_code, document_date, "
+        "travel_reference, trip_segments_count, currency, total_amount, segments, line_items, extras, confidence und review_flag.\n\n"
+        f"Text:\n{document_text[:24000]}"
     )
-
-    headers = {
-        "Authorization": f"Bearer {MISTRAL_API_KEY}",
-        "Content-Type": "application/json"
-    }
 
     payload = {
         "model": MISTRAL_MODEL,
@@ -449,27 +495,33 @@ def call_mistral_structured(document_text: str, source_type: str):
         "temperature": 0,
         "response_format": {
             "type": "json_schema",
-            "json_schema": schema
+            "json_schema": mistral_schema()
         }
+    }
+
+    headers = {
+        "Authorization": f"Bearer {MISTRAL_API_KEY}",
+        "Content-Type": "application/json"
     }
 
     try:
         response = requests.post(MISTRAL_CHAT_URL, headers=headers, json=payload, timeout=90)
         response.raise_for_status()
         data = response.json()
-
         content = data["choices"][0]["message"]["content"]
+
         if isinstance(content, list):
-            content = "".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in content])
+            content = "".join(
+                c.get("text", "") if isinstance(c, dict) else str(c)
+                for c in content
+            )
 
-        parsed = json.loads(content)
-        return parsed
-
+        return json.loads(content)
     except Exception as e:
         return {"error": str(e)}
 
 
-def heuristic_extract(text: str, detected_type: str):
+def heuristic_extract(text: str, detected_type: str, filename: str = ""):
     date = ""
     patterns = [
         r"\b\d{2}[./]\d{2}[./]\d{4}\b",
@@ -483,6 +535,7 @@ def heuristic_extract(text: str, detected_type: str):
 
     amounts = re.findall(r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b", text or "")
     amount = amounts[-1] if amounts else ""
+
     currency = "EUR"
     lower = (text or "").lower()
     if " inr" in lower or "₹" in lower:
@@ -500,16 +553,18 @@ def heuristic_extract(text: str, detected_type: str):
             break
 
     return {
-        "belegdatum": date,
-        "art_des_dokuments": detected_type or "Unbekannt",
-        "buchungsnummer_code": "",
-        "name_des_reisenden": "",
-        "anzahl_reisesegmente": 0,
-        "ticketnummer": "",
-        "kosten_mit_steuern": amount,
-        "waehrung": currency,
-        "segmente": [],
-        "zusatzinfos": {},
+        "document_type": detected_type or "Unbekannt",
+        "document_role": detect_document_role(text, filename),
+        "person_name": "",
+        "booking_code": "",
+        "document_date": date,
+        "travel_reference": "",
+        "trip_segments_count": 0,
+        "currency": currency,
+        "total_amount": amount,
+        "segments": [],
+        "line_items": [],
+        "extras": {},
         "confidence": "niedrig",
         "review_flag": "pruefen",
         "_vendor_fallback": vendor
@@ -551,6 +606,21 @@ def page_shell(title: str, content: str):
                 font-size: 30px;
                 font-weight: 700;
                 letter-spacing: 0.2px;
+            }}
+            .tool-status {{
+                display: flex;
+                gap: 10px;
+                margin-left: 10px;
+            }}
+            .status-box {{
+                border: 1px solid rgba(255,255,255,0.25);
+                color: white;
+                padding: 8px 10px;
+                border-radius: 10px;
+                font-size: 13px;
+                min-width: 92px;
+                text-align: center;
+                background: rgba(255,255,255,0.08);
             }}
             .version {{
                 font-size: 13px;
@@ -626,6 +696,14 @@ def page_shell(title: str, content: str):
                 color: #567;
                 font-size: 14px;
             }}
+            .columns {{
+                display: flex;
+                gap: 20px;
+                align-items: flex-start;
+            }}
+            .col {{
+                flex: 1;
+            }}
             pre {{
                 white-space: pre-wrap;
                 word-break: break-word;
@@ -639,8 +717,15 @@ def page_shell(title: str, content: str):
     <body>
         <div class="topbar">
             <div class="topbar-left">
-                <img src="/static/herrhammer-logo.png" alt="Herrhammer Logo">
-                <div class="tool-title">Reisekosten-Tool</div>
+                <a href="/" style="display:flex; align-items:center; gap:16px; text-decoration:none; color:white;">
+                    <img src="/static/herrhammer-logo.png" alt="Herrhammer Logo">
+                    <div class="tool-title">Reisekosten-Tool</div>
+                </a>
+                <div class="tool-status">
+                    <div class="status-box">live</div>
+                    <div class="status-box">in Planung</div>
+                    <div class="status-box">abgeschlossen</div>
+                </div>
             </div>
             <div class="version">Version {APP_VERSION}</div>
         </div>
@@ -650,6 +735,25 @@ def page_shell(title: str, content: str):
     </body>
     </html>
     """
+
+
+def get_trip_events(cur, trip_code: str):
+    cur.execute("""
+        SELECT event_code, event_type, event_status
+        FROM trip_events
+        WHERE trip_code=%s
+        ORDER BY event_code
+    """, (trip_code,))
+    return cur.fetchall()
+
+
+def classify_document_side(role: str, eur_amount_final: str):
+    role = role or ""
+    if role in ["invoice", "receipt"]:
+        return "completed"
+    if eur_amount_final:
+        return "completed"
+    return "planning"
 
 
 @app.get("/version")
@@ -682,7 +786,7 @@ def dashboard():
         cur.execute("""
             SELECT COALESCE(trip_code, '') AS trip_code,
                    detected_type,
-                   COALESCE(detected_amount_eur, ''),
+                   COALESCE(eur_amount_final, ''),
                    review_flag,
                    duplicate_flag
             FROM mail_attachments
@@ -695,7 +799,7 @@ def dashboard():
 
         trips = {}
 
-        for trip_code, detected_type, amount_eur, review_flag, duplicate_flag in rows:
+        for trip_code, detected_type, eur_final, review_flag, duplicate_flag in rows:
             code = trip_code or "(ohne Code)"
             if code not in trips:
                 trips[code] = {
@@ -723,9 +827,9 @@ def dashboard():
             if duplicate_flag == "ja":
                 trips[code]["duplicate_count"] += 1
 
-            if amount_eur:
+            if eur_final:
                 try:
-                    trips[code]["sum_eur"] += float(amount_eur.replace(".", "").replace(",", "."))
+                    trips[code]["sum_eur"] += float(eur_final.replace(".", "").replace(",", "."))
                 except Exception:
                     pass
 
@@ -759,11 +863,16 @@ def dashboard():
             else:
                 status = '<span class="badge-ok">vollständig</span>'
 
+            trip_link = ""
+            if code != "(ohne Code)":
+                trip_link = f'<a class="btn-light" href="/trip/{code}">Ereignisse</a>'
+
             actions = ""
             if code != "(ohne Code)":
                 actions = (
                     f'<a class="btn-light" href="/set-hotel?code={code}&mode=customer">Hotel Kunde</a> '
-                    f'<a class="btn-light" href="/set-hotel?code={code}&mode=own">Hotel selbst</a>'
+                    f'<a class="btn-light" href="/set-hotel?code={code}&mode=own">Hotel selbst</a> '
+                    f'{trip_link}'
                 )
 
             table_rows += f"""
@@ -787,8 +896,8 @@ def dashboard():
 
         return HTMLResponse(page_shell("Dashboard", f"""
         <div class="card">
-            <h2>Dashboard 5.6</h2>
-            <div class="sub">UI-Anpassung mit silbernem Logo und neuem Titel.</div>
+            <h2>Dashboard 6.2</h2>
+            <div class="sub">Ereignis-System mit Planung / Abgeschlossen und Ereignis-PDF.</div>
             <p>
                 <a class="btn" href="/fetch-mails">Mails abrufen</a>
                 <a class="btn" href="/analyze-attachments">Anhänge analysieren</a>
@@ -823,6 +932,254 @@ def dashboard():
         """), status_code=500)
 
 
+@app.get("/trip/{trip_code}", response_class=HTMLResponse)
+def trip_detail(trip_code: str):
+    try:
+        ensure_schema()
+
+        conn = get_conn()
+        cur = conn.cursor()
+
+        events = get_trip_events(cur, trip_code)
+
+        rows = ""
+        for event_code, event_type, event_status in events:
+            rows += f"""
+            <tr>
+                <td class="code">{trip_code}</td>
+                <td>{event_code}</td>
+                <td>{event_type}</td>
+                <td>{event_status}</td>
+                <td><a class="btn-light" href="/event/{trip_code}/{event_code}">Öffnen</a></td>
+            </tr>
+            """
+
+        cur.close()
+        conn.close()
+
+        return page_shell("Reise", f"""
+        <div class="card">
+            <h2>Reise {trip_code}</h2>
+            <table>
+                <tr>
+                    <th>Reise</th>
+                    <th>Ereignis</th>
+                    <th>Typ</th>
+                    <th>Status</th>
+                    <th>Aktion</th>
+                </tr>
+                {rows}
+            </table>
+        </div>
+        """)
+    except Exception as e:
+        return page_shell("Fehler", f"""
+        <div class="card">
+            <h2>Reise-Fehler</h2>
+            <p>{str(e)}</p>
+        </div>
+        """)
+
+
+@app.get("/event/{trip_code}/{event_code}", response_class=HTMLResponse)
+def event_detail(trip_code: str, event_code: str):
+    try:
+        ensure_schema()
+
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT id, original_filename, detected_type, detected_role,
+                   original_amount, original_currency, eur_amount_display, eur_amount_final,
+                   fx_status, detected_date, detected_vendor, analysis_status
+            FROM mail_attachments
+            WHERE trip_code=%s AND event_code=%s
+            ORDER BY id
+        """, (trip_code, event_code))
+        rows = cur.fetchall()
+
+        planning_blocks = []
+        completed_blocks = []
+
+        for row in rows:
+            (
+                attachment_id, filename, dtype, drole,
+                original_amount, original_currency, eur_display, eur_final,
+                fx_status, detected_date, detected_vendor, analysis_status
+            ) = row
+
+            side = classify_document_side(drole, eur_final)
+
+            block = f"""
+            <div class="card">
+                <b>{dtype}</b><br>
+                Rolle: {drole or ''}<br>
+                Datei: {filename}<br>
+                Datum: {detected_date or ''}<br>
+                Anbieter: {detected_vendor or ''}<br>
+                Betrag Original: {original_amount or ''} {original_currency or ''}<br>
+                EUR: {eur_final or eur_display or ''}<br>
+                FX Status: {fx_status or ''}<br>
+                Analyse: {analysis_status or ''}<br><br>
+                <a class="btn-light" href="/download-attachment/{attachment_id}">Original herunterladen</a>
+                <a class="btn-light" href="/attachment-ai/{attachment_id}">AI JSON</a>
+            </div>
+            """
+
+            if side == "completed":
+                completed_blocks.append(block)
+            else:
+                planning_blocks.append(block)
+
+        cur.close()
+        conn.close()
+
+        return page_shell("Ereignis", f"""
+        <div class="card">
+            <h2>Reise {trip_code} / Ereignis {event_code}</h2>
+            <p>
+                <a class="btn" href="/event-pdf/{trip_code}/{event_code}">Ereignis-PDF herunterladen</a>
+                <a class="btn-light" href="/trip/{trip_code}">Zur Reise</a>
+            </p>
+        </div>
+
+        <div class="columns">
+            <div class="col">
+                <div class="card">
+                    <h3>Planung</h3>
+                    {''.join(planning_blocks) or 'Keine Daten'}
+                </div>
+            </div>
+            <div class="col">
+                <div class="card">
+                    <h3>Abgeschlossen</h3>
+                    {''.join(completed_blocks) or 'Keine Daten'}
+                </div>
+            </div>
+        </div>
+        """)
+    except Exception as e:
+        return page_shell("Fehler", f"""
+        <div class="card">
+            <h2>Ereignis-Fehler</h2>
+            <p>{str(e)}</p>
+        </div>
+        """)
+
+
+@app.get("/event-pdf/{trip_code}/{event_code}")
+def event_pdf(trip_code: str, event_code: str):
+    try:
+        ensure_schema()
+
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT original_filename, detected_type, detected_role,
+                   original_amount, original_currency, eur_amount_display, eur_amount_final,
+                   fx_status, detected_date, detected_vendor, analysis_status
+            FROM mail_attachments
+            WHERE trip_code=%s AND event_code=%s
+            ORDER BY id
+        """, (trip_code, event_code))
+        rows = cur.fetchall()
+
+        cur.close()
+        conn.close()
+
+        buffer = BytesIO()
+        pdf = canvas.Canvas(buffer, pagesize=A4)
+        width, height = A4
+        y = height - 50
+
+        def line(text, step=15):
+            nonlocal y
+            if y < 60:
+                pdf.showPage()
+                y = height - 50
+            pdf.drawString(40, y, text[:115])
+            y -= step
+
+        pdf.setTitle(f"Reise_{trip_code}_Ereignis_{event_code}")
+        pdf.setFont("Helvetica-Bold", 14)
+        line(f"Reise {trip_code} / Ereignis {event_code}", 22)
+
+        pdf.setFont("Helvetica", 10)
+        line("Zusammenfassung Ereignis", 18)
+        line(" ", 8)
+
+        for row in rows:
+            (
+                filename, dtype, drole, original_amount, original_currency,
+                eur_display, eur_final, fx_status, detected_date, detected_vendor, analysis_status
+            ) = row
+
+            line(f"Dokument: {filename}", 14)
+            line(f"Typ: {dtype} | Rolle: {drole}", 14)
+            line(f"Datum: {detected_date or ''} | Anbieter: {detected_vendor or ''}", 14)
+            line(f"Original: {original_amount or ''} {original_currency or ''}", 14)
+            line(f"EUR final: {eur_final or eur_display or ''} | FX: {fx_status or ''}", 14)
+            line(f"Status: {analysis_status or ''}", 18)
+
+        pdf.save()
+        buffer.seek(0)
+
+        return StreamingResponse(
+            buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="reise_{trip_code}_ereignis_{event_code}.pdf"'
+            }
+        )
+    except Exception as e:
+        return HTMLResponse(page_shell("Fehler", f"""
+        <div class="card">
+            <h2>Ereignis-PDF-Fehler</h2>
+            <p>{str(e)}</p>
+        </div>
+        """), status_code=500)
+
+
+@app.get("/download-attachment/{attachment_id}")
+def download_attachment(attachment_id: int):
+    try:
+        ensure_schema()
+
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT original_filename, storage_key, content_type
+            FROM mail_attachments
+            WHERE id=%s
+        """, (attachment_id,))
+        row = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        if not row:
+            return HTMLResponse("Datei nicht gefunden", status_code=404)
+
+        original_filename, storage_key, content_type = row
+
+        s3 = get_s3()
+        response = s3.get_object(Bucket=S3_BUCKET, Key=storage_key)
+        data = response["Body"].read()
+
+        return StreamingResponse(
+            BytesIO(data),
+            media_type=content_type or "application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{original_filename or "download.bin"}"'
+            }
+        )
+    except Exception as e:
+        return HTMLResponse(f"Download-Fehler: {str(e)}", status_code=500)
+
+
 @app.get("/set-hotel")
 def set_hotel(code: str, mode: str):
     ensure_schema()
@@ -852,11 +1209,12 @@ def reset_mail_log():
     cur = conn.cursor()
     cur.execute("TRUNCATE TABLE mail_attachments RESTART IDENTITY")
     cur.execute("TRUNCATE TABLE mail_messages RESTART IDENTITY")
+    cur.execute("TRUNCATE TABLE trip_events RESTART IDENTITY")
     conn.commit()
     cur.close()
     conn.close()
 
-    return {"status": "mail log und anhaenge geloescht", "version": APP_VERSION}
+    return {"status": "mail log, events und anhaenge geloescht", "version": APP_VERSION}
 
 
 @app.get("/fetch-mails", response_class=HTMLResponse)
@@ -869,7 +1227,7 @@ def fetch_mails():
         mail.login(IMAP_USER, IMAP_PASS)
         mail.select("INBOX")
 
-        status, data = mail.search(None, "ALL")
+        _, data = mail.search(None, "ALL")
         ids = data[0].split()[-20:]
 
         conn = get_conn()
@@ -914,21 +1272,20 @@ def fetch_mails():
             code = extract_trip_code(full_text)
             detected_type = detect_mail_type(full_text)
             detected_destination = detect_destination(full_text)
+            detected_role = detect_document_role(full_text)
 
             ai_result = {}
             confidence = "niedrig"
             review_flag = "pruefen"
 
             if body and len(body) > 80:
-                ai_result = call_mistral_structured(
-                    document_text=full_text,
-                    source_type="email"
-                )
+                ai_result = call_mistral_structured(full_text, "email")
 
                 if "error" in ai_result:
                     ai_result = heuristic_extract(full_text, detected_type)
                 else:
-                    detected_type = ai_result.get("art_des_dokuments", detected_type) or detected_type
+                    detected_type = ai_result.get("document_type", detected_type) or detected_type
+                    detected_role = ai_result.get("document_role", detected_role) or detected_role
                     confidence = ai_result.get("confidence", "mittel")
                     review_flag = ai_result.get("review_flag", "pruefen")
                     ai_processed_emails += 1
@@ -937,19 +1294,12 @@ def fetch_mails():
 
             cur.execute("""
                 INSERT INTO mail_messages
-                (mail_uid, sender, subject, body, trip_code, detected_type, detected_destination, ai_json, confidence, review_flag)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                (mail_uid, sender, subject, body, trip_code, detected_type, detected_role,
+                 detected_destination, ai_json, confidence, review_flag)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (
-                uid,
-                sender,
-                subject,
-                body,
-                code,
-                detected_type,
-                detected_destination,
-                json.dumps(ai_result, ensure_ascii=False),
-                confidence,
-                review_flag
+                uid, sender, subject, body, code, detected_type, detected_role,
+                detected_destination, json.dumps(ai_result, ensure_ascii=False), confidence, review_flag
             ))
 
             if msg.is_multipart():
@@ -962,7 +1312,7 @@ def fetch_mails():
                     if filename:
                         decoded_filename = decode_mime_header(filename)
                     else:
-                        ext = ""
+                        ext = ".bin"
                         content_type = part.get_content_type()
                         if content_type == "application/pdf":
                             ext = ".pdf"
@@ -974,8 +1324,6 @@ def fetch_mails():
                             ext = ".webp"
                         elif content_type == "text/calendar":
                             ext = ".ics"
-                        else:
-                            ext = ".bin"
                         decoded_filename = f"attachment{ext}"
 
                     payload = part.get_payload(decode=True)
@@ -993,31 +1341,19 @@ def fetch_mails():
                         ContentType=part.get_content_type() or "application/octet-stream"
                     )
 
-                    attachment_type = detect_attachment_type(
-                        safe_original,
-                        subject,
-                        body
-                    )
+                    attachment_type = detect_attachment_type(safe_original, subject, body)
+                    attachment_role = detect_document_role(full_text, safe_original)
 
                     cur.execute("""
                         INSERT INTO mail_attachments
                         (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path,
-                         detected_type, analysis_status, storage_key, confidence, review_flag, duplicate_flag, ai_json)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         detected_type, detected_role, analysis_status, storage_key, confidence,
+                         review_flag, duplicate_flag, ai_json)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (
-                        uid,
-                        code,
-                        safe_original,
-                        saved_filename,
-                        part.get_content_type(),
-                        storage_key,
-                        attachment_type,
-                        "neu",
-                        storage_key,
-                        "niedrig",
-                        "pruefen",
-                        "",
-                        ""
+                        uid, code, safe_original, saved_filename, part.get_content_type(), storage_key,
+                        attachment_type, attachment_role, "neu", storage_key, "niedrig",
+                        "pruefen", "", ""
                     ))
 
                     attachment_count += 1
@@ -1059,7 +1395,7 @@ def analyze_attachments():
         cur = conn.cursor()
 
         cur.execute("""
-            SELECT id, trip_code, storage_key, original_filename, detected_type
+            SELECT id, trip_code, storage_key, original_filename, detected_type, detected_role
             FROM mail_attachments
             ORDER BY id
         """)
@@ -1069,11 +1405,11 @@ def analyze_attachments():
         ai_processed = 0
 
         for row in rows:
-            attachment_id = row[0]
-            trip_code = row[1]
-            storage_key = row[2] or ""
-            original_filename = row[3] or ""
-            detected_type = row[4] or "Unbekannt"
+            attachment_id, trip_code, storage_key, original_filename, detected_type, detected_role = row
+            storage_key = storage_key or ""
+            original_filename = original_filename or ""
+            detected_type = detected_type or "Unbekannt"
+            detected_role = detected_role or "unknown"
 
             if not storage_key:
                 status = "kein storage key"
@@ -1083,9 +1419,11 @@ def analyze_attachments():
                 cur.execute("""
                     UPDATE mail_attachments
                     SET extracted_text=%s,
-                        detected_amount=%s,
-                        detected_amount_eur=%s,
-                        detected_currency=%s,
+                        original_amount=%s,
+                        original_currency=%s,
+                        eur_amount_display=%s,
+                        eur_amount_final=%s,
+                        fx_status=%s,
                         detected_date=%s,
                         detected_vendor=%s,
                         analysis_status=%s,
@@ -1094,7 +1432,8 @@ def analyze_attachments():
                         duplicate_flag=%s
                     WHERE id=%s
                 """, (
-                    "KEIN_STORAGE_KEY", "", "", "", "", "", status, confidence, review_flag, duplicate_flag, attachment_id
+                    "KEIN_STORAGE_KEY", "", "", "", "", "manuelle_korrektur_offen",
+                    "", "", status, confidence, review_flag, duplicate_flag, attachment_id
                 ))
                 processed += 1
                 continue
@@ -1107,9 +1446,11 @@ def analyze_attachments():
                 cur.execute("""
                     UPDATE mail_attachments
                     SET extracted_text=%s,
-                        detected_amount=%s,
-                        detected_amount_eur=%s,
-                        detected_currency=%s,
+                        original_amount=%s,
+                        original_currency=%s,
+                        eur_amount_display=%s,
+                        eur_amount_final=%s,
+                        fx_status=%s,
                         detected_date=%s,
                         detected_vendor=%s,
                         analysis_status=%s,
@@ -1118,7 +1459,8 @@ def analyze_attachments():
                         duplicate_flag=%s
                     WHERE id=%s
                 """, (
-                    "NICHT_ANALYSIERBAR", "", "", "", "", "", status, confidence, review_flag, duplicate_flag, attachment_id
+                    "NICHT_ANALYSIERBAR", "", "", "", "", "manuelle_korrektur_offen",
+                    "", "", status, confidence, review_flag, duplicate_flag, attachment_id
                 ))
                 processed += 1
                 continue
@@ -1134,60 +1476,74 @@ def analyze_attachments():
                 status = "kein text"
 
             ai_result = {}
-            amount = ""
-            currency = ""
-            amount_eur = ""
-            date = ""
-            vendor = ""
+            original_amount = ""
+            original_currency = ""
+            eur_amount_display = ""
+            eur_amount_final = ""
+            fx_status = "manuelle_korrektur_offen"
+            detected_date = ""
+            detected_vendor = ""
             confidence = "niedrig"
             review_flag = "pruefen"
+            event_code = None
 
             if status == "ok":
-                ai_result = call_mistral_structured(
-                    document_text=text,
-                    source_type="pdf"
-                )
+                ai_result = call_mistral_structured(text, "pdf")
 
                 if "error" in ai_result:
-                    fallback = heuristic_extract(text, detected_type)
+                    fallback = heuristic_extract(text, detected_type, original_filename)
                     ai_result = fallback
-                    detected_type = fallback.get("art_des_dokuments", detected_type)
-                    amount = fallback.get("kosten_mit_steuern", "")
-                    currency = fallback.get("waehrung", "EUR")
-                    amount_eur = convert_to_eur(amount, currency)
-                    date = fallback.get("belegdatum", "")
-                    vendor = fallback.get("_vendor_fallback", "")
+                    detected_type = fallback.get("document_type", detected_type)
+                    detected_role = fallback.get("document_role", detected_role)
+                    original_amount = fallback.get("total_amount", "")
+                    original_currency = fallback.get("currency", "EUR")
+                    eur_amount_display, eur_amount_final, _, fx_status = handle_currency(original_amount, original_currency)
+                    detected_date = fallback.get("document_date", "")
+                    detected_vendor = fallback.get("_vendor_fallback", "")
                     confidence = fallback.get("confidence", "niedrig")
                     review_flag = fallback.get("review_flag", "pruefen")
+                    booking_code = fallback.get("booking_code", "")
+                    person_name = fallback.get("person_name", "")
                 else:
-                    detected_type = ai_result.get("art_des_dokuments", detected_type) or detected_type
-                    amount = ai_result.get("kosten_mit_steuern", "") or ""
-                    currency = ai_result.get("waehrung", "EUR") or "EUR"
-                    amount_eur = convert_to_eur(amount, currency)
-                    date = ai_result.get("belegdatum", "") or ""
-                    segments = ai_result.get("segmente", []) or []
+                    detected_type = ai_result.get("document_type", detected_type) or detected_type
+                    detected_role = ai_result.get("document_role", detected_role) or detected_role
+                    original_amount = ai_result.get("total_amount", "") or ""
+                    original_currency = ai_result.get("currency", "EUR") or "EUR"
+                    eur_amount_display, eur_amount_final, _, fx_status = handle_currency(original_amount, original_currency)
+                    detected_date = ai_result.get("document_date", "") or ""
+                    booking_code = ai_result.get("booking_code", "") or ""
+                    person_name = ai_result.get("person_name", "") or ""
+
+                    segments = ai_result.get("segments", []) or []
                     if segments:
-                        vendor = segments[0].get("transportunternehmen_oder_unterkunft", "") or ""
-                    if not vendor:
-                        vendor = ""
+                        detected_vendor = segments[0].get("transportunternehmen_oder_unterkunft", "") or ""
+                    if not detected_vendor:
+                        detected_vendor = ""
+
                     confidence = ai_result.get("confidence", "mittel") or "mittel"
                     review_flag = ai_result.get("review_flag", "pruefen") or "pruefen"
                     ai_processed += 1
+
+                event_code = assign_event(cur, trip_code, detected_type, booking_code, person_name, detected_vendor)
             else:
                 confidence = "niedrig"
                 review_flag = "pruefen"
 
             duplicate_flag = maybe_mark_duplicate(
-                cur, trip_code, detected_type, amount, date, vendor, attachment_id
+                cur, trip_code, detected_type, original_amount, detected_date, detected_vendor, attachment_id
             )
 
             cur.execute("""
                 UPDATE mail_attachments
                 SET extracted_text=%s,
                     detected_type=%s,
-                    detected_amount=%s,
-                    detected_amount_eur=%s,
-                    detected_currency=%s,
+                    detected_role=%s,
+                    event_code=%s,
+                    original_amount=%s,
+                    original_currency=%s,
+                    eur_amount_display=%s,
+                    eur_amount_final=%s,
+                    fx_status=%s,
                     detected_date=%s,
                     detected_vendor=%s,
                     analysis_status=%s,
@@ -1199,11 +1555,15 @@ def analyze_attachments():
             """, (
                 text,
                 detected_type,
-                amount,
-                amount_eur,
-                currency,
-                date,
-                vendor,
+                detected_role,
+                event_code,
+                original_amount,
+                original_currency,
+                eur_amount_display,
+                eur_amount_final,
+                fx_status,
+                detected_date,
+                detected_vendor,
                 status,
                 confidence,
                 review_flag,
@@ -1311,7 +1671,7 @@ def trip_review():
 
         return page_shell("Reisebewertung", f"""
         <div class="card">
-            <h2>Reisebewertung v5.6</h2>
+            <h2>Reisebewertung v6.2</h2>
             <table>
                 <tr>
                     <th>Code</th>
@@ -1346,7 +1706,7 @@ def mail_log():
         cur = conn.cursor()
 
         cur.execute("""
-            SELECT sender, subject, trip_code, detected_type, detected_destination, confidence, review_flag
+            SELECT sender, subject, trip_code, detected_type, detected_role, detected_destination, confidence, review_flag
             FROM mail_messages
             ORDER BY id DESC
             LIMIT 50
@@ -1364,6 +1724,7 @@ def mail_log():
                 <td>{r[4] or ''}</td>
                 <td>{r[5] or ''}</td>
                 <td>{r[6] or ''}</td>
+                <td>{r[7] or ''}</td>
             </tr>
             """
 
@@ -1378,8 +1739,9 @@ def mail_log():
                     <th>Von</th>
                     <th>Betreff</th>
                     <th>Code</th>
-                    <th>Typ erkannt</th>
-                    <th>Ziel erkannt</th>
+                    <th>Typ</th>
+                    <th>Rolle</th>
+                    <th>Ziel</th>
                     <th>Confidence</th>
                     <th>Review</th>
                 </tr>
@@ -1405,9 +1767,10 @@ def attachment_log():
         cur = conn.cursor()
 
         cur.execute("""
-            SELECT trip_code, original_filename, detected_type, detected_amount, detected_amount_eur,
-                   detected_currency, detected_date, detected_vendor, analysis_status,
-                   confidence, review_flag, duplicate_flag, storage_key
+            SELECT trip_code, event_code, original_filename, detected_type, detected_role,
+                   original_amount, original_currency, eur_amount_final, fx_status,
+                   detected_date, detected_vendor, analysis_status, confidence,
+                   review_flag, duplicate_flag, storage_key
             FROM mail_attachments
             ORDER BY id DESC
             LIMIT 100
@@ -1431,6 +1794,9 @@ def attachment_log():
                 <td>{r[10] or ''}</td>
                 <td>{r[11] or ''}</td>
                 <td>{r[12] or ''}</td>
+                <td>{r[13] or ''}</td>
+                <td>{r[14] or ''}</td>
+                <td>{r[15] or ''}</td>
             </tr>
             """
 
@@ -1439,15 +1805,18 @@ def attachment_log():
 
         return page_shell("Anhang Log", f"""
         <div class="card">
-            <h2>Anhang Log mit Analyse v5.6</h2>
+            <h2>Anhang Log mit Analyse v6.2</h2>
             <table>
                 <tr>
                     <th>Code</th>
+                    <th>Ereignis</th>
                     <th>Datei</th>
-                    <th>Typ erkannt</th>
-                    <th>Betrag</th>
-                    <th>Betrag EUR</th>
-                    <th>Währung</th>
+                    <th>Typ</th>
+                    <th>Rolle</th>
+                    <th>Original Betrag</th>
+                    <th>Original Währung</th>
+                    <th>EUR final</th>
+                    <th>FX Status</th>
                     <th>Datum</th>
                     <th>Anbieter</th>
                     <th>Status</th>
