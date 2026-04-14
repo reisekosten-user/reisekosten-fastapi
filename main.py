@@ -16,7 +16,7 @@ from io import BytesIO
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
-APP_VERSION = "6.2"
+APP_VERSION = "6.3"
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -33,7 +33,6 @@ S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
 S3_REGION = os.getenv("S3_REGION")
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
-
 MISTRAL_CHAT_URL = "https://api.mistral.ai/v1/chat/completions"
 MISTRAL_MODEL = "mistral-small-latest"
 
@@ -66,6 +65,7 @@ def ensure_schema():
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS subject TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS body TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS trip_code TEXT")
+    cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS document_group TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_type TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_role TEXT")
     cur.execute("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS detected_destination TEXT")
@@ -98,6 +98,8 @@ def ensure_schema():
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS saved_filename TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS content_type TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS file_path TEXT")
+
+    cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS document_group TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_type TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS detected_role TEXT")
     cur.execute("ALTER TABLE mail_attachments ADD COLUMN IF NOT EXISTS extracted_text TEXT")
@@ -148,110 +150,10 @@ def decode_mime_header(value):
     return "".join(result)
 
 
-def detect_mail_type(text: str):
-    t = (text or "").lower()
-
-    if any(x in t for x in [
-        "flug", "flight", "boarding", "boardingpass", "boarding pass",
-        "pnr", "ticket", "airline", "itinerary", "e-ticket", "eticket"
-    ]):
-        return "Flug"
-
-    if any(x in t for x in [
-        "hotel", "booking.com", "check-in", "check out", "check-out",
-        "reservation", "zimmer", "accommodation"
-    ]):
-        return "Hotel"
-
-    if any(x in t for x in ["taxi", "uber", "cab", "ride"]):
-        return "Taxi"
-
-    if any(x in t for x in ["bahn", "zug", "train", "ice", "db "]):
-        return "Bahn"
-
-    if any(x in t for x in [
-        "meal", "restaurant", "verpflegung", "essen",
-        "dinner", "lunch", "breakfast", "food"
-    ]):
-        return "Essen"
-
-    if any(x in t for x in ["mietwagen", "rental car", "car rental", "hertz", "sixt", "avis"]):
-        return "Mietwagen"
-
-    return "Unbekannt"
-
-
-def detect_destination(text: str):
-    t = (text or "").lower()
-    places = [
-        "delhi", "mumbai", "bangalore", "new york", "london", "paris",
-        "dubai", "shanghai", "beijing", "tokyo", "singapore", "mexico city",
-        "lyon", "frankfurt", "zaq", "zürich", "zurich", "san josé", "san jose"
-    ]
-    for place in places:
-        if place in t:
-            return place.title()
-    return ""
-
-
 def sanitize_filename(name: str):
     name = (name or "").replace("\\", "_").replace("/", "_").strip()
     name = re.sub(r"[^A-Za-z0-9._ -]", "_", name)
     return name[:180] if name else "attachment.bin"
-
-
-def detect_attachment_type(filename: str, subject: str, body: str):
-    filename = filename or ""
-    text = f"{filename} {subject or ''} {body or ''}".lower()
-
-    if filename.lower().endswith(".ics"):
-        return "Kalendereintrag"
-    if filename.lower().endswith(".emz"):
-        return "Inline-Grafik"
-
-    if any(x in text for x in [
-        "boarding", "boardingpass", "boarding pass", "eticket",
-        "e-ticket", "flight", "flug", "ticket", "pnr", "itinerary"
-    ]):
-        return "Flug"
-
-    if any(x in text for x in [
-        "hotel", "booking", "reservation", "zimmer", "check-in", "check-out"
-    ]):
-        return "Hotel"
-
-    if any(x in text for x in ["taxi", "uber", "cab", "receipt_", "ride"]):
-        return "Taxi"
-
-    if any(x in text for x in ["bahn", "zug", "train", "ice", "db"]):
-        return "Bahn"
-
-    if any(x in text for x in [
-        "meal", "restaurant", "essen", "verpflegung",
-        "breakfast", "lunch", "dinner", "food"
-    ]):
-        return "Essen"
-
-    if any(x in text for x in ["mietwagen", "rental", "car rental", "hertz", "sixt", "avis"]):
-        return "Mietwagen"
-
-    return "Unbekannt"
-
-
-def detect_document_role(text: str, filename: str = ""):
-    combined = f"{filename} {text or ''}".lower()
-
-    if filename.lower().endswith(".ics"):
-        return "calendar_entry"
-    if any(x in combined for x in ["invoice", "receipt", "quittung", "rechnung"]):
-        if "uber" in combined or "taxi" in combined:
-            return "receipt"
-        return "invoice"
-    if any(x in combined for x in ["itinerary", "e-ticket", "ticket", "flight details"]):
-        return "itinerary"
-    if any(x in combined for x in ["booking confirmation", "reservation", "check-in", "check-out", "booked"]):
-        return "booking_confirmation"
-    return "unknown"
 
 
 def is_supported_analysis_file(filename: str):
@@ -274,7 +176,6 @@ def extract_text_from_s3_object(storage_key: str, filename: str):
             return text[:30000] if text else "KEIN_TEXT_GEFUNDEN"
 
         return "NICHT_ANALYSIERBAR"
-
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -284,7 +185,6 @@ def handle_currency(amount_str: str, currency: str):
         return "", "", "", "manuelle_korrektur_offen"
 
     currency = (currency or "").upper()
-
     if currency == "EUR":
         return amount_str, amount_str, amount_str, "direkt_eur"
 
@@ -338,18 +238,18 @@ def maybe_mark_duplicate(cur, trip_code, detected_type, original_amount, detecte
     return "ja" if count > 0 else ""
 
 
-def assign_event(cur, trip_code, doc_type, booking_code, person_name, vendor_name):
+def assign_event(cur, trip_code, document_group, detected_type, booking_code, person_name, vendor_name):
     if not trip_code:
         return None
 
     event_anchor = booking_code or person_name or vendor_name or "generic"
-    event_key = f"{trip_code}_{doc_type}_{event_anchor}"
+    event_key = f"{trip_code}_{document_group}_{detected_type}_{event_anchor}"
 
     cur.execute("""
         SELECT event_code
         FROM trip_events
         WHERE trip_code=%s AND event_type=%s AND event_key=%s
-    """, (trip_code, doc_type, event_key))
+    """, (trip_code, detected_type, event_key))
     row = cur.fetchone()
     if row:
         return row[0]
@@ -360,37 +260,53 @@ def assign_event(cur, trip_code, doc_type, booking_code, person_name, vendor_nam
         WHERE trip_code=%s
     """, (trip_code,))
     count = cur.fetchone()[0] + 1
-
     event_code = f"{count:02d}"
 
     cur.execute("""
         INSERT INTO trip_events (trip_code, event_code, event_type, event_status, event_key)
         VALUES (%s,%s,%s,%s,%s)
-    """, (trip_code, event_code, doc_type, "in_planung", event_key))
+    """, (trip_code, event_code, detected_type, "in_planung", event_key))
 
     return event_code
 
 
-def mistral_schema():
+def schema_classification():
     return {
-        "name": "reisekosten_extraction",
+        "name": "document_classification",
         "schema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "document_type": {
+                "document_group": {
                     "type": "string",
-                    "enum": ["Flug", "Hotel", "Zug", "Taxi", "Essen", "Bahn", "Mietwagen", "Kalendereintrag", "Sonstiges", "Unbekannt"]
+                    "enum": ["transport", "accommodation", "restaurant", "supporting_document", "unknown"]
                 },
+                "document_type": {"type": "string"},
                 "document_role": {
                     "type": "string",
-                    "enum": ["booking_confirmation", "itinerary", "invoice", "receipt", "calendar_entry", "unknown"]
+                    "enum": ["booking_confirmation", "itinerary", "invoice", "receipt", "calendar_entry", "information_only", "unknown"]
                 },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["hoch", "mittel", "niedrig"]
+                }
+            },
+            "required": ["document_group", "document_type", "document_role", "confidence"]
+        }
+    }
+
+
+def schema_transport():
+    return {
+        "name": "transport_details",
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
                 "person_name": {"type": "string"},
                 "booking_code": {"type": "string"},
+                "ticket_number": {"type": "string"},
                 "document_date": {"type": "string"},
-                "travel_reference": {"type": "string"},
-                "trip_segments_count": {"type": "integer"},
                 "currency": {"type": "string"},
                 "total_amount": {"type": "string"},
                 "segments": {
@@ -399,30 +315,20 @@ def mistral_schema():
                         "type": "object",
                         "additionalProperties": False,
                         "properties": {
-                            "segment_nr": {"type": "integer"},
-                            "abreise_datum_zeit": {"type": "string"},
-                            "ankunft_datum_zeit": {"type": "string"},
-                            "abreise_zeitzone": {"type": "string"},
-                            "ankunft_zeitzone": {"type": "string"},
-                            "abreiseort": {"type": "string"},
-                            "ankunftsort": {"type": "string"},
-                            "abreiseort_code": {"type": "string"},
-                            "ankunftsort_code": {"type": "string"},
-                            "transportunternehmen_oder_unterkunft": {"type": "string"},
-                            "transportnummer": {"type": "string"}
+                            "departure_datetime": {"type": "string"},
+                            "arrival_datetime": {"type": "string"},
+                            "departure_location": {"type": "string"},
+                            "arrival_location": {"type": "string"},
+                            "provider": {"type": "string"},
+                            "transport_number": {"type": "string"}
                         },
                         "required": [
-                            "segment_nr",
-                            "abreise_datum_zeit",
-                            "ankunft_datum_zeit",
-                            "abreise_zeitzone",
-                            "ankunft_zeitzone",
-                            "abreiseort",
-                            "ankunftsort",
-                            "abreiseort_code",
-                            "ankunftsort_code",
-                            "transportunternehmen_oder_unterkunft",
-                            "transportnummer"
+                            "departure_datetime",
+                            "arrival_datetime",
+                            "departure_location",
+                            "arrival_location",
+                            "provider",
+                            "transport_number"
                         ]
                     }
                 },
@@ -444,13 +350,10 @@ def mistral_schema():
                 }
             },
             "required": [
-                "document_type",
-                "document_role",
                 "person_name",
                 "booking_code",
+                "ticket_number",
                 "document_date",
-                "travel_reference",
-                "trip_segments_count",
                 "currency",
                 "total_amount",
                 "segments",
@@ -463,39 +366,157 @@ def mistral_schema():
     }
 
 
-def call_mistral_structured(document_text: str, source_type: str):
+def schema_accommodation():
+    return {
+        "name": "accommodation_details",
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "person_name": {"type": "string"},
+                "booking_code": {"type": "string"},
+                "hotel_name": {"type": "string"},
+                "location": {"type": "string"},
+                "checkin_date": {"type": "string"},
+                "checkout_date": {"type": "string"},
+                "nights": {"type": "integer"},
+                "currency": {"type": "string"},
+                "total_amount": {"type": "string"},
+                "taxes": {"type": "string"},
+                "line_items": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "extras": {
+                    "type": "object",
+                    "additionalProperties": True
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["hoch", "mittel", "niedrig"]
+                },
+                "review_flag": {
+                    "type": "string",
+                    "enum": ["ok", "pruefen"]
+                }
+            },
+            "required": [
+                "person_name",
+                "booking_code",
+                "hotel_name",
+                "location",
+                "checkin_date",
+                "checkout_date",
+                "nights",
+                "currency",
+                "total_amount",
+                "taxes",
+                "line_items",
+                "extras",
+                "confidence",
+                "review_flag"
+            ]
+        }
+    }
+
+
+def schema_restaurant():
+    return {
+        "name": "restaurant_details",
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "vendor": {"type": "string"},
+                "location": {"type": "string"},
+                "document_date": {"type": "string"},
+                "currency": {"type": "string"},
+                "total_amount": {"type": "string"},
+                "tax_amount": {"type": "string"},
+                "line_items": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "extras": {
+                    "type": "object",
+                    "additionalProperties": True
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["hoch", "mittel", "niedrig"]
+                },
+                "review_flag": {
+                    "type": "string",
+                    "enum": ["ok", "pruefen"]
+                }
+            },
+            "required": [
+                "vendor",
+                "location",
+                "document_date",
+                "currency",
+                "total_amount",
+                "tax_amount",
+                "line_items",
+                "extras",
+                "confidence",
+                "review_flag"
+            ]
+        }
+    }
+
+
+def schema_supporting():
+    return {
+        "name": "supporting_document_details",
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "description": {"type": "string"},
+                "dates": {"type": "string"},
+                "locations": {"type": "string"},
+                "line_items": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "extras": {
+                    "type": "object",
+                    "additionalProperties": True
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["hoch", "mittel", "niedrig"]
+                },
+                "review_flag": {
+                    "type": "string",
+                    "enum": ["ok", "pruefen"]
+                }
+            },
+            "required": [
+                "description",
+                "dates",
+                "locations",
+                "line_items",
+                "extras",
+                "confidence",
+                "review_flag"
+            ]
+        }
+    }
+
+
+def mistral_request(messages, schema):
     if not MISTRAL_API_KEY:
         return {"error": "MISTRAL_API_KEY fehlt"}
 
-    system_prompt = (
-        "Du bist ein Extraktionsmodul für ein deutsches Reisekosten-System. "
-        "Extrahiere strukturierte Daten nur aus dem übergebenen Dokumenttext. "
-        "Erfinde keine Werte. "
-        "Wenn ein Feld nicht vorhanden ist, gib leeren String oder leeres Array zurück. "
-        "Unterscheide IMMER document_type und document_role. "
-        "Hotels können booking_confirmation oder invoice sein. "
-        "Flug-/Zug-Dokumente mit mehreren Segmenten bleiben ein zusammengehöriger Vorgang. "
-        "Gib nur JSON zurück, das exakt dem Schema entspricht."
-    )
-
-    user_prompt = (
-        f"Quelle: {source_type}\n\n"
-        "Analysiere den folgenden Text für ein Reisekosten-System.\n"
-        "Extrahiere document_type, document_role, person_name, booking_code, document_date, "
-        "travel_reference, trip_segments_count, currency, total_amount, segments, line_items, extras, confidence und review_flag.\n\n"
-        f"Text:\n{document_text[:24000]}"
-    )
-
     payload = {
         "model": MISTRAL_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
+        "messages": messages,
         "temperature": 0,
         "response_format": {
             "type": "json_schema",
-            "json_schema": mistral_schema()
+            "json_schema": schema
         }
     }
 
@@ -521,12 +542,118 @@ def call_mistral_structured(document_text: str, source_type: str):
         return {"error": str(e)}
 
 
-def heuristic_extract(text: str, detected_type: str, filename: str = ""):
-    date = ""
+def mistral_classify(document_text: str, source_type: str):
+    system_prompt = (
+        "Du bist ein Dokumenten-Analyse-System für ein Reisekosten-Tool. "
+        "Klassifiziere das Dokument allgemein. "
+        "Keine Annahmen. Nur Informationen aus dem Dokument. "
+        "Wenn unsicher, verwende unknown."
+    )
+    user_prompt = (
+        f"Quelle: {source_type}\n\n"
+        "Analysiere das Dokument und klassifiziere es.\n\n"
+        f"Text:\n{document_text[:24000]}"
+    )
+    return mistral_request(
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+        schema_classification()
+    )
+
+
+def mistral_extract_by_group(document_text: str, source_type: str, document_group: str):
+    if document_group == "transport":
+        schema = schema_transport()
+        prompt = (
+            "Extrahiere alle relevanten Informationen aus einem Transport-Dokument. "
+            "Dokument kann sein: Flug, Zug, Taxi, Shuttle, Mietwagen. "
+            "Mehrere Segmente gehören zusammen. Zeiten exakt übernehmen. "
+            "Währungen nicht umrechnen. Nur echte Werte extrahieren."
+        )
+    elif document_group == "accommodation":
+        schema = schema_accommodation()
+        prompt = (
+            "Extrahiere alle relevanten Informationen aus einer Unterkunft. "
+            "Check-in und Check-out sind zentral. Preise können pro Nacht oder gesamt sein. "
+            "Steuern und Zusatzkosten separat erfassen. Keine Annahmen."
+        )
+    elif document_group == "restaurant":
+        schema = schema_restaurant()
+        prompt = (
+            "Extrahiere alle relevanten Informationen aus einem Restaurant- oder Verpflegungsbeleg. "
+            "Gesamtbetrag ist entscheidend. Steuer oder MwSt getrennt erfassen. "
+            "Einzelpositionen optional."
+        )
+    else:
+        schema = schema_supporting()
+        prompt = (
+            "Dieses Dokument ist ein unterstützendes Dokument. "
+            "Extrahiere nur relevante Zeitdaten, Orte und Kontext. "
+            "Keine Annahmen."
+        )
+
+    return mistral_request(
+        [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": f"Quelle: {source_type}\n\nText:\n{document_text[:24000]}"}
+        ],
+        schema
+    )
+
+
+def heuristic_classify(text: str, filename: str = ""):
+    combined = f"{filename} {text or ''}".lower()
+
+    if filename.lower().endswith(".ics"):
+        return {
+            "document_group": "supporting_document",
+            "document_type": "Kalendereintrag",
+            "document_role": "calendar_entry",
+            "confidence": "mittel"
+        }
+
+    if any(x in combined for x in ["hotel", "airbnb", "check-in", "check-out", "reservation"]):
+        return {
+            "document_group": "accommodation",
+            "document_type": "Hotel",
+            "document_role": "booking_confirmation" if "reservation" in combined else "unknown",
+            "confidence": "niedrig"
+        }
+
+    if any(x in combined for x in ["flight", "flug", "ticket", "itinerary", "boarding", "train", "bahn", "uber", "taxi", "shuttle", "mietwagen", "rental"]):
+        role = "unknown"
+        if "itinerary" in combined or "ticket" in combined:
+            role = "itinerary"
+        if "receipt" in combined or "invoice" in combined or "rechnung" in combined:
+            role = "receipt"
+        return {
+            "document_group": "transport",
+            "document_type": "Transport",
+            "document_role": role,
+            "confidence": "niedrig"
+        }
+
+    if any(x in combined for x in ["restaurant", "meal", "essen", "verpflegung", "bar", "cafe"]):
+        return {
+            "document_group": "restaurant",
+            "document_type": "Restaurant",
+            "document_role": "receipt",
+            "confidence": "niedrig"
+        }
+
+    return {
+        "document_group": "unknown",
+        "document_type": "Unbekannt",
+        "document_role": "unknown",
+        "confidence": "niedrig"
+    }
+
+
+def heuristic_extract(text: str, document_group: str):
     patterns = [
         r"\b\d{2}[./]\d{2}[./]\d{4}\b",
         r"\b\d{1,2}\s+[A-Za-zäöüÄÖÜ]+\s+\d{4}\b"
     ]
+    date = ""
     for p in patterns:
         m = re.search(p, text or "")
         if m:
@@ -545,29 +672,120 @@ def heuristic_extract(text: str, detected_type: str, filename: str = ""):
     elif " gbp" in lower or "£" in lower:
         currency = "GBP"
 
-    vendor = ""
-    vendor_words = ["uber", "lufthansa", "marriott", "booking", "hotel", "air france", "swiss"]
-    for w in vendor_words:
-        if w in lower:
-            vendor = w.title()
-            break
+    if document_group == "transport":
+        return {
+            "person_name": "",
+            "booking_code": "",
+            "ticket_number": "",
+            "document_date": date,
+            "currency": currency,
+            "total_amount": amount,
+            "segments": [],
+            "line_items": [],
+            "extras": {},
+            "confidence": "niedrig",
+            "review_flag": "pruefen"
+        }
+    if document_group == "accommodation":
+        return {
+            "person_name": "",
+            "booking_code": "",
+            "hotel_name": "",
+            "location": "",
+            "checkin_date": "",
+            "checkout_date": "",
+            "nights": 0,
+            "currency": currency,
+            "total_amount": amount,
+            "taxes": "",
+            "line_items": [],
+            "extras": {},
+            "confidence": "niedrig",
+            "review_flag": "pruefen"
+        }
+    if document_group == "restaurant":
+        return {
+            "vendor": "",
+            "location": "",
+            "document_date": date,
+            "currency": currency,
+            "total_amount": amount,
+            "tax_amount": "",
+            "line_items": [],
+            "extras": {},
+            "confidence": "niedrig",
+            "review_flag": "pruefen"
+        }
 
     return {
-        "document_type": detected_type or "Unbekannt",
-        "document_role": detect_document_role(text, filename),
-        "person_name": "",
-        "booking_code": "",
-        "document_date": date,
-        "travel_reference": "",
-        "trip_segments_count": 0,
-        "currency": currency,
-        "total_amount": amount,
-        "segments": [],
+        "description": "",
+        "dates": date,
+        "locations": "",
         "line_items": [],
         "extras": {},
         "confidence": "niedrig",
-        "review_flag": "pruefen",
-        "_vendor_fallback": vendor
+        "review_flag": "pruefen"
+    }
+
+
+def normalize_extraction(document_group: str, classification: dict, details: dict):
+    detected_type = classification.get("document_type", "Unbekannt") or "Unbekannt"
+    detected_role = classification.get("document_role", "unknown") or "unknown"
+    confidence = details.get("confidence") or classification.get("confidence", "niedrig") or "niedrig"
+    review_flag = details.get("review_flag", "pruefen") or "pruefen"
+
+    booking_code = ""
+    person_name = ""
+    detected_date = ""
+    original_amount = ""
+    original_currency = ""
+    detected_vendor = ""
+
+    if document_group == "transport":
+        booking_code = details.get("booking_code", "")
+        person_name = details.get("person_name", "")
+        detected_date = details.get("document_date", "")
+        original_amount = details.get("total_amount", "")
+        original_currency = details.get("currency", "")
+        segments = details.get("segments", []) or []
+        if segments:
+            detected_vendor = segments[0].get("provider", "") or ""
+
+    elif document_group == "accommodation":
+        booking_code = details.get("booking_code", "")
+        person_name = details.get("person_name", "")
+        detected_date = details.get("checkin_date", "") or details.get("checkout_date", "")
+        original_amount = details.get("total_amount", "")
+        original_currency = details.get("currency", "")
+        detected_vendor = details.get("hotel_name", "")
+
+    elif document_group == "restaurant":
+        detected_date = details.get("document_date", "")
+        original_amount = details.get("total_amount", "")
+        original_currency = details.get("currency", "")
+        detected_vendor = details.get("vendor", "")
+
+    else:
+        detected_date = details.get("dates", "")
+        detected_vendor = details.get("locations", "")
+
+    eur_amount_display, eur_amount_final, _, fx_status = handle_currency(original_amount, original_currency)
+
+    return {
+        "document_group": document_group,
+        "detected_type": detected_type,
+        "detected_role": detected_role,
+        "booking_code": booking_code,
+        "person_name": person_name,
+        "detected_date": detected_date,
+        "original_amount": original_amount,
+        "original_currency": original_currency,
+        "eur_amount_display": eur_amount_display,
+        "eur_amount_final": eur_amount_final,
+        "fx_status": fx_status,
+        "detected_vendor": detected_vendor,
+        "confidence": confidence,
+        "review_flag": review_flag
     }
 
 
@@ -816,9 +1034,9 @@ def dashboard():
                 trips[code]["flight"] = True
             elif detected_type == "Hotel":
                 trips[code]["hotel"] = True
-            elif detected_type == "Taxi":
+            elif detected_type in ["Taxi", "Transport"]:
                 trips[code]["taxi"] = True
-            elif detected_type == "Essen":
+            elif detected_type in ["Essen", "Restaurant"]:
                 trips[code]["essen"] = True
 
             if review_flag == "pruefen":
@@ -896,8 +1114,8 @@ def dashboard():
 
         return HTMLResponse(page_shell("Dashboard", f"""
         <div class="card">
-            <h2>Dashboard 6.2</h2>
-            <div class="sub">Ereignis-System mit Planung / Abgeschlossen und Ereignis-PDF.</div>
+            <h2>Dashboard 6.3</h2>
+            <div class="sub">Zweistufige Mistral-Analyse: Klassifikation zuerst, dann gruppenspezifische Extraktion.</div>
             <p>
                 <a class="btn" href="/fetch-mails">Mails abrufen</a>
                 <a class="btn" href="/analyze-attachments">Anhänge analysieren</a>
@@ -910,8 +1128,8 @@ def dashboard():
                     <th>Code</th>
                     <th>Flug</th>
                     <th>Hotel</th>
-                    <th>Taxi</th>
-                    <th>Essen</th>
+                    <th>Transport</th>
+                    <th>Restaurant</th>
                     <th>Offen</th>
                     <th>Summe EUR</th>
                     <th>Warnungen</th>
@@ -936,7 +1154,6 @@ def dashboard():
 def trip_detail(trip_code: str):
     try:
         ensure_schema()
-
         conn = get_conn()
         cur = conn.cursor()
 
@@ -990,7 +1207,7 @@ def event_detail(trip_code: str, event_code: str):
         cur = conn.cursor()
 
         cur.execute("""
-            SELECT id, original_filename, detected_type, detected_role,
+            SELECT id, original_filename, document_group, detected_type, detected_role,
                    original_amount, original_currency, eur_amount_display, eur_amount_final,
                    fx_status, detected_date, detected_vendor, analysis_status
             FROM mail_attachments
@@ -1004,7 +1221,7 @@ def event_detail(trip_code: str, event_code: str):
 
         for row in rows:
             (
-                attachment_id, filename, dtype, drole,
+                attachment_id, filename, document_group, dtype, drole,
                 original_amount, original_currency, eur_display, eur_final,
                 fx_status, detected_date, detected_vendor, analysis_status
             ) = row
@@ -1014,6 +1231,7 @@ def event_detail(trip_code: str, event_code: str):
             block = f"""
             <div class="card">
                 <b>{dtype}</b><br>
+                Gruppe: {document_group or ''}<br>
                 Rolle: {drole or ''}<br>
                 Datei: {filename}<br>
                 Datum: {detected_date or ''}<br>
@@ -1077,7 +1295,7 @@ def event_pdf(trip_code: str, event_code: str):
         cur = conn.cursor()
 
         cur.execute("""
-            SELECT original_filename, detected_type, detected_role,
+            SELECT original_filename, document_group, detected_type, detected_role,
                    original_amount, original_currency, eur_amount_display, eur_amount_final,
                    fx_status, detected_date, detected_vendor, analysis_status
             FROM mail_attachments
@@ -1112,12 +1330,12 @@ def event_pdf(trip_code: str, event_code: str):
 
         for row in rows:
             (
-                filename, dtype, drole, original_amount, original_currency,
+                filename, document_group, dtype, drole, original_amount, original_currency,
                 eur_display, eur_final, fx_status, detected_date, detected_vendor, analysis_status
             ) = row
 
             line(f"Dokument: {filename}", 14)
-            line(f"Typ: {dtype} | Rolle: {drole}", 14)
+            line(f"Gruppe: {document_group} | Typ: {dtype} | Rolle: {drole}", 14)
             line(f"Datum: {detected_date or ''} | Anbieter: {detected_vendor or ''}", 14)
             line(f"Original: {original_amount or ''} {original_currency or ''}", 14)
             line(f"EUR final: {eur_final or eur_display or ''} | FX: {fx_status or ''}", 14)
@@ -1257,7 +1475,6 @@ def fetch_mails():
                 for part in msg.walk():
                     content_type = part.get_content_type()
                     content_disposition = str(part.get("Content-Disposition") or "")
-
                     if content_type == "text/plain" and "attachment" not in content_disposition.lower():
                         payload = part.get_payload(decode=True)
                         if payload:
@@ -1270,36 +1487,55 @@ def fetch_mails():
 
             full_text = subject + "\n" + body
             code = extract_trip_code(full_text)
-            detected_type = detect_mail_type(full_text)
-            detected_destination = detect_destination(full_text)
-            detected_role = detect_document_role(full_text)
+            detected_destination = ""
 
-            ai_result = {}
+            classification = {}
+            details = {}
+            document_group = "unknown"
+            detected_type = "Unbekannt"
+            detected_role = "unknown"
             confidence = "niedrig"
             review_flag = "pruefen"
 
             if body and len(body) > 80:
-                ai_result = call_mistral_structured(full_text, "email")
+                classification = mistral_classify(full_text, "email")
+                if "error" in classification:
+                    classification = heuristic_classify(full_text)
 
-                if "error" in ai_result:
-                    ai_result = heuristic_extract(full_text, detected_type)
-                else:
-                    detected_type = ai_result.get("document_type", detected_type) or detected_type
-                    detected_role = ai_result.get("document_role", detected_role) or detected_role
-                    confidence = ai_result.get("confidence", "mittel")
-                    review_flag = ai_result.get("review_flag", "pruefen")
-                    ai_processed_emails += 1
+                document_group = classification.get("document_group", "unknown")
+                detected_type = classification.get("document_type", "Unbekannt")
+                detected_role = classification.get("document_role", "unknown")
+
+                details = mistral_extract_by_group(full_text, "email", document_group)
+                if "error" in details:
+                    details = heuristic_extract(full_text, document_group)
+
+                normalized = normalize_extraction(document_group, classification, details)
+                detected_type = normalized["detected_type"]
+                detected_role = normalized["detected_role"]
+                confidence = normalized["confidence"]
+                review_flag = normalized["review_flag"]
+                ai_processed_emails += 1
             else:
-                ai_result = heuristic_extract(full_text, detected_type)
+                classification = heuristic_classify(full_text)
+                details = heuristic_extract(full_text, classification.get("document_group", "unknown"))
+                normalized = normalize_extraction(classification.get("document_group", "unknown"), classification, details)
+                document_group = normalized["document_group"]
+                detected_type = normalized["detected_type"]
+                detected_role = normalized["detected_role"]
+                confidence = normalized["confidence"]
+                review_flag = normalized["review_flag"]
 
             cur.execute("""
                 INSERT INTO mail_messages
-                (mail_uid, sender, subject, body, trip_code, detected_type, detected_role,
-                 detected_destination, ai_json, confidence, review_flag)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                (mail_uid, sender, subject, body, trip_code, document_group, detected_type,
+                 detected_role, detected_destination, ai_json, confidence, review_flag)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (
-                uid, sender, subject, body, code, detected_type, detected_role,
-                detected_destination, json.dumps(ai_result, ensure_ascii=False), confidence, review_flag
+                uid, sender, subject, body, code, document_group, detected_type,
+                detected_role, detected_destination,
+                json.dumps({"classification": classification, "details": details}, ensure_ascii=False),
+                confidence, review_flag
             ))
 
             if msg.is_multipart():
@@ -1341,19 +1577,15 @@ def fetch_mails():
                         ContentType=part.get_content_type() or "application/octet-stream"
                     )
 
-                    attachment_type = detect_attachment_type(safe_original, subject, body)
-                    attachment_role = detect_document_role(full_text, safe_original)
-
                     cur.execute("""
                         INSERT INTO mail_attachments
                         (mail_uid, trip_code, original_filename, saved_filename, content_type, file_path,
-                         detected_type, detected_role, analysis_status, storage_key, confidence,
-                         review_flag, duplicate_flag, ai_json)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         document_group, detected_type, detected_role, analysis_status, storage_key,
+                         confidence, review_flag, duplicate_flag, ai_json)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (
                         uid, code, safe_original, saved_filename, part.get_content_type(), storage_key,
-                        attachment_type, attachment_role, "neu", storage_key, "niedrig",
-                        "pruefen", "", ""
+                        "", "", "", "neu", storage_key, "niedrig", "pruefen", "", ""
                     ))
 
                     attachment_count += 1
@@ -1376,7 +1608,6 @@ def fetch_mails():
             <a class="btn-light" href="/attachment-log">Zum Anhang Log</a>
         </div>
         """)
-
     except Exception as e:
         return page_shell("Fehler", f"""
         <div class="card">
@@ -1395,7 +1626,7 @@ def analyze_attachments():
         cur = conn.cursor()
 
         cur.execute("""
-            SELECT id, trip_code, storage_key, original_filename, detected_type, detected_role
+            SELECT id, trip_code, storage_key, original_filename
             FROM mail_attachments
             ORDER BY id
         """)
@@ -1404,64 +1635,31 @@ def analyze_attachments():
         processed = 0
         ai_processed = 0
 
-        for row in rows:
-            attachment_id, trip_code, storage_key, original_filename, detected_type, detected_role = row
+        for attachment_id, trip_code, storage_key, original_filename in rows:
             storage_key = storage_key or ""
             original_filename = original_filename or ""
-            detected_type = detected_type or "Unbekannt"
-            detected_role = detected_role or "unknown"
 
             if not storage_key:
-                status = "kein storage key"
-                confidence = "niedrig"
-                review_flag = "pruefen"
-                duplicate_flag = ""
                 cur.execute("""
                     UPDATE mail_attachments
                     SET extracted_text=%s,
-                        original_amount=%s,
-                        original_currency=%s,
-                        eur_amount_display=%s,
-                        eur_amount_final=%s,
-                        fx_status=%s,
-                        detected_date=%s,
-                        detected_vendor=%s,
                         analysis_status=%s,
                         confidence=%s,
-                        review_flag=%s,
-                        duplicate_flag=%s
+                        review_flag=%s
                     WHERE id=%s
-                """, (
-                    "KEIN_STORAGE_KEY", "", "", "", "", "manuelle_korrektur_offen",
-                    "", "", status, confidence, review_flag, duplicate_flag, attachment_id
-                ))
+                """, ("KEIN_STORAGE_KEY", "kein storage key", "niedrig", "pruefen", attachment_id))
                 processed += 1
                 continue
 
             if not is_supported_analysis_file(original_filename):
-                status = "nicht analysierbar"
-                confidence = "niedrig"
-                review_flag = "pruefen"
-                duplicate_flag = ""
                 cur.execute("""
                     UPDATE mail_attachments
                     SET extracted_text=%s,
-                        original_amount=%s,
-                        original_currency=%s,
-                        eur_amount_display=%s,
-                        eur_amount_final=%s,
-                        fx_status=%s,
-                        detected_date=%s,
-                        detected_vendor=%s,
                         analysis_status=%s,
                         confidence=%s,
-                        review_flag=%s,
-                        duplicate_flag=%s
+                        review_flag=%s
                     WHERE id=%s
-                """, (
-                    "NICHT_ANALYSIERBAR", "", "", "", "", "manuelle_korrektur_offen",
-                    "", "", status, confidence, review_flag, duplicate_flag, attachment_id
-                ))
+                """, ("NICHT_ANALYSIERBAR", "nicht analysierbar", "niedrig", "pruefen", attachment_id))
                 processed += 1
                 continue
 
@@ -1475,7 +1673,9 @@ def analyze_attachments():
             elif text == "KEIN_TEXT_GEFUNDEN":
                 status = "kein text"
 
-            ai_result = {}
+            document_group = "unknown"
+            detected_type = "Unbekannt"
+            detected_role = "unknown"
             original_amount = ""
             original_currency = ""
             eur_amount_display = ""
@@ -1485,57 +1685,61 @@ def analyze_attachments():
             detected_vendor = ""
             confidence = "niedrig"
             review_flag = "pruefen"
+            duplicate_flag = ""
             event_code = None
+            ai_payload = {}
 
             if status == "ok":
-                ai_result = call_mistral_structured(text, "pdf")
+                classification = mistral_classify(text, "pdf")
+                if "error" in classification:
+                    classification = heuristic_classify(text, original_filename)
 
-                if "error" in ai_result:
-                    fallback = heuristic_extract(text, detected_type, original_filename)
-                    ai_result = fallback
-                    detected_type = fallback.get("document_type", detected_type)
-                    detected_role = fallback.get("document_role", detected_role)
-                    original_amount = fallback.get("total_amount", "")
-                    original_currency = fallback.get("currency", "EUR")
-                    eur_amount_display, eur_amount_final, _, fx_status = handle_currency(original_amount, original_currency)
-                    detected_date = fallback.get("document_date", "")
-                    detected_vendor = fallback.get("_vendor_fallback", "")
-                    confidence = fallback.get("confidence", "niedrig")
-                    review_flag = fallback.get("review_flag", "pruefen")
-                    booking_code = fallback.get("booking_code", "")
-                    person_name = fallback.get("person_name", "")
-                else:
-                    detected_type = ai_result.get("document_type", detected_type) or detected_type
-                    detected_role = ai_result.get("document_role", detected_role) or detected_role
-                    original_amount = ai_result.get("total_amount", "") or ""
-                    original_currency = ai_result.get("currency", "EUR") or "EUR"
-                    eur_amount_display, eur_amount_final, _, fx_status = handle_currency(original_amount, original_currency)
-                    detected_date = ai_result.get("document_date", "") or ""
-                    booking_code = ai_result.get("booking_code", "") or ""
-                    person_name = ai_result.get("person_name", "") or ""
+                document_group = classification.get("document_group", "unknown")
+                details = mistral_extract_by_group(text, "pdf", document_group)
+                if "error" in details:
+                    details = heuristic_extract(text, document_group)
 
-                    segments = ai_result.get("segments", []) or []
-                    if segments:
-                        detected_vendor = segments[0].get("transportunternehmen_oder_unterkunft", "") or ""
-                    if not detected_vendor:
-                        detected_vendor = ""
+                normalized = normalize_extraction(document_group, classification, details)
 
-                    confidence = ai_result.get("confidence", "mittel") or "mittel"
-                    review_flag = ai_result.get("review_flag", "pruefen") or "pruefen"
-                    ai_processed += 1
+                document_group = normalized["document_group"]
+                detected_type = normalized["detected_type"]
+                detected_role = normalized["detected_role"]
+                original_amount = normalized["original_amount"]
+                original_currency = normalized["original_currency"]
+                eur_amount_display = normalized["eur_amount_display"]
+                eur_amount_final = normalized["eur_amount_final"]
+                fx_status = normalized["fx_status"]
+                detected_date = normalized["detected_date"]
+                detected_vendor = normalized["detected_vendor"]
+                confidence = normalized["confidence"]
+                review_flag = normalized["review_flag"]
 
-                event_code = assign_event(cur, trip_code, detected_type, booking_code, person_name, detected_vendor)
+                booking_code = normalized["booking_code"]
+                person_name = normalized["person_name"]
+
+                event_code = assign_event(
+                    cur,
+                    trip_code,
+                    document_group,
+                    detected_type,
+                    booking_code,
+                    person_name,
+                    detected_vendor
+                )
+
+                duplicate_flag = maybe_mark_duplicate(
+                    cur, trip_code, detected_type, original_amount, detected_date, detected_vendor, attachment_id
+                )
+                ai_payload = {"classification": classification, "details": details}
+                ai_processed += 1
             else:
                 confidence = "niedrig"
                 review_flag = "pruefen"
 
-            duplicate_flag = maybe_mark_duplicate(
-                cur, trip_code, detected_type, original_amount, detected_date, detected_vendor, attachment_id
-            )
-
             cur.execute("""
                 UPDATE mail_attachments
                 SET extracted_text=%s,
+                    document_group=%s,
                     detected_type=%s,
                     detected_role=%s,
                     event_code=%s,
@@ -1554,6 +1758,7 @@ def analyze_attachments():
                 WHERE id=%s
             """, (
                 text,
+                document_group,
                 detected_type,
                 detected_role,
                 event_code,
@@ -1568,7 +1773,7 @@ def analyze_attachments():
                 confidence,
                 review_flag,
                 duplicate_flag,
-                json.dumps(ai_result, ensure_ascii=False),
+                json.dumps(ai_payload, ensure_ascii=False),
                 attachment_id
             ))
 
@@ -1586,7 +1791,6 @@ def analyze_attachments():
             <a class="btn-light" href="/attachment-log">Zum Anhang Log</a>
         </div>
         """)
-
     except Exception as e:
         return page_shell("Fehler", f"""
         <div class="card">
@@ -1627,7 +1831,7 @@ def trip_review():
 
             has_flight = any(x[0] == "Flug" for x in items)
             has_hotel = any(x[0] == "Hotel" for x in items)
-            has_taxi = any(x[0] == "Taxi" for x in items)
+            has_transport = any(x[0] in ["Taxi", "Transport"] for x in items)
             open_reviews = sum(1 for x in items if x[2] == "pruefen")
             duplicates = sum(1 for x in items if x[3] == "ja")
 
@@ -1658,7 +1862,7 @@ def trip_review():
                 <td class="code">{trip_code or '(ohne Code)'}</td>
                 <td>{"ja" if has_flight else "nein"}</td>
                 <td>{"ja" if has_hotel else "nein"}</td>
-                <td>{"ja" if has_taxi else "nein"}</td>
+                <td>{"ja" if has_transport else "nein"}</td>
                 <td>{open_reviews}</td>
                 <td>{", ".join(warnings) if warnings else ""}</td>
                 <td>{", ".join(errors) if errors else ""}</td>
@@ -1671,13 +1875,13 @@ def trip_review():
 
         return page_shell("Reisebewertung", f"""
         <div class="card">
-            <h2>Reisebewertung v6.2</h2>
+            <h2>Reisebewertung v6.3</h2>
             <table>
                 <tr>
                     <th>Code</th>
                     <th>Flug</th>
                     <th>Hotel</th>
-                    <th>Taxi</th>
+                    <th>Transport</th>
                     <th>Offene Prüfungen</th>
                     <th>Warnungen</th>
                     <th>Fehler</th>
@@ -1687,7 +1891,6 @@ def trip_review():
             </table>
         </div>
         """)
-
     except Exception as e:
         return page_shell("Fehler", f"""
         <div class="card">
@@ -1706,7 +1909,8 @@ def mail_log():
         cur = conn.cursor()
 
         cur.execute("""
-            SELECT sender, subject, trip_code, detected_type, detected_role, detected_destination, confidence, review_flag
+            SELECT sender, subject, trip_code, document_group, detected_type, detected_role,
+                   confidence, review_flag
             FROM mail_messages
             ORDER BY id DESC
             LIMIT 50
@@ -1739,9 +1943,9 @@ def mail_log():
                     <th>Von</th>
                     <th>Betreff</th>
                     <th>Code</th>
+                    <th>Gruppe</th>
                     <th>Typ</th>
                     <th>Rolle</th>
-                    <th>Ziel</th>
                     <th>Confidence</th>
                     <th>Review</th>
                 </tr>
@@ -1767,7 +1971,7 @@ def attachment_log():
         cur = conn.cursor()
 
         cur.execute("""
-            SELECT trip_code, event_code, original_filename, detected_type, detected_role,
+            SELECT trip_code, event_code, original_filename, document_group, detected_type, detected_role,
                    original_amount, original_currency, eur_amount_final, fx_status,
                    detected_date, detected_vendor, analysis_status, confidence,
                    review_flag, duplicate_flag, storage_key
@@ -1797,6 +2001,7 @@ def attachment_log():
                 <td>{r[13] or ''}</td>
                 <td>{r[14] or ''}</td>
                 <td>{r[15] or ''}</td>
+                <td>{r[16] or ''}</td>
             </tr>
             """
 
@@ -1805,12 +2010,13 @@ def attachment_log():
 
         return page_shell("Anhang Log", f"""
         <div class="card">
-            <h2>Anhang Log mit Analyse v6.2</h2>
+            <h2>Anhang Log mit Analyse v6.3</h2>
             <table>
                 <tr>
                     <th>Code</th>
                     <th>Ereignis</th>
                     <th>Datei</th>
+                    <th>Gruppe</th>
                     <th>Typ</th>
                     <th>Rolle</th>
                     <th>Original Betrag</th>
