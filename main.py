@@ -682,9 +682,11 @@ def get_prompt() -> JSONResponse:
 
 @app.get("/belege")
 def get_belege() -> JSONResponse:
-    belege = list_belege()
-    return JSONResponse({"count": len(belege), "belege": belege})
-
+    try:
+        belege = list_belege()
+        return JSONResponse({"count": len(belege), "belege": belege})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"/belege Fehler: {exc}")
 
 if __name__ == "__main__":
     import uvicorn

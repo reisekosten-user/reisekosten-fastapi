@@ -2,15 +2,20 @@ import os
 from datetime import datetime
 
 import psycopg
+from psycopg.rows import dict_row
 
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 
 def get_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL ist nicht gesetzt.")
-    return psycopg.connect(DATABASE_URL)
+
+    return psycopg.connect(
+        DATABASE_URL,
+        row_factory=dict_row,
+    )
 
 
 def init_db():
@@ -66,11 +71,11 @@ def check_duplicate(duplicate_key):
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT COUNT(*) FROM belege WHERE duplicate_key = %s",
+                "SELECT COUNT(*) AS cnt FROM belege WHERE duplicate_key = %s",
                 (duplicate_key,),
             )
             row = cur.fetchone()
-            count = row[0] if row else 0
+            count = row["cnt"] if row else 0
     return count > 0
 
 
@@ -79,23 +84,19 @@ def list_belege():
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, belegdatum, art, kosten, waehrung, fingerprint, duplicate_key, created_at
+                SELECT
+                    id,
+                    belegdatum,
+                    art,
+                    kosten,
+                    waehrung,
+                    fingerprint,
+                    duplicate_key,
+                    created_at
                 FROM belege
                 ORDER BY id DESC
                 """
             )
             rows = cur.fetchall()
 
-    return [
-        {
-            "id": row[0],
-            "belegdatum": row[1],
-            "art": row[2],
-            "kosten": row[3],
-            "waehrung": row[4],
-            "fingerprint": row[5],
-            "duplicate_key": row[6],
-            "created_at": row[7],
-        }
-        for row in rows
-    ]
+    return rows
