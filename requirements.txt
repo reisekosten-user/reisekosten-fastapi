@@ -3,3 +3,4 @@ uvicorn
 requests
 pypdf
 python-multipart
+psycopg[binary]

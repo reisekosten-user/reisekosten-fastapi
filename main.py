@@ -15,9 +15,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
-from database import check_duplicate, get_connection, init_db, insert_beleg
+from database import check_duplicate, init_db, insert_beleg, list_belege
 
-APP_VERSION = "6.7"
+APP_VERSION = "7.0"
 DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_API_BASE = os.getenv("MISTRAL_API_BASE", "https://api.mistral.ai/v1")
@@ -111,11 +111,13 @@ Analysiere das bereitgestellte Dokument (PDF, E-Mail oder Text) und extrahiere A
 
 WICHTIGE REGELN:
 - Jede der folgenden Felder MUSS IMMER ausgefüllt werden.
-- Wenn ein Wert nicht vorhanden ist: schreibe \"nicht vorhanden\".
+- Wenn ein Wert nicht vorhanden ist: schreibe "nicht vorhanden".
 - Keine Werte erfinden.
 - Keine Interpretation ohne Grundlage im Dokument.
 - Datum und Zeit IMMER im Format DD.MM.YYYY HH:MM.
 - Wenn keine Uhrzeit vorhanden: nur Datum.
+- Wenn im Dokument keine Uhrzeit steht, darf keine Standarduhrzeit erfunden werden.
+- Wenn kein Belegdatum explizit vorhanden ist, dann "nicht vorhanden".
 - Zeitzonen, wenn erkennbar, ergänzen.
 - Währungen exakt übernehmen.
 
@@ -136,7 +138,7 @@ SPEZIALREGELN:
 - Normalerweise genau 1 Segment
 - Bei Storno: 0 Segmente
 - Start und Ziel aus Adressen oder Haltestellen extrahieren
-- transport_company_and_number darf z.B. \"Uber / Fahrername / Kennzeichen\" enthalten
+- transport_company_and_number darf z.B. "Uber / Fahrername / Kennzeichen" enthalten
 
 2. HOTEL:
 - 1 Segment = gesamter Aufenthalt
@@ -144,6 +146,7 @@ SPEZIALREGELN:
 - arrival_datetime = Check-out
 - departure_location und arrival_location = Hotelname oder Hotelort
 - transport_company_and_number = Hotelname
+- Keine Standardzeiten annehmen
 
 3. FLUG:
 - Jedes Flugsegment einzeln aufführen
@@ -171,7 +174,6 @@ SPEZIALREGELN:
 
 Gib das Ergebnis AUSSCHLIESSLICH als valides JSON zurück. Keine Markdown-Blöcke. Kein Vorwort. Kein Nachwort.
 """
-
 
 USER_PROMPT_TEMPLATE = """Extrahiere die Daten aus folgendem Dokumentinhalt.
 
@@ -211,12 +213,10 @@ Dokumentinhalt:
 {document_text}
 """
 
-
 JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 AMOUNT_RE = re.compile(r"([-+]?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})|[-+]?\d+(?:[.,]\d{2}))")
 DATE_RE = re.compile(r"\b(\d{2}\.\d{2}\.\d{4})\b")
 KNOWN_CURRENCIES = {"EUR", "USD", "INR", "CHF", "GBP", "JPY", "CNY", "AED", "CAD", "AUD"}
-
 
 
 def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
@@ -231,12 +231,10 @@ def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
         raise HTTPException(status_code=400, detail=f"PDF konnte nicht gelesen werden: {exc}") from exc
 
 
-
 def normalize_input_text(text: str) -> str:
     cleaned = text.replace("\x00", " ").strip()
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned
-
 
 
 def build_user_prompt(document_text: str, filename: str) -> str:
@@ -244,7 +242,6 @@ def build_user_prompt(document_text: str, filename: str) -> str:
         filename=filename or "nicht vorhanden",
         document_text=document_text[:120000],
     )
-
 
 
 def call_mistral(messages: List[Dict[str, str]], model: Optional[str] = None) -> str:
@@ -282,7 +279,6 @@ def call_mistral(messages: List[Dict[str, str]], model: Optional[str] = None) ->
         raise HTTPException(status_code=502, detail=f"Unerwartete Mistral Antwort: {json.dumps(data)[:1000]}") from exc
 
 
-
 def parse_model_json(raw_output: str) -> Dict[str, Any]:
     text = raw_output.strip()
     try:
@@ -297,7 +293,6 @@ def parse_model_json(raw_output: str) -> Dict[str, Any]:
         raise HTTPException(status_code=502, detail="Modellantwort war kein valides JSON.")
 
 
-
 def ensure_string(value: Any) -> str:
     if value is None:
         return "nicht vorhanden"
@@ -305,7 +300,6 @@ def ensure_string(value: Any) -> str:
         stripped = value.strip()
         return stripped if stripped else "nicht vorhanden"
     return str(value)
-
 
 
 def normalize_currency(value: str) -> str:
@@ -317,7 +311,6 @@ def normalize_currency(value: str) -> str:
         return upper
     symbol_map = {"€": "EUR", "$": "USD", "₹": "INR", "£": "GBP", "CHF": "CHF"}
     return symbol_map.get(value.strip(), upper)
-
 
 
 def parse_decimal_maybe(text: str) -> Optional[Decimal]:
@@ -342,17 +335,14 @@ def parse_decimal_maybe(text: str) -> Optional[Decimal]:
         return None
 
 
-
 def format_decimal(amount: Decimal) -> str:
     return f"{amount.quantize(Decimal('0.01'))}"
-
 
 
 def detect_storno(text: str, warnungen: List[str], fehler: List[str]) -> bool:
     joined = " ".join([text.lower()] + [w.lower() for w in warnungen] + [f.lower() for f in fehler])
     keywords = ["storniert", "cancelled", "canceled", "cancelled ride", "storno"]
     return any(keyword in joined for keyword in keywords)
-
 
 
 def build_duplicate_info(result: Dict[str, Any], source_filename: Optional[str], original_text: str) -> DuplicateInfo:
@@ -383,7 +373,6 @@ def build_duplicate_info(result: Dict[str, Any], source_filename: Optional[str],
         duplicate_candidate_key=duplicate_candidate_key,
         is_duplicate=is_duplicate,
     )
-
 
 
 def maybe_fetch_exchange_rate(currency: str, belegdatum: str, amount: Optional[Decimal]) -> ExchangeRateInfo:
@@ -449,7 +438,6 @@ def maybe_fetch_exchange_rate(currency: str, belegdatum: str, amount: Optional[D
         return info
 
 
-
 def compute_review_status(warnungen: List[str], fehler: List[str], confidence_score: Optional[float], is_storno: bool) -> ReviewStatus:
     if fehler:
         return "fehler"
@@ -460,7 +448,6 @@ def compute_review_status(warnungen: List[str], fehler: List[str], confidence_sc
     if confidence_score >= 0.85 and not warnungen:
         return "ok"
     return "pruefen"
-
 
 
 def save_result_to_db(result: ExtractionResult) -> None:
@@ -476,7 +463,6 @@ def save_result_to_db(result: ExtractionResult) -> None:
             "duplicate_key": result.duplicate_info.duplicate_candidate_key,
         }
     )
-
 
 
 def postprocess_result(
@@ -532,7 +518,7 @@ def postprocess_result(
 
     result = ExtractionResult(
         belegdatum=ensure_string(parsed.get("belegdatum")),
-        art_des_dokuments=art,  # type: ignore[arg-type]
+        art_des_dokuments=art,
         buchungsnummer_code=ensure_string(parsed.get("buchungsnummer_code")),
         name_des_reisenden=ensure_string(parsed.get("name_des_reisenden")),
         wie_viele_reisesegmente=int(parsed.get("wie_viele_reisesegmente") or 0),
@@ -554,9 +540,6 @@ def postprocess_result(
         if "Storno erkannt" not in result.warnungen:
             result.warnungen.append("Storno erkannt")
 
-    if result.art_des_dokuments == "Hotel" and result.wie_viele_reisesegmente == 0:
-        result.wie_viele_reisesegmente = 1
-
     if result.wie_viele_reisesegmente != len(result.reisesegmente):
         if not (result.is_storno and len(result.reisesegmente) == 0):
             result.warnungen.append(
@@ -572,12 +555,15 @@ def postprocess_result(
             result.belegdatum,
             parse_decimal_maybe(result.kosten_mit_steuern),
         )
-        if result.exchange_rate_info and not result.exchange_rate_info.success and result.waehrung_der_kosten not in {"nicht vorhanden", DEFAULT_BASE_CURRENCY}:
+        if (
+            result.exchange_rate_info
+            and not result.exchange_rate_info.success
+            and result.waehrung_der_kosten not in {"nicht vorhanden", DEFAULT_BASE_CURRENCY}
+        ):
             result.warnungen.append("Wechselkurs konnte nicht geladen werden")
 
     result.review_status = compute_review_status(result.warnungen, result.fehler, result.confidence_score, result.is_storno)
     return result
-
 
 
 def analyze_document_text(document_text: str, filename: str, model: Optional[str], include_raw_output: bool, convert_to_base_currency: bool) -> ExtractionResult:
@@ -608,7 +594,7 @@ def root() -> str:
     return f"""
     <html>
       <head><title>Reisekosten Mistral API</title></head>
-      <body style=\"font-family: Arial, sans-serif; margin: 40px;\">
+      <body style="font-family: Arial, sans-serif; margin: 40px;">
         <h1>Reisekosten Mistral API</h1>
         <p>Status: läuft 🚀</p>
         <p>Version: {APP_VERSION}</p>
@@ -688,32 +674,7 @@ def get_prompt() -> JSONResponse:
 
 @app.get("/belege")
 def get_belege() -> JSONResponse:
-    conn = get_connection()
-    conn.row_factory = None
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, belegdatum, art, kosten, waehrung, fingerprint, duplicate_key, created_at
-        FROM belege
-        ORDER BY id DESC
-        """
-    )
-    rows = cur.fetchall()
-    conn.close()
-
-    belege = [
-        {
-            "id": row[0],
-            "belegdatum": row[1],
-            "art": row[2],
-            "kosten": row[3],
-            "waehrung": row[4],
-            "fingerprint": row[5],
-            "duplicate_key": row[6],
-            "created_at": row[7],
-        }
-        for row in rows
-    ]
+    belege = list_belege()
     return JSONResponse({"count": len(belege), "belege": belege})
 
 
