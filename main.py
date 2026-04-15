@@ -7,7 +7,7 @@ import re
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional
 
 import requests
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -15,7 +15,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
-APP_VERSION = "6.6"
+from database import check_duplicate, get_connection, init_db, insert_beleg
+
+APP_VERSION = "6.7"
 DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_API_BASE = os.getenv("MISTRAL_API_BASE", "https://api.mistral.ai/v1")
@@ -29,6 +31,8 @@ app = FastAPI(
     version=APP_VERSION,
     description="Extrahiert strukturierte Reisekosten-Daten aus PDFs, E-Mails und Texten via Mistral.",
 )
+
+init_db()
 
 DocumentType = Literal["Zug", "Flug", "Hotel", "Taxi", "Unbekannt"]
 ReviewStatus = Literal["ok", "pruefen", "fehler"]
@@ -46,6 +50,7 @@ class Segment(BaseModel):
 class DuplicateInfo(BaseModel):
     fingerprint: str
     duplicate_candidate_key: str
+    is_duplicate: bool = False
 
 
 class ExchangeRateInfo(BaseModel):
@@ -131,7 +136,7 @@ SPEZIALREGELN:
 - Normalerweise genau 1 Segment
 - Bei Storno: 0 Segmente
 - Start und Ziel aus Adressen oder Haltestellen extrahieren
-- Unternehmen + Nummer darf z.B. \"Uber / Fahrername / Kennzeichen\" enthalten
+- transport_company_and_number darf z.B. \"Uber / Fahrername / Kennzeichen\" enthalten
 
 2. HOTEL:
 - 1 Segment = gesamter Aufenthalt
@@ -152,7 +157,7 @@ SPEZIALREGELN:
 
 5. KOSTEN:
 - kosten_mit_steuern nur angeben, wenn Gesamtbetrag eindeutig vorhanden ist
-- Betrag und Währung trennen: 
+- Betrag und Währung trennen:
   - kosten_mit_steuern = nur Betrag oder Betrag mit Symbol, ohne Zusatztext
   - waehrung_der_kosten = ISO-Code oder klare Währung
 
@@ -211,6 +216,7 @@ JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 AMOUNT_RE = re.compile(r"([-+]?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})|[-+]?\d+(?:[.,]\d{2}))")
 DATE_RE = re.compile(r"\b(\d{2}\.\d{2}\.\d{4})\b")
 KNOWN_CURRENCIES = {"EUR", "USD", "INR", "CHF", "GBP", "JPY", "CNY", "AED", "CAD", "AUD"}
+
 
 
 def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
@@ -345,7 +351,7 @@ def format_decimal(amount: Decimal) -> str:
 def detect_storno(text: str, warnungen: List[str], fehler: List[str]) -> bool:
     joined = " ".join([text.lower()] + [w.lower() for w in warnungen] + [f.lower() for f in fehler])
     keywords = ["storniert", "cancelled", "canceled", "cancelled ride", "storno"]
-    return any(k in joined for k in keywords)
+    return any(keyword in joined for keyword in keywords)
 
 
 
@@ -367,9 +373,16 @@ def build_duplicate_info(result: Dict[str, Any], source_filename: Optional[str],
         ticket.lower(),
         name.lower(),
     ])
+
     fingerprint = hashlib.sha256((original_text + "|" + (source_filename or "")).encode("utf-8", errors="ignore")).hexdigest()[:20]
     duplicate_candidate_key = hashlib.sha256(key.encode("utf-8", errors="ignore")).hexdigest()[:20]
-    return DuplicateInfo(fingerprint=fingerprint, duplicate_candidate_key=duplicate_candidate_key)
+    is_duplicate = check_duplicate(duplicate_candidate_key)
+
+    return DuplicateInfo(
+        fingerprint=fingerprint,
+        duplicate_candidate_key=duplicate_candidate_key,
+        is_duplicate=is_duplicate,
+    )
 
 
 
@@ -450,6 +463,22 @@ def compute_review_status(warnungen: List[str], fehler: List[str], confidence_sc
 
 
 
+def save_result_to_db(result: ExtractionResult) -> None:
+    if result.duplicate_info is None:
+        return
+    insert_beleg(
+        {
+            "belegdatum": result.belegdatum,
+            "art": result.art_des_dokuments,
+            "kosten": result.kosten_mit_steuern,
+            "waehrung": result.waehrung_der_kosten,
+            "fingerprint": result.duplicate_info.fingerprint,
+            "duplicate_key": result.duplicate_info.duplicate_candidate_key,
+        }
+    )
+
+
+
 def postprocess_result(
     parsed: Dict[str, Any],
     source_filename: Optional[str],
@@ -525,20 +554,8 @@ def postprocess_result(
         if "Storno erkannt" not in result.warnungen:
             result.warnungen.append("Storno erkannt")
 
-    if result.art_des_dokuments == "Hotel":
-        if not result.reisesegmente:
-            result.reisesegmente = [
-                Segment(
-                    index=1,
-                    departure_datetime="nicht vorhanden",
-                    arrival_datetime="nicht vorhanden",
-                    departure_location=result.buchungsnummer_code if result.buchungsnummer_code != "nicht vorhanden" else result.name_des_reisenden,
-                    arrival_location=result.buchungsnummer_code if result.buchungsnummer_code != "nicht vorhanden" else result.name_des_reisenden,
-                    transport_company_and_number="nicht vorhanden",
-                )
-            ]
-        if result.wie_viele_reisesegmente == 0:
-            result.wie_viele_reisesegmente = 1
+    if result.art_des_dokuments == "Hotel" and result.wie_viele_reisesegmente == 0:
+        result.wie_viele_reisesegmente = 1
 
     if result.wie_viele_reisesegmente != len(result.reisesegmente):
         if not (result.is_storno and len(result.reisesegmente) == 0):
@@ -575,13 +592,15 @@ def analyze_document_text(document_text: str, filename: str, model: Optional[str
 
     raw_output = call_mistral(messages=messages, model=model)
     parsed = parse_model_json(raw_output)
-    return postprocess_result(
+    result = postprocess_result(
         parsed=parsed,
         source_filename=filename,
         raw_output=raw_output if include_raw_output else None,
         original_text=cleaned,
         convert_to_base_currency=convert_to_base_currency,
     )
+    save_result_to_db(result)
+    return result
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -598,6 +617,7 @@ def root() -> str:
           <li>POST /analyze/text</li>
           <li>POST /analyze/file</li>
           <li>GET /prompt</li>
+          <li>GET /belege</li>
         </ul>
       </body>
     </html>
@@ -657,11 +677,44 @@ async def analyze_file(
 
 @app.get("/prompt")
 def get_prompt() -> JSONResponse:
-    return JSONResponse({
-        "version": APP_VERSION,
-        "system_prompt": SYSTEM_PROMPT,
-        "user_prompt_template": USER_PROMPT_TEMPLATE,
-    })
+    return JSONResponse(
+        {
+            "version": APP_VERSION,
+            "system_prompt": SYSTEM_PROMPT,
+            "user_prompt_template": USER_PROMPT_TEMPLATE,
+        }
+    )
+
+
+@app.get("/belege")
+def get_belege() -> JSONResponse:
+    conn = get_connection()
+    conn.row_factory = None
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, belegdatum, art, kosten, waehrung, fingerprint, duplicate_key, created_at
+        FROM belege
+        ORDER BY id DESC
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    belege = [
+        {
+            "id": row[0],
+            "belegdatum": row[1],
+            "art": row[2],
+            "kosten": row[3],
+            "waehrung": row[4],
+            "fingerprint": row[5],
+            "duplicate_key": row[6],
+            "created_at": row[7],
+        }
+        for row in rows
+    ]
+    return JSONResponse({"count": len(belege), "belege": belege})
 
 
 if __name__ == "__main__":
