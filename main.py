@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import requests
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
@@ -128,7 +128,7 @@ BELEGDATUM-PRIORITÄT:
 4. Sonst klar erkennbares Dokumentdatum
 
 KLASSIFIKATION:
-- Flug → Airlines, Flugnummern, Flughäfen
+- Flug → Airlines, Flugnummern, Flughäfen, Reiseplan, Itinerary, Ticket, Buchungsreferenz
 - Hotel → Check-in / Check-out, Nächte, Zimmer
 - Taxi → Uber, Fahrt, Fahrer, Strecke, Fahrzeug
 - Zug → Bahn, Rail, ICE, TGV, SNCF, DB, etc.
@@ -153,6 +153,7 @@ SPEZIALREGELN:
 - (+1) Tage korrekt berücksichtigen
 - Flughafencodes hinzufügen, wenn vorhanden
 - transport_company_and_number = Airline + Flugnummer
+- Begriffe wie "Itinerary", "E-Ticket", "Flugbestaetigung", "Booking Reference", "Ticketnummer", "Flight", "Air Lines" sind starke Flug-Indikatoren
 
 4. ZUG:
 - Jedes Zugsegment einzeln aufführen
@@ -474,6 +475,7 @@ def postprocess_result(
 ) -> ExtractionResult:
     segments_input = parsed.get("reisesegmente") or []
     segments: List[Segment] = []
+
     for idx, seg in enumerate(segments_input, start=1):
         if not isinstance(seg, dict):
             continue
@@ -600,6 +602,7 @@ def root() -> str:
         <p>Version: {APP_VERSION}</p>
         <ul>
           <li>GET /health</li>
+          <li>GET /dashboard</li>
           <li>POST /analyze/text</li>
           <li>POST /analyze/file</li>
           <li>GET /prompt</li>
@@ -608,6 +611,11 @@ def root() -> str:
       </body>
     </html>
     """
+
+
+@app.get("/dashboard")
+def dashboard():
+    return FileResponse("templates/dashboard.html")
 
 
 @app.get("/health", response_model=HealthResponse)

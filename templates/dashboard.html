@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reisekosten Dashboard</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f4f7fb;
+      margin: 0;
+      padding: 24px;
+      color: #1f2937;
+    }
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    h1, h2, h3 {
+      margin-top: 0;
+      color: #0f172a;
+    }
+    .card {
+      background: white;
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+      margin-bottom: 20px;
+    }
+    .grid {
+      display: grid;
+      gap: 20px;
+    }
+    .grid-2 {
+      grid-template-columns: 1.1fr 0.9fr;
+    }
+    .grid-3 {
+      grid-template-columns: repeat(3, 1fr);
+    }
+    .row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    input, textarea, button {
+      font-size: 14px;
+      border-radius: 12px;
+      border: 1px solid #cbd5e1;
+      padding: 10px 12px;
+    }
+    input, textarea {
+      width: 100%;
+      box-sizing: border-box;
+    }
+    textarea {
+      min-height: 220px;
+      resize: vertical;
+    }
+    button {
+      background: #2563eb;
+      color: white;
+      border: none;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: white;
+      color: #1f2937;
+      border: 1px solid #cbd5e1;
+    }
+    button:hover {
+      opacity: 0.95;
+    }
+    .smallbox {
+      background: #eef2ff;
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .label {
+      font-size: 12px;
+      text-transform: uppercase;
+      color: #64748b;
+      margin-bottom: 4px;
+    }
+    .value {
+      font-weight: 600;
+    }
+    .status-ok {
+      color: #166534;
+      font-weight: 700;
+    }
+    .status-pruefen {
+      color: #92400e;
+      font-weight: 700;
+    }
+    .status-fehler {
+      color: #991b1b;
+      font-weight: 700;
+    }
+    .warning {
+      background: #fff7ed;
+      color: #9a3412;
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+    }
+    .error {
+      background: #fef2f2;
+      color: #b91c1c;
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: white;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #e5e7eb;
+      text-align: left;
+      font-size: 14px;
+      vertical-align: top;
+    }
+    th {
+      background: #e2e8f0;
+    }
+    pre {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 16px;
+      border-radius: 12px;
+      overflow: auto;
+      font-size: 12px;
+    }
+    @media (max-width: 1000px) {
+      .grid-2, .grid-3 {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Reisekosten Dashboard</h1>
+
+    <div class="card">
+      <div class="row">
+        <div style="flex:2; min-width:300px;">
+          <div class="label">API Basis-URL</div>
+          <input id="apiBase" value="" />
+        </div>
+        <div style="display:flex; align-items:end;">
+          <button class="secondary" onclick="loadBelege()">Belege laden</button>
+        </div>
+      </div>
+      <div id="errorBox" style="margin-top:12px;"></div>
+    </div>
+
+    <div class="grid grid-2">
+      <div class="card">
+        <h2>Analyse starten</h2>
+
+        <div class="row">
+          <div style="flex:1; min-width:250px;">
+            <div class="label">Dateiname für Textanalyse</div>
+            <input id="filename" value="manuell.txt" />
+          </div>
+        </div>
+
+        <div style="margin-top:12px;">
+          <div class="label">Textinhalt</div>
+          <textarea id="textInput" placeholder="Hier E-Mail-Text oder Dokumentinhalt einfügen ..."></textarea>
+        </div>
+
+        <div class="row" style="margin-top:12px;">
+          <button onclick="analyzeText()">Text analysieren</button>
+          <button class="secondary" onclick="resetResult()">Zurücksetzen</button>
+        </div>
+
+        <hr style="margin:20px 0; border:none; border-top:1px solid #e5e7eb;">
+
+        <div class="label">PDF / Datei hochladen</div>
+        <input id="fileInput" type="file" onchange="analyzeFile()" />
+      </div>
+
+      <div class="card">
+        <h2>Letztes Ergebnis</h2>
+        <div id="resultBox">Noch keine Analyse vorhanden.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Gespeicherte Belege</h2>
+      <div class="row" style="margin-bottom:12px;">
+        <div style="flex:1; min-width:250px;">
+          <input id="searchInput" placeholder="Suche in Belegen ..." oninput="renderBelege()" />
+        </div>
+        <div>
+          <button class="secondary" onclick="loadBelege()">Aktualisieren</button>
+        </div>
+      </div>
+      <div id="belegeBox">Noch keine Daten geladen.</div>
+    </div>
+  </div>
+
+  <script>
+    let lastResult = null;
+    let belege = [];
+
+    function getApiBase() {
+      const value = document.getElementById("apiBase").value.trim();
+      return value.replace(/\/$/, "");
+    }
+
+    function showError(message) {
+      document.getElementById("errorBox").innerHTML =
+        '<div class="error">' + escapeHtml(message) + '</div>';
+    }
+
+    function clearError() {
+      document.getElementById("errorBox").innerHTML = "";
+    }
+
+    function escapeHtml(text) {
+      return String(text ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    function statusClass(status) {
+      if (status === "ok") return "status-ok";
+      if (status === "fehler") return "status-fehler";
+      return "status-pruefen";
+    }
+
+    async function analyzeText() {
+      clearError();
+      const apiBase = getApiBase();
+      const text = document.getElementById("textInput").value;
+      const filename = document.getElementById("filename").value;
+
+      try {
+        const res = await fetch(apiBase + "/analyze/text", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: text,
+            filename: filename,
+            include_raw_output: true,
+            convert_to_base_currency: true
+          })
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Fehler bei Textanalyse");
+
+        lastResult = data;
+        renderResult();
+        await loadBelege();
+      } catch (err) {
+        showError(err.message || String(err));
+      }
+    }
+
+    async function analyzeFile() {
+      clearError();
+      const apiBase = getApiBase();
+      const input = document.getElementById("fileInput");
+      const file = input.files[0];
+      if (!file) return;
+
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("include_raw_output", "true");
+        form.append("convert_to_base_currency", "true");
+
+        const res = await fetch(apiBase + "/analyze/file", {
+          method: "POST",
+          body: form
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Fehler bei Dateianalyse");
+
+        lastResult = data;
+        renderResult();
+        await loadBelege();
+      } catch (err) {
+        showError(err.message || String(err));
+      } finally {
+        input.value = "";
+      }
+    }
+
+    function resetResult() {
+      lastResult = null;
+      document.getElementById("resultBox").innerHTML = "Noch keine Analyse vorhanden.";
+      clearError();
+    }
+
+    function renderResult() {
+      if (!lastResult) {
+        document.getElementById("resultBox").innerHTML = "Noch keine Analyse vorhanden.";
+        return;
+      }
+
+      const r = lastResult;
+      const warnungen = (r.warnungen || []).map(w => `<div class="warning">${escapeHtml(w)}</div>`).join("");
+
+      const segRows = (r.reisesegmente || []).map(s => `
+        <tr>
+          <td>${escapeHtml(s.index)}</td>
+          <td>${escapeHtml(s.departure_datetime)}</td>
+          <td>${escapeHtml(s.arrival_datetime)}</td>
+          <td>${escapeHtml(s.departure_location)}</td>
+          <td>${escapeHtml(s.arrival_location)}</td>
+          <td>${escapeHtml(s.transport_company_and_number)}</td>
+        </tr>
+      `).join("");
+
+      document.getElementById("resultBox").innerHTML = `
+        <div class="grid grid-3">
+          <div class="smallbox"><div class="label">Dokumenttyp</div><div class="value">${escapeHtml(r.art_des_dokuments)}</div></div>
+          <div class="smallbox"><div class="label">Belegdatum</div><div class="value">${escapeHtml(r.belegdatum)}</div></div>
+          <div class="smallbox"><div class="label">Buchungsnummer</div><div class="value">${escapeHtml(r.buchungsnummer_code)}</div></div>
+          <div class="smallbox"><div class="label">Reisender</div><div class="value">${escapeHtml(r.name_des_reisenden)}</div></div>
+          <div class="smallbox"><div class="label">Kosten</div><div class="value">${escapeHtml(r.kosten_mit_steuern)}</div></div>
+          <div class="smallbox"><div class="label">Währung</div><div class="value">${escapeHtml(r.waehrung_der_kosten)}</div></div>
+          <div class="smallbox"><div class="label">Segmente</div><div class="value">${escapeHtml(r.wie_viele_reisesegmente)}</div></div>
+          <div class="smallbox"><div class="label">Prüfstatus</div><div class="value ${statusClass(r.review_status)}">${escapeHtml(r.review_status)}</div></div>
+          <div class="smallbox"><div class="label">Duplikat</div><div class="value">${r.duplicate_info?.is_duplicate ? "Ja" : "Nein"}</div></div>
+        </div>
+
+        <h3 style="margin-top:20px;">Reisesegmente</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Abreise</th>
+              <th>Ankunft</th>
+              <th>Von</th>
+              <th>Nach</th>
+              <th>Unternehmen / Nr.</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${segRows || '<tr><td colspan="6">Keine Segmente vorhanden</td></tr>'}
+          </tbody>
+        </table>
+
+        ${warnungen ? `<h3 style="margin-top:20px;">Warnungen</h3>${warnungen}` : ""}
+
+        <h3 style="margin-top:20px;">Rohantwort</h3>
+        <pre>${escapeHtml(JSON.stringify(r, null, 2))}</pre>
+      `;
+    }
+
+    async function loadBelege() {
+      clearError();
+      const apiBase = getApiBase();
+
+      try {
+        const res = await fetch(apiBase + "/belege");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Fehler beim Laden der Belege");
+        belege = data.belege || [];
+        renderBelege();
+      } catch (err) {
+        showError(err.message || String(err));
+      }
+    }
+
+    function renderBelege() {
+      const q = document.getElementById("searchInput").value.trim().toLowerCase();
+      const filtered = belege.filter(b =>
+        [b.id, b.belegdatum, b.art, b.kosten, b.waehrung, b.created_at]
+          .join(" ")
+          .toLowerCase()
+          .includes(q)
+      );
+
+      const rows = filtered.map(b => `
+        <tr>
+          <td>${escapeHtml(b.id)}</td>
+          <td>${escapeHtml(b.belegdatum)}</td>
+          <td>${escapeHtml(b.art)}</td>
+          <td>${escapeHtml(b.kosten)}</td>
+          <td>${escapeHtml(b.waehrung)}</td>
+          <td>${escapeHtml(b.created_at)}</td>
+        </tr>
+      `).join("");
+
+      document.getElementById("belegeBox").innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Datum</th>
+              <th>Art</th>
+              <th>Kosten</th>
+              <th>Währung</th>
+              <th>Erstellt</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows || '<tr><td colspan="6">Keine Belege gefunden</td></tr>'}
+          </tbody>
+        </table>
+      `;
+    }
+
+    window.onload = () => {
+      document.getElementById("apiBase").value = window.location.origin;
+      loadBelege();
+    };
+  </script>
+</body>
+</html>
