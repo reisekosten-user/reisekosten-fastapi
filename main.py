@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 
-APP_VERSION = "6.5a1"
+APP_VERSION = "6.5a"
 DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_API_BASE = os.getenv("MISTRAL_API_BASE", "https://api.mistral.ai/v1")
@@ -26,10 +26,6 @@ app = FastAPI(
     description="Extrahiert strukturierte Reisekosten-Daten aus PDFs, E-Mails und Texten via Mistral.",
 )
 
-
-# =========================
-# Models
-# =========================
 
 DocumentType = Literal["Zug", "Flug", "Hotel", "Taxi", "Unbekannt"]
 
@@ -74,10 +70,6 @@ class HealthResponse(BaseModel):
     version: str
     mistral_configured: bool
 
-
-# =========================
-# Prompt
-# =========================
 
 SYSTEM_PROMPT = """Du bist ein hochpräziser Dokumenten-Parser für Reisekostenbelege.
 
@@ -181,10 +173,6 @@ Dokumentinhalt:
 """
 
 
-# =========================
-# Helpers
-# =========================
-
 def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
     try:
         reader = PdfReader(BytesIO(pdf_bytes))
@@ -197,13 +185,11 @@ def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
         raise HTTPException(status_code=400, detail=f"PDF konnte nicht gelesen werden: {exc}") from exc
 
 
-EMAIL_HEADER_RE = re.compile(r"^(Von:|Datum:|An:|Betreff:)", re.IGNORECASE | re.MULTILINE)
-
-
 def normalize_input_text(text: str) -> str:
     cleaned = text.replace("\x00", " ").strip()
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned
+
 
 
 def build_user_prompt(document_text: str, filename: str) -> str:
@@ -211,6 +197,7 @@ def build_user_prompt(document_text: str, filename: str) -> str:
         filename=filename or "nicht vorhanden",
         document_text=document_text[:120000],
     )
+
 
 
 def call_mistral(messages: List[Dict[str, str]], model: Optional[str] = None) -> str:
@@ -287,6 +274,7 @@ def normalize_currency(value: str) -> str:
     return symbols.get(value, value)
 
 
+
 def ensure_string(value: Any) -> str:
     if value is None:
         return "nicht vorhanden"
@@ -294,6 +282,7 @@ def ensure_string(value: Any) -> str:
         stripped = value.strip()
         return stripped if stripped else "nicht vorhanden"
     return str(value)
+
 
 
 def postprocess_result(parsed: Dict[str, Any], source_filename: Optional[str], raw_output: Optional[str]) -> ExtractionResult:
@@ -362,6 +351,7 @@ def postprocess_result(parsed: Dict[str, Any], source_filename: Optional[str], r
     return result
 
 
+
 def analyze_document_text(document_text: str, filename: str, model: Optional[str], include_raw_output: bool) -> ExtractionResult:
     cleaned = normalize_input_text(document_text)
     if not cleaned:
@@ -378,10 +368,6 @@ def analyze_document_text(document_text: str, filename: str, model: Optional[str
     return result
 
 
-# =========================
-# Routes
-# =========================
-
 @app.get("/", response_class=HTMLResponse)
 def root() -> str:
     return f"""
@@ -395,6 +381,7 @@ def root() -> str:
           <li>GET /health</li>
           <li>POST /analyze/text</li>
           <li>POST /analyze/file</li>
+          <li>GET /prompt</li>
         </ul>
       </body>
     </html>
@@ -437,7 +424,6 @@ async def analyze_file(
     elif lowered.endswith(".txt") or lowered.endswith(".eml") or lowered.endswith(".md"):
         document_text = content.decode("utf-8", errors="replace")
     else:
-        # Fallback: versuche Textdekodierung. Für Bilder/OCR könntest du später Mistral OCR ergänzen.
         document_text = content.decode("utf-8", errors="replace")
 
     return analyze_document_text(
@@ -458,10 +444,6 @@ def get_prompt() -> JSONResponse:
         }
     )
 
-
-# =========================
-# Local dev helper
-# =========================
 
 if __name__ == "__main__":
     import uvicorn
