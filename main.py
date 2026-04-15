@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 
-APP_VERSION = "6.5a"
+APP_VERSION = "6.5a1"
 DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_API_BASE = os.getenv("MISTRAL_API_BASE", "https://api.mistral.ai/v1")
