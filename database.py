@@ -93,6 +93,26 @@ def init_db():
                     created_at TEXT
                 )
             """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS events (
+                    id SERIAL PRIMARY KEY,
+                    reise_id INTEGER NOT NULL,
+                    typ TEXT,
+                    titel TEXT,
+                    status TEXT DEFAULT 'planung',
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS event_belege (
+                    id SERIAL PRIMARY KEY,
+                    event_id INTEGER NOT NULL,
+                    beleg_id INTEGER NOT NULL
+                )
+            """)
         conn.commit()
 
 
@@ -103,6 +123,7 @@ def insert_beleg(data):
                 INSERT INTO belege
                 (belegdatum, art, kosten, waehrung, fingerprint, duplicate_key, created_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
             """, (
                 data.get("belegdatum"),
                 data.get("art"),
@@ -112,7 +133,9 @@ def insert_beleg(data):
                 data.get("duplicate_key"),
                 now_iso(),
             ))
+            row = cur.fetchone()
         conn.commit()
+    return row["id"]
 
 
 def list_belege():
@@ -163,16 +186,8 @@ def create_mitarbeiter(data: dict):
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
-                kuerzel,
-                vorname,
-                nachname,
-                klarname,
-                geburtsdatum,
-                email,
-                aktiv,
-                such_normalisiert,
-                now_iso(),
-                now_iso(),
+                kuerzel, vorname, nachname, klarname, geburtsdatum, email,
+                aktiv, such_normalisiert, now_iso(), now_iso(),
             ))
             row = cur.fetchone()
         conn.commit()
@@ -206,16 +221,8 @@ def update_mitarbeiter(mitarbeiter_id: int, data: dict):
                     updated_at=%s
                 WHERE id=%s
             """, (
-                kuerzel,
-                vorname,
-                nachname,
-                klarname,
-                geburtsdatum,
-                email,
-                aktiv,
-                such_normalisiert,
-                now_iso(),
-                mitarbeiter_id,
+                kuerzel, vorname, nachname, klarname, geburtsdatum, email,
+                aktiv, such_normalisiert, now_iso(), mitarbeiter_id,
             ))
         conn.commit()
 
@@ -299,15 +306,8 @@ def create_reise(data: dict):
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, reise_code
             """, (
-                next_code["reise_code"],
-                year,
-                next_code["laufende_nummer"],
-                reise_name,
-                startdatum,
-                enddatum,
-                anzahl_reisende,
-                now_iso(),
-                now_iso(),
+                next_code["reise_code"], year, next_code["laufende_nummer"], reise_name,
+                startdatum, enddatum, anzahl_reisende, now_iso(), now_iso(),
             ))
             row = cur.fetchone()
             reise_id = row["id"]
@@ -318,17 +318,11 @@ def create_reise(data: dict):
                     (reise_id, mitarbeiter_id, alias_name, created_at)
                     VALUES (%s, %s, %s, %s)
                 """, (
-                    reise_id,
-                    int(mitarbeiter_id),
-                    f"REISENDER_{idx}",
-                    now_iso(),
+                    reise_id, int(mitarbeiter_id), f"REISENDER_{idx}", now_iso(),
                 ))
         conn.commit()
 
-    return {
-        "reise_id": reise_id,
-        "reise_code": row["reise_code"],
-    }
+    return {"reise_id": reise_id, "reise_code": row["reise_code"]}
 
 
 def list_reisen(limit: int = 100):
@@ -341,3 +335,93 @@ def list_reisen(limit: int = 100):
                 LIMIT %s
             """, (limit,))
             return cur.fetchall()
+
+
+def create_event(data: dict):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO events (reise_id, typ, titel, status, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                int(data["reise_id"]),
+                data.get("typ"),
+                data.get("titel"),
+                data.get("status", "planung"),
+                now_iso(),
+                now_iso(),
+            ))
+            row = cur.fetchone()
+        conn.commit()
+    return row["id"]
+
+
+def update_event_status(event_id: int, status: str):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE events
+                SET status=%s, updated_at=%s
+                WHERE id=%s
+            """, (status, now_iso(), event_id))
+        conn.commit()
+
+
+def list_events_by_reise(reise_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, reise_id, typ, titel, status, created_at, updated_at
+                FROM events
+                WHERE reise_id = %s
+                ORDER BY id ASC
+            """, (reise_id,))
+            return cur.fetchall()
+
+
+def attach_beleg_to_event(event_id: int, beleg_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO event_belege (event_id, beleg_id)
+                VALUES (%s, %s)
+            """, (event_id, beleg_id))
+        conn.commit()
+
+
+def get_reise_detail(reise_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, reise_code, reise_jahr, laufende_nummer, reise_name, startdatum, enddatum, anzahl_reisende, created_at
+                FROM reisen
+                WHERE id = %s
+            """, (reise_id,))
+            reise = cur.fetchone()
+
+            cur.execute("""
+                SELECT e.id, e.typ, e.titel, e.status, e.created_at,
+                       COALESCE(COUNT(eb.id), 0) AS beleg_anzahl
+                FROM events e
+                LEFT JOIN event_belege eb ON eb.event_id = e.id
+                WHERE e.reise_id = %s
+                GROUP BY e.id
+                ORDER BY e.id ASC
+            """, (reise_id,))
+            events = cur.fetchall()
+
+            cur.execute("""
+                SELECT m.id, m.kuerzel, m.klarname, rr.alias_name
+                FROM reise_reisende rr
+                JOIN mitarbeiter m ON m.id = rr.mitarbeiter_id
+                WHERE rr.reise_id = %s
+                ORDER BY rr.id ASC
+            """, (reise_id,))
+            reisende = cur.fetchall()
+
+    return {
+        "reise": reise,
+        "events": events,
+        "reisende": reisende,
+    }

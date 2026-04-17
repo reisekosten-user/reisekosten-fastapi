@@ -16,21 +16,26 @@ from pydantic import BaseModel
 from pypdf import PdfReader
 
 from database import (
+    attach_beleg_to_event,
     check_duplicate,
+    create_event,
     create_mitarbeiter,
     create_reise,
     db_ping,
     get_next_reise_code,
+    get_reise_detail,
     init_db,
     insert_beleg,
     list_belege,
+    list_events_by_reise,
     list_mitarbeiter,
     list_reisen,
     search_mitarbeiter,
+    update_event_status,
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.3"
+APP_VERSION = "7.5"
 DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_API_BASE = "https://api.mistral.ai/v1"
@@ -44,6 +49,8 @@ init_db()
 class AnalyzeTextRequest(BaseModel):
     text: str
     filename: Optional[str] = None
+    reise_id: Optional[int] = None
+    event_id: Optional[int] = None
 
 
 class MitarbeiterCreateRequest(BaseModel):
@@ -63,6 +70,17 @@ class ReiseCreateRequest(BaseModel):
     enddatum: Optional[str] = None
     anzahl_reisende: int = 1
     mitarbeiter_ids: List[int] = []
+
+
+class EventCreateRequest(BaseModel):
+    reise_id: int
+    typ: str
+    titel: str
+    status: str = "planung"
+
+
+class EventStatusRequest(BaseModel):
+    status: str
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
@@ -231,7 +249,6 @@ def call_mistral(prompt: str) -> dict:
         raise HTTPException(status_code=502, detail=f"Mistral API Fehler: {exc}") from exc
 
     data = response.json()
-
     try:
         content = data["choices"][0]["message"]["content"]
     except Exception as exc:
@@ -314,27 +331,50 @@ def build_duplicate_info(data: Dict[str, Any], original_text: str) -> dict:
     }
 
 
-def compute_reise_status(reise: dict) -> dict:
+def compute_reise_status(detail: dict) -> dict:
+    events = detail.get("events", [])
+    reisende = detail.get("reisende", [])
+
+    typen = [e.get("typ") for e in events]
     warnungen = []
     status = "ok"
 
-    if not reise.get("anzahl_reisende") or int(reise.get("anzahl_reisende") or 0) <= 0:
+    if len(reisende) == 0:
         warnungen.append("Keine Reisenden zugeordnet")
         status = "fehler"
 
-    reise_name = (reise.get("reise_name") or "").lower()
-    if "hotel" not in reise_name:
-        warnungen.append("Hotel fehlt oder nicht gekennzeichnet")
+    if "Hotel" not in typen:
+        warnungen.append("Hotel fehlt")
         if status != "fehler":
             status = "pruefen"
+
+    if len(events) == 0:
+        warnungen.append("Keine Events vorhanden")
+        status = "fehler"
 
     return {
         "status": status,
         "warnungen": warnungen,
+        "flug": "Flug" in typen,
+        "hotel": "Hotel" in typen,
+        "taxi": "Taxi" in typen,
     }
 
 
-def analyze_text_internal(text: str, filename: str = "nicht vorhanden") -> dict:
+def auto_create_event_for_analysis(reise_id: int, beleg_id: int, data: dict):
+    art = data.get("art_des_dokuments", "Unbekannt")
+    titel = art if art != "Unbekannt" else "Beleg"
+    event_id = create_event({
+        "reise_id": reise_id,
+        "typ": art,
+        "titel": titel,
+        "status": "abgeschlossen",
+    })
+    attach_beleg_to_event(event_id, beleg_id)
+    return event_id
+
+
+def analyze_text_internal(text: str, filename: str = "nicht vorhanden", reise_id: Optional[int] = None, event_id: Optional[int] = None) -> dict:
     anonymized_text = anonymize_document_text(text)
     prompt = build_prompt(anonymized_text, filename=filename)
     raw = call_mistral(prompt)
@@ -346,14 +386,24 @@ def analyze_text_internal(text: str, filename: str = "nicht vorhanden") -> dict:
     data["generated_at_utc"] = datetime.utcnow().isoformat()
     data["anonymized_preview"] = anonymized_text[:4000]
 
-    insert_beleg({
+    beleg_id = insert_beleg({
         "belegdatum": data.get("belegdatum"),
         "art": data.get("art_des_dokuments"),
         "kosten": data.get("kosten_mit_steuern"),
         "waehrung": data.get("waehrung_der_kosten"),
         "fingerprint": dup["fingerprint"],
-        "duplicate_key": dup["duplicate_candidate_key"],
+        "duplicate_key": dup["duplicate_candidate_key"),
     })
+
+    data["beleg_id"] = beleg_id
+
+    if event_id:
+        attach_beleg_to_event(event_id, beleg_id)
+        update_event_status(event_id, "abgeschlossen")
+        data["attached_event_id"] = event_id
+    elif reise_id:
+        new_event_id = auto_create_event_for_analysis(reise_id, beleg_id, data)
+        data["created_event_id"] = new_event_id
 
     return data
 
@@ -373,6 +423,9 @@ def root():
             "/reisen",
             "/reisen/next-code?jahr=2027",
             "/reisen/overview",
+            "/reisen/{reise_id}",
+            "/events",
+            "/events/{event_id}/status",
             "/anonymize/text",
             "/anonymize/file",
             "/analyze/text",
@@ -467,9 +520,20 @@ def reisen_overview():
         items = list_reisen()
         enriched = []
         for r in items:
-            meta = compute_reise_status(r)
+            detail = get_reise_detail(r["id"])
+            meta = compute_reise_status(detail)
             enriched.append({**r, **meta})
         return {"count": len(enriched), "reisen": enriched}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
+@app.get("/reisen/{reise_id}")
+def reisen_detail(reise_id: int):
+    try:
+        detail = get_reise_detail(reise_id)
+        meta = compute_reise_status(detail)
+        return {**detail, **meta}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
 
@@ -487,6 +551,24 @@ def reisen_create(payload: ReiseCreateRequest):
     try:
         result = create_reise(payload.model_dump())
         return {"status": "ok", **result}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/events")
+def events_create(payload: EventCreateRequest):
+    try:
+        event_id = create_event(payload.model_dump())
+        return {"status": "ok", "event_id": event_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.put("/events/{event_id}/status")
+def events_update_status(event_id: int, payload: EventStatusRequest):
+    try:
+        update_event_status(event_id, payload.status)
+        return {"status": "ok", "event_id": event_id, "new_status": payload.status}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -526,13 +608,22 @@ async def anonymize_file(file: UploadFile = File(...)):
 @app.post("/analyze/text")
 def analyze_text(payload: AnalyzeTextRequest):
     try:
-        return analyze_text_internal(payload.text, payload.filename or "text-input.txt")
+        return analyze_text_internal(
+            payload.text,
+            payload.filename or "text-input.txt",
+            payload.reise_id,
+            payload.event_id,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/analyze/file")
-async def analyze_file(file: UploadFile = File(...)):
+async def analyze_file(
+    file: UploadFile = File(...),
+    reise_id: Optional[int] = Query(default=None),
+    event_id: Optional[int] = Query(default=None),
+):
     try:
         content = await file.read()
 
@@ -541,6 +632,11 @@ async def analyze_file(file: UploadFile = File(...)):
         else:
             text = content.decode("utf-8", errors="replace")
 
-        return analyze_text_internal(text, file.filename or "upload")
+        return analyze_text_internal(
+            text,
+            file.filename or "upload",
+            reise_id,
+            event_id,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

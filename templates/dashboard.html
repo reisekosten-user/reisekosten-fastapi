@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <title>Reisekosten Dashboard 7.3</title>
+  <title>Reisekosten Dashboard 7.5</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -22,12 +22,7 @@
     }
 
     * { box-sizing: border-box; }
-    body {
-      font-family: Arial, sans-serif;
-      background: var(--bg);
-      margin: 0;
-      color: var(--text);
-    }
+    body { font-family: Arial, sans-serif; background: var(--bg); margin: 0; color: var(--text); }
 
     .header {
       background: linear-gradient(90deg, #143a9b, #2563eb);
@@ -40,35 +35,12 @@
       flex-wrap: wrap;
     }
 
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-    }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .brand img { height: 64px; background: transparent; border-radius: 8px; }
+    .brand-title { font-size: 22px; font-weight: 700; }
+    .brand-sub { font-size: 13px; opacity: 0.9; }
 
-    .brand img {
-      height: 46px;
-      background: white;
-      border-radius: 8px;
-      padding: 4px;
-    }
-
-    .brand-title {
-      font-size: 22px;
-      font-weight: 700;
-    }
-
-    .brand-sub {
-      font-size: 13px;
-      opacity: 0.9;
-    }
-
-    .nav {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-
+    .nav { display: flex; gap: 10px; flex-wrap: wrap; }
     .nav button {
       background: rgba(255,255,255,0.14);
       color: white;
@@ -78,24 +50,10 @@
       cursor: pointer;
     }
 
-    .container {
-      max-width: 1380px;
-      margin: 24px auto;
-      padding: 0 18px;
-    }
-
-    .grid {
-      display: grid;
-      gap: 20px;
-    }
-
-    .grid-2 {
-      grid-template-columns: 1.2fr 0.8fr;
-    }
-
-    .grid-3 {
-      grid-template-columns: repeat(3, 1fr);
-    }
+    .container { max-width: 1450px; margin: 24px auto; padding: 0 18px; }
+    .grid { display: grid; gap: 20px; }
+    .grid-2 { grid-template-columns: 1.2fr 0.8fr; }
+    .grid-3 { grid-template-columns: repeat(3, 1fr); }
 
     .card {
       background: var(--card);
@@ -105,28 +63,11 @@
       box-shadow: 0 3px 14px rgba(15, 23, 42, 0.06);
     }
 
-    .title {
-      font-size: 20px;
-      font-weight: 700;
-      margin: 0 0 14px;
-    }
+    .title { font-size: 20px; font-weight: 700; margin: 0 0 14px; }
+    .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
 
-    .subtitle {
-      color: var(--muted);
-      font-size: 13px;
-      margin-bottom: 16px;
-    }
-
-    .row {
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-
-    .col {
-      flex: 1;
-      min-width: 220px;
-    }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .col { flex: 1; min-width: 220px; }
 
     label {
       font-size: 13px;
@@ -146,10 +87,7 @@
       margin-bottom: 14px;
     }
 
-    textarea {
-      min-height: 180px;
-      resize: vertical;
-    }
+    textarea { min-height: 180px; resize: vertical; }
 
     button {
       border: none;
@@ -160,22 +98,10 @@
       font-weight: 700;
     }
 
-    .btn-primary {
-      background: var(--primary);
-      color: white;
-    }
-
+    .btn-primary { background: var(--primary); color: white; }
     .btn-primary:hover { background: var(--primary-dark); }
-
-    .btn-secondary {
-      background: #475569;
-      color: white;
-    }
-
-    .btn-light {
-      background: #e2e8f0;
-      color: #0f172a;
-    }
+    .btn-secondary { background: #475569; color: white; }
+    .btn-light { background: #e2e8f0; color: #0f172a; }
 
     .hidden { display: none; }
 
@@ -204,11 +130,7 @@
       letter-spacing: 0.04em;
     }
 
-    .metric-value {
-      margin-top: 6px;
-      font-size: 24px;
-      font-weight: 800;
-    }
+    .metric-value { margin-top: 6px; font-size: 24px; font-weight: 800; }
 
     .traveler-row {
       border: 1px solid var(--line);
@@ -232,7 +154,6 @@
       cursor: pointer;
       border-top: 1px solid #eef2f7;
     }
-
     .search-item:first-child { border-top: 0; }
     .search-item:hover { background: #eff6ff; }
 
@@ -270,6 +191,30 @@
     .badge-warn { background: var(--warn-bg); color: var(--warn); }
     .badge-err { background: var(--err-bg); color: var(--err); }
 
+    .detail-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .event-column {
+      background: #f8fbff;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+    }
+
+    .event-card {
+      background: white;
+      border: 1px solid #dbe4f0;
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+
+    .event-title { font-weight: 700; }
+    .event-meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
     pre {
       background: #0f172a;
       color: #dbeafe;
@@ -282,9 +227,7 @@
     }
 
     @media (max-width: 1100px) {
-      .grid-2, .grid-3 {
-        grid-template-columns: 1fr;
-      }
+      .grid-2, .grid-3, .detail-layout { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -292,10 +235,10 @@
 
 <div class="header">
   <div class="brand">
-    <img src="/static/logo.png" alt="Logo">
+    <img src="/static/logo2.png" alt="Logo">
     <div>
       <div class="brand-title">Reisekosten System</div>
-      <div class="brand-sub">Version 7.3 · Analyse · Reisen · Mitarbeiter · DSGVO-Voranonymisierung</div>
+      <div class="brand-sub">Version 7.5 · Reise-Detailseite · Planung / Abgeschlossen · DSGVO-konforme Voranonymisierung</div>
     </div>
   </div>
 
@@ -304,6 +247,7 @@
     <button onclick="showSection('reise')">Neue Reise</button>
     <button onclick="showSection('scan')">Belegscan</button>
     <button onclick="showSection('mitarbeiter')">Mitarbeiter</button>
+    <button onclick="showSection('detail')">Reise-Detail</button>
   </div>
 </div>
 
@@ -392,7 +336,18 @@
 
   <div id="scanSection" class="card hidden">
     <div class="title">Belegscan / Analyse</div>
-    <div class="subtitle">Vor der KI wird automatisch anonymisiert</div>
+    <div class="subtitle">Optional direkt einer Reise oder einem Event zuordnen</div>
+
+    <div class="row">
+      <div class="col">
+        <label>Reise-ID optional</label>
+        <input id="scanReiseId" type="number">
+      </div>
+      <div class="col">
+        <label>Event-ID optional</label>
+        <input id="scanEventId" type="number">
+      </div>
+    </div>
 
     <label>Dateiname</label>
     <input id="filename" type="text" value="manuell.txt">
@@ -455,10 +410,64 @@
     <button class="btn-primary" onclick="createMitarbeiter()">Mitarbeiter anlegen</button>
   </div>
 
+  <div id="detailSection" class="card hidden">
+    <div class="title">Reise-Detailseite</div>
+    <div class="subtitle">Planung / Abgeschlossen je Reise</div>
+
+    <div class="row">
+      <div class="col">
+        <label>Reise-ID</label>
+        <input id="detailReiseId" type="number">
+      </div>
+      <div class="col" style="display:flex;align-items:flex-end;">
+        <button class="btn-primary" onclick="loadReiseDetail()">Reise laden</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col">
+        <label>Neues Event Typ</label>
+        <select id="eventTyp">
+          <option value="Flug">Flug</option>
+          <option value="Hotel">Hotel</option>
+          <option value="Taxi">Taxi</option>
+          <option value="Zug">Zug</option>
+          <option value="Sonstiges">Sonstiges</option>
+        </select>
+      </div>
+      <div class="col">
+        <label>Event Titel</label>
+        <input id="eventTitel" type="text" placeholder="z. B. Hotel Marriott Lyon">
+      </div>
+      <div class="col">
+        <label>Event Status</label>
+        <select id="eventStatus">
+          <option value="planung">Planung</option>
+          <option value="abgeschlossen">Abgeschlossen</option>
+        </select>
+      </div>
+    </div>
+
+    <button class="btn-primary" onclick="createEvent()">Event anlegen</button>
+
+    <div id="reiseDetailMeta" style="margin-top:18px;"></div>
+
+    <div class="detail-layout" style="margin-top:18px;">
+      <div class="event-column">
+        <div class="title" style="font-size:18px;">Planung</div>
+        <div id="planungColumn"></div>
+      </div>
+      <div class="event-column">
+        <div class="title" style="font-size:18px;">Abgeschlossen</div>
+        <div id="abgeschlossenColumn"></div>
+      </div>
+    </div>
+  </div>
+
   <div class="grid grid-2" style="margin-top:20px;">
     <div class="card">
       <div class="title">Reisen Übersicht</div>
-      <div class="subtitle">Mit Status und Warnungen</div>
+      <div class="subtitle">Klick auf ID für Detailansicht</div>
       <div id="reisenTable"></div>
     </div>
 
@@ -519,11 +528,13 @@ function showSection(name) {
   document.getElementById("reiseSection").classList.add("hidden");
   document.getElementById("scanSection").classList.add("hidden");
   document.getElementById("mitarbeiterSection").classList.add("hidden");
+  document.getElementById("detailSection").classList.add("hidden");
 
   if (name === "overview") document.getElementById("overviewSection").classList.remove("hidden");
   if (name === "reise") document.getElementById("reiseSection").classList.remove("hidden");
   if (name === "scan") document.getElementById("scanSection").classList.remove("hidden");
   if (name === "mitarbeiter") document.getElementById("mitarbeiterSection").classList.remove("hidden");
+  if (name === "detail") document.getElementById("detailSection").classList.remove("hidden");
 }
 
 async function testHealth() {
@@ -583,10 +594,13 @@ async function loadReisen() {
 
     const rows = (data.reisen || []).map(r => `
       <tr>
+        <td><a href="#" onclick="openReiseDetail(${r.id});return false;">${escapeHtml(r.id)}</a></td>
         <td>${escapeHtml(r.reise_code)}</td>
         <td>${escapeHtml(r.reise_name)}</td>
-        <td>${escapeHtml(r.reise_jahr)}</td>
         <td>${escapeHtml(r.anzahl_reisende)}</td>
+        <td>${r.flug ? '✔' : '—'}</td>
+        <td>${r.hotel ? '✔' : '—'}</td>
+        <td>${r.taxi ? '✔' : '—'}</td>
         <td>${badge(r.status)}</td>
         <td>${escapeHtml((r.warnungen || []).join(", "))}</td>
       </tr>
@@ -596,15 +610,18 @@ async function loadReisen() {
       <table>
         <thead>
           <tr>
+            <th>ID</th>
             <th>Code</th>
             <th>Reisename</th>
-            <th>Jahr</th>
             <th>Reisende</th>
+            <th>Flug</th>
+            <th>Hotel</th>
+            <th>Taxi</th>
             <th>Status</th>
             <th>Warnungen</th>
           </tr>
         </thead>
-        <tbody>${rows || '<tr><td colspan="6">Keine Reisen vorhanden</td></tr>'}</tbody>
+        <tbody>${rows || '<tr><td colspan="9">Keine Reisen vorhanden</td></tr>'}</tbody>
       </table>
     `;
   } catch (e) {
@@ -815,7 +832,9 @@ async function analyzeText() {
   try {
     const payload = {
       text: document.getElementById("textInput").value,
-      filename: document.getElementById("filename").value
+      filename: document.getElementById("filename").value,
+      reise_id: document.getElementById("scanReiseId").value ? parseInt(document.getElementById("scanReiseId").value, 10) : null,
+      event_id: document.getElementById("scanEventId").value ? parseInt(document.getElementById("scanEventId").value, 10) : null
     };
 
     const res = await fetch(api() + "/analyze/text", {
@@ -828,6 +847,7 @@ async function analyzeText() {
     document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
     setStatus("Textanalyse abgeschlossen.");
     await loadBelege();
+    if (payload.reise_id) await loadReiseDetailById(payload.reise_id);
   } catch (e) {
     setStatus(e.message || String(e), true);
   }
@@ -841,10 +861,16 @@ async function analyzeFile() {
       return;
     }
 
+    let url = api() + "/analyze/file";
+    const qp = [];
+    if (document.getElementById("scanReiseId").value) qp.push("reise_id=" + encodeURIComponent(document.getElementById("scanReiseId").value));
+    if (document.getElementById("scanEventId").value) qp.push("event_id=" + encodeURIComponent(document.getElementById("scanEventId").value));
+    if (qp.length) url += "?" + qp.join("&");
+
     const formData = new FormData();
     formData.append("file", input.files[0]);
 
-    const res = await fetch(api() + "/analyze/file", {
+    const res = await fetch(url, {
       method: "POST",
       body: formData
     });
@@ -853,6 +879,108 @@ async function analyzeFile() {
     document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
     setStatus("Dateianalyse abgeschlossen.");
     await loadBelege();
+    if (document.getElementById("scanReiseId").value) {
+      await loadReiseDetailById(parseInt(document.getElementById("scanReiseId").value, 10));
+    }
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+async function createEvent() {
+  try {
+    const payload = {
+      reise_id: parseInt(document.getElementById("detailReiseId").value, 10),
+      typ: document.getElementById("eventTyp").value,
+      titel: document.getElementById("eventTitel").value,
+      status: document.getElementById("eventStatus").value
+    };
+
+    const res = await fetch(api() + "/events", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    });
+
+    const data = await parseJsonResponse(res);
+    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
+    setStatus("Event angelegt.");
+    await loadReiseDetail();
+    await loadReisen();
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+async function setEventStatus(eventId, status) {
+  try {
+    const res = await fetch(api() + "/events/" + eventId + "/status", {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({status})
+    });
+    const data = await parseJsonResponse(res);
+    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
+    setStatus("Event aktualisiert.");
+    await loadReiseDetail();
+    await loadReisen();
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+function renderEventCard(e) {
+  return `
+    <div class="event-card">
+      <div class="event-title">${escapeHtml(e.typ || "Unbekannt")} · ${escapeHtml(e.titel || "")}</div>
+      <div class="event-meta">Event-ID ${escapeHtml(e.id)} · Belege: ${escapeHtml(e.beleg_anzahl || 0)}</div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn-light" onclick="setEventStatus(${e.id}, 'planung')">Nach Planung</button>
+        <button class="btn-primary" onclick="setEventStatus(${e.id}, 'abgeschlossen')">Nach Abgeschlossen</button>
+      </div>
+    </div>
+  `;
+}
+
+async function openReiseDetail(reiseId) {
+  document.getElementById("detailReiseId").value = reiseId;
+  showSection('detail');
+  await loadReiseDetail();
+}
+
+async function loadReiseDetail() {
+  const reiseId = parseInt(document.getElementById("detailReiseId").value, 10);
+  if (!reiseId) {
+    setStatus("Bitte zuerst eine Reise-ID eingeben.", true);
+    return;
+  }
+  await loadReiseDetailById(reiseId);
+}
+
+async function loadReiseDetailById(reiseId) {
+  try {
+    const res = await fetch(api() + "/reisen/" + reiseId);
+    const data = await parseJsonResponse(res);
+    if (data.status === "error") throw new Error(data.detail || "Fehler");
+
+    const reise = data.reise || {};
+    const planung = (data.events || []).filter(e => e.status === "planung");
+    const abgeschlossen = (data.events || []).filter(e => e.status === "abgeschlossen");
+    const reisende = (data.reisende || []).map(r => `${r.alias_name}: ${r.klarname}`).join(", ");
+
+    document.getElementById("reiseDetailMeta").innerHTML = `
+      <div class="card" style="padding:14px; margin-top:10px;">
+        <div><strong>${escapeHtml(reise.reise_code || "")}</strong> · ${escapeHtml(reise.reise_name || "")}</div>
+        <div style="margin-top:6px; color:#64748b;">Reisende: ${escapeHtml(reisende || "—")}</div>
+        <div style="margin-top:6px;">Status: ${badge(data.status)} · Warnungen: ${escapeHtml((data.warnungen || []).join(", "))}</div>
+      </div>
+    `;
+
+    document.getElementById("planungColumn").innerHTML =
+      planung.length ? planung.map(renderEventCard).join("") : "<div>Keine geplanten Events.</div>";
+
+    document.getElementById("abgeschlossenColumn").innerHTML =
+      abgeschlossen.length ? abgeschlossen.map(renderEventCard).join("") : "<div>Keine abgeschlossenen Events.</div>";
   } catch (e) {
     setStatus(e.message || String(e), true);
   }
