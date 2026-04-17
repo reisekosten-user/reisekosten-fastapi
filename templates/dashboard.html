@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <title>Reisekosten Dashboard 7.7</title>
+  <title>Reisekosten Dashboard 7.7a</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -47,8 +47,9 @@
       height: 100%;
       max-height: 96px;
       object-fit: contain;
-      filter: brightness(2.2) contrast(0.85) grayscale(100%);
       background: transparent;
+      filter: none;
+      mix-blend-mode: normal;
     }
 
     .brand-title { font-size: 22px; font-weight: 700; }
@@ -68,6 +69,7 @@
       border-radius: 10px;
       padding: 10px 14px;
       cursor: pointer;
+      font-weight: 700;
     }
 
     .nav button:hover {
@@ -264,7 +266,7 @@
     <img src="/static/logo2.png" alt="Logo">
     <div>
       <div class="brand-title">Reisekosten System</div>
-      <div class="brand-sub">Version 7.7 · Premium-Logo · Event-Details · Belege je Event · Prüflogik</div>
+      <div class="brand-sub">Version 7.7a · erster Testlauf</div>
     </div>
   </div>
 
@@ -277,7 +279,7 @@
     <button onclick="testHealth()">Health</button>
     <button onclick="loadBelege()">Belege</button>
     <button onclick="loadReisen()">Reisen</button>
-    <button onclick="loadMitarbeiter()">Mitarbeiter laden</button>
+    <button onclick="loadMitarbeiter()">Mitarbeiter</button>
   </div>
 </div>
 
@@ -598,8 +600,27 @@ async function loadBelege() {
 
 async function loadReisen() {
   try {
-    const res = await fetch(api() + "/reisen/overview");
-    const data = await parseJsonResponse(res);
+    let data = null;
+
+    try {
+      const resOverview = await fetch(api() + "/reisen/overview");
+      data = await parseJsonResponse(resOverview);
+      if (data.status === "error") throw new Error(data.detail || "overview failed");
+    } catch (e) {
+      const resFallback = await fetch(api() + "/reisen");
+      const raw = await parseJsonResponse(resFallback);
+      data = {
+        count: raw.count || 0,
+        reisen: (raw.reisen || []).map(r => ({
+          ...r,
+          flug: false,
+          hotel: false,
+          taxi: false,
+          status: "pruefen",
+          warnungen: []
+        }))
+      };
+    }
 
     document.getElementById("metricReisen").textContent = data.count || 0;
 
@@ -636,7 +657,7 @@ async function loadReisen() {
       </table>
     `;
   } catch (e) {
-    setStatus(e.message || String(e), true);
+    setStatus("Reisen konnten nicht geladen werden: " + (e.message || String(e)), true);
   }
 }
 
@@ -759,8 +780,10 @@ async function createReise() {
       body: JSON.stringify(payload)
     });
     const data = await parseJsonResponse(res);
+
     document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
     setStatus("Reise angelegt: " + (data.reise_code || ""));
+    showSection('overview');
     await previewNextCode();
     await loadReisen();
   } catch (e) {
