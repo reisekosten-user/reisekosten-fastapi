@@ -22,6 +22,7 @@ from database import (
     create_mitarbeiter,
     create_reise,
     db_ping,
+    get_event_detail,
     get_next_reise_code,
     get_reise_detail,
     init_db,
@@ -34,7 +35,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.5"
+APP_VERSION = "7.7"
 DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_API_BASE = "https://api.mistral.ai/v1"
@@ -134,8 +135,7 @@ def anonymize_document_text(text: str) -> str:
     sorted_names = sorted(name_candidates, key=len, reverse=True)
     for name in sorted_names:
         for variant in normalize_variants(name):
-            pattern = re.compile(re.escape(variant), re.IGNORECASE)
-            anonymized = pattern.sub("Max Mustermann", anonymized)
+            anonymized = re.sub(re.escape(variant), "Max Mustermann", anonymized, flags=re.IGNORECASE)
 
     anonymized = re.sub(
         r"(?i)\b(geburtsdatum|birth date|date of birth|dob)\b\s*[:\-]?\s*([0-9]{1,2}[./\-][0-9]{1,2}[./\-][0-9]{2,4})",
@@ -150,11 +150,7 @@ def anonymize_document_text(text: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    anonymized = re.sub(
-        r"(?i)\b(\+?\d[\d\s\-()/]{6,}\d)\b",
-        "XXXX",
-        anonymized,
-    )
+    anonymized = re.sub(r"(?i)\b(\+?\d[\d\s\-()/]{6,}\d)\b", "XXXX", anonymized)
 
     patterns = [
         re.compile(r"(?i)\b(booking code\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
@@ -351,6 +347,12 @@ def compute_reise_status(detail: dict) -> dict:
         warnungen.append("Keine Events vorhanden")
         status = "fehler"
 
+    taxi_count = sum(1 for e in events if e.get("typ") == "Taxi")
+    if taxi_count > 1:
+        warnungen.append("Mehrere Taxi-Events prüfen")
+        if status == "ok":
+            status = "pruefen"
+
     return {
         "status": status,
         "warnungen": warnungen,
@@ -373,7 +375,12 @@ def auto_create_event_for_analysis(reise_id: int, beleg_id: int, data: dict):
     return event_id
 
 
-def analyze_text_internal(text: str, filename: str = "nicht vorhanden", reise_id: Optional[int] = None, event_id: Optional[int] = None) -> dict:
+def analyze_text_internal(
+    text: str,
+    filename: str = "nicht vorhanden",
+    reise_id: Optional[int] = None,
+    event_id: Optional[int] = None
+) -> dict:
     anonymized_text = anonymize_document_text(text)
     prompt = build_prompt(anonymized_text, filename=filename)
     raw = call_mistral(prompt)
@@ -424,6 +431,7 @@ def root():
             "/reisen/overview",
             "/reisen/{reise_id}",
             "/events",
+            "/events/{event_id}",
             "/events/{event_id}/status",
             "/anonymize/text",
             "/anonymize/file",
@@ -561,6 +569,14 @@ def events_create(payload: EventCreateRequest):
         return {"status": "ok", "event_id": event_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/events/{event_id}")
+def events_detail(event_id: int):
+    try:
+        return get_event_detail(event_id)
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
 
 
 @app.put("/events/{event_id}/status")

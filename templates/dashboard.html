@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <title>Reisekosten Dashboard 7.5</title>
+  <title>Reisekosten Dashboard 7.7</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -25,9 +25,10 @@
     body { font-family: Arial, sans-serif; background: var(--bg); margin: 0; color: var(--text); }
 
     .header {
-      background: linear-gradient(90deg, #143a9b, #2563eb);
+      background: linear-gradient(90deg, #12327f, #2563eb);
       color: white;
-      padding: 18px 24px;
+      padding: 8px 24px;
+      min-height: 96px;
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -35,8 +36,14 @@
       flex-wrap: wrap;
     }
 
-    .brand { display: flex; align-items: center; gap: 14px; }
-    .brand img { height: 64px; background: transparent; border-radius: 8px; }
+    .brand { display: flex; align-items: center; gap: 14px; height: 80px; }
+    .brand img {
+      height: 100%;
+      max-height: 96px;
+      object-fit: contain;
+      filter: brightness(2.2) contrast(0.85) grayscale(100%);
+    }
+
     .brand-title { font-size: 22px; font-weight: 700; }
     .brand-sub { font-size: 13px; opacity: 0.9; }
 
@@ -212,7 +219,8 @@
       margin-bottom: 10px;
     }
 
-    .event-title { font-weight: 700; }
+    .event-title { font-weight: 700; cursor: pointer; }
+    .event-title:hover { color: var(--primary); }
     .event-meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
 
     pre {
@@ -238,7 +246,7 @@
     <img src="/static/logo2.png" alt="Logo">
     <div>
       <div class="brand-title">Reisekosten System</div>
-      <div class="brand-sub">Version 7.5 · Reise-Detailseite · Planung / Abgeschlossen · DSGVO-konforme Voranonymisierung</div>
+      <div class="brand-sub">Version 7.7 · Premium-Logo · Event-Details · Belege je Event · Prüflogik</div>
     </div>
   </div>
 
@@ -485,7 +493,7 @@
   </div>
 
   <div class="card" style="margin-top:20px;">
-    <div class="title">Letztes Ergebnis / Debug</div>
+    <div class="title">Letztes Ergebnis / Event-Detail / Debug</div>
     <pre id="resultBox">Noch keine Analyse vorhanden.</pre>
   </div>
 
@@ -929,10 +937,37 @@ async function setEventStatus(eventId, status) {
   }
 }
 
+async function showEventDetail(eventId) {
+  try {
+    const res = await fetch(api() + "/events/" + eventId);
+    const data = await parseJsonResponse(res);
+
+    let html = "";
+    html += `Event-ID: ${data.event?.id}\n`;
+    html += `Typ: ${data.event?.typ}\n`;
+    html += `Titel: ${data.event?.titel}\n`;
+    html += `Status: ${data.event?.status}\n\n`;
+    html += `Belege:\n`;
+
+    if (!data.belege || data.belege.length === 0) {
+      html += "Keine Belege vorhanden.";
+    } else {
+      data.belege.forEach(b => {
+        html += `#${b.id} | ${b.art} | ${b.kosten} ${b.waehrung} | ${b.belegdatum}\n`;
+      });
+    }
+
+    document.getElementById("resultBox").textContent = html;
+    setStatus("Event-Detail geladen.");
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
 function renderEventCard(e) {
   return `
     <div class="event-card">
-      <div class="event-title">${escapeHtml(e.typ || "Unbekannt")} · ${escapeHtml(e.titel || "")}</div>
+      <div class="event-title" onclick="showEventDetail(${e.id})">${escapeHtml(e.typ || "Unbekannt")} · ${escapeHtml(e.titel || "")}</div>
       <div class="event-meta">Event-ID ${escapeHtml(e.id)} · Belege: ${escapeHtml(e.beleg_anzahl || 0)}</div>
       <div class="row" style="margin-top:10px;">
         <button class="btn-light" onclick="setEventStatus(${e.id}, 'planung')">Nach Planung</button>

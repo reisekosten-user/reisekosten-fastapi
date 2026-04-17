@@ -368,18 +368,6 @@ def update_event_status(event_id: int, status: str):
         conn.commit()
 
 
-def list_events_by_reise(reise_id: int):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, reise_id, typ, titel, status, created_at, updated_at
-                FROM events
-                WHERE reise_id = %s
-                ORDER BY id ASC
-            """, (reise_id,))
-            return cur.fetchall()
-
-
 def attach_beleg_to_event(event_id: int, beleg_id: int):
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -401,7 +389,7 @@ def get_reise_detail(reise_id: int):
             reise = cur.fetchone()
 
             cur.execute("""
-                SELECT e.id, e.typ, e.titel, e.status, e.created_at,
+                SELECT e.id, e.reise_id, e.typ, e.titel, e.status, e.created_at,
                        COALESCE(COUNT(eb.id), 0) AS beleg_anzahl
                 FROM events e
                 LEFT JOIN event_belege eb ON eb.event_id = e.id
@@ -420,8 +408,26 @@ def get_reise_detail(reise_id: int):
             """, (reise_id,))
             reisende = cur.fetchall()
 
-    return {
-        "reise": reise,
-        "events": events,
-        "reisende": reisende,
-    }
+    return {"reise": reise, "events": events, "reisende": reisende}
+
+
+def get_event_detail(event_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, reise_id, typ, titel, status, created_at
+                FROM events
+                WHERE id = %s
+            """, (event_id,))
+            event = cur.fetchone()
+
+            cur.execute("""
+                SELECT b.id, b.belegdatum, b.art, b.kosten, b.waehrung, b.created_at
+                FROM event_belege eb
+                JOIN belege b ON b.id = eb.beleg_id
+                WHERE eb.event_id = %s
+                ORDER BY b.id DESC
+            """, (event_id,))
+            belege = cur.fetchall()
+
+    return {"event": event, "belege": belege}
