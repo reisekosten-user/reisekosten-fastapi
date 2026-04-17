@@ -29,7 +29,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.2a"
+APP_VERSION = "7.2b"
 DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_API_BASE = "https://api.mistral.ai/v1"
@@ -71,6 +71,96 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
         return "\n".join(text_parts).strip()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"PDF konnte nicht gelesen werden: {exc}") from exc
+
+
+def normalize_variants(name: str) -> List[str]:
+    if not name:
+        return []
+    base = name.strip().lower()
+    variants = {base}
+    variants.add(base.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss"))
+    variants.add(base.replace("ä", "a").replace("ö", "o").replace("ü", "u").replace("ß", "ss"))
+    variants.add(base.replace("ae", "a").replace("oe", "o").replace("ue", "u"))
+    return [v for v in variants if v]
+
+
+def mask_field_values(text: str, patterns: List[re.Pattern]) -> str:
+    out = text
+    for pattern in patterns:
+        out = pattern.sub(lambda m: f"{m.group(1)}XXXX", out)
+    return out
+
+
+def anonymize_document_text(text: str) -> str:
+    anonymized = text
+
+    # Namen aus Mitarbeiterdatenbank durch Max Mustermann ersetzen
+    try:
+        mitarbeiter = list_mitarbeiter(limit=1000)
+    except Exception:
+        mitarbeiter = []
+
+    name_candidates = set()
+    for m in mitarbeiter:
+        for candidate in [
+            m.get("klarname"),
+            f"{m.get('vorname', '')} {m.get('nachname', '')}".strip(),
+            f"{m.get('nachname', '')} {m.get('vorname', '')}".strip(),
+            m.get("vorname"),
+            m.get("nachname"),
+        ]:
+            if candidate and candidate.strip():
+                name_candidates.add(candidate.strip())
+
+    sorted_names = sorted(name_candidates, key=len, reverse=True)
+    for name in sorted_names:
+        for variant in normalize_variants(name):
+            pattern = re.compile(re.escape(variant), re.IGNORECASE)
+            anonymized = pattern.sub("Max Mustermann", anonymized)
+
+    # Geburtsdaten / Birth / DOB
+    anonymized = re.sub(
+        r"(?i)\b(geburtsdatum|birth date|date of birth|dob)\b\s*[:\-]?\s*([0-9]{1,2}[./\-][0-9]{1,2}[./\-][0-9]{2,4})",
+        r"\1: XXXX",
+        anonymized,
+    )
+
+    # E-Mail
+    anonymized = re.sub(
+        r"(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b",
+        "XXXX",
+        anonymized,
+        flags=re.IGNORECASE,
+    )
+
+    # Telefon
+    anonymized = re.sub(
+        r"(?i)\b(\+?\d[\d\s\-()/]{6,}\d)\b",
+        "XXXX",
+        anonymized,
+    )
+
+    # Feste Label-Felder auf XXXX
+    patterns = [
+        re.compile(r"(?i)\b(booking code\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(booking reference\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(buchungsnummer\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(buchungsreferenz\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(confirmation number\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(reservation number\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(ticket number\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(ticketnummer\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(ticketnummer\s*[:\-]?\s*)[\d\- ]+"),
+        re.compile(r"(?i)\b(pnr\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(record locator\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(confirmation no\.?\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(reservation no\.?\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(frequent flyer number\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        re.compile(r"(?i)\b(vielfliegernummer\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+    ]
+    anonymized = mask_field_values(anonymized, patterns)
+
+    return anonymized
 
 
 def build_prompt(document_text: str, filename: str = "nicht vorhanden") -> str:
@@ -227,14 +317,16 @@ def build_duplicate_info(data: Dict[str, Any], original_text: str) -> dict:
 
 
 def analyze_text_internal(text: str, filename: str = "nicht vorhanden") -> dict:
-    prompt = build_prompt(text, filename=filename)
+    anonymized_text = anonymize_document_text(text)
+    prompt = build_prompt(anonymized_text, filename=filename)
     raw = call_mistral(prompt)
     data = ensure_defaults(raw)
 
-    dup = build_duplicate_info(data, text)
+    dup = build_duplicate_info(data, anonymized_text)
     data["duplicate_info"] = dup
     data["version"] = APP_VERSION
     data["generated_at_utc"] = datetime.utcnow().isoformat()
+    data["anonymized_preview"] = anonymized_text[:4000]
 
     insert_beleg({
         "belegdatum": data.get("belegdatum"),
@@ -262,6 +354,8 @@ def root():
             "/mitarbeiter/suche?q=...",
             "/reisen",
             "/reisen/next-code?jahr=2027",
+            "/anonymize/text",
+            "/anonymize/file",
             "/analyze/text",
             "/analyze/file",
         ],
@@ -361,6 +455,38 @@ def reisen_create(payload: ReiseCreateRequest):
     try:
         result = create_reise(payload.model_dump())
         return {"status": "ok", **result}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/anonymize/text")
+def anonymize_text(payload: AnalyzeTextRequest):
+    try:
+        anonymized = anonymize_document_text(payload.text)
+        return {
+            "status": "ok",
+            "filename": payload.filename or "text-input.txt",
+            "anonymized_text": anonymized,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/anonymize/file")
+async def anonymize_file(file: UploadFile = File(...)):
+    try:
+        content = await file.read()
+        if (file.filename or "").lower().endswith(".pdf"):
+            text = extract_text_from_pdf(content)
+        else:
+            text = content.decode("utf-8", errors="replace")
+
+        anonymized = anonymize_document_text(text)
+        return {
+            "status": "ok",
+            "filename": file.filename or "upload",
+            "anonymized_text": anonymized,
+        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
