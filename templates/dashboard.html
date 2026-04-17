@@ -36,18 +36,31 @@
       flex-wrap: wrap;
     }
 
-    .brand { display: flex; align-items: center; gap: 14px; height: 80px; }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      height: 80px;
+    }
+
     .brand img {
       height: 100%;
       max-height: 96px;
       object-fit: contain;
       filter: brightness(2.2) contrast(0.85) grayscale(100%);
+      background: transparent;
     }
 
     .brand-title { font-size: 22px; font-weight: 700; }
     .brand-sub { font-size: 13px; opacity: 0.9; }
 
-    .nav { display: flex; gap: 10px; flex-wrap: wrap; }
+    .nav {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
     .nav button {
       background: rgba(255,255,255,0.14);
       color: white;
@@ -55,6 +68,10 @@
       border-radius: 10px;
       padding: 10px 14px;
       cursor: pointer;
+    }
+
+    .nav button:hover {
+      background: rgba(255,255,255,0.22);
     }
 
     .container { max-width: 1450px; margin: 24px auto; padding: 0 18px; }
@@ -113,7 +130,7 @@
     .hidden { display: none; }
 
     .statusbox {
-      margin-top: 12px;
+      margin: 18px 0 0 0;
       border-radius: 12px;
       padding: 12px;
       font-size: 14px;
@@ -161,6 +178,7 @@
       cursor: pointer;
       border-top: 1px solid #eef2f7;
     }
+
     .search-item:first-child { border-top: 0; }
     .search-item:hover { background: #eff6ff; }
 
@@ -256,31 +274,16 @@
     <button onclick="showSection('scan')">Belegscan</button>
     <button onclick="showSection('mitarbeiter')">Mitarbeiter</button>
     <button onclick="showSection('detail')">Reise-Detail</button>
+    <button onclick="testHealth()">Health</button>
+    <button onclick="loadBelege()">Belege</button>
+    <button onclick="loadReisen()">Reisen</button>
+    <button onclick="loadMitarbeiter()">Mitarbeiter laden</button>
   </div>
 </div>
 
 <div class="container">
 
-  <div class="card">
-    <div class="title">Systemsteuerung</div>
-    <div class="subtitle">API, Status und Schnellaktionen</div>
-
-    <div class="row">
-      <div class="col">
-        <label>API Basis-URL</label>
-        <input id="apiBase" type="text">
-      </div>
-    </div>
-
-    <div class="row">
-      <button class="btn-secondary" onclick="testHealth()">Health prüfen</button>
-      <button class="btn-secondary" onclick="loadBelege()">Belege laden</button>
-      <button class="btn-secondary" onclick="loadReisen()">Reisen laden</button>
-      <button class="btn-secondary" onclick="loadMitarbeiter()">Mitarbeiter laden</button>
-    </div>
-
-    <div id="statusBox"></div>
-  </div>
+  <div id="statusBox"></div>
 
   <div id="overviewSection" class="grid grid-3">
     <div class="metric">
@@ -501,7 +504,7 @@
 
 <script>
 function api() {
-  return document.getElementById("apiBase").value.trim().replace(/\/$/, "");
+  return window.location.origin;
 }
 
 function setStatus(message, isError = false) {
@@ -1022,8 +1025,6 @@ async function loadReiseDetailById(reiseId) {
 }
 
 window.onload = async function () {
-  document.getElementById("apiBase").value = window.location.origin;
-
   const yearSelect = document.getElementById("reiseJahr");
   const currentYear = new Date().getFullYear();
   for (let y = currentYear - 1; y <= currentYear + 3; y++) {
