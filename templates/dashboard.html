@@ -5,131 +5,248 @@
   <title>Reisekosten Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: Arial, sans-serif; background:#f4f7fb; padding:24px; }
-    .box { background:white; padding:20px; border-radius:16px; margin-bottom:20px; box-shadow:0 2px 10px rgba(0,0,0,0.06); }
-    input, textarea, button { width:100%; box-sizing:border-box; margin-top:8px; margin-bottom:12px; padding:10px; border-radius:10px; border:1px solid #cbd5e1; }
-    button { background:#2563eb; color:white; border:none; cursor:pointer; }
-    pre { background:#0f172a; color:#e2e8f0; padding:16px; border-radius:12px; overflow:auto; }
-    .error { background:#fef2f2; color:#b91c1c; padding:12px; border-radius:12px; margin-bottom:12px; }
+    body {
+      font-family: Arial, sans-serif;
+      background: #f4f7fb;
+      margin: 0;
+      padding: 24px;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .box {
+      background: #fff;
+      border-radius: 14px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+    }
+    h1, h2 {
+      margin-top: 0;
+    }
+    label {
+      display: block;
+      margin-top: 12px;
+      margin-bottom: 6px;
+      font-weight: bold;
+    }
+    input, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      font-size: 14px;
+    }
+    textarea {
+      min-height: 220px;
+      resize: vertical;
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+    button {
+      padding: 10px 16px;
+      border: none;
+      border-radius: 10px;
+      background: #2563eb;
+      color: white;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:hover {
+      opacity: 0.95;
+    }
+    .secondary {
+      background: #475569;
+    }
+    pre {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 14px;
+      border-radius: 10px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .error {
+      background: #fef2f2;
+      color: #b91c1c;
+      padding: 12px;
+      border-radius: 10px;
+      margin-top: 12px;
+    }
+    .ok {
+      background: #f0fdf4;
+      color: #166534;
+      padding: 12px;
+      border-radius: 10px;
+      margin-top: 12px;
+    }
   </style>
 </head>
 <body>
+  <div class="container">
+    <div class="box">
+      <h1>Reisekosten Dashboard</h1>
 
-  <div class="box">
-    <h1>Reisekosten Dashboard</h1>
-    <label>API Basis-URL</label>
-    <input id="apiBase" value="">
-    <button onclick="loadBelege()">Belege laden</button>
-    <div id="errorBox"></div>
-  </div>
+      <label for="apiBase">API Basis-URL</label>
+      <input id="apiBase" type="text">
 
-  <div class="box">
-    <h2>Text analysieren</h2>
-    <label>Dateiname</label>
-    <input id="filename" value="manuell.txt">
-    <label>Text</label>
-    <textarea id="textInput" rows="10"></textarea>
-    <button onclick="analyzeText()">Text analysieren</button>
-  </div>
+      <div class="row">
+        <button type="button" onclick="loadBelege()">Belege laden</button>
+        <button type="button" class="secondary" onclick="testHealth()">Health prüfen</button>
+      </div>
 
-  <div class="box">
-    <h2>Datei analysieren</h2>
-    <input id="fileInput" type="file">
-    <button onclick="analyzeFile()">Datei hochladen und analysieren</button>
-  </div>
+      <div id="statusBox"></div>
+    </div>
 
-  <div class="box">
-    <h2>Letztes Ergebnis</h2>
-    <pre id="resultBox">Noch keine Analyse vorhanden.</pre>
-  </div>
+    <div class="box">
+      <h2>Text analysieren</h2>
 
-  <div class="box">
-    <h2>Gespeicherte Belege</h2>
-    <pre id="belegeBox">Noch keine Daten geladen.</pre>
+      <label for="filename">Dateiname</label>
+      <input id="filename" type="text" value="manuell.txt">
+
+      <label for="textInput">Textinhalt</label>
+      <textarea id="textInput"></textarea>
+
+      <div class="row">
+        <button type="button" onclick="analyzeText()">Text analysieren</button>
+        <button type="button" class="secondary" onclick="clearResult()">Zurücksetzen</button>
+      </div>
+    </div>
+
+    <div class="box">
+      <h2>Datei analysieren</h2>
+
+      <label for="fileInput">Datei auswählen</label>
+      <input id="fileInput" type="file">
+
+      <div class="row">
+        <button type="button" onclick="analyzeFile()">Datei hochladen und analysieren</button>
+      </div>
+    </div>
+
+    <div class="box">
+      <h2>Letztes Ergebnis</h2>
+      <pre id="resultBox">Noch keine Analyse vorhanden.</pre>
+    </div>
+
+    <div class="box">
+      <h2>Gespeicherte Belege</h2>
+      <pre id="belegeBox">Noch keine Daten geladen.</pre>
+    </div>
   </div>
 
   <script>
-    function api() {
+    function getApiBase() {
       return document.getElementById("apiBase").value.trim().replace(/\/$/, "");
     }
 
-    function showError(msg) {
-      document.getElementById("errorBox").innerHTML = '<div class="error">' + msg + '</div>';
+    function setStatus(message, isError = false) {
+      const box = document.getElementById("statusBox");
+      box.innerHTML = '<div class="' + (isError ? 'error' : 'ok') + '">' + escapeHtml(message) + '</div>';
     }
 
-    function clearError() {
-      document.getElementById("errorBox").innerHTML = '';
+    function escapeHtml(text) {
+      return String(text ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
     }
 
     async function parseJsonResponse(res) {
-      const txt = await res.text();
+      const text = await res.text();
       try {
-        return JSON.parse(txt);
-      } catch {
-        throw new Error("Antwort war kein JSON: " + txt.substring(0, 500));
+        return JSON.parse(text);
+      } catch (e) {
+        throw new Error("Antwort war kein JSON: " + text.substring(0, 500));
       }
     }
 
-    async function analyzeText() {
-      clearError();
+    async function testHealth() {
       try {
-        const res = await fetch(api() + "/analyze/text", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text: document.getElementById("textInput").value,
-            filename: document.getElementById("filename").value
-          })
-        });
+        const res = await fetch(getApiBase() + "/health");
         const data = await parseJsonResponse(res);
-        document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-        await loadBelege();
+        setStatus("Health OK: " + JSON.stringify(data));
       } catch (e) {
-        showError(e.message || String(e));
-      }
-    }
-
-    async function analyzeFile() {
-      clearError();
-      try {
-        const file = document.getElementById("fileInput").files[0];
-        if (!file) {
-          showError("Bitte zuerst eine Datei auswählen.");
-          return;
-        }
-
-        const form = new FormData();
-        form.append("file", file);
-
-        const res = await fetch(api() + "/analyze/file", {
-          method: "POST",
-          body: form
-        });
-
-        const data = await parseJsonResponse(res);
-        document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-        await loadBelege();
-      } catch (e) {
-        showError(e.message || String(e));
+        setStatus(e.message || String(e), true);
       }
     }
 
     async function loadBelege() {
-      clearError();
       try {
-        const res = await fetch(api() + "/belege");
+        const res = await fetch(getApiBase() + "/belege");
         const data = await parseJsonResponse(res);
         document.getElementById("belegeBox").textContent = JSON.stringify(data, null, 2);
+        setStatus("Belege geladen.");
       } catch (e) {
-        showError(e.message || String(e));
+        setStatus(e.message || String(e), true);
       }
     }
 
-    window.onload = () => {
+    async function analyzeText() {
+      try {
+        const payload = {
+          text: document.getElementById("textInput").value,
+          filename: document.getElementById("filename").value
+        };
+
+        const res = await fetch(getApiBase() + "/analyze/text", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await parseJsonResponse(res);
+        document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
+        setStatus("Textanalyse abgeschlossen.");
+        await loadBelege();
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
+    }
+
+    async function analyzeFile() {
+      try {
+        const fileInput = document.getElementById("fileInput");
+        if (!fileInput.files || !fileInput.files[0]) {
+          setStatus("Bitte zuerst eine Datei auswählen.", true);
+          return;
+        }
+
+        const formData = new FormData();
+        formData.append("file", fileInput.files[0]);
+
+        const res = await fetch(getApiBase() + "/analyze/file", {
+          method: "POST",
+          body: formData
+        });
+
+        const data = await parseJsonResponse(res);
+        document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
+        setStatus("Dateianalyse abgeschlossen.");
+        await loadBelege();
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
+    }
+
+    function clearResult() {
+      document.getElementById("resultBox").textContent = "Noch keine Analyse vorhanden.";
+      document.getElementById("statusBox").innerHTML = "";
+    }
+
+    window.onload = function () {
       document.getElementById("apiBase").value = window.location.origin;
       loadBelege();
     };
   </script>
-
 </body>
 </html>
