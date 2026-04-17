@@ -2,251 +2,468 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <title>Reisekosten Dashboard</title>
+  <title>Reisekosten Dashboard 7.2a</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #f4f7fb;
-      margin: 0;
-      padding: 24px;
+    body { font-family: Arial, sans-serif; background:#f4f7fb; margin:0; padding:24px; }
+    .container { max-width:1300px; margin:0 auto; }
+    .box { background:#fff; border-radius:14px; padding:20px; margin-bottom:20px; box-shadow:0 2px 10px rgba(0,0,0,0.08); }
+    .topbar { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; }
+    .col { flex:1; min-width:220px; }
+    input, select, textarea, button {
+      width:100%;
+      box-sizing:border-box;
+      margin-top:6px;
+      margin-bottom:12px;
+      padding:10px;
+      border-radius:10px;
+      border:1px solid #cbd5e1;
+      font-size:14px;
     }
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-    }
-    .box {
-      background: #fff;
-      border-radius: 14px;
-      padding: 20px;
-      margin-bottom: 20px;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-    }
-    h1, h2 {
-      margin-top: 0;
-    }
-    label {
-      display: block;
-      margin-top: 12px;
-      margin-bottom: 6px;
-      font-weight: bold;
-    }
-    input, textarea {
-      width: 100%;
-      box-sizing: border-box;
-      padding: 10px;
-      border: 1px solid #cbd5e1;
-      border-radius: 10px;
-      font-size: 14px;
-    }
-    textarea {
-      min-height: 220px;
-      resize: vertical;
-    }
-    .row {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      margin-top: 14px;
-    }
-    button {
-      padding: 10px 16px;
-      border: none;
-      border-radius: 10px;
-      background: #2563eb;
-      color: white;
-      cursor: pointer;
-      font-size: 14px;
-    }
-    button:hover {
-      opacity: 0.95;
-    }
-    .secondary {
-      background: #475569;
-    }
-    pre {
-      background: #0f172a;
-      color: #e2e8f0;
-      padding: 14px;
-      border-radius: 10px;
-      overflow: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-    .error {
-      background: #fef2f2;
-      color: #b91c1c;
-      padding: 12px;
-      border-radius: 10px;
-      margin-top: 12px;
-    }
-    .ok {
-      background: #f0fdf4;
-      color: #166534;
-      padding: 12px;
-      border-radius: 10px;
-      margin-top: 12px;
-    }
+    textarea { min-height:180px; resize:vertical; }
+    button { background:#2563eb; color:white; border:none; cursor:pointer; }
+    button.secondary { background:#475569; }
+    button.small { width:auto; padding:8px 12px; }
+    pre { background:#0f172a; color:#e2e8f0; padding:14px; border-radius:10px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+    .error { background:#fef2f2; color:#b91c1c; padding:12px; border-radius:10px; margin-top:12px; }
+    .ok { background:#f0fdf4; color:#166534; padding:12px; border-radius:10px; margin-top:12px; }
+    .hidden { display:none; }
+    .traveler-row { padding:12px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; margin-bottom:10px; }
+    .search-results { background:#fff; border:1px solid #cbd5e1; border-radius:10px; padding:8px; }
+    .search-item { padding:8px; border-radius:8px; cursor:pointer; }
+    .search-item:hover { background:#eff6ff; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="box">
-      <h1>Reisekosten Dashboard</h1>
+<div class="container">
 
-      <label for="apiBase">API Basis-URL</label>
-      <input id="apiBase" type="text">
-
-      <div class="row">
-        <button type="button" onclick="loadBelege()">Belege laden</button>
-        <button type="button" class="secondary" onclick="testHealth()">Health prüfen</button>
+  <div class="box">
+    <div class="topbar">
+      <div>
+        <h1>Reisekosten Dashboard</h1>
+        <div>Version 7.2a</div>
       </div>
-
-      <div id="statusBox"></div>
-    </div>
-
-    <div class="box">
-      <h2>Text analysieren</h2>
-
-      <label for="filename">Dateiname</label>
-      <input id="filename" type="text" value="manuell.txt">
-
-      <label for="textInput">Textinhalt</label>
-      <textarea id="textInput"></textarea>
-
-      <div class="row">
-        <button type="button" onclick="analyzeText()">Text analysieren</button>
-        <button type="button" class="secondary" onclick="clearResult()">Zurücksetzen</button>
+      <div style="min-width:180px;">
+        <button onclick="toggleNeuMenu()">Neu+</button>
       </div>
     </div>
 
-    <div class="box">
-      <h2>Datei analysieren</h2>
-
-      <label for="fileInput">Datei auswählen</label>
-      <input id="fileInput" type="file">
-
+    <div id="neuMenu" class="hidden" style="margin-top:12px;">
       <div class="row">
-        <button type="button" onclick="analyzeFile()">Datei hochladen und analysieren</button>
+        <div style="width:220px;">
+          <button class="secondary" onclick="showSection('reise')">Neue Reise</button>
+        </div>
+        <div style="width:220px;">
+          <button class="secondary" onclick="showSection('scan')">Neuer Belegscan</button>
+        </div>
+        <div style="width:220px;">
+          <button class="secondary" onclick="showSection('mitarbeiter')">Neuer Mitarbeiter</button>
+        </div>
       </div>
     </div>
 
-    <div class="box">
-      <h2>Letztes Ergebnis</h2>
-      <pre id="resultBox">Noch keine Analyse vorhanden.</pre>
+    <label>API Basis-URL</label>
+    <input id="apiBase" type="text">
+    <div class="row">
+      <button class="small secondary" onclick="testHealth()">Health prüfen</button>
+      <button class="small secondary" onclick="loadBelege()">Belege laden</button>
+      <button class="small secondary" onclick="loadReisen()">Reisen laden</button>
+      <button class="small secondary" onclick="loadMitarbeiter()">Mitarbeiter laden</button>
+    </div>
+    <div id="statusBox"></div>
+  </div>
+
+  <div id="reiseSection" class="box hidden">
+    <h2>Neue Reise</h2>
+    <div class="row">
+      <div class="col">
+        <label>Jahr</label>
+        <select id="reiseJahr" onchange="previewNextCode()"></select>
+      </div>
+      <div class="col">
+        <label>Nächster Reisecode</label>
+        <input id="reiseCodePreview" type="text" readonly>
+      </div>
+      <div class="col">
+        <label>Anzahl Reisende</label>
+        <select id="anzahlReisende" onchange="renderTravelerRows()">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+        </select>
+      </div>
     </div>
 
-    <div class="box">
-      <h2>Gespeicherte Belege</h2>
-      <pre id="belegeBox">Noch keine Daten geladen.</pre>
+    <label>Reisename</label>
+    <input id="reiseName" type="text">
+
+    <div class="row">
+      <div class="col">
+        <label>Startdatum</label>
+        <input id="reiseStart" type="date">
+      </div>
+      <div class="col">
+        <label>Enddatum</label>
+        <input id="reiseEnd" type="date">
+      </div>
+    </div>
+
+    <h3>Reisende</h3>
+    <div id="travelerRows"></div>
+
+    <button onclick="createReise()">Reise anlegen</button>
+  </div>
+
+  <div id="scanSection" class="box hidden">
+    <h2>Neuer Belegscan</h2>
+
+    <label>Dateiname</label>
+    <input id="filename" type="text" value="manuell.txt">
+
+    <label>Textinhalt</label>
+    <textarea id="textInput"></textarea>
+
+    <div class="row">
+      <div class="col">
+        <button onclick="analyzeText()">Text analysieren</button>
+      </div>
+      <div class="col">
+        <input id="fileInput" type="file">
+      </div>
+      <div class="col">
+        <button onclick="analyzeFile()">Datei hochladen und analysieren</button>
+      </div>
     </div>
   </div>
 
-  <script>
-    function getApiBase() {
-      return document.getElementById("apiBase").value.trim().replace(/\/$/, "");
+  <div id="mitarbeiterSection" class="box hidden">
+    <h2>Neuer Mitarbeiter</h2>
+    <div class="row">
+      <div class="col">
+        <label>Kürzel</label>
+        <input id="mKuerzel" type="text">
+      </div>
+      <div class="col">
+        <label>Vorname</label>
+        <input id="mVorname" type="text">
+      </div>
+      <div class="col">
+        <label>Nachname</label>
+        <input id="mNachname" type="text">
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col">
+        <label>Klarname</label>
+        <input id="mKlarname" type="text">
+      </div>
+      <div class="col">
+        <label>Geburtsdatum</label>
+        <input id="mGeburtsdatum" type="date">
+      </div>
+      <div class="col">
+        <label>E-Mail</label>
+        <input id="mEmail" type="email">
+      </div>
+    </div>
+
+    <button onclick="createMitarbeiter()">Mitarbeiter anlegen</button>
+  </div>
+
+  <div class="box">
+    <h2>Letztes Ergebnis</h2>
+    <pre id="resultBox">Noch keine Analyse vorhanden.</pre>
+  </div>
+
+  <div class="box">
+    <h2>Reisen</h2>
+    <pre id="reisenBox">Noch keine Reisen geladen.</pre>
+  </div>
+
+  <div class="box">
+    <h2>Mitarbeiter</h2>
+    <pre id="mitarbeiterBox">Noch keine Mitarbeiter geladen.</pre>
+  </div>
+
+  <div class="box">
+    <h2>Gespeicherte Belege</h2>
+    <pre id="belegeBox">Noch keine Daten geladen.</pre>
+  </div>
+</div>
+
+<script>
+function api() {
+  return document.getElementById("apiBase").value.trim().replace(/\/$/, "");
+}
+
+function setStatus(message, isError = false) {
+  const box = document.getElementById("statusBox");
+  box.innerHTML = '<div class="' + (isError ? 'error' : 'ok') + '">' + escapeHtml(message) + '</div>';
+}
+
+function escapeHtml(text) {
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+async function parseJsonResponse(res) {
+  const txt = await res.text();
+  try {
+    return JSON.parse(txt);
+  } catch {
+    throw new Error("Antwort war kein JSON: " + txt.substring(0, 500));
+  }
+}
+
+function toggleNeuMenu() {
+  document.getElementById("neuMenu").classList.toggle("hidden");
+}
+
+function showSection(name) {
+  document.getElementById("reiseSection").classList.add("hidden");
+  document.getElementById("scanSection").classList.add("hidden");
+  document.getElementById("mitarbeiterSection").classList.add("hidden");
+
+  if (name === "reise") document.getElementById("reiseSection").classList.remove("hidden");
+  if (name === "scan") document.getElementById("scanSection").classList.remove("hidden");
+  if (name === "mitarbeiter") document.getElementById("mitarbeiterSection").classList.remove("hidden");
+}
+
+async function testHealth() {
+  try {
+    const res = await fetch(api() + "/health");
+    const data = await parseJsonResponse(res);
+    setStatus("Health OK: " + JSON.stringify(data));
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+async function loadBelege() {
+  try {
+    const res = await fetch(api() + "/belege");
+    const data = await parseJsonResponse(res);
+    document.getElementById("belegeBox").textContent = JSON.stringify(data, null, 2);
+    setStatus("Belege geladen.");
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+async function loadReisen() {
+  try {
+    const res = await fetch(api() + "/reisen");
+    const data = await parseJsonResponse(res);
+    document.getElementById("reisenBox").textContent = JSON.stringify(data, null, 2);
+    setStatus("Reisen geladen.");
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+async function loadMitarbeiter() {
+  try {
+    const res = await fetch(api() + "/mitarbeiter");
+    const data = await parseJsonResponse(res);
+    document.getElementById("mitarbeiterBox").textContent = JSON.stringify(data, null, 2);
+    setStatus("Mitarbeiter geladen.");
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+async function previewNextCode() {
+  try {
+    const jahr = document.getElementById("reiseJahr").value;
+    const res = await fetch(api() + "/reisen/next-code?jahr=" + encodeURIComponent(jahr));
+    const data = await parseJsonResponse(res);
+    document.getElementById("reiseCodePreview").value = data.reise_code || "";
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+function renderTravelerRows() {
+  const count = parseInt(document.getElementById("anzahlReisende").value, 10);
+  const box = document.getElementById("travelerRows");
+  box.innerHTML = "";
+
+  for (let i = 1; i <= count; i++) {
+    box.innerHTML += `
+      <div class="traveler-row">
+        <div><strong>Reisender ${i}</strong></div>
+        <label>Suche Mitarbeiter</label>
+        <input type="text" id="travelerSearch_${i}" oninput="searchMitarbeiter(${i})" placeholder="Kürzel oder Name">
+        <div id="travelerResults_${i}" class="search-results"></div>
+        <input type="hidden" id="travelerId_${i}">
+      </div>
+    `;
+  }
+}
+
+async function searchMitarbeiter(index) {
+  const q = document.getElementById(`travelerSearch_${index}`).value;
+  const box = document.getElementById(`travelerResults_${index}`);
+  if (!q.trim()) {
+    box.innerHTML = "";
+    return;
+  }
+
+  try {
+    const res = await fetch(api() + "/mitarbeiter/suche?q=" + encodeURIComponent(q));
+    const data = await parseJsonResponse(res);
+    const items = data.mitarbeiter || [];
+    box.innerHTML = items.map(m => `
+      <div class="search-item" onclick="selectMitarbeiter(${index}, ${m.id}, '${escapeJs(m.kuerzel)}', '${escapeJs(m.klarname)}')">
+        ${escapeHtml(m.kuerzel)} | ${escapeHtml(m.klarname)}
+      </div>
+    `).join("");
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+function selectMitarbeiter(index, id, kuerzel, klarname) {
+  document.getElementById(`travelerId_${index}`).value = id;
+  document.getElementById(`travelerSearch_${index}`).value = `${kuerzel} | ${klarname}`;
+  document.getElementById(`travelerResults_${index}`).innerHTML = "";
+}
+
+function escapeJs(value) {
+  return String(value ?? "").replace(/'/g, "\\'");
+}
+
+async function createReise() {
+  try {
+    const count = parseInt(document.getElementById("anzahlReisende").value, 10);
+    const ids = [];
+    for (let i = 1; i <= count; i++) {
+      const val = document.getElementById(`travelerId_${i}`).value;
+      if (val) ids.push(parseInt(val, 10));
     }
 
-    function setStatus(message, isError = false) {
-      const box = document.getElementById("statusBox");
-      box.innerHTML = '<div class="' + (isError ? 'error' : 'ok') + '">' + escapeHtml(message) + '</div>';
-    }
-
-    function escapeHtml(text) {
-      return String(text ?? "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-    }
-
-    async function parseJsonResponse(res) {
-      const text = await res.text();
-      try {
-        return JSON.parse(text);
-      } catch (e) {
-        throw new Error("Antwort war kein JSON: " + text.substring(0, 500));
-      }
-    }
-
-    async function testHealth() {
-      try {
-        const res = await fetch(getApiBase() + "/health");
-        const data = await parseJsonResponse(res);
-        setStatus("Health OK: " + JSON.stringify(data));
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
-    }
-
-    async function loadBelege() {
-      try {
-        const res = await fetch(getApiBase() + "/belege");
-        const data = await parseJsonResponse(res);
-        document.getElementById("belegeBox").textContent = JSON.stringify(data, null, 2);
-        setStatus("Belege geladen.");
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
-    }
-
-    async function analyzeText() {
-      try {
-        const payload = {
-          text: document.getElementById("textInput").value,
-          filename: document.getElementById("filename").value
-        };
-
-        const res = await fetch(getApiBase() + "/analyze/text", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(payload)
-        });
-
-        const data = await parseJsonResponse(res);
-        document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-        setStatus("Textanalyse abgeschlossen.");
-        await loadBelege();
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
-    }
-
-    async function analyzeFile() {
-      try {
-        const fileInput = document.getElementById("fileInput");
-        if (!fileInput.files || !fileInput.files[0]) {
-          setStatus("Bitte zuerst eine Datei auswählen.", true);
-          return;
-        }
-
-        const formData = new FormData();
-        formData.append("file", fileInput.files[0]);
-
-        const res = await fetch(getApiBase() + "/analyze/file", {
-          method: "POST",
-          body: formData
-        });
-
-        const data = await parseJsonResponse(res);
-        document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-        setStatus("Dateianalyse abgeschlossen.");
-        await loadBelege();
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
-    }
-
-    function clearResult() {
-      document.getElementById("resultBox").textContent = "Noch keine Analyse vorhanden.";
-      document.getElementById("statusBox").innerHTML = "";
-    }
-
-    window.onload = function () {
-      document.getElementById("apiBase").value = window.location.origin;
-      loadBelege();
+    const payload = {
+      reise_jahr: parseInt(document.getElementById("reiseJahr").value, 10),
+      reise_name: document.getElementById("reiseName").value,
+      startdatum: document.getElementById("reiseStart").value || null,
+      enddatum: document.getElementById("reiseEnd").value || null,
+      anzahl_reisende: count,
+      mitarbeiter_ids: ids
     };
-  </script>
+
+    const res = await fetch(api() + "/reisen", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    });
+    const data = await parseJsonResponse(res);
+    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
+    setStatus("Reise angelegt: " + (data.reise_code || ""));
+    await previewNextCode();
+    await loadReisen();
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+async function createMitarbeiter() {
+  try {
+    const payload = {
+      kuerzel: document.getElementById("mKuerzel").value,
+      vorname: document.getElementById("mVorname").value,
+      nachname: document.getElementById("mNachname").value,
+      klarname: document.getElementById("mKlarname").value,
+      geburtsdatum: document.getElementById("mGeburtsdatum").value || null,
+      email: document.getElementById("mEmail").value || null,
+      aktiv: true
+    };
+
+    const res = await fetch(api() + "/mitarbeiter", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    });
+    const data = await parseJsonResponse(res);
+    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
+    setStatus("Mitarbeiter angelegt.");
+    await loadMitarbeiter();
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+async function analyzeText() {
+  try {
+    const payload = {
+      text: document.getElementById("textInput").value,
+      filename: document.getElementById("filename").value
+    };
+
+    const res = await fetch(api() + "/analyze/text", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    });
+
+    const data = await parseJsonResponse(res);
+    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
+    setStatus("Textanalyse abgeschlossen.");
+    await loadBelege();
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+async function analyzeFile() {
+  try {
+    const input = document.getElementById("fileInput");
+    if (!input.files || !input.files[0]) {
+      setStatus("Bitte zuerst eine Datei auswählen.", true);
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("file", input.files[0]);
+
+    const res = await fetch(api() + "/analyze/file", {
+      method: "POST",
+      body: formData
+    });
+
+    const data = await parseJsonResponse(res);
+    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
+    setStatus("Dateianalyse abgeschlossen.");
+    await loadBelege();
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+window.onload = async function () {
+  document.getElementById("apiBase").value = window.location.origin;
+
+  const yearSelect = document.getElementById("reiseJahr");
+  const currentYear = new Date().getFullYear();
+  for (let y = currentYear - 1; y <= currentYear + 3; y++) {
+    const opt = document.createElement("option");
+    opt.value = y;
+    opt.textContent = y;
+    yearSelect.appendChild(opt);
+  }
+  yearSelect.value = currentYear;
+
+  renderTravelerRows();
+  await previewNextCode();
+  await loadBelege();
+  await loadReisen();
+  await loadMitarbeiter();
+};
+</script>
 </body>
 </html>

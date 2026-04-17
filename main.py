@@ -9,26 +9,57 @@ from io import BytesIO
 from typing import Any, Dict, List, Optional
 
 import requests
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pypdf import PdfReader
 
-from database import check_duplicate, db_ping, init_db, insert_beleg, list_belege
+from database import (
+    check_duplicate,
+    create_mitarbeiter,
+    create_reise,
+    db_ping,
+    get_next_reise_code,
+    init_db,
+    insert_beleg,
+    list_belege,
+    list_mitarbeiter,
+    list_reisen,
+    search_mitarbeiter,
+    update_mitarbeiter,
+)
 
-APP_VERSION = "7.1"
+APP_VERSION = "7.2a"
 DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_API_BASE = "https://api.mistral.ai/v1"
 
 app = FastAPI(title="Reisekosten API", version=APP_VERSION)
-
 init_db()
 
 
 class AnalyzeTextRequest(BaseModel):
     text: str
     filename: Optional[str] = None
+
+
+class MitarbeiterCreateRequest(BaseModel):
+    kuerzel: str
+    vorname: str
+    nachname: str
+    klarname: Optional[str] = None
+    geburtsdatum: Optional[str] = None
+    email: Optional[str] = None
+    aktiv: bool = True
+
+
+class ReiseCreateRequest(BaseModel):
+    reise_jahr: int
+    reise_name: str
+    startdatum: Optional[str] = None
+    enddatum: Optional[str] = None
+    anzahl_reisende: int = 1
+    mitarbeiter_ids: List[int] = []
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
@@ -55,7 +86,7 @@ Regeln:
 - Bei Hotel keine Standarduhrzeiten erfinden
 - Bei Flug alle Segmente einzeln
 - Bei Taxi normalerweise 1 Segment, bei Storno 0
-- Extrahiere wenn möglich:
+- Extrahiere:
   belegdatum
   art_des_dokuments
   buchungsnummer_code
@@ -93,14 +124,8 @@ def call_mistral(prompt: str) -> dict:
     payload = {
         "model": DEFAULT_MISTRAL_MODEL,
         "messages": [
-            {
-                "role": "system",
-                "content": "Gib ausschließlich valides JSON zurück. Keine Erklärungen."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
+            {"role": "system", "content": "Gib ausschließlich valides JSON zurück. Keine Erklärungen."},
+            {"role": "user", "content": prompt},
         ],
         "temperature": 0,
         "response_format": {"type": "json_object"},
@@ -233,6 +258,10 @@ def root():
             "/db-test",
             "/dashboard",
             "/belege",
+            "/mitarbeiter",
+            "/mitarbeiter/suche?q=...",
+            "/reisen",
+            "/reisen/next-code?jahr=2027",
             "/analyze/text",
             "/analyze/file",
         ],
@@ -268,16 +297,72 @@ def dashboard():
 @app.get("/belege")
 def belege():
     try:
-        return {
-            "count": len(list_belege()),
-            "belege": list_belege(),
-        }
+        items = list_belege()
+        return {"count": len(items), "belege": items}
     except Exception as exc:
-        return {
-            "status": "error",
-            "detail": f"/belege Fehler: {exc}",
-            "database_url_present": bool(os.getenv("DATABASE_URL", "").strip()),
-        }
+        return {"status": "error", "detail": f"/belege Fehler: {exc}"}
+
+
+@app.get("/mitarbeiter")
+def mitarbeiter_list():
+    try:
+        items = list_mitarbeiter()
+        return {"count": len(items), "mitarbeiter": items}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
+@app.get("/mitarbeiter/suche")
+def mitarbeiter_suche(q: str = Query(default="")):
+    try:
+        items = search_mitarbeiter(q)
+        return {"count": len(items), "mitarbeiter": items}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
+@app.post("/mitarbeiter")
+def mitarbeiter_create(payload: MitarbeiterCreateRequest):
+    try:
+        new_id = create_mitarbeiter(payload.model_dump())
+        return {"status": "ok", "id": new_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.put("/mitarbeiter/{mitarbeiter_id}")
+def mitarbeiter_update(mitarbeiter_id: int, payload: MitarbeiterCreateRequest):
+    try:
+        update_mitarbeiter(mitarbeiter_id, payload.model_dump())
+        return {"status": "ok", "id": mitarbeiter_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/reisen")
+def reisen_list():
+    try:
+        items = list_reisen()
+        return {"count": len(items), "reisen": items}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
+@app.get("/reisen/next-code")
+def reisen_next_code(jahr: int = Query(...)):
+    try:
+        return get_next_reise_code(jahr)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/reisen")
+def reisen_create(payload: ReiseCreateRequest):
+    try:
+        result = create_reise(payload.model_dump())
+        return {"status": "ok", **result}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/analyze/text")
