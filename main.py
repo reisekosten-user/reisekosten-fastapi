@@ -27,7 +27,6 @@ from database import (
     init_db,
     insert_beleg,
     list_belege,
-    list_events_by_reise,
     list_mitarbeiter,
     list_reisen,
     search_mitarbeiter,
@@ -392,7 +391,7 @@ def analyze_text_internal(text: str, filename: str = "nicht vorhanden", reise_id
         "kosten": data.get("kosten_mit_steuern"),
         "waehrung": data.get("waehrung_der_kosten"),
         "fingerprint": dup["fingerprint"],
-        "duplicate_key": dup["duplicate_candidate_key"),
+        "duplicate_key": dup["duplicate_candidate_key"],
     })
 
     data["beleg_id"] = beleg_id
