@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 import requests
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pypdf import PdfReader
 
@@ -29,12 +30,14 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.2b"
+APP_VERSION = "7.3"
 DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_API_BASE = "https://api.mistral.ai/v1"
 
 app = FastAPI(title="Reisekosten API", version=APP_VERSION)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 init_db()
 
 
@@ -94,7 +97,6 @@ def mask_field_values(text: str, patterns: List[re.Pattern]) -> str:
 def anonymize_document_text(text: str) -> str:
     anonymized = text
 
-    # Namen aus Mitarbeiterdatenbank durch Max Mustermann ersetzen
     try:
         mitarbeiter = list_mitarbeiter(limit=1000)
     except Exception:
@@ -118,29 +120,25 @@ def anonymize_document_text(text: str) -> str:
             pattern = re.compile(re.escape(variant), re.IGNORECASE)
             anonymized = pattern.sub("Max Mustermann", anonymized)
 
-    # Geburtsdaten / Birth / DOB
     anonymized = re.sub(
         r"(?i)\b(geburtsdatum|birth date|date of birth|dob)\b\s*[:\-]?\s*([0-9]{1,2}[./\-][0-9]{1,2}[./\-][0-9]{2,4})",
         r"\1: XXXX",
         anonymized,
     )
 
-    # E-Mail
     anonymized = re.sub(
-        r"(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b",
+        r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b",
         "XXXX",
         anonymized,
         flags=re.IGNORECASE,
     )
 
-    # Telefon
     anonymized = re.sub(
         r"(?i)\b(\+?\d[\d\s\-()/]{6,}\d)\b",
         "XXXX",
         anonymized,
     )
 
-    # Feste Label-Felder auf XXXX
     patterns = [
         re.compile(r"(?i)\b(booking code\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
         re.compile(r"(?i)\b(booking reference\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
@@ -316,6 +314,26 @@ def build_duplicate_info(data: Dict[str, Any], original_text: str) -> dict:
     }
 
 
+def compute_reise_status(reise: dict) -> dict:
+    warnungen = []
+    status = "ok"
+
+    if not reise.get("anzahl_reisende") or int(reise.get("anzahl_reisende") or 0) <= 0:
+        warnungen.append("Keine Reisenden zugeordnet")
+        status = "fehler"
+
+    reise_name = (reise.get("reise_name") or "").lower()
+    if "hotel" not in reise_name:
+        warnungen.append("Hotel fehlt oder nicht gekennzeichnet")
+        if status != "fehler":
+            status = "pruefen"
+
+    return {
+        "status": status,
+        "warnungen": warnungen,
+    }
+
+
 def analyze_text_internal(text: str, filename: str = "nicht vorhanden") -> dict:
     anonymized_text = anonymize_document_text(text)
     prompt = build_prompt(anonymized_text, filename=filename)
@@ -354,6 +372,7 @@ def root():
             "/mitarbeiter/suche?q=...",
             "/reisen",
             "/reisen/next-code?jahr=2027",
+            "/reisen/overview",
             "/anonymize/text",
             "/anonymize/file",
             "/analyze/text",
@@ -438,6 +457,19 @@ def reisen_list():
     try:
         items = list_reisen()
         return {"count": len(items), "reisen": items}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
+@app.get("/reisen/overview")
+def reisen_overview():
+    try:
+        items = list_reisen()
+        enriched = []
+        for r in items:
+            meta = compute_reise_status(r)
+            enriched.append({**r, **meta})
+        return {"count": len(enriched), "reisen": enriched}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
 

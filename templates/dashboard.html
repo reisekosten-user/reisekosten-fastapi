@@ -2,80 +2,353 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <title>Reisekosten Dashboard 7.2b</title>
+  <title>Reisekosten Dashboard 7.3</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: Arial, sans-serif; background:#f4f7fb; margin:0; padding:24px; }
-    .container { max-width:1300px; margin:0 auto; }
-    .box { background:#fff; border-radius:14px; padding:20px; margin-bottom:20px; box-shadow:0 2px 10px rgba(0,0,0,0.08); }
-    .topbar { display:flex; justify-content:space-between; align-items:center; gap:12px; }
-    .row { display:flex; gap:12px; flex-wrap:wrap; }
-    .col { flex:1; min-width:220px; }
-    input, select, textarea, button {
-      width:100%;
-      box-sizing:border-box;
-      margin-top:6px;
-      margin-bottom:12px;
-      padding:10px;
-      border-radius:10px;
-      border:1px solid #cbd5e1;
-      font-size:14px;
+    :root {
+      --bg: #f3f6fb;
+      --card: #ffffff;
+      --line: #d8e0ee;
+      --primary: #1f4ed8;
+      --primary-dark: #163aa6;
+      --text: #0f172a;
+      --muted: #64748b;
+      --ok: #166534;
+      --warn: #b45309;
+      --err: #b91c1c;
+      --ok-bg: #dcfce7;
+      --warn-bg: #fef3c7;
+      --err-bg: #fee2e2;
     }
-    textarea { min-height:180px; resize:vertical; }
-    button { background:#2563eb; color:white; border:none; cursor:pointer; }
-    button.secondary { background:#475569; }
-    button.small { width:auto; padding:8px 12px; }
-    pre { background:#0f172a; color:#e2e8f0; padding:14px; border-radius:10px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
-    .error { background:#fef2f2; color:#b91c1c; padding:12px; border-radius:10px; margin-top:12px; }
-    .ok { background:#f0fdf4; color:#166534; padding:12px; border-radius:10px; margin-top:12px; }
-    .hidden { display:none; }
-    .traveler-row { padding:12px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; margin-bottom:10px; }
-    .search-results { background:#fff; border:1px solid #cbd5e1; border-radius:10px; padding:8px; }
-    .search-item { padding:8px; border-radius:8px; cursor:pointer; }
-    .search-item:hover { background:#eff6ff; }
+
+    * { box-sizing: border-box; }
+    body {
+      font-family: Arial, sans-serif;
+      background: var(--bg);
+      margin: 0;
+      color: var(--text);
+    }
+
+    .header {
+      background: linear-gradient(90deg, #143a9b, #2563eb);
+      color: white;
+      padding: 18px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .brand img {
+      height: 46px;
+      background: white;
+      border-radius: 8px;
+      padding: 4px;
+    }
+
+    .brand-title {
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .brand-sub {
+      font-size: 13px;
+      opacity: 0.9;
+    }
+
+    .nav {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .nav button {
+      background: rgba(255,255,255,0.14);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.22);
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+
+    .container {
+      max-width: 1380px;
+      margin: 24px auto;
+      padding: 0 18px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 20px;
+    }
+
+    .grid-2 {
+      grid-template-columns: 1.2fr 0.8fr;
+    }
+
+    .grid-3 {
+      grid-template-columns: repeat(3, 1fr);
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 3px 14px rgba(15, 23, 42, 0.06);
+    }
+
+    .title {
+      font-size: 20px;
+      font-weight: 700;
+      margin: 0 0 14px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+
+    .row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .col {
+      flex: 1;
+      min-width: 220px;
+    }
+
+    label {
+      font-size: 13px;
+      font-weight: 700;
+      display: block;
+      margin-bottom: 6px;
+      color: #334155;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      padding: 11px 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      background: white;
+      font-size: 14px;
+      margin-bottom: 14px;
+    }
+
+    textarea {
+      min-height: 180px;
+      resize: vertical;
+    }
+
+    button {
+      border: none;
+      border-radius: 10px;
+      padding: 11px 14px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+    }
+
+    .btn-primary:hover { background: var(--primary-dark); }
+
+    .btn-secondary {
+      background: #475569;
+      color: white;
+    }
+
+    .btn-light {
+      background: #e2e8f0;
+      color: #0f172a;
+    }
+
+    .hidden { display: none; }
+
+    .statusbox {
+      margin-top: 12px;
+      border-radius: 12px;
+      padding: 12px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .status-ok { background: #eff6ff; color: #1d4ed8; }
+    .status-error { background: var(--err-bg); color: var(--err); }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      background: #f8fbff;
+    }
+
+    .metric-label {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .metric-value {
+      margin-top: 6px;
+      font-size: 24px;
+      font-weight: 800;
+    }
+
+    .traveler-row {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      background: #f8fafc;
+      margin-bottom: 12px;
+    }
+
+    .search-results {
+      border: 1px solid #dbe5f3;
+      background: white;
+      border-radius: 10px;
+      margin-top: -8px;
+      margin-bottom: 8px;
+      overflow: hidden;
+    }
+
+    .search-item {
+      padding: 10px 12px;
+      cursor: pointer;
+      border-top: 1px solid #eef2f7;
+    }
+
+    .search-item:first-child { border-top: 0; }
+    .search-item:hover { background: #eff6ff; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      background: white;
+      overflow: hidden;
+      border-radius: 12px;
+    }
+
+    th, td {
+      border-bottom: 1px solid #e5edf7;
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #eef4fb;
+      color: #334155;
+      font-size: 13px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .badge-ok { background: var(--ok-bg); color: var(--ok); }
+    .badge-warn { background: var(--warn-bg); color: var(--warn); }
+    .badge-err { background: var(--err-bg); color: var(--err); }
+
+    pre {
+      background: #0f172a;
+      color: #dbeafe;
+      border-radius: 12px;
+      padding: 14px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 13px;
+    }
+
+    @media (max-width: 1100px) {
+      .grid-2, .grid-3 {
+        grid-template-columns: 1fr;
+      }
+    }
   </style>
 </head>
 <body>
+
+<div class="header">
+  <div class="brand">
+    <img src="/static/logo.png" alt="Logo">
+    <div>
+      <div class="brand-title">Reisekosten System</div>
+      <div class="brand-sub">Version 7.3 · Analyse · Reisen · Mitarbeiter · DSGVO-Voranonymisierung</div>
+    </div>
+  </div>
+
+  <div class="nav">
+    <button onclick="showSection('overview')">Übersicht</button>
+    <button onclick="showSection('reise')">Neue Reise</button>
+    <button onclick="showSection('scan')">Belegscan</button>
+    <button onclick="showSection('mitarbeiter')">Mitarbeiter</button>
+  </div>
+</div>
+
 <div class="container">
 
-  <div class="box">
-    <div class="topbar">
-      <div>
-        <h1>Reisekosten Dashboard</h1>
-        <div>Version 7.2b</div>
-      </div>
-      <div style="min-width:180px;">
-        <button onclick="toggleNeuMenu()">Neu+</button>
-      </div>
-    </div>
+  <div class="card">
+    <div class="title">Systemsteuerung</div>
+    <div class="subtitle">API, Status und Schnellaktionen</div>
 
-    <div id="neuMenu" class="hidden" style="margin-top:12px;">
-      <div class="row">
-        <div style="width:220px;">
-          <button class="secondary" onclick="showSection('reise')">Neue Reise</button>
-        </div>
-        <div style="width:220px;">
-          <button class="secondary" onclick="showSection('scan')">Neuer Belegscan</button>
-        </div>
-        <div style="width:220px;">
-          <button class="secondary" onclick="showSection('mitarbeiter')">Neuer Mitarbeiter</button>
-        </div>
-      </div>
-    </div>
-
-    <label>API Basis-URL</label>
-    <input id="apiBase" type="text">
     <div class="row">
-      <button class="small secondary" onclick="testHealth()">Health prüfen</button>
-      <button class="small secondary" onclick="loadBelege()">Belege laden</button>
-      <button class="small secondary" onclick="loadReisen()">Reisen laden</button>
-      <button class="small secondary" onclick="loadMitarbeiter()">Mitarbeiter laden</button>
+      <div class="col">
+        <label>API Basis-URL</label>
+        <input id="apiBase" type="text">
+      </div>
     </div>
+
+    <div class="row">
+      <button class="btn-secondary" onclick="testHealth()">Health prüfen</button>
+      <button class="btn-secondary" onclick="loadBelege()">Belege laden</button>
+      <button class="btn-secondary" onclick="loadReisen()">Reisen laden</button>
+      <button class="btn-secondary" onclick="loadMitarbeiter()">Mitarbeiter laden</button>
+    </div>
+
     <div id="statusBox"></div>
   </div>
 
-  <div id="reiseSection" class="box hidden">
-    <h2>Neue Reise</h2>
+  <div id="overviewSection" class="grid grid-3">
+    <div class="metric">
+      <div class="metric-label">Belege</div>
+      <div class="metric-value" id="metricBelege">0</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Reisen</div>
+      <div class="metric-value" id="metricReisen">0</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Mitarbeiter</div>
+      <div class="metric-value" id="metricMitarbeiter">0</div>
+    </div>
+  </div>
+
+  <div id="reiseSection" class="card hidden">
+    <div class="title">Neue Reise</div>
+    <div class="subtitle">Reisecode wird automatisch nach Jahr erzeugt</div>
+
     <div class="row">
       <div class="col">
         <label>Jahr</label>
@@ -98,7 +371,7 @@
     </div>
 
     <label>Reisename</label>
-    <input id="reiseName" type="text">
+    <input id="reiseName" type="text" placeholder="z. B. Montage Lyon März 2027">
 
     <div class="row">
       <div class="col">
@@ -111,45 +384,44 @@
       </div>
     </div>
 
-    <h3>Reisende</h3>
+    <div class="title" style="font-size:16px;margin-top:10px;">Reisende</div>
     <div id="travelerRows"></div>
 
-    <button onclick="createReise()">Reise anlegen</button>
+    <button class="btn-primary" onclick="createReise()">Reise anlegen</button>
   </div>
 
-  <div id="scanSection" class="box hidden">
-    <h2>Neuer Belegscan</h2>
+  <div id="scanSection" class="card hidden">
+    <div class="title">Belegscan / Analyse</div>
+    <div class="subtitle">Vor der KI wird automatisch anonymisiert</div>
 
     <label>Dateiname</label>
     <input id="filename" type="text" value="manuell.txt">
 
     <label>Textinhalt</label>
-    <textarea id="textInput"></textarea>
+    <textarea id="textInput" placeholder="Hier Text, E-Mail-Inhalt oder OCR-Text einfügen ..."></textarea>
 
     <div class="row">
+      <button class="btn-light" onclick="previewAnonymizedText()">Anonymisierung Vorschau</button>
+      <button class="btn-primary" onclick="analyzeText()">Text analysieren</button>
+    </div>
+
+    <div class="row" style="margin-top:14px;">
       <div class="col">
-        <button onclick="previewAnonymizedText()">Anonymisierung Vorschau</button>
-      </div>
-      <div class="col">
-        <button onclick="analyzeText()">Text analysieren</button>
+        <label>Datei auswählen</label>
+        <input id="fileInput" type="file">
       </div>
     </div>
 
     <div class="row">
-      <div class="col">
-        <input id="fileInput" type="file">
-      </div>
-      <div class="col">
-        <button onclick="previewAnonymizedFile()">Datei anonymisieren</button>
-      </div>
-      <div class="col">
-        <button onclick="analyzeFile()">Datei hochladen und analysieren</button>
-      </div>
+      <button class="btn-light" onclick="previewAnonymizedFile()">Datei anonymisieren</button>
+      <button class="btn-primary" onclick="analyzeFile()">Datei analysieren</button>
     </div>
   </div>
 
-  <div id="mitarbeiterSection" class="box hidden">
-    <h2>Neuer Mitarbeiter</h2>
+  <div id="mitarbeiterSection" class="card hidden">
+    <div class="title">Mitarbeiter anlegen</div>
+    <div class="subtitle">Kürzel, Klarname und persönliche Daten pflegen</div>
+
     <div class="row">
       <div class="col">
         <label>Kürzel</label>
@@ -180,28 +452,34 @@
       </div>
     </div>
 
-    <button onclick="createMitarbeiter()">Mitarbeiter anlegen</button>
+    <button class="btn-primary" onclick="createMitarbeiter()">Mitarbeiter anlegen</button>
   </div>
 
-  <div class="box">
-    <h2>Letztes Ergebnis</h2>
+  <div class="grid grid-2" style="margin-top:20px;">
+    <div class="card">
+      <div class="title">Reisen Übersicht</div>
+      <div class="subtitle">Mit Status und Warnungen</div>
+      <div id="reisenTable"></div>
+    </div>
+
+    <div class="card">
+      <div class="title">Gespeicherte Belege</div>
+      <div class="subtitle">Neueste Belege zuerst</div>
+      <div id="belegeTable"></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:20px;">
+    <div class="title">Mitarbeiter Übersicht</div>
+    <div class="subtitle">Aktive Mitarbeiter aus der PostgreSQL-Datenbank</div>
+    <div id="mitarbeiterTable"></div>
+  </div>
+
+  <div class="card" style="margin-top:20px;">
+    <div class="title">Letztes Ergebnis / Debug</div>
     <pre id="resultBox">Noch keine Analyse vorhanden.</pre>
   </div>
 
-  <div class="box">
-    <h2>Reisen</h2>
-    <pre id="reisenBox">Noch keine Reisen geladen.</pre>
-  </div>
-
-  <div class="box">
-    <h2>Mitarbeiter</h2>
-    <pre id="mitarbeiterBox">Noch keine Mitarbeiter geladen.</pre>
-  </div>
-
-  <div class="box">
-    <h2>Gespeicherte Belege</h2>
-    <pre id="belegeBox">Noch keine Daten geladen.</pre>
-  </div>
 </div>
 
 <script>
@@ -211,7 +489,7 @@ function api() {
 
 function setStatus(message, isError = false) {
   const box = document.getElementById("statusBox");
-  box.innerHTML = '<div class="' + (isError ? 'error' : 'ok') + '">' + escapeHtml(message) + '</div>';
+  box.innerHTML = '<div class="statusbox ' + (isError ? 'status-error' : 'status-ok') + '">' + escapeHtml(message) + '</div>';
 }
 
 function escapeHtml(text) {
@@ -230,15 +508,19 @@ async function parseJsonResponse(res) {
   }
 }
 
-function toggleNeuMenu() {
-  document.getElementById("neuMenu").classList.toggle("hidden");
+function badge(status) {
+  if (status === "ok") return '<span class="badge badge-ok">OK</span>';
+  if (status === "fehler") return '<span class="badge badge-err">Fehler</span>';
+  return '<span class="badge badge-warn">Prüfen</span>';
 }
 
 function showSection(name) {
+  document.getElementById("overviewSection").classList.add("hidden");
   document.getElementById("reiseSection").classList.add("hidden");
   document.getElementById("scanSection").classList.add("hidden");
   document.getElementById("mitarbeiterSection").classList.add("hidden");
 
+  if (name === "overview") document.getElementById("overviewSection").classList.remove("hidden");
   if (name === "reise") document.getElementById("reiseSection").classList.remove("hidden");
   if (name === "scan") document.getElementById("scanSection").classList.remove("hidden");
   if (name === "mitarbeiter") document.getElementById("mitarbeiterSection").classList.remove("hidden");
@@ -258,8 +540,35 @@ async function loadBelege() {
   try {
     const res = await fetch(api() + "/belege");
     const data = await parseJsonResponse(res);
-    document.getElementById("belegeBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Belege geladen.");
+
+    document.getElementById("metricBelege").textContent = data.count || 0;
+
+    const rows = (data.belege || []).map(b => `
+      <tr>
+        <td>${escapeHtml(b.id)}</td>
+        <td>${escapeHtml(b.belegdatum)}</td>
+        <td>${escapeHtml(b.art)}</td>
+        <td>${escapeHtml(b.kosten)}</td>
+        <td>${escapeHtml(b.waehrung)}</td>
+        <td>${escapeHtml(b.created_at)}</td>
+      </tr>
+    `).join("");
+
+    document.getElementById("belegeTable").innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Datum</th>
+            <th>Art</th>
+            <th>Kosten</th>
+            <th>Währung</th>
+            <th>Erstellt</th>
+          </tr>
+        </thead>
+        <tbody>${rows || '<tr><td colspan="6">Keine Belege vorhanden</td></tr>'}</tbody>
+      </table>
+    `;
   } catch (e) {
     setStatus(e.message || String(e), true);
   }
@@ -267,10 +576,37 @@ async function loadBelege() {
 
 async function loadReisen() {
   try {
-    const res = await fetch(api() + "/reisen");
+    const res = await fetch(api() + "/reisen/overview");
     const data = await parseJsonResponse(res);
-    document.getElementById("reisenBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Reisen geladen.");
+
+    document.getElementById("metricReisen").textContent = data.count || 0;
+
+    const rows = (data.reisen || []).map(r => `
+      <tr>
+        <td>${escapeHtml(r.reise_code)}</td>
+        <td>${escapeHtml(r.reise_name)}</td>
+        <td>${escapeHtml(r.reise_jahr)}</td>
+        <td>${escapeHtml(r.anzahl_reisende)}</td>
+        <td>${badge(r.status)}</td>
+        <td>${escapeHtml((r.warnungen || []).join(", "))}</td>
+      </tr>
+    `).join("");
+
+    document.getElementById("reisenTable").innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Code</th>
+            <th>Reisename</th>
+            <th>Jahr</th>
+            <th>Reisende</th>
+            <th>Status</th>
+            <th>Warnungen</th>
+          </tr>
+        </thead>
+        <tbody>${rows || '<tr><td colspan="6">Keine Reisen vorhanden</td></tr>'}</tbody>
+      </table>
+    `;
   } catch (e) {
     setStatus(e.message || String(e), true);
   }
@@ -280,8 +616,31 @@ async function loadMitarbeiter() {
   try {
     const res = await fetch(api() + "/mitarbeiter");
     const data = await parseJsonResponse(res);
-    document.getElementById("mitarbeiterBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Mitarbeiter geladen.");
+
+    document.getElementById("metricMitarbeiter").textContent = data.count || 0;
+
+    const rows = (data.mitarbeiter || []).map(m => `
+      <tr>
+        <td>${escapeHtml(m.kuerzel)}</td>
+        <td>${escapeHtml(m.klarname)}</td>
+        <td>${escapeHtml(m.geburtsdatum || "")}</td>
+        <td>${escapeHtml(m.email || "")}</td>
+      </tr>
+    `).join("");
+
+    document.getElementById("mitarbeiterTable").innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Kürzel</th>
+            <th>Klarname</th>
+            <th>Geburtsdatum</th>
+            <th>E-Mail</th>
+          </tr>
+        </thead>
+        <tbody>${rows || '<tr><td colspan="4">Keine Mitarbeiter vorhanden</td></tr>'}</tbody>
+      </table>
+    `;
   } catch (e) {
     setStatus(e.message || String(e), true);
   }
@@ -306,7 +665,7 @@ function renderTravelerRows() {
   for (let i = 1; i <= count; i++) {
     box.innerHTML += `
       <div class="traveler-row">
-        <div><strong>Reisender ${i}</strong></div>
+        <div style="font-weight:700; margin-bottom:8px;">Reisender ${i}</div>
         <label>Suche Mitarbeiter</label>
         <input type="text" id="travelerSearch_${i}" oninput="searchMitarbeiter(${i})" placeholder="Kürzel oder Name">
         <div id="travelerResults_${i}" class="search-results"></div>
@@ -519,5 +878,6 @@ window.onload = async function () {
   await loadMitarbeiter();
 };
 </script>
+
 </body>
 </html>

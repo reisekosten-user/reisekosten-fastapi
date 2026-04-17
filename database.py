@@ -93,7 +93,6 @@ def init_db():
                     created_at TEXT
                 )
             """)
-
         conn.commit()
 
 
