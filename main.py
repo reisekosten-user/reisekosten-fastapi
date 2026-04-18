@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -17,7 +16,6 @@ from pypdf import PdfReader
 
 from database import (
     attach_beleg_to_event,
-    check_duplicate,
     create_event,
     create_mitarbeiter,
     create_reise,
@@ -36,7 +34,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.7a"
+APP_VERSION = "7.7b"
 DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_API_BASE = "https://api.mistral.ai/v1"
@@ -261,7 +259,7 @@ def call_mistral(prompt: str) -> dict:
 
 
 def ensure_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
-    result = {
+    return {
         "belegdatum": data.get("belegdatum", "nicht vorhanden"),
         "art_des_dokuments": data.get("art_des_dokuments", "Unbekannt"),
         "buchungsnummer_code": data.get("buchungsnummer_code", "nicht vorhanden"),
@@ -274,11 +272,6 @@ def ensure_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
         "warnungen": data.get("warnungen", []),
         "fehler": data.get("fehler", []),
     }
-
-    if not isinstance(result["reisesegmente"], list):
-        result["reisesegmente"] = []
-
-    return result
 
 
 def compute_reise_status(detail: dict) -> dict:
@@ -296,7 +289,7 @@ def compute_reise_status(detail: dict) -> dict:
     if "Hotel" not in typen:
         warnungen.append("Hotel fehlt")
         if status != "fehler":
-          status = "pruefen"
+            status = "pruefen"
 
     if len(events) == 0:
         warnungen.append("Keine Events vorhanden")
@@ -367,10 +360,7 @@ def analyze_text_internal(
 
 @app.get("/")
 def root():
-    return {
-        "status": "ok",
-        "version": APP_VERSION,
-    }
+    return {"status": "ok", "version": APP_VERSION}
 
 
 @app.get("/health")
@@ -387,12 +377,12 @@ def reset_db():
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("DROP TABLE IF EXISTS event_belege")
-                cur.execute("DROP TABLE IF EXISTS events")
-                cur.execute("DROP TABLE IF EXISTS reise_reisende")
-                cur.execute("DROP TABLE IF EXISTS reisen")
-                cur.execute("DROP TABLE IF EXISTS mitarbeiter")
-                cur.execute("DROP TABLE IF EXISTS belege")
+                cur.execute("DROP TABLE IF EXISTS event_belege CASCADE")
+                cur.execute("DROP TABLE IF EXISTS events CASCADE")
+                cur.execute("DROP TABLE IF EXISTS reise_reisende CASCADE")
+                cur.execute("DROP TABLE IF EXISTS belege CASCADE")
+                cur.execute("DROP TABLE IF EXISTS mitarbeiter CASCADE")
+                cur.execute("DROP TABLE IF EXISTS reisen CASCADE")
             conn.commit()
 
         init_db()
