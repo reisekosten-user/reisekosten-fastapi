@@ -1,1069 +1,188 @@
 <!DOCTYPE html>
 <html lang="de">
 <head>
-  <meta charset="UTF-8">
-  <title>Reisekosten Dashboard 7.7a</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    :root {
-      --bg: #f3f6fb;
-      --card: #ffffff;
-      --line: #d8e0ee;
-      --primary: #1f4ed8;
-      --primary-dark: #163aa6;
-      --text: #0f172a;
-      --muted: #64748b;
-      --ok: #166534;
-      --warn: #b45309;
-      --err: #b91c1c;
-      --ok-bg: #dcfce7;
-      --warn-bg: #fef3c7;
-      --err-bg: #fee2e2;
-    }
+    <meta charset="UTF-8">
+    <title>Reisekosten Dashboard</title>
 
-    * { box-sizing: border-box; }
-    body { font-family: Arial, sans-serif; background: var(--bg); margin: 0; color: var(--text); }
+    <style>
+        body {
+            font-family: Arial;
+            margin: 0;
+            background: #f5f7fa;
+        }
 
-    .header {
-      background: linear-gradient(90deg, #12327f, #2563eb);
-      color: white;
-      padding: 8px 24px;
-      min-height: 96px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 16px;
-      flex-wrap: wrap;
-    }
+        header {
+            background: #0a2a66;
+            color: white;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+        }
 
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      height: 80px;
-    }
+        header img {
+            height: 60px;
+            margin-right: 20px;
+        }
 
-    .brand img {
-      height: 100%;
-      max-height: 96px;
-      object-fit: contain;
-      background: transparent;
-      filter: none;
-      mix-blend-mode: normal;
-    }
+        .container {
+            padding: 20px;
+        }
 
-    .brand-title { font-size: 22px; font-weight: 700; }
-    .brand-sub { font-size: 13px; opacity: 0.9; }
+        button {
+            padding: 10px 15px;
+            margin: 5px;
+            cursor: pointer;
+        }
 
-    .nav {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      align-items: center;
-    }
+        textarea {
+            width: 100%;
+            height: 120px;
+        }
 
-    .nav button {
-      background: rgba(255,255,255,0.14);
-      color: white;
-      border: 1px solid rgba(255,255,255,0.22);
-      border-radius: 10px;
-      padding: 10px 14px;
-      cursor: pointer;
-      font-weight: 700;
-    }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
 
-    .nav button:hover {
-      background: rgba(255,255,255,0.22);
-    }
+        td, th {
+            border: 1px solid #ccc;
+            padding: 5px;
+        }
 
-    .container { max-width: 1450px; margin: 24px auto; padding: 0 18px; }
-    .grid { display: grid; gap: 20px; }
-    .grid-2 { grid-template-columns: 1.2fr 0.8fr; }
-    .grid-3 { grid-template-columns: repeat(3, 1fr); }
-
-    .card {
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 18px;
-      box-shadow: 0 3px 14px rgba(15, 23, 42, 0.06);
-    }
-
-    .title { font-size: 20px; font-weight: 700; margin: 0 0 14px; }
-    .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
-
-    .row { display: flex; gap: 12px; flex-wrap: wrap; }
-    .col { flex: 1; min-width: 220px; }
-
-    label {
-      font-size: 13px;
-      font-weight: 700;
-      display: block;
-      margin-bottom: 6px;
-      color: #334155;
-    }
-
-    input, select, textarea {
-      width: 100%;
-      padding: 11px 12px;
-      border: 1px solid #cbd5e1;
-      border-radius: 10px;
-      background: white;
-      font-size: 14px;
-      margin-bottom: 14px;
-    }
-
-    textarea { min-height: 180px; resize: vertical; }
-
-    button {
-      border: none;
-      border-radius: 10px;
-      padding: 11px 14px;
-      cursor: pointer;
-      font-size: 14px;
-      font-weight: 700;
-    }
-
-    .btn-primary { background: var(--primary); color: white; }
-    .btn-primary:hover { background: var(--primary-dark); }
-    .btn-secondary { background: #475569; color: white; }
-    .btn-light { background: #e2e8f0; color: #0f172a; }
-
-    .hidden { display: none; }
-
-    .statusbox {
-      margin: 18px 0 0 0;
-      border-radius: 12px;
-      padding: 12px;
-      font-size: 14px;
-      font-weight: 600;
-    }
-
-    .status-ok { background: #eff6ff; color: #1d4ed8; }
-    .status-error { background: var(--err-bg); color: var(--err); }
-
-    .metric {
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 14px;
-      background: #f8fbff;
-    }
-
-    .metric-label {
-      font-size: 12px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-    }
-
-    .metric-value { margin-top: 6px; font-size: 24px; font-weight: 800; }
-
-    .traveler-row {
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 12px;
-      background: #f8fafc;
-      margin-bottom: 12px;
-    }
-
-    .search-results {
-      border: 1px solid #dbe5f3;
-      background: white;
-      border-radius: 10px;
-      margin-top: -8px;
-      margin-bottom: 8px;
-      overflow: hidden;
-    }
-
-    .search-item {
-      padding: 10px 12px;
-      cursor: pointer;
-      border-top: 1px solid #eef2f7;
-    }
-
-    .search-item:first-child { border-top: 0; }
-    .search-item:hover { background: #eff6ff; }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 14px;
-      background: white;
-      overflow: hidden;
-      border-radius: 12px;
-    }
-
-    th, td {
-      border-bottom: 1px solid #e5edf7;
-      padding: 10px 12px;
-      text-align: left;
-      vertical-align: top;
-    }
-
-    th {
-      background: #eef4fb;
-      color: #334155;
-      font-size: 13px;
-    }
-
-    .badge {
-      display: inline-block;
-      padding: 6px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
-    }
-
-    .badge-ok { background: var(--ok-bg); color: var(--ok); }
-    .badge-warn { background: var(--warn-bg); color: var(--warn); }
-    .badge-err { background: var(--err-bg); color: var(--err); }
-
-    .detail-layout {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 18px;
-    }
-
-    .event-column {
-      background: #f8fbff;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 14px;
-    }
-
-    .event-card {
-      background: white;
-      border: 1px solid #dbe4f0;
-      border-radius: 12px;
-      padding: 12px;
-      margin-bottom: 10px;
-    }
-
-    .event-title { font-weight: 700; cursor: pointer; }
-    .event-title:hover { color: var(--primary); }
-    .event-meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
-
-    pre {
-      background: #0f172a;
-      color: #dbeafe;
-      border-radius: 12px;
-      padding: 14px;
-      overflow: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 13px;
-    }
-
-    @media (max-width: 1100px) {
-      .grid-2, .grid-3, .detail-layout { grid-template-columns: 1fr; }
-    }
-  </style>
+        .box {
+            background: white;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+        }
+    </style>
 </head>
+
 <body>
 
-<div class="header">
-  <div class="brand">
-    <img src="/static/logo2.png" alt="Logo">
-    <div>
-      <div class="brand-title">Reisekosten System</div>
-      <div class="brand-sub">Version 7.7a · erster Testlauf</div>
-    </div>
-  </div>
-
-  <div class="nav">
-    <button onclick="showSection('overview')">Übersicht</button>
-    <button onclick="showSection('reise')">Neue Reise</button>
-    <button onclick="showSection('scan')">Belegscan</button>
-    <button onclick="showSection('mitarbeiter')">Mitarbeiter</button>
-    <button onclick="showSection('detail')">Reise-Detail</button>
-    <button onclick="testHealth()">Health</button>
-    <button onclick="loadBelege()">Belege</button>
-    <button onclick="loadReisen()">Reisen</button>
-    <button onclick="loadMitarbeiter()">Mitarbeiter</button>
-  </div>
-</div>
+<header>
+    <img src="/static/logo2.png">
+    <h2>Reisekosten System</h2>
+</header>
 
 <div class="container">
 
-  <div id="statusBox"></div>
+    <div class="box">
+        <h3>Neue Reise</h3>
 
-  <div id="overviewSection" class="grid grid-3">
-    <div class="metric">
-      <div class="metric-label">Belege</div>
-      <div class="metric-value" id="metricBelege">0</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Reisen</div>
-      <div class="metric-value" id="metricReisen">0</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Mitarbeiter</div>
-      <div class="metric-value" id="metricMitarbeiter">0</div>
-    </div>
-  </div>
+        Jahr:
+        <input id="jahr" value="2026">
 
-  <div id="reiseSection" class="card hidden">
-    <div class="title">Neue Reise</div>
-    <div class="subtitle">Reisecode wird automatisch nach Jahr erzeugt</div>
+        Name:
+        <input id="name" value="Testreise">
 
-    <div class="row">
-      <div class="col">
-        <label>Jahr</label>
-        <select id="reiseJahr" onchange="previewNextCode()"></select>
-      </div>
-      <div class="col">
-        <label>Nächster Reisecode</label>
-        <input id="reiseCodePreview" type="text" readonly>
-      </div>
-      <div class="col">
-        <label>Anzahl Reisende</label>
-        <select id="anzahlReisende" onchange="renderTravelerRows()">
-          <option value="1">1</option>
-          <option value="2">2</option>
-          <option value="3">3</option>
-          <option value="4">4</option>
-          <option value="5">5</option>
-        </select>
-      </div>
+        <button onclick="createReise()">Anlegen</button>
     </div>
 
-    <label>Reisename</label>
-    <input id="reiseName" type="text" placeholder="z. B. Montage Lyon März 2027">
+    <div class="box">
+        <h3>Analyse starten</h3>
 
-    <div class="row">
-      <div class="col">
-        <label>Startdatum</label>
-        <input id="reiseStart" type="date">
-      </div>
-      <div class="col">
-        <label>Enddatum</label>
-        <input id="reiseEnd" type="date">
-      </div>
+        Datei:
+        <input id="filename" value="test.txt">
+
+        <textarea id="text"></textarea>
+
+        <button onclick="analyze()">Analyse starten</button>
     </div>
 
-    <div class="title" style="font-size:16px;margin-top:10px;">Reisende</div>
-    <div id="travelerRows"></div>
+    <div class="box">
+        <h3>Reisen Übersicht</h3>
+        <button onclick="loadReisen()">Neu laden</button>
 
-    <button class="btn-primary" onclick="createReise()">Reise anlegen</button>
-  </div>
-
-  <div id="scanSection" class="card hidden">
-    <div class="title">Belegscan / Analyse</div>
-    <div class="subtitle">Optional direkt einer Reise oder einem Event zuordnen</div>
-
-    <div class="row">
-      <div class="col">
-        <label>Reise-ID optional</label>
-        <input id="scanReiseId" type="number">
-      </div>
-      <div class="col">
-        <label>Event-ID optional</label>
-        <input id="scanEventId" type="number">
-      </div>
+        <table id="reisenTable"></table>
     </div>
 
-    <label>Dateiname</label>
-    <input id="filename" type="text" value="manuell.txt">
-
-    <label>Textinhalt</label>
-    <textarea id="textInput" placeholder="Hier Text, E-Mail-Inhalt oder OCR-Text einfügen ..."></textarea>
-
-    <div class="row">
-      <button class="btn-light" onclick="previewAnonymizedText()">Anonymisierung Vorschau</button>
-      <button class="btn-primary" onclick="analyzeText()">Text analysieren</button>
+    <div class="box">
+        <h3>Letztes Ergebnis</h3>
+        <pre id="result"></pre>
     </div>
-
-    <div class="row" style="margin-top:14px;">
-      <div class="col">
-        <label>Datei auswählen</label>
-        <input id="fileInput" type="file">
-      </div>
-    </div>
-
-    <div class="row">
-      <button class="btn-light" onclick="previewAnonymizedFile()">Datei anonymisieren</button>
-      <button class="btn-primary" onclick="analyzeFile()">Datei analysieren</button>
-    </div>
-  </div>
-
-  <div id="mitarbeiterSection" class="card hidden">
-    <div class="title">Mitarbeiter anlegen</div>
-    <div class="subtitle">Kürzel, Klarname und persönliche Daten pflegen</div>
-
-    <div class="row">
-      <div class="col">
-        <label>Kürzel</label>
-        <input id="mKuerzel" type="text">
-      </div>
-      <div class="col">
-        <label>Vorname</label>
-        <input id="mVorname" type="text">
-      </div>
-      <div class="col">
-        <label>Nachname</label>
-        <input id="mNachname" type="text">
-      </div>
-    </div>
-
-    <div class="row">
-      <div class="col">
-        <label>Klarname</label>
-        <input id="mKlarname" type="text">
-      </div>
-      <div class="col">
-        <label>Geburtsdatum</label>
-        <input id="mGeburtsdatum" type="date">
-      </div>
-      <div class="col">
-        <label>E-Mail</label>
-        <input id="mEmail" type="email">
-      </div>
-    </div>
-
-    <button class="btn-primary" onclick="createMitarbeiter()">Mitarbeiter anlegen</button>
-  </div>
-
-  <div id="detailSection" class="card hidden">
-    <div class="title">Reise-Detailseite</div>
-    <div class="subtitle">Planung / Abgeschlossen je Reise</div>
-
-    <div class="row">
-      <div class="col">
-        <label>Reise-ID</label>
-        <input id="detailReiseId" type="number">
-      </div>
-      <div class="col" style="display:flex;align-items:flex-end;">
-        <button class="btn-primary" onclick="loadReiseDetail()">Reise laden</button>
-      </div>
-    </div>
-
-    <div class="row">
-      <div class="col">
-        <label>Neues Event Typ</label>
-        <select id="eventTyp">
-          <option value="Flug">Flug</option>
-          <option value="Hotel">Hotel</option>
-          <option value="Taxi">Taxi</option>
-          <option value="Zug">Zug</option>
-          <option value="Sonstiges">Sonstiges</option>
-        </select>
-      </div>
-      <div class="col">
-        <label>Event Titel</label>
-        <input id="eventTitel" type="text" placeholder="z. B. Hotel Marriott Lyon">
-      </div>
-      <div class="col">
-        <label>Event Status</label>
-        <select id="eventStatus">
-          <option value="planung">Planung</option>
-          <option value="abgeschlossen">Abgeschlossen</option>
-        </select>
-      </div>
-    </div>
-
-    <button class="btn-primary" onclick="createEvent()">Event anlegen</button>
-
-    <div id="reiseDetailMeta" style="margin-top:18px;"></div>
-
-    <div class="detail-layout" style="margin-top:18px;">
-      <div class="event-column">
-        <div class="title" style="font-size:18px;">Planung</div>
-        <div id="planungColumn"></div>
-      </div>
-      <div class="event-column">
-        <div class="title" style="font-size:18px;">Abgeschlossen</div>
-        <div id="abgeschlossenColumn"></div>
-      </div>
-    </div>
-  </div>
-
-  <div class="grid grid-2" style="margin-top:20px;">
-    <div class="card">
-      <div class="title">Reisen Übersicht</div>
-      <div class="subtitle">Klick auf ID für Detailansicht</div>
-      <div id="reisenTable"></div>
-    </div>
-
-    <div class="card">
-      <div class="title">Gespeicherte Belege</div>
-      <div class="subtitle">Neueste Belege zuerst</div>
-      <div id="belegeTable"></div>
-    </div>
-  </div>
-
-  <div class="card" style="margin-top:20px;">
-    <div class="title">Mitarbeiter Übersicht</div>
-    <div class="subtitle">Aktive Mitarbeiter aus der PostgreSQL-Datenbank</div>
-    <div id="mitarbeiterTable"></div>
-  </div>
-
-  <div class="card" style="margin-top:20px;">
-    <div class="title">Letztes Ergebnis / Event-Detail / Debug</div>
-    <pre id="resultBox">Noch keine Analyse vorhanden.</pre>
-  </div>
 
 </div>
 
 <script>
-function api() {
-  return window.location.origin;
-}
 
-function setStatus(message, isError = false) {
-  const box = document.getElementById("statusBox");
-  box.innerHTML = '<div class="statusbox ' + (isError ? 'status-error' : 'status-ok') + '">' + escapeHtml(message) + '</div>';
-}
+const API = "";
 
-function escapeHtml(text) {
-  return String(text ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-async function parseJsonResponse(res) {
-  const txt = await res.text();
-  try {
-    return JSON.parse(txt);
-  } catch {
-    throw new Error("Antwort war kein JSON: " + txt.substring(0, 500));
-  }
-}
-
-function badge(status) {
-  if (status === "ok") return '<span class="badge badge-ok">OK</span>';
-  if (status === "fehler") return '<span class="badge badge-err">Fehler</span>';
-  return '<span class="badge badge-warn">Prüfen</span>';
-}
-
-function showSection(name) {
-  document.getElementById("overviewSection").classList.add("hidden");
-  document.getElementById("reiseSection").classList.add("hidden");
-  document.getElementById("scanSection").classList.add("hidden");
-  document.getElementById("mitarbeiterSection").classList.add("hidden");
-  document.getElementById("detailSection").classList.add("hidden");
-
-  if (name === "overview") document.getElementById("overviewSection").classList.remove("hidden");
-  if (name === "reise") document.getElementById("reiseSection").classList.remove("hidden");
-  if (name === "scan") document.getElementById("scanSection").classList.remove("hidden");
-  if (name === "mitarbeiter") document.getElementById("mitarbeiterSection").classList.remove("hidden");
-  if (name === "detail") document.getElementById("detailSection").classList.remove("hidden");
-}
-
-async function testHealth() {
-  try {
-    const res = await fetch(api() + "/health");
-    const data = await parseJsonResponse(res);
-    setStatus("Health OK: " + JSON.stringify(data));
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-async function loadBelege() {
-  try {
-    const res = await fetch(api() + "/belege");
-    const data = await parseJsonResponse(res);
-
-    document.getElementById("metricBelege").textContent = data.count || 0;
-
-    const rows = (data.belege || []).map(b => `
-      <tr>
-        <td>${escapeHtml(b.id)}</td>
-        <td>${escapeHtml(b.belegdatum)}</td>
-        <td>${escapeHtml(b.art)}</td>
-        <td>${escapeHtml(b.kosten)}</td>
-        <td>${escapeHtml(b.waehrung)}</td>
-        <td>${escapeHtml(b.created_at)}</td>
-      </tr>
-    `).join("");
-
-    document.getElementById("belegeTable").innerHTML = `
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Datum</th>
-            <th>Art</th>
-            <th>Kosten</th>
-            <th>Währung</th>
-            <th>Erstellt</th>
-          </tr>
-        </thead>
-        <tbody>${rows || '<tr><td colspan="6">Keine Belege vorhanden</td></tr>'}</tbody>
-      </table>
-    `;
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-async function loadReisen() {
-  try {
-    let data = null;
-
-    try {
-      const resOverview = await fetch(api() + "/reisen/overview");
-      data = await parseJsonResponse(resOverview);
-      if (data.status === "error") throw new Error(data.detail || "overview failed");
-    } catch (e) {
-      const resFallback = await fetch(api() + "/reisen");
-      const raw = await parseJsonResponse(resFallback);
-      data = {
-        count: raw.count || 0,
-        reisen: (raw.reisen || []).map(r => ({
-          ...r,
-          flug: false,
-          hotel: false,
-          taxi: false,
-          status: "pruefen",
-          warnungen: []
-        }))
-      };
-    }
-
-    document.getElementById("metricReisen").textContent = data.count || 0;
-
-    const rows = (data.reisen || []).map(r => `
-      <tr>
-        <td><a href="#" onclick="openReiseDetail(${r.id});return false;">${escapeHtml(r.id)}</a></td>
-        <td>${escapeHtml(r.reise_code)}</td>
-        <td>${escapeHtml(r.reise_name)}</td>
-        <td>${escapeHtml(r.anzahl_reisende)}</td>
-        <td>${r.flug ? '✔' : '—'}</td>
-        <td>${r.hotel ? '✔' : '—'}</td>
-        <td>${r.taxi ? '✔' : '—'}</td>
-        <td>${badge(r.status)}</td>
-        <td>${escapeHtml((r.warnungen || []).join(", "))}</td>
-      </tr>
-    `).join("");
-
-    document.getElementById("reisenTable").innerHTML = `
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Code</th>
-            <th>Reisename</th>
-            <th>Reisende</th>
-            <th>Flug</th>
-            <th>Hotel</th>
-            <th>Taxi</th>
-            <th>Status</th>
-            <th>Warnungen</th>
-          </tr>
-        </thead>
-        <tbody>${rows || '<tr><td colspan="9">Keine Reisen vorhanden</td></tr>'}</tbody>
-      </table>
-    `;
-  } catch (e) {
-    setStatus("Reisen konnten nicht geladen werden: " + (e.message || String(e)), true);
-  }
-}
-
-async function loadMitarbeiter() {
-  try {
-    const res = await fetch(api() + "/mitarbeiter");
-    const data = await parseJsonResponse(res);
-
-    document.getElementById("metricMitarbeiter").textContent = data.count || 0;
-
-    const rows = (data.mitarbeiter || []).map(m => `
-      <tr>
-        <td>${escapeHtml(m.kuerzel)}</td>
-        <td>${escapeHtml(m.klarname)}</td>
-        <td>${escapeHtml(m.geburtsdatum || "")}</td>
-        <td>${escapeHtml(m.email || "")}</td>
-      </tr>
-    `).join("");
-
-    document.getElementById("mitarbeiterTable").innerHTML = `
-      <table>
-        <thead>
-          <tr>
-            <th>Kürzel</th>
-            <th>Klarname</th>
-            <th>Geburtsdatum</th>
-            <th>E-Mail</th>
-          </tr>
-        </thead>
-        <tbody>${rows || '<tr><td colspan="4">Keine Mitarbeiter vorhanden</td></tr>'}</tbody>
-      </table>
-    `;
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-async function previewNextCode() {
-  try {
-    const jahr = document.getElementById("reiseJahr").value;
-    const res = await fetch(api() + "/reisen/next-code?jahr=" + encodeURIComponent(jahr));
-    const data = await parseJsonResponse(res);
-    document.getElementById("reiseCodePreview").value = data.reise_code || "";
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-function renderTravelerRows() {
-  const count = parseInt(document.getElementById("anzahlReisende").value, 10);
-  const box = document.getElementById("travelerRows");
-  box.innerHTML = "";
-
-  for (let i = 1; i <= count; i++) {
-    box.innerHTML += `
-      <div class="traveler-row">
-        <div style="font-weight:700; margin-bottom:8px;">Reisender ${i}</div>
-        <label>Suche Mitarbeiter</label>
-        <input type="text" id="travelerSearch_${i}" oninput="searchMitarbeiter(${i})" placeholder="Kürzel oder Name">
-        <div id="travelerResults_${i}" class="search-results"></div>
-        <input type="hidden" id="travelerId_${i}">
-      </div>
-    `;
-  }
-}
-
-async function searchMitarbeiter(index) {
-  const q = document.getElementById(`travelerSearch_${index}`).value;
-  const box = document.getElementById(`travelerResults_${index}`);
-  if (!q.trim()) {
-    box.innerHTML = "";
-    return;
-  }
-
-  try {
-    const res = await fetch(api() + "/mitarbeiter/suche?q=" + encodeURIComponent(q));
-    const data = await parseJsonResponse(res);
-    const items = data.mitarbeiter || [];
-    box.innerHTML = items.map(m => `
-      <div class="search-item" onclick="selectMitarbeiter(${index}, ${m.id}, '${escapeJs(m.kuerzel)}', '${escapeJs(m.klarname)}')">
-        ${escapeHtml(m.kuerzel)} | ${escapeHtml(m.klarname)}
-      </div>
-    `).join("");
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-function selectMitarbeiter(index, id, kuerzel, klarname) {
-  document.getElementById(`travelerId_${index}`).value = id;
-  document.getElementById(`travelerSearch_${index}`).value = `${kuerzel} | ${klarname}`;
-  document.getElementById(`travelerResults_${index}`).innerHTML = "";
-}
-
-function escapeJs(value) {
-  return String(value ?? "").replace(/'/g, "\\'");
-}
 
 async function createReise() {
-  try {
-    const count = parseInt(document.getElementById("anzahlReisende").value, 10);
-    const ids = [];
-    for (let i = 1; i <= count; i++) {
-      const val = document.getElementById(`travelerId_${i}`).value;
-      if (val) ids.push(parseInt(val, 10));
-    }
 
-    const payload = {
-      reise_jahr: parseInt(document.getElementById("reiseJahr").value, 10),
-      reise_name: document.getElementById("reiseName").value,
-      startdatum: document.getElementById("reiseStart").value || null,
-      enddatum: document.getElementById("reiseEnd").value || null,
-      anzahl_reisende: count,
-      mitarbeiter_ids: ids
+    const data = {
+        reise_jahr: parseInt(document.getElementById("jahr").value),
+        reise_name: document.getElementById("name").value,
+        anzahl_reisende: 1,
+        mitarbeiter_ids: []
     };
 
-    const res = await fetch(api() + "/reisen", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(payload)
-    });
-    const data = await parseJsonResponse(res);
-
-    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Reise angelegt: " + (data.reise_code || ""));
-    showSection('overview');
-    await previewNextCode();
-    await loadReisen();
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-async function createMitarbeiter() {
-  try {
-    const payload = {
-      kuerzel: document.getElementById("mKuerzel").value,
-      vorname: document.getElementById("mVorname").value,
-      nachname: document.getElementById("mNachname").value,
-      klarname: document.getElementById("mKlarname").value,
-      geburtsdatum: document.getElementById("mGeburtsdatum").value || null,
-      email: document.getElementById("mEmail").value || null,
-      aktiv: true
-    };
-
-    const res = await fetch(api() + "/mitarbeiter", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(payload)
-    });
-    const data = await parseJsonResponse(res);
-    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Mitarbeiter angelegt.");
-    await loadMitarbeiter();
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-async function previewAnonymizedText() {
-  try {
-    const payload = {
-      text: document.getElementById("textInput").value,
-      filename: document.getElementById("filename").value
-    };
-
-    const res = await fetch(api() + "/anonymize/text", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(payload)
+    const res = await fetch(API + "/reisen", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data)
     });
 
-    const data = await parseJsonResponse(res);
-    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Anonymisierung Vorschau erstellt.");
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
+    const json = await res.json();
+    document.getElementById("result").innerText = JSON.stringify(json, null, 2);
+
+    loadReisen();
 }
 
-async function previewAnonymizedFile() {
-  try {
-    const input = document.getElementById("fileInput");
-    if (!input.files || !input.files[0]) {
-      setStatus("Bitte zuerst eine Datei auswählen.", true);
-      return;
-    }
 
-    const formData = new FormData();
-    formData.append("file", input.files[0]);
+async function loadReisen() {
 
-    const res = await fetch(api() + "/anonymize/file", {
-      method: "POST",
-      body: formData
-    });
+    const res = await fetch(API + "/reisen/overview");
+    const json = await res.json();
 
-    const data = await parseJsonResponse(res);
-    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Datei anonymisiert.");
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-async function analyzeText() {
-  try {
-    const payload = {
-      text: document.getElementById("textInput").value,
-      filename: document.getElementById("filename").value,
-      reise_id: document.getElementById("scanReiseId").value ? parseInt(document.getElementById("scanReiseId").value, 10) : null,
-      event_id: document.getElementById("scanEventId").value ? parseInt(document.getElementById("scanEventId").value, 10) : null
-    };
-
-    const res = await fetch(api() + "/analyze/text", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(payload)
-    });
-
-    const data = await parseJsonResponse(res);
-    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Textanalyse abgeschlossen.");
-    await loadBelege();
-    if (payload.reise_id) await loadReiseDetailById(payload.reise_id);
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-async function analyzeFile() {
-  try {
-    const input = document.getElementById("fileInput");
-    if (!input.files || !input.files[0]) {
-      setStatus("Bitte zuerst eine Datei auswählen.", true);
-      return;
-    }
-
-    let url = api() + "/analyze/file";
-    const qp = [];
-    if (document.getElementById("scanReiseId").value) qp.push("reise_id=" + encodeURIComponent(document.getElementById("scanReiseId").value));
-    if (document.getElementById("scanEventId").value) qp.push("event_id=" + encodeURIComponent(document.getElementById("scanEventId").value));
-    if (qp.length) url += "?" + qp.join("&");
-
-    const formData = new FormData();
-    formData.append("file", input.files[0]);
-
-    const res = await fetch(url, {
-      method: "POST",
-      body: formData
-    });
-
-    const data = await parseJsonResponse(res);
-    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Dateianalyse abgeschlossen.");
-    await loadBelege();
-    if (document.getElementById("scanReiseId").value) {
-      await loadReiseDetailById(parseInt(document.getElementById("scanReiseId").value, 10));
-    }
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-async function createEvent() {
-  try {
-    const payload = {
-      reise_id: parseInt(document.getElementById("detailReiseId").value, 10),
-      typ: document.getElementById("eventTyp").value,
-      titel: document.getElementById("eventTitel").value,
-      status: document.getElementById("eventStatus").value
-    };
-
-    const res = await fetch(api() + "/events", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(payload)
-    });
-
-    const data = await parseJsonResponse(res);
-    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Event angelegt.");
-    await loadReiseDetail();
-    await loadReisen();
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-async function setEventStatus(eventId, status) {
-  try {
-    const res = await fetch(api() + "/events/" + eventId + "/status", {
-      method: "PUT",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({status})
-    });
-    const data = await parseJsonResponse(res);
-    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Event aktualisiert.");
-    await loadReiseDetail();
-    await loadReisen();
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-async function showEventDetail(eventId) {
-  try {
-    const res = await fetch(api() + "/events/" + eventId);
-    const data = await parseJsonResponse(res);
-
-    let html = "";
-    html += `Event-ID: ${data.event?.id}\n`;
-    html += `Typ: ${data.event?.typ}\n`;
-    html += `Titel: ${data.event?.titel}\n`;
-    html += `Status: ${data.event?.status}\n\n`;
-    html += `Belege:\n`;
-
-    if (!data.belege || data.belege.length === 0) {
-      html += "Keine Belege vorhanden.";
-    } else {
-      data.belege.forEach(b => {
-        html += `#${b.id} | ${b.art} | ${b.kosten} ${b.waehrung} | ${b.belegdatum}\n`;
-      });
-    }
-
-    document.getElementById("resultBox").textContent = html;
-    setStatus("Event-Detail geladen.");
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
-}
-
-function renderEventCard(e) {
-  return `
-    <div class="event-card">
-      <div class="event-title" onclick="showEventDetail(${e.id})">${escapeHtml(e.typ || "Unbekannt")} · ${escapeHtml(e.titel || "")}</div>
-      <div class="event-meta">Event-ID ${escapeHtml(e.id)} · Belege: ${escapeHtml(e.beleg_anzahl || 0)}</div>
-      <div class="row" style="margin-top:10px;">
-        <button class="btn-light" onclick="setEventStatus(${e.id}, 'planung')">Nach Planung</button>
-        <button class="btn-primary" onclick="setEventStatus(${e.id}, 'abgeschlossen')">Nach Abgeschlossen</button>
-      </div>
-    </div>
-  `;
-}
-
-async function openReiseDetail(reiseId) {
-  document.getElementById("detailReiseId").value = reiseId;
-  showSection('detail');
-  await loadReiseDetail();
-}
-
-async function loadReiseDetail() {
-  const reiseId = parseInt(document.getElementById("detailReiseId").value, 10);
-  if (!reiseId) {
-    setStatus("Bitte zuerst eine Reise-ID eingeben.", true);
-    return;
-  }
-  await loadReiseDetailById(reiseId);
-}
-
-async function loadReiseDetailById(reiseId) {
-  try {
-    const res = await fetch(api() + "/reisen/" + reiseId);
-    const data = await parseJsonResponse(res);
-    if (data.status === "error") throw new Error(data.detail || "Fehler");
-
-    const reise = data.reise || {};
-    const planung = (data.events || []).filter(e => e.status === "planung");
-    const abgeschlossen = (data.events || []).filter(e => e.status === "abgeschlossen");
-    const reisende = (data.reisende || []).map(r => `${r.alias_name}: ${r.klarname}`).join(", ");
-
-    document.getElementById("reiseDetailMeta").innerHTML = `
-      <div class="card" style="padding:14px; margin-top:10px;">
-        <div><strong>${escapeHtml(reise.reise_code || "")}</strong> · ${escapeHtml(reise.reise_name || "")}</div>
-        <div style="margin-top:6px; color:#64748b;">Reisende: ${escapeHtml(reisende || "—")}</div>
-        <div style="margin-top:6px;">Status: ${badge(data.status)} · Warnungen: ${escapeHtml((data.warnungen || []).join(", "))}</div>
-      </div>
+    let html = `
+        <tr>
+            <th>ID</th>
+            <th>Code</th>
+            <th>Name</th>
+            <th>Status</th>
+        </tr>
     `;
 
-    document.getElementById("planungColumn").innerHTML =
-      planung.length ? planung.map(renderEventCard).join("") : "<div>Keine geplanten Events.</div>";
+    json.reisen.forEach(r => {
+        html += `
+            <tr>
+                <td>${r.id}</td>
+                <td>${r.reise_code}</td>
+                <td>${r.reise_name}</td>
+                <td>${r.status}</td>
+            </tr>
+        `;
+    });
 
-    document.getElementById("abgeschlossenColumn").innerHTML =
-      abgeschlossen.length ? abgeschlossen.map(renderEventCard).join("") : "<div>Keine abgeschlossenen Events.</div>";
-  } catch (e) {
-    setStatus(e.message || String(e), true);
-  }
+    document.getElementById("reisenTable").innerHTML = html;
 }
 
-window.onload = async function () {
-  const yearSelect = document.getElementById("reiseJahr");
-  const currentYear = new Date().getFullYear();
-  for (let y = currentYear - 1; y <= currentYear + 3; y++) {
-    const opt = document.createElement("option");
-    opt.value = y;
-    opt.textContent = y;
-    yearSelect.appendChild(opt);
-  }
-  yearSelect.value = currentYear;
 
-  renderTravelerRows();
-  await previewNextCode();
-  await loadBelege();
-  await loadReisen();
-  await loadMitarbeiter();
-};
+async function analyze() {
+
+    const data = {
+        text: document.getElementById("text").value,
+        filename: document.getElementById("filename").value,
+        reise_id: 1
+    };
+
+    const res = await fetch(API + "/analyze/text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data)
+    });
+
+    const json = await res.json();
+
+    document.getElementById("result").innerText =
+        JSON.stringify(json, null, 2);
+
+    loadReisen();
+}
+
 </script>
 
 </body>
