@@ -20,10 +20,10 @@ from database import (
     create_mitarbeiter,
     create_reise,
     db_ping,
+    get_conn,
     get_event_detail,
     get_next_reise_code,
     get_reise_detail,
-    get_conn,
     init_db,
     insert_beleg,
     list_belege,
@@ -34,7 +34,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.7b"
+APP_VERSION = "7.8"
 DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_API_BASE = "https://api.mistral.ai/v1"

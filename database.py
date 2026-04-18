@@ -345,10 +345,6 @@ def list_belege():
     ]
 
 
-def check_duplicate(key: str) -> bool:
-    return False
-
-
 def attach_beleg_to_event(event_id: int, beleg_id: int):
     with get_conn() as conn:
         with conn.cursor() as cur:
