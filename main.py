@@ -35,7 +35,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.9b"
+APP_VERSION = "7.9c"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "mistral").strip().lower()
 
@@ -104,10 +104,10 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
         raise HTTPException(status_code=400, detail=f"PDF konnte nicht gelesen werden: {exc}") from exc
 
 
-def normalize_variants(name: str) -> List[str]:
-    if not name:
+def normalize_variants(value: str) -> List[str]:
+    if not value:
         return []
-    base = name.strip().lower()
+    base = value.strip().lower()
     variants = {base}
     variants.add(base.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss"))
     variants.add(base.replace("ä", "a").replace("ö", "o").replace("ü", "u").replace("ß", "ss"))
@@ -115,70 +115,116 @@ def normalize_variants(name: str) -> List[str]:
     return [v for v in variants if v]
 
 
-def mask_field_values(text: str, patterns: List[re.Pattern]) -> str:
-    out = text
-    for pattern in patterns:
-        out = pattern.sub(lambda m: f"{m.group(1)}XXXX", out)
-    return out
-
-
-def anonymize_document_text(text: str) -> str:
+def replace_name_variants(text: str, replacement: str = "Max Mustermann") -> str:
     anonymized = text
-
     try:
         mitarbeiter = list_mitarbeiter(limit=1000)
     except Exception:
         mitarbeiter = []
 
-    name_candidates = set()
+    candidates = set()
     for m in mitarbeiter:
-        for candidate in [
-            f"{m.get('vorname', '')} {m.get('nachname', '')}".strip(),
-            f"{m.get('nachname', '')} {m.get('vorname', '')}".strip(),
-            m.get("vorname"),
-            m.get("nachname"),
-        ]:
-            if candidate and candidate.strip():
-                name_candidates.add(candidate.strip())
+        vorname = (m.get("vorname") or "").strip()
+        nachname = (m.get("nachname") or "").strip()
+        vollname = f"{vorname} {nachname}".strip()
+        reversed_name = f"{nachname} {vorname}".strip()
 
-    sorted_names = sorted(name_candidates, key=len, reverse=True)
-    for name in sorted_names:
-        for variant in normalize_variants(name):
-            anonymized = re.sub(re.escape(variant), "Max Mustermann", anonymized, flags=re.IGNORECASE)
+        for candidate in [vollname, reversed_name, vorname, nachname]:
+            if candidate:
+                candidates.add(candidate)
 
-    anonymized = re.sub(
-        r"(?i)\b(geburtsdatum|birth date|date of birth|dob)\b\s*[:\-]?\s*([0-9]{1,2}[./\-][0-9]{1,2}[./\-][0-9]{2,4})",
-        r"\1: XXXX",
-        anonymized,
-    )
+    for candidate in sorted(candidates, key=len, reverse=True):
+        for variant in normalize_variants(candidate):
+            anonymized = re.sub(re.escape(variant), replacement, anonymized, flags=re.IGNORECASE)
 
-    anonymized = re.sub(
+    return anonymized
+
+
+def anonymize_emails(text: str) -> str:
+    return re.sub(
         r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b",
         "XXXX",
-        anonymized,
+        text,
         flags=re.IGNORECASE,
     )
 
-    anonymized = re.sub(r"(?i)\b(\+?\d[\d\s\-()/]{6,}\d)\b", "XXXX", anonymized)
 
+def anonymize_phone_numbers(text: str) -> str:
+    return re.sub(r"(?<!\w)(\+?\d[\d\s\-()/]{6,}\d)(?!\w)", "XXXX", text)
+
+
+def anonymize_birth_dates(text: str) -> str:
+    return re.sub(
+        r"(?i)\b(geburtsdatum|birth date|date of birth|dob)\b\s*[:\-]?\s*([0-9]{1,2}[./\-][0-9]{1,2}[./\-][0-9]{2,4})",
+        r"\1: XXXX",
+        text,
+    )
+
+
+def anonymize_labeled_codes(text: str) -> str:
     patterns = [
-        re.compile(r"(?i)\b(booking code\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(booking reference\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(buchungsnummer\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(buchungsreferenz\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(confirmation number\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(reservation number\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(ticket number\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(ticketnummer\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(ticketnummer\s*[:\-]?\s*)[\d\- ]+"),
-        re.compile(r"(?i)\b(pnr\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(record locator\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(confirmation no\.?\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(reservation no\.?\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(frequent flyer number\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
-        re.compile(r"(?i)\b(vielfliegernummer\s*[:\-]?\s*)[A-Z0-9\-\/]+"),
+        r"(?i)\b(booking code\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
+        r"(?i)\b(booking reference\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
+        r"(?i)\b(buchungsnummer\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
+        r"(?i)\b(buchungsreferenz\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
+        r"(?i)\b(confirmation number\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
+        r"(?i)\b(reservation number\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
+        r"(?i)\b(ticket number\s*[:\-]?\s*)([A-Z0-9\-\/ ]+)",
+        r"(?i)\b(ticketnummer\s*[:\-]?\s*)([A-Z0-9\-\/ ]+)",
+        r"(?i)\b(pnr\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
+        r"(?i)\b(record locator\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
+        r"(?i)\b(confirmation no\.?\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
+        r"(?i)\b(reservation no\.?\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
+        r"(?i)\b(frequent flyer number\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
+        r"(?i)\b(vielfliegernummer\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
+        r"(?i)\b(buchungsreferenz\(en\)\s*)([A-Z0-9\-\/]+)",
     ]
-    anonymized = mask_field_values(anonymized, patterns)
+
+    anonymized = text
+    for pattern in patterns:
+        anonymized = re.sub(pattern, r"\1XXXX", anonymized)
+
+    return anonymized
+
+
+def anonymize_ticket_number_lines(text: str) -> str:
+    patterns = [
+        r"(?i)\b(Ticketnummer\s*:?\s*)([A-Z0-9 ]{6,})",
+        r"(?i)\b(Ticketnummer)([A-Z0-9 ]{6,})",
+        r"(?i)\b(Ticket number\s*:?\s*)([A-Z0-9 ]{6,})",
+        r"(?i)\b(Ticketdetails\s*[\r\n]+Ticketnummer)([A-Z0-9 ]{6,})",
+    ]
+
+    anonymized = text
+    for pattern in patterns:
+        anonymized = re.sub(pattern, r"\1XXXX", anonymized)
+
+    return anonymized
+
+
+def anonymize_mail_headers(text: str) -> str:
+    anonymized = text
+
+    anonymized = re.sub(r"(?im)^(Von:\s*)(.+)$", r"\1XXXX", anonymized)
+    anonymized = re.sub(r"(?im)^(From:\s*)(.+)$", r"\1XXXX", anonymized)
+    anonymized = re.sub(r"(?im)^(Agent Email\s*)(.+)$", r"\1XXXX", anonymized)
+    anonymized = re.sub(r"(?im)^(E-Mail-Adresse\s*)(.+)$", r"\1XXXX", anonymized)
+    anonymized = re.sub(r"(?im)^(Telefon\s*)(.+)$", r"\1XXXX", anonymized)
+    anonymized = re.sub(r"(?im)^(Fax\s*)(.+)$", r"\1XXXX", anonymized)
+
+    return anonymized
+
+
+def anonymize_document_text(text: str) -> str:
+    anonymized = text
+
+    anonymized = replace_name_variants(anonymized, "Max Mustermann")
+    anonymized = anonymize_birth_dates(anonymized)
+    anonymized = anonymize_emails(anonymized)
+    anonymized = anonymize_phone_numbers(anonymized)
+    anonymized = anonymize_labeled_codes(anonymized)
+    anonymized = anonymize_ticket_number_lines(anonymized)
+    anonymized = anonymize_mail_headers(anonymized)
 
     return anonymized
 
@@ -289,8 +335,6 @@ def call_openai(prompt: str, model: Optional[str] = None) -> dict:
     response = client.responses.create(
         model=use_model,
         input=prompt,
-        temperature=0,
-        text={"format": {"type": "json_object"}},
     )
 
     output_text = response.output_text

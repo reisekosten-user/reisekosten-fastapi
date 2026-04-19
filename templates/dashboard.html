@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <title>Reisekosten Dashboard 7.9b</title>
+  <title>Reisekosten Dashboard 7.9c</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -127,6 +127,11 @@
       cursor: pointer;
       font-size: 14px;
       font-weight: 700;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
     }
 
     .btn-primary { background: var(--primary); color: white; }
@@ -292,7 +297,7 @@
     <img src="/static/logo2.png" alt="Logo">
     <div>
       <div class="brand-title">Reisekosten System</div>
-      <div class="brand-sub">Version 7.9b · Provider-Anzeige · OpenAI / Mistral pro Analyse</div>
+      <div class="brand-sub">Version 7.9c · Provider-Schalter · sichtbares Feedback · bessere Anonymisierung</div>
     </div>
   </div>
 
@@ -407,8 +412,8 @@
     <textarea id="textInput" placeholder="Hier Text, E-Mail-Inhalt oder OCR-Text einfügen ..."></textarea>
 
     <div class="row">
-      <button class="btn-light" onclick="previewAnonymizedText()">Anonymisierung Vorschau</button>
-      <button class="btn-primary" onclick="analyzeText()">Text analysieren</button>
+      <button id="btnAnonymizeText" class="btn-light" onclick="previewAnonymizedText()">Anonymisierung Vorschau</button>
+      <button id="btnAnalyzeText" class="btn-primary" onclick="analyzeText()">Text analysieren</button>
     </div>
 
     <div class="row" style="margin-top:14px;">
@@ -419,8 +424,8 @@
     </div>
 
     <div class="row">
-      <button class="btn-light" onclick="previewAnonymizedFile()">Datei anonymisieren</button>
-      <button class="btn-primary" onclick="analyzeFile()">Datei analysieren</button>
+      <button id="btnAnonymizeFile" class="btn-light" onclick="previewAnonymizedFile()">Datei anonymisieren</button>
+      <button id="btnAnalyzeFile" class="btn-primary" onclick="analyzeFile()">Datei analysieren</button>
     </div>
   </div>
 
@@ -556,6 +561,19 @@ function currentAiModel() {
 function setStatus(message, isError = false) {
   const box = document.getElementById("statusBox");
   box.innerHTML = '<div class="statusbox ' + (isError ? 'status-error' : 'status-ok') + '">' + escapeHtml(message) + '</div>';
+}
+
+function setLoading(buttonId, loading, loadingText = "läuft...") {
+  const btn = document.getElementById(buttonId);
+  if (!btn) return;
+  if (loading) {
+    btn.dataset.originalText = btn.innerText;
+    btn.innerText = loadingText;
+    btn.disabled = true;
+  } else {
+    btn.innerText = btn.dataset.originalText || btn.innerText;
+    btn.disabled = false;
+  }
 }
 
 function escapeHtml(text) {
@@ -863,7 +881,10 @@ async function createMitarbeiter() {
 }
 
 async function previewAnonymizedText() {
+  setLoading("btnAnonymizeText", true, "läuft...");
   try {
+    setStatus("Anonymisierung läuft...");
+
     const payload = {
       text: document.getElementById("textInput").value,
       filename: document.getElementById("filename").value
@@ -875,21 +896,27 @@ async function previewAnonymizedText() {
       body: JSON.stringify(payload)
     });
 
-    const data = await parseJsonResponse(res);
+    const data = await parseApiResponse(res);
     document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Anonymisierung Vorschau erstellt.");
+    setStatus("✅ Anonymisierung erfolgreich durchgeführt.");
   } catch (e) {
-    setStatus(e.message || String(e), true);
+    setStatus("❌ Fehler bei Anonymisierung: " + (e.message || String(e)), true);
+  } finally {
+    setLoading("btnAnonymizeText", false);
   }
 }
 
 async function previewAnonymizedFile() {
+  setLoading("btnAnonymizeFile", true, "läuft...");
   try {
     const input = document.getElementById("fileInput");
+
     if (!input.files || !input.files[0]) {
-      setStatus("Bitte zuerst eine Datei auswählen.", true);
+      setStatus("❌ Bitte zuerst eine Datei auswählen.", true);
       return;
     }
+
+    setStatus("Datei-Anonymisierung läuft...");
 
     const formData = new FormData();
     formData.append("file", input.files[0]);
@@ -899,15 +926,18 @@ async function previewAnonymizedFile() {
       body: formData
     });
 
-    const data = await parseJsonResponse(res);
+    const data = await parseApiResponse(res);
     document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Datei anonymisiert.");
+    setStatus("✅ Datei erfolgreich anonymisiert.");
   } catch (e) {
-    setStatus(e.message || String(e), true);
+    setStatus("❌ Fehler bei Datei-Anonymisierung: " + (e.message || String(e)), true);
+  } finally {
+    setLoading("btnAnonymizeFile", false);
   }
 }
 
 async function analyzeText() {
+  setLoading("btnAnalyzeText", true, "analysiert...");
   try {
     const payload = {
       text: document.getElementById("textInput").value,
@@ -917,6 +947,8 @@ async function analyzeText() {
       ai_provider: currentAiProvider(),
       ai_model: currentAiModel()
     };
+
+    setStatus("Textanalyse läuft...");
 
     const res = await fetch(api() + "/analyze/text", {
       method: "POST",
@@ -932,16 +964,21 @@ async function analyzeText() {
     if (payload.reise_id) await loadReiseDetailById(payload.reise_id);
   } catch (e) {
     setStatus(e.message || String(e), true);
+  } finally {
+    setLoading("btnAnalyzeText", false);
   }
 }
 
 async function analyzeFile() {
+  setLoading("btnAnalyzeFile", true, "analysiert...");
   try {
     const input = document.getElementById("fileInput");
     if (!input.files || !input.files[0]) {
       setStatus("Bitte zuerst eine Datei auswählen.", true);
       return;
     }
+
+    setStatus("Dateianalyse läuft...");
 
     let url = api() + "/analyze/file";
     const qp = [];
@@ -969,6 +1006,8 @@ async function analyzeFile() {
     }
   } catch (e) {
     setStatus(e.message || String(e), true);
+  } finally {
+    setLoading("btnAnalyzeFile", false);
   }
 }
 
