@@ -11,6 +11,7 @@ import requests
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from openai import OpenAI
 from pydantic import BaseModel
 from pypdf import PdfReader
 
@@ -34,10 +35,16 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.8a"
-DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+APP_VERSION = "7.9"
+
+AI_PROVIDER = os.getenv("AI_PROVIDER", "mistral").strip().lower()
+
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_BASE = "https://api.mistral.ai/v1"
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
 
 app = FastAPI(title="Reisekosten API", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -235,7 +242,7 @@ def call_mistral(prompt: str) -> dict:
     }
 
     payload = {
-        "model": DEFAULT_MISTRAL_MODEL,
+        "model": MISTRAL_MODEL,
         "messages": [
             {"role": "system", "content": "Gib ausschließlich valides JSON zurück. Keine Erklärungen."},
             {"role": "user", "content": prompt},
@@ -254,6 +261,58 @@ def call_mistral(prompt: str) -> dict:
     data = response.json()
     content = data["choices"][0]["message"]["content"]
     return json.loads(content)
+
+
+def call_openai(prompt: str) -> dict:
+    if not OPENAI_API_KEY:
+        return {
+            "belegdatum": "nicht vorhanden",
+            "art_des_dokuments": "Unbekannt",
+            "buchungsnummer_code": "nicht vorhanden",
+            "name_des_reisenden": "nicht vorhanden",
+            "wie_viele_reisesegmente": 0,
+            "ticketnummer": "nicht vorhanden",
+            "kosten_mit_steuern": "nicht vorhanden",
+            "waehrung_der_kosten": "nicht vorhanden",
+            "reisesegmente": [],
+            "warnungen": ["OPENAI_API_KEY ist nicht gesetzt"],
+            "fehler": [],
+        }
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    response = client.responses.create(
+        model=OPENAI_MODEL,
+        input=prompt,
+        temperature=0,
+        text={"format": {"type": "json_object"}},
+    )
+
+    output_text = response.output_text
+    return json.loads(output_text)
+
+
+def call_ai_provider(prompt: str) -> dict:
+    provider = AI_PROVIDER.lower()
+
+    if provider == "openai":
+        return call_openai(prompt)
+    if provider == "mistral":
+        return call_mistral(prompt)
+
+    return {
+        "belegdatum": "nicht vorhanden",
+        "art_des_dokuments": "Unbekannt",
+        "buchungsnummer_code": "nicht vorhanden",
+        "name_des_reisenden": "nicht vorhanden",
+        "wie_viele_reisesegmente": 0,
+        "ticketnummer": "nicht vorhanden",
+        "kosten_mit_steuern": "nicht vorhanden",
+        "waehrung_der_kosten": "nicht vorhanden",
+        "reisesegmente": [],
+        "warnungen": [f"Unbekannter AI_PROVIDER: {provider}"],
+        "fehler": [],
+    }
 
 
 def ensure_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -329,11 +388,13 @@ def analyze_text_internal(
 ) -> dict:
     anonymized_text = anonymize_document_text(text)
     prompt = build_prompt(anonymized_text, filename=filename)
-    raw = call_mistral(prompt)
+    raw = call_ai_provider(prompt)
     data = ensure_defaults(raw)
 
     data["version"] = APP_VERSION
     data["generated_at_utc"] = datetime.utcnow().isoformat()
+    data["ai_provider"] = AI_PROVIDER
+    data["ai_model"] = OPENAI_MODEL if AI_PROVIDER == "openai" else MISTRAL_MODEL
     data["anonymized_preview"] = anonymized_text[:4000]
 
     beleg_id = insert_beleg({
@@ -366,7 +427,11 @@ def health():
     return {
         "status": "ok",
         "version": APP_VERSION,
+        "ai_provider": AI_PROVIDER,
         "mistral_configured": bool(MISTRAL_API_KEY),
+        "openai_configured": bool(OPENAI_API_KEY),
+        "openai_model": OPENAI_MODEL,
+        "mistral_model": MISTRAL_MODEL,
     }
 
 
