@@ -35,7 +35,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.9e"
+APP_VERSION = "7.9f"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "mistral").strip().lower()
 
@@ -124,7 +124,7 @@ def anonymize_emails(text: str) -> str:
     )
 
 
-def build_name_candidates_for_reise(reise_id: Optional[int]) -> List[str]:
+def build_name_candidates_for_reise(reise_id: Optional[int]) -> List[dict]:
     if not reise_id:
         return []
 
@@ -133,54 +133,102 @@ def build_name_candidates_for_reise(reise_id: Optional[int]) -> List[str]:
     except Exception:
         return []
 
-    candidates: set[str] = set()
+    candidates: List[dict] = []
+
     for reisender in detail.get("reisende", []):
         vollname = (reisender.get("vollname") or "").strip()
-        if vollname:
-            candidates.add(vollname)
+        if not vollname:
+            continue
 
-            parts = [p for p in vollname.split() if p.strip()]
-            if len(parts) >= 2:
-                first = parts[0]
-                last = parts[-1]
-                candidates.add(f"{first} {last}".strip())
-                candidates.add(f"{last} {first}".strip())
-                candidates.add(first)
-                candidates.add(last)
+        parts = [p.strip() for p in vollname.split() if p.strip()]
+        if not parts:
+            continue
 
-    return sorted(candidates, key=len, reverse=True)
+        first = parts[0]
+        last = parts[-1]
+
+        candidates.append({
+            "vollname": vollname,
+            "first": first,
+            "last": last,
+        })
+
+    return candidates
+
+
+def replace_exact_full_names(text: str, candidates: List[dict]) -> str:
+    anonymized = text
+
+    for item in candidates:
+        vollname = item["vollname"]
+        first = item["first"]
+        last = item["last"]
+
+        exact_candidates = {
+            vollname,
+            f"{first} {last}".strip(),
+            f"{last} {first}".strip(),
+        }
+
+        for candidate in sorted(exact_candidates, key=len, reverse=True):
+            for variant in normalize_variants(candidate):
+                anonymized = re.sub(re.escape(variant), "Max Mustermann", anonymized, flags=re.IGNORECASE)
+
+    return anonymized
+
+
+def replace_first_middle_last_patterns(text: str, candidates: List[dict]) -> str:
+    anonymized = text
+
+    # Ersetzt z. B.:
+    # Ralf Nico Diesslin
+    # Mr Ralf Nico Diesslin
+    # Herr Ralf N. Diesslin
+    # auch wenn in DB nur "Ralf Diesslin" steht
+    for item in candidates:
+        first = item["first"]
+        last = item["last"]
+
+        first_variants = normalize_variants(first)
+        last_variants = normalize_variants(last)
+
+        for fv in first_variants:
+            for lv in last_variants:
+                # mit Titel
+                pattern_title = rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(fv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(lv)}\b"
+                anonymized = re.sub(pattern_title, lambda m: f"{m.group(1)} Max Mustermann", anonymized)
+
+                # ohne Titel
+                pattern_plain = rf"(?i)\b{re.escape(fv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(lv)}\b"
+                anonymized = re.sub(pattern_plain, "Max Mustermann", anonymized)
+
+                # Nachname, Vorname Mittelname
+                pattern_reverse = rf"(?i)\b{re.escape(lv)}\s*,?\s*{re.escape(fv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\b"
+                anonymized = re.sub(pattern_reverse, "Max Mustermann", anonymized)
+
+    return anonymized
+
+
+def cleanup_name_replacements(text: str) -> str:
+    anonymized = text
+    anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
+    anonymized = re.sub(
+        r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+",
+        r"\1 Max Mustermann",
+        anonymized,
+    )
+    return anonymized
 
 
 def replace_reise_names(text: str, reise_id: Optional[int]) -> str:
-    anonymized = text
     candidates = build_name_candidates_for_reise(reise_id)
-
     if not candidates:
-        return anonymized
+        return text
 
-    full_names = [c for c in candidates if " " in c.strip()]
-    single_names = [c for c in candidates if " " not in c.strip()]
-
-    # 1. Ganze Namen zuerst
-    for candidate in full_names:
-        for variant in normalize_variants(candidate):
-            anonymized = re.sub(re.escape(variant), "Max Mustermann", anonymized, flags=re.IGNORECASE)
-
-    # 2. Doppelte Ersetzungen glätten
-    anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
-
-    # 3. Einzelne Namen nur vorsichtig ersetzen
-    for candidate in single_names:
-        for variant in normalize_variants(candidate):
-            anonymized = re.sub(
-                rf"(?i)(?<!Max\s)(?<!Mustermann\s)\b{re.escape(variant)}\b(?!\s+Mustermann)",
-                "Max Mustermann",
-                anonymized,
-            )
-
-    # 4. Nochmals glätten
-    anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
-    anonymized = re.sub(r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+", r"\1 Max Mustermann", anonymized)
+    anonymized = text
+    anonymized = replace_exact_full_names(anonymized, candidates)
+    anonymized = replace_first_middle_last_patterns(anonymized, candidates)
+    anonymized = cleanup_name_replacements(anonymized)
 
     return anonymized
 
