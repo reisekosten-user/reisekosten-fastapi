@@ -34,7 +34,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.8"
+APP_VERSION = "7.8a"
 DEFAULT_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_API_BASE = "https://api.mistral.ai/v1"
@@ -59,7 +59,6 @@ class MitarbeiterCreateRequest(BaseModel):
     kuerzel: str
     vorname: str
     nachname: str
-    klarname: Optional[str] = None
     geburtsdatum: Optional[str] = None
     email: Optional[str] = None
     aktiv: bool = True
@@ -125,7 +124,6 @@ def anonymize_document_text(text: str) -> str:
     name_candidates = set()
     for m in mitarbeiter:
         for candidate in [
-            m.get("klarname"),
             f"{m.get('vorname', '')} {m.get('nachname', '')}".strip(),
             f"{m.get('nachname', '')} {m.get('vorname', '')}".strip(),
             m.get("vorname"),
@@ -434,10 +432,7 @@ def mitarbeiter_suche(q: str = Query(default="")):
 @app.post("/mitarbeiter")
 def mitarbeiter_create(payload: MitarbeiterCreateRequest):
     try:
-        data = payload.model_dump()
-        if not data.get("klarname"):
-            data["klarname"] = f'{data.get("vorname", "")} {data.get("nachname", "")}'.strip()
-        new_id = create_mitarbeiter(data)
+        new_id = create_mitarbeiter(payload.model_dump())
         return {"status": "ok", "id": new_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -446,10 +441,7 @@ def mitarbeiter_create(payload: MitarbeiterCreateRequest):
 @app.put("/mitarbeiter/{mitarbeiter_id}")
 def mitarbeiter_update(mitarbeiter_id: int, payload: MitarbeiterCreateRequest):
     try:
-        data = payload.model_dump()
-        if not data.get("klarname"):
-            data["klarname"] = f'{data.get("vorname", "")} {data.get("nachname", "")}'.strip()
-        update_mitarbeiter(mitarbeiter_id, data)
+        update_mitarbeiter(mitarbeiter_id, payload.model_dump())
         return {"status": "ok", "id": mitarbeiter_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <title>Reisekosten Dashboard 7.8</title>
+  <title>Reisekosten Dashboard 7.8a</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -49,7 +49,6 @@
       object-fit: contain;
       background: transparent;
       filter: none;
-      mix-blend-mode: normal;
     }
 
     .brand-title { font-size: 22px; font-weight: 700; }
@@ -126,7 +125,6 @@
 
     .btn-primary { background: var(--primary); color: white; }
     .btn-primary:hover { background: var(--primary-dark); }
-    .btn-secondary { background: #475569; color: white; }
     .btn-light { background: #e2e8f0; color: #0f172a; }
 
     .hidden { display: none; }
@@ -266,7 +264,7 @@
     <img src="/static/logo2.png" alt="Logo">
     <div>
       <div class="brand-title">Reisekosten System</div>
-      <div class="brand-sub">Version 7.8 · Premium Dashboard · Mitarbeiter · Reiseanlage · Analyse · Detailseite</div>
+      <div class="brand-sub">Version 7.8a · Kürzel eindeutig · Klarname entfernt</div>
     </div>
   </div>
 
@@ -388,7 +386,7 @@
 
   <div id="mitarbeiterSection" class="card hidden">
     <div class="title">Mitarbeiter anlegen</div>
-    <div class="subtitle">Direkt im Dashboard</div>
+    <div class="subtitle">Kürzel ist eindeutig</div>
 
     <div class="row">
       <div class="col">
@@ -406,10 +404,6 @@
     </div>
 
     <div class="row">
-      <div class="col">
-        <label>Klarname</label>
-        <input id="mKlarname" type="text">
-      </div>
       <div class="col">
         <label>Geburtsdatum</label>
         <input id="mGeburtsdatum" type="text" placeholder="01.01.1980">
@@ -493,7 +487,7 @@
 
   <div class="card" style="margin-top:20px;">
     <div class="title">Mitarbeiter Übersicht</div>
-    <div class="subtitle">Aktive Mitarbeiter aus der PostgreSQL-Datenbank</div>
+    <div class="subtitle">Kürzel ist eindeutig</div>
     <div id="mitarbeiterTable"></div>
   </div>
 
@@ -564,7 +558,6 @@ async function loadBelege() {
   try {
     const res = await fetch(api() + "/belege");
     const data = await parseJsonResponse(res);
-
     document.getElementById("metricBelege").textContent = data.count || 0;
 
     const rows = (data.belege || []).map(b => `
@@ -647,14 +640,13 @@ async function loadMitarbeiter() {
   try {
     const res = await fetch(api() + "/mitarbeiter");
     const data = await parseJsonResponse(res);
-
     document.getElementById("metricMitarbeiter").textContent = data.count || 0;
 
     const rows = (data.mitarbeiter || []).map(m => `
       <tr>
         <td>${escapeHtml(m.id)}</td>
         <td>${escapeHtml(m.kuerzel)}</td>
-        <td>${escapeHtml(m.klarname)}</td>
+        <td>${escapeHtml(m.vollname)}</td>
         <td>${escapeHtml(m.geburtsdatum || "")}</td>
         <td>${escapeHtml(m.email || "")}</td>
       </tr>
@@ -666,7 +658,7 @@ async function loadMitarbeiter() {
           <tr>
             <th>ID</th>
             <th>Kürzel</th>
-            <th>Klarname</th>
+            <th>Name</th>
             <th>Geburtsdatum</th>
             <th>E-Mail</th>
           </tr>
@@ -721,8 +713,8 @@ async function searchMitarbeiter(index) {
     const data = await parseJsonResponse(res);
     const items = data.mitarbeiter || [];
     box.innerHTML = items.map(m => `
-      <div class="search-item" onclick="selectMitarbeiter(${index}, ${m.id}, '${escapeJs(m.kuerzel)}', '${escapeJs(m.klarname)}')">
-        ${escapeHtml(m.kuerzel)} | ${escapeHtml(m.klarname)} (ID ${escapeHtml(m.id)})
+      <div class="search-item" onclick="selectMitarbeiter(${index}, ${m.id}, '${escapeJs(m.kuerzel)}', '${escapeJs(m.vollname)}')">
+        ${escapeHtml(m.kuerzel)} | ${escapeHtml(m.vollname)} (ID ${escapeHtml(m.id)})
       </div>
     `).join("");
   } catch (e) {
@@ -730,9 +722,9 @@ async function searchMitarbeiter(index) {
   }
 }
 
-function selectMitarbeiter(index, id, kuerzel, klarname) {
+function selectMitarbeiter(index, id, kuerzel, vollname) {
   document.getElementById(`travelerId_${index}`).value = id;
-  document.getElementById(`travelerSearch_${index}`).value = `${kuerzel} | ${klarname}`;
+  document.getElementById(`travelerSearch_${index}`).value = `${kuerzel} | ${vollname}`;
   document.getElementById(`travelerResults_${index}`).innerHTML = "";
 }
 
@@ -781,7 +773,6 @@ async function createMitarbeiter() {
       kuerzel: document.getElementById("mKuerzel").value,
       vorname: document.getElementById("mVorname").value,
       nachname: document.getElementById("mNachname").value,
-      klarname: document.getElementById("mKlarname").value,
       geburtsdatum: document.getElementById("mGeburtsdatum").value || null,
       email: document.getElementById("mEmail").value || null,
       aktiv: true
@@ -1013,7 +1004,7 @@ async function loadReiseDetailById(reiseId) {
     const reise = data.reise || {};
     const planung = (data.events || []).filter(e => e.status === "planung");
     const abgeschlossen = (data.events || []).filter(e => e.status === "abgeschlossen");
-    const reisende = (data.reisende || []).map(r => `${r.alias_name}: ${r.klarname}`).join(", ");
+    const reisende = (data.reisende || []).map(r => `${r.alias_name}: ${r.vollname}`).join(", ");
 
     document.getElementById("reiseDetailMeta").innerHTML = `
       <div class="card" style="padding:14px; margin-top:10px;">

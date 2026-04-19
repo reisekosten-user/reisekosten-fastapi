@@ -28,10 +28,9 @@ def init_db():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS mitarbeiter (
                     id SERIAL PRIMARY KEY,
-                    kuerzel TEXT NOT NULL,
+                    kuerzel TEXT NOT NULL UNIQUE,
                     vorname TEXT NOT NULL,
                     nachname TEXT NOT NULL,
-                    klarname TEXT NOT NULL,
                     geburtsdatum TEXT,
                     email TEXT,
                     aktiv BOOLEAN DEFAULT TRUE,
@@ -105,14 +104,13 @@ def create_mitarbeiter(data: dict) -> int:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO mitarbeiter
-                (kuerzel, vorname, nachname, klarname, geburtsdatum, email, aktiv, created_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                (kuerzel, vorname, nachname, geburtsdatum, email, aktiv, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id
             """, (
                 data.get("kuerzel"),
                 data.get("vorname"),
                 data.get("nachname"),
-                data.get("klarname"),
                 data.get("geburtsdatum"),
                 data.get("email"),
                 data.get("aktiv", True),
@@ -131,7 +129,6 @@ def update_mitarbeiter(mitarbeiter_id: int, data: dict):
                 SET kuerzel=%s,
                     vorname=%s,
                     nachname=%s,
-                    klarname=%s,
                     geburtsdatum=%s,
                     email=%s,
                     aktiv=%s
@@ -140,7 +137,6 @@ def update_mitarbeiter(mitarbeiter_id: int, data: dict):
                 data.get("kuerzel"),
                 data.get("vorname"),
                 data.get("nachname"),
-                data.get("klarname"),
                 data.get("geburtsdatum"),
                 data.get("email"),
                 data.get("aktiv", True),
@@ -153,7 +149,7 @@ def list_mitarbeiter(limit: int = 100):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT id, kuerzel, vorname, nachname, klarname, geburtsdatum, email, aktiv
+                SELECT id, kuerzel, vorname, nachname, geburtsdatum, email, aktiv
                 FROM mitarbeiter
                 ORDER BY id DESC
                 LIMIT %s
@@ -166,10 +162,10 @@ def list_mitarbeiter(limit: int = 100):
             "kuerzel": r[1],
             "vorname": r[2],
             "nachname": r[3],
-            "klarname": r[4],
-            "geburtsdatum": r[5],
-            "email": r[6],
-            "aktiv": r[7],
+            "vollname": f"{r[2]} {r[3]}".strip(),
+            "geburtsdatum": r[4],
+            "email": r[5],
+            "aktiv": r[6],
         }
         for r in rows
     ]
@@ -180,16 +176,16 @@ def search_mitarbeiter(query: str, limit: int = 10):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT id, kuerzel, klarname
+                SELECT id, kuerzel, vorname, nachname
                 FROM mitarbeiter
                 WHERE aktiv = TRUE
                   AND (
                     LOWER(kuerzel) LIKE %s
-                    OR LOWER(klarname) LIKE %s
                     OR LOWER(vorname) LIKE %s
                     OR LOWER(nachname) LIKE %s
+                    OR LOWER(vorname || ' ' || nachname) LIKE %s
                   )
-                ORDER BY klarname ASC
+                ORDER BY nachname ASC, vorname ASC
                 LIMIT %s
             """, (q, q, q, q, limit))
             rows = cur.fetchall()
@@ -198,7 +194,7 @@ def search_mitarbeiter(query: str, limit: int = 10):
         {
             "id": r[0],
             "kuerzel": r[1],
-            "klarname": r[2],
+            "vollname": f"{r[2]} {r[3]}".strip(),
         }
         for r in rows
     ]
@@ -377,7 +373,7 @@ def get_reise_detail(reise_id: int):
             events = cur.fetchall()
 
             cur.execute("""
-                SELECT m.id, m.kuerzel, m.klarname
+                SELECT m.id, m.kuerzel, m.vorname, m.nachname
                 FROM reise_reisende rr
                 JOIN mitarbeiter m ON rr.mitarbeiter_id = m.id
                 WHERE rr.reise_id=%s
@@ -416,7 +412,7 @@ def get_reise_detail(reise_id: int):
             {
                 "id": r[0],
                 "kuerzel": r[1],
-                "klarname": r[2],
+                "vollname": f"{r[2]} {r[3]}".strip(),
                 "alias_name": f"REISENDER_{i+1}",
             }
             for i, r in enumerate(reisende)
