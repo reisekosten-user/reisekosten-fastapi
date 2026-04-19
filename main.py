@@ -35,7 +35,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.9"
+APP_VERSION = "7.9b"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "mistral").strip().lower()
 
@@ -60,6 +60,8 @@ class AnalyzeTextRequest(BaseModel):
     filename: Optional[str] = None
     reise_id: Optional[int] = None
     event_id: Optional[int] = None
+    ai_provider: Optional[str] = None
+    ai_model: Optional[str] = None
 
 
 class MitarbeiterCreateRequest(BaseModel):
@@ -220,7 +222,7 @@ Dokumentinhalt:
 """.strip()
 
 
-def call_mistral(prompt: str) -> dict:
+def call_mistral(prompt: str, model: Optional[str] = None) -> dict:
     if not MISTRAL_API_KEY:
         return {
             "belegdatum": "nicht vorhanden",
@@ -236,13 +238,15 @@ def call_mistral(prompt: str) -> dict:
             "fehler": [],
         }
 
+    use_model = model or MISTRAL_MODEL
+
     headers = {
         "Authorization": f"Bearer {MISTRAL_API_KEY}",
         "Content-Type": "application/json",
     }
 
     payload = {
-        "model": MISTRAL_MODEL,
+        "model": use_model,
         "messages": [
             {"role": "system", "content": "Gib ausschließlich valides JSON zurück. Keine Erklärungen."},
             {"role": "user", "content": prompt},
@@ -263,7 +267,7 @@ def call_mistral(prompt: str) -> dict:
     return json.loads(content)
 
 
-def call_openai(prompt: str) -> dict:
+def call_openai(prompt: str, model: Optional[str] = None) -> dict:
     if not OPENAI_API_KEY:
         return {
             "belegdatum": "nicht vorhanden",
@@ -279,10 +283,11 @@ def call_openai(prompt: str) -> dict:
             "fehler": [],
         }
 
+    use_model = model or OPENAI_MODEL
     client = OpenAI(api_key=OPENAI_API_KEY)
 
     response = client.responses.create(
-        model=OPENAI_MODEL,
+        model=use_model,
         input=prompt,
         temperature=0,
         text={"format": {"type": "json_object"}},
@@ -292,15 +297,18 @@ def call_openai(prompt: str) -> dict:
     return json.loads(output_text)
 
 
-def call_ai_provider(prompt: str) -> dict:
-    provider = AI_PROVIDER.lower()
+def call_ai_provider(prompt: str, provider_override: Optional[str] = None, model_override: Optional[str] = None) -> tuple[dict, str, str]:
+    provider = (provider_override or AI_PROVIDER).strip().lower()
 
     if provider == "openai":
-        return call_openai(prompt)
-    if provider == "mistral":
-        return call_mistral(prompt)
+        model = model_override or OPENAI_MODEL
+        return call_openai(prompt, model), provider, model
 
-    return {
+    if provider == "mistral":
+        model = model_override or MISTRAL_MODEL
+        return call_mistral(prompt, model), provider, model
+
+    return ({
         "belegdatum": "nicht vorhanden",
         "art_des_dokuments": "Unbekannt",
         "buchungsnummer_code": "nicht vorhanden",
@@ -310,9 +318,9 @@ def call_ai_provider(prompt: str) -> dict:
         "kosten_mit_steuern": "nicht vorhanden",
         "waehrung_der_kosten": "nicht vorhanden",
         "reisesegmente": [],
-        "warnungen": [f"Unbekannter AI_PROVIDER: {provider}"],
+        "warnungen": [f"Unbekannter AI Provider: {provider}"],
         "fehler": [],
-    }
+    }, provider, model_override or "")
 
 
 def ensure_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -384,17 +392,19 @@ def analyze_text_internal(
     text: str,
     filename: str = "nicht vorhanden",
     reise_id: Optional[int] = None,
-    event_id: Optional[int] = None
+    event_id: Optional[int] = None,
+    ai_provider_override: Optional[str] = None,
+    ai_model_override: Optional[str] = None,
 ) -> dict:
     anonymized_text = anonymize_document_text(text)
     prompt = build_prompt(anonymized_text, filename=filename)
-    raw = call_ai_provider(prompt)
+    raw, used_provider, used_model = call_ai_provider(prompt, ai_provider_override, ai_model_override)
     data = ensure_defaults(raw)
 
     data["version"] = APP_VERSION
     data["generated_at_utc"] = datetime.utcnow().isoformat()
-    data["ai_provider"] = AI_PROVIDER
-    data["ai_model"] = OPENAI_MODEL if AI_PROVIDER == "openai" else MISTRAL_MODEL
+    data["ai_provider"] = used_provider
+    data["ai_model"] = used_model
     data["anonymized_preview"] = anonymized_text[:4000]
 
     beleg_id = insert_beleg({
@@ -628,6 +638,8 @@ def analyze_text(payload: AnalyzeTextRequest):
             payload.filename or "text-input.txt",
             payload.reise_id,
             payload.event_id,
+            payload.ai_provider,
+            payload.ai_model,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -638,6 +650,8 @@ async def analyze_file(
     file: UploadFile = File(...),
     reise_id: Optional[int] = Query(default=None),
     event_id: Optional[int] = Query(default=None),
+    ai_provider: Optional[str] = Query(default=None),
+    ai_model: Optional[str] = Query(default=None),
 ):
     try:
         content = await file.read()
@@ -652,6 +666,8 @@ async def analyze_file(
             file.filename or "upload",
             reise_id,
             event_id,
+            ai_provider,
+            ai_model,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <title>Reisekosten Dashboard 7.8b</title>
+  <title>Reisekosten Dashboard 7.9b</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -188,6 +188,28 @@
     .search-item:first-child { border-top: 0; }
     .search-item:hover { background: #eff6ff; }
 
+    .provider-bar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      background: #eef4fb;
+      border: 1px solid #d8e0ee;
+      border-radius: 12px;
+    }
+
+    .provider-pill {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: #dbeafe;
+      color: #1d4ed8;
+    }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -270,7 +292,7 @@
     <img src="/static/logo2.png" alt="Logo">
     <div>
       <div class="brand-title">Reisekosten System</div>
-      <div class="brand-sub">Version 7.8b · Kürzel eindeutig · Mitarbeiterformular verbessert</div>
+      <div class="brand-sub">Version 7.9b · Provider-Anzeige · OpenAI / Mistral pro Analyse</div>
     </div>
   </div>
 
@@ -290,6 +312,18 @@
 <div class="container">
 
   <div id="statusBox"></div>
+
+  <div class="provider-bar">
+    <span>Server-Standard:</span>
+    <span class="provider-pill" id="serverProviderBadge">lädt...</span>
+    <span>Analyse mit:</span>
+    <select id="aiProviderSelect" style="max-width:180px; margin-bottom:0;">
+      <option value="">Server-Standard</option>
+      <option value="mistral">Mistral</option>
+      <option value="openai">OpenAI</option>
+    </select>
+    <input id="aiModelInput" type="text" placeholder="Optional: Modell überschreiben" style="max-width:260px; margin-bottom:0;">
+  </div>
 
   <div id="overviewSection" class="grid grid-3">
     <div class="metric">
@@ -509,6 +543,16 @@ function api() {
   return window.location.origin;
 }
 
+function currentAiProvider() {
+  const val = document.getElementById("aiProviderSelect").value.trim();
+  return val || null;
+}
+
+function currentAiModel() {
+  const val = document.getElementById("aiModelInput").value.trim();
+  return val || null;
+}
+
 function setStatus(message, isError = false) {
   const box = document.getElementById("statusBox");
   box.innerHTML = '<div class="statusbox ' + (isError ? 'status-error' : 'status-ok') + '">' + escapeHtml(message) + '</div>';
@@ -562,6 +606,8 @@ async function testHealth() {
   try {
     const res = await fetch(api() + "/health");
     const data = await parseJsonResponse(res);
+    document.getElementById("serverProviderBadge").textContent =
+      `${data.ai_provider || "?"} | Default`;
     setStatus("Health OK: " + JSON.stringify(data));
   } catch (e) {
     setStatus(e.message || String(e), true);
@@ -867,7 +913,9 @@ async function analyzeText() {
       text: document.getElementById("textInput").value,
       filename: document.getElementById("filename").value,
       reise_id: document.getElementById("scanReiseId").value ? parseInt(document.getElementById("scanReiseId").value, 10) : null,
-      event_id: document.getElementById("scanEventId").value ? parseInt(document.getElementById("scanEventId").value, 10) : null
+      event_id: document.getElementById("scanEventId").value ? parseInt(document.getElementById("scanEventId").value, 10) : null,
+      ai_provider: currentAiProvider(),
+      ai_model: currentAiModel()
     };
 
     const res = await fetch(api() + "/analyze/text", {
@@ -878,7 +926,7 @@ async function analyzeText() {
 
     const data = await parseApiResponse(res);
     document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Textanalyse abgeschlossen.");
+    setStatus(`Textanalyse abgeschlossen mit ${data.ai_provider || "?"} / ${data.ai_model || "?"}.`);
     await loadBelege();
     await loadReisen();
     if (payload.reise_id) await loadReiseDetailById(payload.reise_id);
@@ -899,6 +947,8 @@ async function analyzeFile() {
     const qp = [];
     if (document.getElementById("scanReiseId").value) qp.push("reise_id=" + encodeURIComponent(document.getElementById("scanReiseId").value));
     if (document.getElementById("scanEventId").value) qp.push("event_id=" + encodeURIComponent(document.getElementById("scanEventId").value));
+    if (currentAiProvider()) qp.push("ai_provider=" + encodeURIComponent(currentAiProvider()));
+    if (currentAiModel()) qp.push("ai_model=" + encodeURIComponent(currentAiModel()));
     if (qp.length) url += "?" + qp.join("&");
 
     const formData = new FormData();
@@ -911,7 +961,7 @@ async function analyzeFile() {
 
     const data = await parseApiResponse(res);
     document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
-    setStatus("Dateianalyse abgeschlossen.");
+    setStatus(`Dateianalyse abgeschlossen mit ${data.ai_provider || "?"} / ${data.ai_model || "?"}.`);
     await loadBelege();
     await loadReisen();
     if (document.getElementById("scanReiseId").value) {
@@ -1064,6 +1114,7 @@ window.onload = async function () {
   await loadBelege();
   await loadReisen();
   await loadMitarbeiter();
+  await testHealth();
 };
 </script>
 

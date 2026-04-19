@@ -4,3 +4,4 @@ requests
 pypdf
 python-multipart
 psycopg[binary]
+openai
