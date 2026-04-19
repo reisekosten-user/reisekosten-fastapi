@@ -35,7 +35,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.9c"
+APP_VERSION = "7.9d"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "mistral").strip().lower()
 
@@ -115,31 +115,6 @@ def normalize_variants(value: str) -> List[str]:
     return [v for v in variants if v]
 
 
-def replace_name_variants(text: str, replacement: str = "Max Mustermann") -> str:
-    anonymized = text
-    try:
-        mitarbeiter = list_mitarbeiter(limit=1000)
-    except Exception:
-        mitarbeiter = []
-
-    candidates = set()
-    for m in mitarbeiter:
-        vorname = (m.get("vorname") or "").strip()
-        nachname = (m.get("nachname") or "").strip()
-        vollname = f"{vorname} {nachname}".strip()
-        reversed_name = f"{nachname} {vorname}".strip()
-
-        for candidate in [vollname, reversed_name, vorname, nachname]:
-            if candidate:
-                candidates.add(candidate)
-
-    for candidate in sorted(candidates, key=len, reverse=True):
-        for variant in normalize_variants(candidate):
-            anonymized = re.sub(re.escape(variant), replacement, anonymized, flags=re.IGNORECASE)
-
-    return anonymized
-
-
 def anonymize_emails(text: str) -> str:
     return re.sub(
         r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b",
@@ -161,7 +136,92 @@ def anonymize_birth_dates(text: str) -> str:
     )
 
 
-def anonymize_labeled_codes(text: str) -> str:
+def anonymize_mail_headers(text: str) -> str:
+    anonymized = text
+    anonymized = re.sub(r"(?im)^(Von:\s*)(.+)$", r"\1XXXX", anonymized)
+    anonymized = re.sub(r"(?im)^(From:\s*)(.+)$", r"\1XXXX", anonymized)
+    anonymized = re.sub(r"(?im)^(Agent Email\s*)(.+)$", r"\1XXXX", anonymized)
+    anonymized = re.sub(r"(?im)^(E-Mail-Adresse\s*)(.+)$", r"\1XXXX", anonymized)
+    anonymized = re.sub(r"(?im)^(Telefon\s*)(.+)$", r"\1XXXX", anonymized)
+    anonymized = re.sub(r"(?im)^(Fax\s*)(.+)$", r"\1XXXX", anonymized)
+    return anonymized
+
+
+def anonymize_named_fields(text: str) -> str:
+    anonymized = text
+
+    patterns = [
+        r"(?i)\b(Guest name:\s*)(.+)",
+        r"(?i)\b(Name des Reisenden:\s*)(.+)",
+        r"(?i)\b(Reisender\s+)(.+)",
+        r"(?i)\b(Passenger:\s*)(.+)",
+        r"(?i)\b(Traveler:\s*)(.+)",
+        r"(?i)\b(Travell?er:\s*)(.+)",
+        r"(?i)\b(An:\s*)(.+)",
+        r"(?i)\b(To:\s*)(.+)",
+        r"(?i)\b(Betreff:\s*)(.+)",
+        r"(?i)\b(Subject:\s*)(.+)",
+    ]
+
+    for pattern in patterns:
+        anonymized = re.sub(pattern, lambda m: f"{m.group(1)}{replace_known_names(m.group(2))}", anonymized)
+
+    return anonymized
+
+
+def replace_known_names(text: str) -> str:
+    anonymized = text
+    try:
+        mitarbeiter = list_mitarbeiter(limit=1000)
+    except Exception:
+        mitarbeiter = []
+
+    full_names = []
+    partial_names = []
+
+    for m in mitarbeiter:
+        vorname = (m.get("vorname") or "").strip()
+        nachname = (m.get("nachname") or "").strip()
+
+        if vorname and nachname:
+            full_names.append(f"{vorname} {nachname}")
+            full_names.append(f"{nachname} {vorname}")
+
+        if vorname:
+            partial_names.append(vorname)
+        if nachname:
+            partial_names.append(nachname)
+
+    # 1. Ganze Namen zuerst
+    for candidate in sorted(set(full_names), key=len, reverse=True):
+        for variant in normalize_variants(candidate):
+            anonymized = re.sub(re.escape(variant), "Max Mustermann", anonymized, flags=re.IGNORECASE)
+
+    # 2. Titel + Name glätten
+    anonymized = re.sub(r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+", r"\1 Max Mustermann", anonymized)
+    anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
+
+    # 3. Einzelne Vor-/Nachnamen nur noch vorsichtig ersetzen,
+    #    aber NICHT innerhalb von bereits ersetztem "Max Mustermann"
+    for candidate in sorted(set(partial_names), key=len, reverse=True):
+        for variant in normalize_variants(candidate):
+            anonymized = re.sub(
+                rf"(?i)(?<!Max\s)(?<!Mustermann\s)\b{re.escape(variant)}\b(?!\s+Mustermann)",
+                "Max Mustermann",
+                anonymized,
+            )
+
+    # 4. Doppelte Ersetzungen glätten
+    anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
+    anonymized = re.sub(r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+", r"\1 Max Mustermann", anonymized)
+
+    return anonymized
+
+
+def anonymize_booking_references(text: str) -> str:
+    anonymized = text
+
+    # Feld-Label links erhalten, nur Wert rechts ersetzen
     patterns = [
         r"(?i)\b(booking code\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
         r"(?i)\b(booking reference\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
@@ -169,48 +229,83 @@ def anonymize_labeled_codes(text: str) -> str:
         r"(?i)\b(buchungsreferenz\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
         r"(?i)\b(confirmation number\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
         r"(?i)\b(reservation number\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(ticket number\s*[:\-]?\s*)([A-Z0-9\-\/ ]+)",
-        r"(?i)\b(ticketnummer\s*[:\-]?\s*)([A-Z0-9\-\/ ]+)",
         r"(?i)\b(pnr\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
         r"(?i)\b(record locator\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
         r"(?i)\b(confirmation no\.?\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
         r"(?i)\b(reservation no\.?\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(frequent flyer number\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(vielfliegernummer\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(buchungsreferenz\(en\)\s*)([A-Z0-9\-\/]+)",
     ]
-
-    anonymized = text
     for pattern in patterns:
         anonymized = re.sub(pattern, r"\1XXXX", anonymized)
+
+    # Zeilen wie "LH (Lufthansa): Z6INOT"
+    anonymized = re.sub(
+        r"(?im)^([A-Z]{2}\s*\([^)]+\)\s*:\s*)([A-Z0-9\-\/]+)\s*$",
+        r"\1XXXX",
+        anonymized,
+    )
+
+    # Einzeiler "Reiseangebot Z6INOTBuchungsreferenz:" nicht hart zerstören,
+    # aber unmittelbar nach "Reiseangebot " oder ähnlichem Codes maskieren
+    anonymized = re.sub(
+        r"(?i)\b(Reiseangebot\s+)([A-Z0-9]{5,10})(?=\b|Buchungsreferenz|$)",
+        r"\1XXXX",
+        anonymized,
+    )
 
     return anonymized
 
 
-def anonymize_ticket_number_lines(text: str) -> str:
-    patterns = [
-        r"(?i)\b(Ticketnummer\s*:?\s*)([A-Z0-9 ]{6,})",
-        r"(?i)\b(Ticketnummer)([A-Z0-9 ]{6,})",
-        r"(?i)\b(Ticket number\s*:?\s*)([A-Z0-9 ]{6,})",
-        r"(?i)\b(Ticketdetails\s*[\r\n]+Ticketnummer)([A-Z0-9 ]{6,})",
-    ]
-
+def anonymize_ticket_numbers(text: str) -> str:
     anonymized = text
-    for pattern in patterns:
-        anonymized = re.sub(pattern, r"\1XXXX", anonymized)
+
+    # Ticketnummer : 123...
+    anonymized = re.sub(
+        r"(?i)\b(Ticketnummer\s*:?\s*)([A-Z0-9][A-Z0-9 \-]{5,})",
+        r"\1XXXX",
+        anonymized,
+    )
+    anonymized = re.sub(
+        r"(?i)\b(Ticket number\s*:?\s*)([A-Z0-9][A-Z0-9 \-]{5,})",
+        r"\1XXXX",
+        anonymized,
+    )
+
+    # Ticketdetails / Ticketnummer12345 für ...
+    anonymized = re.sub(
+        r"(?i)\b(Ticketnummer)([A-Z0-9]{6,})(?=\s|für|for|$)",
+        r"\1 XXXX",
+        anonymized,
+    )
+    anonymized = re.sub(
+        r"(?i)\b(Ticket number)([A-Z0-9]{6,})(?=\s|für|for|$)",
+        r"\1 XXXX",
+        anonymized,
+    )
 
     return anonymized
 
 
-def anonymize_mail_headers(text: str) -> str:
+def anonymize_frequent_flyer_numbers(text: str) -> str:
     anonymized = text
 
-    anonymized = re.sub(r"(?im)^(Von:\s*)(.+)$", r"\1XXXX", anonymized)
-    anonymized = re.sub(r"(?im)^(From:\s*)(.+)$", r"\1XXXX", anonymized)
-    anonymized = re.sub(r"(?im)^(Agent Email\s*)(.+)$", r"\1XXXX", anonymized)
-    anonymized = re.sub(r"(?im)^(E-Mail-Adresse\s*)(.+)$", r"\1XXXX", anonymized)
-    anonymized = re.sub(r"(?im)^(Telefon\s*)(.+)$", r"\1XXXX", anonymized)
-    anonymized = re.sub(r"(?im)^(Fax\s*)(.+)$", r"\1XXXX", anonymized)
+    # Feldweise
+    anonymized = re.sub(
+        r"(?i)\b(Vielfliegernummer\s*:?\s*)([A-Z0-9\-\/ ]+)",
+        r"\1XXXX",
+        anonymized,
+    )
+    anonymized = re.sub(
+        r"(?i)\b(Frequent flyer number\s*:?\s*)([A-Z0-9\-\/ ]+)",
+        r"\1XXXX",
+        anonymized,
+    )
+
+    # Linien wie "LX CX1500100882 für ..."
+    anonymized = re.sub(
+        r"(?im)^([A-Z]{2}\s+)([A-Z0-9]{8,})(\s+für\b.*)$",
+        r"\1XXXX\3",
+        anonymized,
+    )
 
     return anonymized
 
@@ -218,13 +313,19 @@ def anonymize_mail_headers(text: str) -> str:
 def anonymize_document_text(text: str) -> str:
     anonymized = text
 
-    anonymized = replace_name_variants(anonymized, "Max Mustermann")
+    anonymized = replace_known_names(anonymized)
+    anonymized = anonymize_named_fields(anonymized)
     anonymized = anonymize_birth_dates(anonymized)
     anonymized = anonymize_emails(anonymized)
     anonymized = anonymize_phone_numbers(anonymized)
-    anonymized = anonymize_labeled_codes(anonymized)
-    anonymized = anonymize_ticket_number_lines(anonymized)
+    anonymized = anonymize_booking_references(anonymized)
+    anonymized = anonymize_ticket_numbers(anonymized)
+    anonymized = anonymize_frequent_flyer_numbers(anonymized)
     anonymized = anonymize_mail_headers(anonymized)
+
+    # Schlussglättung
+    anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
+    anonymized = re.sub(r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+", r"\1 Max Mustermann", anonymized)
 
     return anonymized
 
