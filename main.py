@@ -35,7 +35,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.9d"
+APP_VERSION = "7.9e"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "mistral").strip().lower()
 
@@ -118,92 +118,59 @@ def normalize_variants(value: str) -> List[str]:
 def anonymize_emails(text: str) -> str:
     return re.sub(
         r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b",
-        "XXXX",
+        "ff@bb.com",
         text,
         flags=re.IGNORECASE,
     )
 
 
-def anonymize_phone_numbers(text: str) -> str:
-    return re.sub(r"(?<!\w)(\+?\d[\d\s\-()/]{6,}\d)(?!\w)", "XXXX", text)
+def build_name_candidates_for_reise(reise_id: Optional[int]) -> List[str]:
+    if not reise_id:
+        return []
 
-
-def anonymize_birth_dates(text: str) -> str:
-    return re.sub(
-        r"(?i)\b(geburtsdatum|birth date|date of birth|dob)\b\s*[:\-]?\s*([0-9]{1,2}[./\-][0-9]{1,2}[./\-][0-9]{2,4})",
-        r"\1: XXXX",
-        text,
-    )
-
-
-def anonymize_mail_headers(text: str) -> str:
-    anonymized = text
-    anonymized = re.sub(r"(?im)^(Von:\s*)(.+)$", r"\1XXXX", anonymized)
-    anonymized = re.sub(r"(?im)^(From:\s*)(.+)$", r"\1XXXX", anonymized)
-    anonymized = re.sub(r"(?im)^(Agent Email\s*)(.+)$", r"\1XXXX", anonymized)
-    anonymized = re.sub(r"(?im)^(E-Mail-Adresse\s*)(.+)$", r"\1XXXX", anonymized)
-    anonymized = re.sub(r"(?im)^(Telefon\s*)(.+)$", r"\1XXXX", anonymized)
-    anonymized = re.sub(r"(?im)^(Fax\s*)(.+)$", r"\1XXXX", anonymized)
-    return anonymized
-
-
-def anonymize_named_fields(text: str) -> str:
-    anonymized = text
-
-    patterns = [
-        r"(?i)\b(Guest name:\s*)(.+)",
-        r"(?i)\b(Name des Reisenden:\s*)(.+)",
-        r"(?i)\b(Reisender\s+)(.+)",
-        r"(?i)\b(Passenger:\s*)(.+)",
-        r"(?i)\b(Traveler:\s*)(.+)",
-        r"(?i)\b(Travell?er:\s*)(.+)",
-        r"(?i)\b(An:\s*)(.+)",
-        r"(?i)\b(To:\s*)(.+)",
-        r"(?i)\b(Betreff:\s*)(.+)",
-        r"(?i)\b(Subject:\s*)(.+)",
-    ]
-
-    for pattern in patterns:
-        anonymized = re.sub(pattern, lambda m: f"{m.group(1)}{replace_known_names(m.group(2))}", anonymized)
-
-    return anonymized
-
-
-def replace_known_names(text: str) -> str:
-    anonymized = text
     try:
-        mitarbeiter = list_mitarbeiter(limit=1000)
+        detail = get_reise_detail(reise_id)
     except Exception:
-        mitarbeiter = []
+        return []
 
-    full_names = []
-    partial_names = []
+    candidates: set[str] = set()
+    for reisender in detail.get("reisende", []):
+        vollname = (reisender.get("vollname") or "").strip()
+        if vollname:
+            candidates.add(vollname)
 
-    for m in mitarbeiter:
-        vorname = (m.get("vorname") or "").strip()
-        nachname = (m.get("nachname") or "").strip()
+            parts = [p for p in vollname.split() if p.strip()]
+            if len(parts) >= 2:
+                first = parts[0]
+                last = parts[-1]
+                candidates.add(f"{first} {last}".strip())
+                candidates.add(f"{last} {first}".strip())
+                candidates.add(first)
+                candidates.add(last)
 
-        if vorname and nachname:
-            full_names.append(f"{vorname} {nachname}")
-            full_names.append(f"{nachname} {vorname}")
+    return sorted(candidates, key=len, reverse=True)
 
-        if vorname:
-            partial_names.append(vorname)
-        if nachname:
-            partial_names.append(nachname)
+
+def replace_reise_names(text: str, reise_id: Optional[int]) -> str:
+    anonymized = text
+    candidates = build_name_candidates_for_reise(reise_id)
+
+    if not candidates:
+        return anonymized
+
+    full_names = [c for c in candidates if " " in c.strip()]
+    single_names = [c for c in candidates if " " not in c.strip()]
 
     # 1. Ganze Namen zuerst
-    for candidate in sorted(set(full_names), key=len, reverse=True):
+    for candidate in full_names:
         for variant in normalize_variants(candidate):
             anonymized = re.sub(re.escape(variant), "Max Mustermann", anonymized, flags=re.IGNORECASE)
 
-    # 2. Titel + Name glätten
-    anonymized = re.sub(r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+", r"\1 Max Mustermann", anonymized)
+    # 2. Doppelte Ersetzungen glätten
     anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
 
-    # 3. Einzelne Vor-/Nachnamen nur noch vorsichtig ersetzen,
-    #    aber NICHT innerhalb von bereits ersetztem "Max Mustermann"
-    for candidate in sorted(set(partial_names), key=len, reverse=True):
+    # 3. Einzelne Namen nur vorsichtig ersetzen
+    for candidate in single_names:
         for variant in normalize_variants(candidate):
             anonymized = re.sub(
                 rf"(?i)(?<!Max\s)(?<!Mustermann\s)\b{re.escape(variant)}\b(?!\s+Mustermann)",
@@ -211,122 +178,31 @@ def replace_known_names(text: str) -> str:
                 anonymized,
             )
 
-    # 4. Doppelte Ersetzungen glätten
+    # 4. Nochmals glätten
     anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
     anonymized = re.sub(r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+", r"\1 Max Mustermann", anonymized)
 
     return anonymized
 
 
-def anonymize_booking_references(text: str) -> str:
+def resolve_reise_id(reise_id: Optional[int], event_id: Optional[int]) -> Optional[int]:
+    if reise_id:
+        return reise_id
+    if not event_id:
+        return None
+    try:
+        event_detail = get_event_detail(event_id)
+        event = event_detail.get("event") or {}
+        return event.get("reise_id")
+    except Exception:
+        return None
+
+
+def anonymize_document_text(text: str, reise_id: Optional[int] = None, event_id: Optional[int] = None) -> str:
+    effective_reise_id = resolve_reise_id(reise_id, event_id)
     anonymized = text
-
-    # Feld-Label links erhalten, nur Wert rechts ersetzen
-    patterns = [
-        r"(?i)\b(booking code\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(booking reference\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(buchungsnummer\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(buchungsreferenz\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(confirmation number\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(reservation number\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(pnr\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(record locator\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(confirmation no\.?\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-        r"(?i)\b(reservation no\.?\s*[:\-]?\s*)([A-Z0-9\-\/]+)",
-    ]
-    for pattern in patterns:
-        anonymized = re.sub(pattern, r"\1XXXX", anonymized)
-
-    # Zeilen wie "LH (Lufthansa): Z6INOT"
-    anonymized = re.sub(
-        r"(?im)^([A-Z]{2}\s*\([^)]+\)\s*:\s*)([A-Z0-9\-\/]+)\s*$",
-        r"\1XXXX",
-        anonymized,
-    )
-
-    # Einzeiler "Reiseangebot Z6INOTBuchungsreferenz:" nicht hart zerstören,
-    # aber unmittelbar nach "Reiseangebot " oder ähnlichem Codes maskieren
-    anonymized = re.sub(
-        r"(?i)\b(Reiseangebot\s+)([A-Z0-9]{5,10})(?=\b|Buchungsreferenz|$)",
-        r"\1XXXX",
-        anonymized,
-    )
-
-    return anonymized
-
-
-def anonymize_ticket_numbers(text: str) -> str:
-    anonymized = text
-
-    # Ticketnummer : 123...
-    anonymized = re.sub(
-        r"(?i)\b(Ticketnummer\s*:?\s*)([A-Z0-9][A-Z0-9 \-]{5,})",
-        r"\1XXXX",
-        anonymized,
-    )
-    anonymized = re.sub(
-        r"(?i)\b(Ticket number\s*:?\s*)([A-Z0-9][A-Z0-9 \-]{5,})",
-        r"\1XXXX",
-        anonymized,
-    )
-
-    # Ticketdetails / Ticketnummer12345 für ...
-    anonymized = re.sub(
-        r"(?i)\b(Ticketnummer)([A-Z0-9]{6,})(?=\s|für|for|$)",
-        r"\1 XXXX",
-        anonymized,
-    )
-    anonymized = re.sub(
-        r"(?i)\b(Ticket number)([A-Z0-9]{6,})(?=\s|für|for|$)",
-        r"\1 XXXX",
-        anonymized,
-    )
-
-    return anonymized
-
-
-def anonymize_frequent_flyer_numbers(text: str) -> str:
-    anonymized = text
-
-    # Feldweise
-    anonymized = re.sub(
-        r"(?i)\b(Vielfliegernummer\s*:?\s*)([A-Z0-9\-\/ ]+)",
-        r"\1XXXX",
-        anonymized,
-    )
-    anonymized = re.sub(
-        r"(?i)\b(Frequent flyer number\s*:?\s*)([A-Z0-9\-\/ ]+)",
-        r"\1XXXX",
-        anonymized,
-    )
-
-    # Linien wie "LX CX1500100882 für ..."
-    anonymized = re.sub(
-        r"(?im)^([A-Z]{2}\s+)([A-Z0-9]{8,})(\s+für\b.*)$",
-        r"\1XXXX\3",
-        anonymized,
-    )
-
-    return anonymized
-
-
-def anonymize_document_text(text: str) -> str:
-    anonymized = text
-
-    anonymized = replace_known_names(anonymized)
-    anonymized = anonymize_named_fields(anonymized)
-    anonymized = anonymize_birth_dates(anonymized)
+    anonymized = replace_reise_names(anonymized, effective_reise_id)
     anonymized = anonymize_emails(anonymized)
-    anonymized = anonymize_phone_numbers(anonymized)
-    anonymized = anonymize_booking_references(anonymized)
-    anonymized = anonymize_ticket_numbers(anonymized)
-    anonymized = anonymize_frequent_flyer_numbers(anonymized)
-    anonymized = anonymize_mail_headers(anonymized)
-
-    # Schlussglättung
-    anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
-    anonymized = re.sub(r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+", r"\1 Max Mustermann", anonymized)
-
     return anonymized
 
 
@@ -541,7 +417,7 @@ def analyze_text_internal(
     ai_provider_override: Optional[str] = None,
     ai_model_override: Optional[str] = None,
 ) -> dict:
-    anonymized_text = anonymize_document_text(text)
+    anonymized_text = anonymize_document_text(text, reise_id=reise_id, event_id=event_id)
     prompt = build_prompt(anonymized_text, filename=filename)
     raw, used_provider, used_model = call_ai_provider(prompt, ai_provider_override, ai_model_override)
     data = ensure_defaults(raw)
@@ -746,7 +622,7 @@ def events_update_status(event_id: int, payload: EventStatusRequest):
 @app.post("/anonymize/text")
 def anonymize_text(payload: AnalyzeTextRequest):
     try:
-        anonymized = anonymize_document_text(payload.text)
+        anonymized = anonymize_document_text(payload.text, reise_id=payload.reise_id, event_id=payload.event_id)
         return {
             "status": "ok",
             "filename": payload.filename or "text-input.txt",
@@ -757,7 +633,11 @@ def anonymize_text(payload: AnalyzeTextRequest):
 
 
 @app.post("/anonymize/file")
-async def anonymize_file(file: UploadFile = File(...)):
+async def anonymize_file(
+    file: UploadFile = File(...),
+    reise_id: Optional[int] = Query(default=None),
+    event_id: Optional[int] = Query(default=None),
+):
     try:
         content = await file.read()
         if (file.filename or "").lower().endswith(".pdf"):
@@ -765,7 +645,7 @@ async def anonymize_file(file: UploadFile = File(...)):
         else:
             text = content.decode("utf-8", errors="replace")
 
-        anonymized = anonymize_document_text(text)
+        anonymized = anonymize_document_text(text, reise_id=reise_id, event_id=event_id)
         return {
             "status": "ok",
             "filename": file.filename or "upload",

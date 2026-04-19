@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <title>Reisekosten Dashboard 7.9d</title>
+  <title>Reisekosten Dashboard 7.9e</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -297,7 +297,7 @@
     <img src="/static/logo2.png" alt="Logo">
     <div>
       <div class="brand-title">Reisekosten System</div>
-      <div class="brand-sub">Version 7.9d · bessere Flug-Anonymisierung · sichtbares Feedback</div>
+      <div class="brand-sub">Version 7.9e · nur Reise-Namen + Mailadressen anonymisieren</div>
     </div>
   </div>
 
@@ -392,7 +392,7 @@
 
   <div id="scanSection" class="card hidden">
     <div class="title">Belegscan / Analyse</div>
-    <div class="subtitle">Optional direkt einer Reise oder einem Event zuordnen</div>
+    <div class="subtitle">Für Namens-Anonymisierung bitte mit Reise-ID arbeiten</div>
 
     <div class="row">
       <div class="col">
@@ -887,7 +887,9 @@ async function previewAnonymizedText() {
 
     const payload = {
       text: document.getElementById("textInput").value,
-      filename: document.getElementById("filename").value
+      filename: document.getElementById("filename").value,
+      reise_id: document.getElementById("scanReiseId").value ? parseInt(document.getElementById("scanReiseId").value, 10) : null,
+      event_id: document.getElementById("scanEventId").value ? parseInt(document.getElementById("scanEventId").value, 10) : null
     };
 
     const res = await fetch(api() + "/anonymize/text", {
@@ -918,10 +920,16 @@ async function previewAnonymizedFile() {
 
     setStatus("Datei-Anonymisierung läuft...");
 
+    let url = api() + "/anonymize/file";
+    const qp = [];
+    if (document.getElementById("scanReiseId").value) qp.push("reise_id=" + encodeURIComponent(document.getElementById("scanReiseId").value));
+    if (document.getElementById("scanEventId").value) qp.push("event_id=" + encodeURIComponent(document.getElementById("scanEventId").value));
+    if (qp.length) url += "?" + qp.join("&");
+
     const formData = new FormData();
     formData.append("file", input.files[0]);
 
-    const res = await fetch(api() + "/anonymize/file", {
+    const res = await fetch(url, {
       method: "POST",
       body: formData
     });
