@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <title>Reisekosten Dashboard 7.9e</title>
+  <title>Reisekosten Dashboard 7.11</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -245,9 +245,9 @@
       font-weight: 700;
     }
 
-    .badge-ok { background: var(--ok-bg); color: var(--ok); }
-    .badge-warn { background: var(--warn-bg); color: var(--warn); }
-    .badge-err { background: var(--err-bg); color: var(--err); }
+    .badge-ok { background: #dcfce7; color: #166534; }
+    .badge-warn { background: #fef3c7; color: #b45309; }
+    .badge-err { background: #fee2e2; color: #b91c1c; }
 
     .detail-layout {
       display: grid;
@@ -297,7 +297,7 @@
     <img src="/static/logo2.png" alt="Logo">
     <div>
       <div class="brand-title">Reisekosten System</div>
-      <div class="brand-sub">Version 7.9e · nur Reise-Namen + Mailadressen anonymisieren</div>
+      <div class="brand-sub">Version 7.11 · einfache Anonymisierung · JSON-Analyse · OpenAI-Test</div>
     </div>
   </div>
 
@@ -308,6 +308,7 @@
     <button onclick="showSection('mitarbeiter')">Mitarbeiter</button>
     <button onclick="showSection('detail')">Reise-Detail</button>
     <button onclick="testHealth()">Health</button>
+    <button onclick="testAI()">AI-Test</button>
     <button onclick="loadBelege()">Belege</button>
     <button onclick="loadReisen()">Reisen</button>
     <button onclick="loadMitarbeiter()">Mitarbeiter</button>
@@ -392,7 +393,7 @@
 
   <div id="scanSection" class="card hidden">
     <div class="title">Belegscan / Analyse</div>
-    <div class="subtitle">Für Namens-Anonymisierung bitte mit Reise-ID arbeiten</div>
+    <div class="subtitle">Anonymisierung: alle Mitarbeiternamen → Max Mustermann, alle E-Mails → abc@123.com</div>
 
     <div class="row">
       <div class="col">
@@ -532,7 +533,7 @@
 
   <div class="card" style="margin-top:20px;">
     <div class="title">Mitarbeiter Übersicht</div>
-    <div class="subtitle">Kürzel ist eindeutig</div>
+    <div class="subtitle">Aktive Mitarbeiter aus der PostgreSQL-Datenbank</div>
     <div id="mitarbeiterTable"></div>
   </div>
 
@@ -627,6 +628,29 @@ async function testHealth() {
     document.getElementById("serverProviderBadge").textContent =
       `${data.ai_provider || "?"} | Default`;
     setStatus("Health OK: " + JSON.stringify(data));
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+async function testAI() {
+  try {
+    setStatus("AI-Test läuft...");
+    const qp = [];
+    if (currentAiProvider()) qp.push("ai_provider=" + encodeURIComponent(currentAiProvider()));
+    if (currentAiModel()) qp.push("ai_model=" + encodeURIComponent(currentAiModel()));
+    let url = api() + "/ai/test";
+    if (qp.length) url += "?" + qp.join("&");
+
+    const res = await fetch(url);
+    const data = await parseJsonResponse(res);
+    document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
+
+    if (data.status === "error") {
+      setStatus("AI-Test fehlgeschlagen.", true);
+    } else {
+      setStatus("AI-Test erfolgreich.");
+    }
   } catch (e) {
     setStatus(e.message || String(e), true);
   }
@@ -887,9 +911,7 @@ async function previewAnonymizedText() {
 
     const payload = {
       text: document.getElementById("textInput").value,
-      filename: document.getElementById("filename").value,
-      reise_id: document.getElementById("scanReiseId").value ? parseInt(document.getElementById("scanReiseId").value, 10) : null,
-      event_id: document.getElementById("scanEventId").value ? parseInt(document.getElementById("scanEventId").value, 10) : null
+      filename: document.getElementById("filename").value
     };
 
     const res = await fetch(api() + "/anonymize/text", {
@@ -920,16 +942,10 @@ async function previewAnonymizedFile() {
 
     setStatus("Datei-Anonymisierung läuft...");
 
-    let url = api() + "/anonymize/file";
-    const qp = [];
-    if (document.getElementById("scanReiseId").value) qp.push("reise_id=" + encodeURIComponent(document.getElementById("scanReiseId").value));
-    if (document.getElementById("scanEventId").value) qp.push("event_id=" + encodeURIComponent(document.getElementById("scanEventId").value));
-    if (qp.length) url += "?" + qp.join("&");
-
     const formData = new FormData();
     formData.append("file", input.files[0]);
 
-    const res = await fetch(url, {
+    const res = await fetch(api() + "/anonymize/file", {
       method: "POST",
       body: formData
     });
@@ -964,8 +980,14 @@ async function analyzeText() {
       body: JSON.stringify(payload)
     });
 
-    const data = await parseApiResponse(res);
+    const data = await parseJsonResponse(res);
     document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
+
+    if (data.status === "error") {
+      setStatus(data.detail || "Analysefehler", true);
+      return;
+    }
+
     setStatus(`Textanalyse abgeschlossen mit ${data.ai_provider || "?"} / ${data.ai_model || "?"}.`);
     await loadBelege();
     await loadReisen();
@@ -1004,8 +1026,14 @@ async function analyzeFile() {
       body: formData
     });
 
-    const data = await parseApiResponse(res);
+    const data = await parseJsonResponse(res);
     document.getElementById("resultBox").textContent = JSON.stringify(data, null, 2);
+
+    if (data.status === "error") {
+      setStatus(data.detail || "Analysefehler", true);
+      return;
+    }
+
     setStatus(`Dateianalyse abgeschlossen mit ${data.ai_provider || "?"} / ${data.ai_model || "?"}.`);
     await loadBelege();
     await loadReisen();

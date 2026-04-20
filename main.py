@@ -35,9 +35,9 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.9f"
+APP_VERSION = "7.11"
 
-AI_PROVIDER = os.getenv("AI_PROVIDER", "mistral").strip().lower()
+AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
@@ -118,208 +118,108 @@ def normalize_variants(value: str) -> List[str]:
 def anonymize_emails(text: str) -> str:
     return re.sub(
         r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b",
-        "ff@bb.com",
+        "abc@123.com",
         text,
         flags=re.IGNORECASE,
     )
 
 
-def build_name_candidates_for_reise(reise_id: Optional[int]) -> List[dict]:
-    if not reise_id:
-        return []
-
-    try:
-        detail = get_reise_detail(reise_id)
-    except Exception:
-        return []
-
-    candidates: List[dict] = []
-
-    for reisender in detail.get("reisende", []):
-        vollname = (reisender.get("vollname") or "").strip()
-        if not vollname:
-            continue
-
-        parts = [p.strip() for p in vollname.split() if p.strip()]
-        if not parts:
-            continue
-
-        first = parts[0]
-        last = parts[-1]
-
-        candidates.append({
-            "vollname": vollname,
-            "first": first,
-            "last": last,
-        })
-
-    return candidates
-
-
-def replace_exact_full_names(text: str, candidates: List[dict]) -> str:
+def anonymize_employee_names(text: str) -> str:
     anonymized = text
+    mitarbeiter = list_mitarbeiter(limit=5000)
 
-    for item in candidates:
-        vollname = item["vollname"]
-        first = item["first"]
-        last = item["last"]
+    all_names: List[str] = []
 
-        exact_candidates = {
-            vollname,
-            f"{first} {last}".strip(),
-            f"{last} {first}".strip(),
-        }
+    for m in mitarbeiter:
+        vorname = (m.get("vorname") or "").strip()
+        nachname = (m.get("nachname") or "").strip()
+        if vorname and nachname:
+            all_names.append(f"{vorname} {nachname}")
+            all_names.append(f"{nachname} {vorname}")
+        if vorname:
+            all_names.append(vorname)
+        if nachname:
+            all_names.append(nachname)
 
-        for candidate in sorted(exact_candidates, key=len, reverse=True):
-            for variant in normalize_variants(candidate):
-                anonymized = re.sub(re.escape(variant), "Max Mustermann", anonymized, flags=re.IGNORECASE)
+    for candidate in sorted(set(all_names), key=len, reverse=True):
+        for variant in normalize_variants(candidate):
+            anonymized = re.sub(re.escape(variant), "Max Mustermann", anonymized, flags=re.IGNORECASE)
 
-    return anonymized
-
-
-def replace_first_middle_last_patterns(text: str, candidates: List[dict]) -> str:
-    anonymized = text
-
-    # Ersetzt z. B.:
-    # Ralf Nico Diesslin
-    # Mr Ralf Nico Diesslin
-    # Herr Ralf N. Diesslin
-    # auch wenn in DB nur "Ralf Diesslin" steht
-    for item in candidates:
-        first = item["first"]
-        last = item["last"]
-
-        first_variants = normalize_variants(first)
-        last_variants = normalize_variants(last)
-
-        for fv in first_variants:
-            for lv in last_variants:
-                # mit Titel
-                pattern_title = rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(fv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(lv)}\b"
-                anonymized = re.sub(pattern_title, lambda m: f"{m.group(1)} Max Mustermann", anonymized)
-
-                # ohne Titel
-                pattern_plain = rf"(?i)\b{re.escape(fv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(lv)}\b"
-                anonymized = re.sub(pattern_plain, "Max Mustermann", anonymized)
-
-                # Nachname, Vorname Mittelname
-                pattern_reverse = rf"(?i)\b{re.escape(lv)}\s*,?\s*{re.escape(fv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\b"
-                anonymized = re.sub(pattern_reverse, "Max Mustermann", anonymized)
-
-    return anonymized
-
-
-def cleanup_name_replacements(text: str) -> str:
-    anonymized = text
     anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
-    anonymized = re.sub(
-        r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+",
-        r"\1 Max Mustermann",
-        anonymized,
-    )
-    return anonymized
-
-
-def replace_reise_names(text: str, reise_id: Optional[int]) -> str:
-    candidates = build_name_candidates_for_reise(reise_id)
-    if not candidates:
-        return text
-
-    anonymized = text
-    anonymized = replace_exact_full_names(anonymized, candidates)
-    anonymized = replace_first_middle_last_patterns(anonymized, candidates)
-    anonymized = cleanup_name_replacements(anonymized)
+    anonymized = re.sub(r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+", r"\1 Max Mustermann", anonymized)
 
     return anonymized
 
 
-def resolve_reise_id(reise_id: Optional[int], event_id: Optional[int]) -> Optional[int]:
-    if reise_id:
-        return reise_id
-    if not event_id:
-        return None
-    try:
-        event_detail = get_event_detail(event_id)
-        event = event_detail.get("event") or {}
-        return event.get("reise_id")
-    except Exception:
-        return None
-
-
-def anonymize_document_text(text: str, reise_id: Optional[int] = None, event_id: Optional[int] = None) -> str:
-    effective_reise_id = resolve_reise_id(reise_id, event_id)
+def anonymize_document_text(text: str) -> str:
     anonymized = text
-    anonymized = replace_reise_names(anonymized, effective_reise_id)
+    anonymized = anonymize_employee_names(anonymized)
     anonymized = anonymize_emails(anonymized)
     return anonymized
 
 
-def build_prompt(document_text: str, filename: str = "nicht vorhanden") -> str:
-    return f"""
-Du bist ein hochpräziser Parser für Reisekostenbelege.
+def build_json_prompt(document_text: str, filename: str = "nicht vorhanden") -> str:
+    schema = {
+        "belegdatum": "",
+        "art_des_dokuments": "",
+        "buchungsnummer_code": "",
+        "name_des_reisenden": "",
+        "wie_viele_reisesegmente": 0,
+        "reisesegmente": [
+            {
+                "index": 1,
+                "abreise_datum_und_zeit": "",
+                "ankunft_datum_und_zeit": "",
+                "abreise_ort": "",
+                "ankunft_ort": "",
+                "transportunternehmen_und_nummer": "",
+            }
+        ],
+        "ticketnummer": "",
+        "kosten_mit_steuern": "",
+        "kosten_ohne_steuern": "",
+        "waehrung_der_kosten": "",
+        "warnungen": [],
+    }
 
-Lies den folgenden Dokumentinhalt und gib AUSSCHLIESSLICH valides JSON zurück.
+    return f"""
+Bitte analysiere mir das folgende PDF/EMAIL/BELEG.
+
+Gib AUSSCHLIESSLICH gültiges JSON zurück.
+Keine Erklärung. Kein Markdown. Kein Zusatztext.
+
+Nutze genau diese Felder:
+{json.dumps(schema, ensure_ascii=False, indent=2)}
 
 Regeln:
-- Keine Werte erfinden
-- Wenn nicht vorhanden: "nicht vorhanden"
-- Dokumenttypen nur: Zug, Flug, Hotel, Taxi, Unbekannt
-- Bei Hotel keine Standarduhrzeiten erfinden
-- Bei Flug alle Segmente einzeln
-- Bei Taxi normalerweise 1 Segment, bei Storno 0
-- Extrahiere:
-  belegdatum
-  art_des_dokuments
-  buchungsnummer_code
-  name_des_reisenden
-  wie_viele_reisesegmente
-  ticketnummer
-  kosten_mit_steuern
-  waehrung_der_kosten
-  reisesegmente[] mit:
-    index
-    departure_datetime
-    arrival_datetime
-    departure_location
-    arrival_location
-    transport_company_and_number
-  warnungen[]
-  fehler[]
+- "art_des_dokuments" nur: "Zug", "Flug", "Hotel", "Taxi", "Unbekannt"
+- Wenn ein Feld nicht vorhanden ist: "nicht vorhanden"
+- "wie_viele_reisesegmente" ist eine Zahl
+- Für jedes Reisesegment einen Eintrag in "reisesegmente"
+- Zeiten möglichst inklusive Zeitzonenhinweis, falls vorhanden
+- "kosten_mit_steuern" und "kosten_ohne_steuern" getrennt angeben
+- Währung separat angeben
 
 Dateiname: {filename}
 
-Dokumentinhalt:
+TEXT:
 {document_text[:120000]}
 """.strip()
 
 
-def call_mistral(prompt: str, model: Optional[str] = None) -> dict:
+def call_mistral_json(prompt: str, model: Optional[str] = None) -> dict:
     if not MISTRAL_API_KEY:
-        return {
-            "belegdatum": "nicht vorhanden",
-            "art_des_dokuments": "Unbekannt",
-            "buchungsnummer_code": "nicht vorhanden",
-            "name_des_reisenden": "nicht vorhanden",
-            "wie_viele_reisesegmente": 0,
-            "ticketnummer": "nicht vorhanden",
-            "kosten_mit_steuern": "nicht vorhanden",
-            "waehrung_der_kosten": "nicht vorhanden",
-            "reisesegmente": [],
-            "warnungen": ["MISTRAL_API_KEY ist nicht gesetzt"],
-            "fehler": [],
-        }
+        return {"status": "error", "detail": "MISTRAL_API_KEY ist nicht gesetzt"}
 
     use_model = model or MISTRAL_MODEL
-
     headers = {
         "Authorization": f"Bearer {MISTRAL_API_KEY}",
         "Content-Type": "application/json",
     }
-
     payload = {
         "model": use_model,
         "messages": [
-            {"role": "system", "content": "Gib ausschließlich valides JSON zurück. Keine Erklärungen."},
+            {"role": "system", "content": "Gib ausschließlich valides JSON zurück."},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0,
@@ -338,74 +238,67 @@ def call_mistral(prompt: str, model: Optional[str] = None) -> dict:
     return json.loads(content)
 
 
-def call_openai(prompt: str, model: Optional[str] = None) -> dict:
+def call_openai_json(prompt: str, model: Optional[str] = None) -> dict:
     if not OPENAI_API_KEY:
-        return {
-            "belegdatum": "nicht vorhanden",
-            "art_des_dokuments": "Unbekannt",
-            "buchungsnummer_code": "nicht vorhanden",
-            "name_des_reisenden": "nicht vorhanden",
-            "wie_viele_reisesegmente": 0,
-            "ticketnummer": "nicht vorhanden",
-            "kosten_mit_steuern": "nicht vorhanden",
-            "waehrung_der_kosten": "nicht vorhanden",
-            "reisesegmente": [],
-            "warnungen": ["OPENAI_API_KEY ist nicht gesetzt"],
-            "fehler": [],
-        }
+        return {"status": "error", "detail": "OPENAI_API_KEY ist nicht gesetzt"}
 
     use_model = model or OPENAI_MODEL
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    response = client.responses.create(
+    response = client.chat.completions.create(
         model=use_model,
-        input=prompt,
+        messages=[
+            {"role": "system", "content": "Gib ausschließlich valides JSON zurück."},
+            {"role": "user", "content": prompt},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0,
     )
 
-    output_text = response.output_text
-    return json.loads(output_text)
+    content = response.choices[0].message.content or "{}"
+    return json.loads(content)
 
 
-def call_ai_provider(prompt: str, provider_override: Optional[str] = None, model_override: Optional[str] = None) -> tuple[dict, str, str]:
+def call_ai_provider_json(
+    prompt: str,
+    provider_override: Optional[str] = None,
+    model_override: Optional[str] = None,
+) -> tuple[dict, str, str]:
     provider = (provider_override or AI_PROVIDER).strip().lower()
 
     if provider == "openai":
         model = model_override or OPENAI_MODEL
-        return call_openai(prompt, model), provider, model
+        return call_openai_json(prompt, model), provider, model
 
     if provider == "mistral":
         model = model_override or MISTRAL_MODEL
-        return call_mistral(prompt, model), provider, model
+        return call_mistral_json(prompt, model), provider, model
 
-    return ({
+    return {"status": "error", "detail": f"Unbekannter AI Provider: {provider}"}, provider, model_override or ""
+
+
+def ensure_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
+    base = {
         "belegdatum": "nicht vorhanden",
         "art_des_dokuments": "Unbekannt",
         "buchungsnummer_code": "nicht vorhanden",
         "name_des_reisenden": "nicht vorhanden",
         "wie_viele_reisesegmente": 0,
+        "reisesegmente": [],
         "ticketnummer": "nicht vorhanden",
         "kosten_mit_steuern": "nicht vorhanden",
+        "kosten_ohne_steuern": "nicht vorhanden",
         "waehrung_der_kosten": "nicht vorhanden",
-        "reisesegmente": [],
-        "warnungen": [f"Unbekannter AI Provider: {provider}"],
-        "fehler": [],
-    }, provider, model_override or "")
-
-
-def ensure_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "belegdatum": data.get("belegdatum", "nicht vorhanden"),
-        "art_des_dokuments": data.get("art_des_dokuments", "Unbekannt"),
-        "buchungsnummer_code": data.get("buchungsnummer_code", "nicht vorhanden"),
-        "name_des_reisenden": data.get("name_des_reisenden", "nicht vorhanden"),
-        "wie_viele_reisesegmente": data.get("wie_viele_reisesegmente", 0),
-        "ticketnummer": data.get("ticketnummer", "nicht vorhanden"),
-        "kosten_mit_steuern": data.get("kosten_mit_steuern", "nicht vorhanden"),
-        "waehrung_der_kosten": data.get("waehrung_der_kosten", "nicht vorhanden"),
-        "reisesegmente": data.get("reisesegmente", []),
-        "warnungen": data.get("warnungen", []),
-        "fehler": data.get("fehler", []),
+        "warnungen": [],
     }
+    if not isinstance(data, dict):
+        return base
+    base.update(data)
+    if not isinstance(base.get("reisesegmente"), list):
+        base["reisesegmente"] = []
+    if not isinstance(base.get("warnungen"), list):
+        base["warnungen"] = []
+    return base
 
 
 def compute_reise_status(detail: dict) -> dict:
@@ -465,11 +358,22 @@ def analyze_text_internal(
     ai_provider_override: Optional[str] = None,
     ai_model_override: Optional[str] = None,
 ) -> dict:
-    anonymized_text = anonymize_document_text(text, reise_id=reise_id, event_id=event_id)
-    prompt = build_prompt(anonymized_text, filename=filename)
-    raw, used_provider, used_model = call_ai_provider(prompt, ai_provider_override, ai_model_override)
-    data = ensure_defaults(raw)
+    anonymized_text = anonymize_document_text(text)
+    prompt = build_json_prompt(anonymized_text, filename=filename)
+    raw, used_provider, used_model = call_ai_provider_json(prompt, ai_provider_override, ai_model_override)
 
+    if isinstance(raw, dict) and raw.get("status") == "error":
+        return {
+            "status": "error",
+            "detail": raw.get("detail", "Analysefehler"),
+            "version": APP_VERSION,
+            "ai_provider": used_provider,
+            "ai_model": used_model,
+            "anonymized_preview": anonymized_text[:4000],
+        }
+
+    data = ensure_defaults(raw)
+    data["status"] = "ok"
     data["version"] = APP_VERSION
     data["generated_at_utc"] = datetime.utcnow().isoformat()
     data["ai_provider"] = used_provider
@@ -482,7 +386,6 @@ def analyze_text_internal(
         "kosten": data.get("kosten_mit_steuern"),
         "waehrung": data.get("waehrung_der_kosten"),
     })
-
     data["beleg_id"] = beleg_id
 
     if event_id:
@@ -511,6 +414,21 @@ def health():
         "openai_configured": bool(OPENAI_API_KEY),
         "openai_model": OPENAI_MODEL,
         "mistral_model": MISTRAL_MODEL,
+    }
+
+
+@app.get("/ai/test")
+def ai_test(
+    ai_provider: Optional[str] = Query(default=None),
+    ai_model: Optional[str] = Query(default=None),
+):
+    prompt = build_json_prompt("Testbeleg: Hotel in Berlin, Check-in 01.05.2026, Check-out 03.05.2026, Total 300 EUR.")
+    raw, used_provider, used_model = call_ai_provider_json(prompt, ai_provider, ai_model)
+    return {
+        "status": "ok" if not (isinstance(raw, dict) and raw.get("status") == "error") else "error",
+        "ai_provider": used_provider,
+        "ai_model": used_model,
+        "result": raw,
     }
 
 
@@ -670,7 +588,7 @@ def events_update_status(event_id: int, payload: EventStatusRequest):
 @app.post("/anonymize/text")
 def anonymize_text(payload: AnalyzeTextRequest):
     try:
-        anonymized = anonymize_document_text(payload.text, reise_id=payload.reise_id, event_id=payload.event_id)
+        anonymized = anonymize_document_text(payload.text)
         return {
             "status": "ok",
             "filename": payload.filename or "text-input.txt",
@@ -681,11 +599,7 @@ def anonymize_text(payload: AnalyzeTextRequest):
 
 
 @app.post("/anonymize/file")
-async def anonymize_file(
-    file: UploadFile = File(...),
-    reise_id: Optional[int] = Query(default=None),
-    event_id: Optional[int] = Query(default=None),
-):
+async def anonymize_file(file: UploadFile = File(...)):
     try:
         content = await file.read()
         if (file.filename or "").lower().endswith(".pdf"):
@@ -693,7 +607,7 @@ async def anonymize_file(
         else:
             text = content.decode("utf-8", errors="replace")
 
-        anonymized = anonymize_document_text(text, reise_id=reise_id, event_id=event_id)
+        anonymized = anonymize_document_text(text)
         return {
             "status": "ok",
             "filename": file.filename or "upload",
