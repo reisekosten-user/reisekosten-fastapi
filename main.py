@@ -44,9 +44,9 @@ APP_VERSION = "7.12"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
 
-MAIL_HOST = os.getenv("MAIL_HOST")
-MAIL_USER = os.getenv("MAIL_USER")
-MAIL_PASS = os.getenv("MAIL_PASS")
+IMAP_HOST = os.getenv("IMAP_HOST")
+IMAP_USER = os.getenv("IMAP_USER")
+IMAP_PASS = os.getenv("IMAP_PASS")
 
 app = FastAPI(title="Reisekosten API", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -117,12 +117,12 @@ def analyze(text: str):
 
 @app.get("/mail/test")
 def mail_test():
-    if not MAIL_HOST:
+    if not IMAP_HOST:
         return {"status": "error", "detail": "MAIL config fehlt"}
 
     try:
-        mail = imaplib.IMAP4_SSL(MAIL_HOST)
-        mail.login(MAIL_USER, MAIL_PASS)
+        mail = imaplib.IMAP4_SSL(IMAP_HOST)
+        mail.login(IMAP_USER, IMAP_PASS)
         mail.select("inbox")
 
         result, data = mail.search(None, "ALL")
