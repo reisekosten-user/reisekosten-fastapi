@@ -36,7 +36,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.13"
+APP_VERSION = "7.14"
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
@@ -387,6 +387,72 @@ def read_latest_mails(limit: int = 3, subject_contains: Optional[str] = None) ->
 
 
 # ----------------------------
+# Event matching helpers
+# ----------------------------
+
+def find_existing_event_for_reise(reise_id: int, beleg_typ: str) -> Optional[Dict[str, Any]]:
+    if not reise_id or not beleg_typ:
+        return None
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, typ, titel, status, created_at
+                    FROM events
+                    WHERE reise_id = %s
+                      AND LOWER(COALESCE(typ, '')) = LOWER(%s)
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (reise_id, beleg_typ),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "typ": row[1],
+                    "titel": row[2],
+                    "status": row[3],
+                    "created_at": row[4].isoformat() if hasattr(row[4], "isoformat") else row[4],
+                }
+    except Exception:
+        return None
+
+
+def attach_or_create_event_for_analysis(reise_id: int, beleg_id: int, data: dict) -> Dict[str, Any]:
+    art = data.get("art_des_dokuments", "Unbekannt")
+    titel = art if art != "Unbekannt" else "Beleg"
+
+    existing_event = find_existing_event_for_reise(reise_id, art)
+    if existing_event:
+        attach_beleg_to_event(existing_event["id"], beleg_id)
+        update_event_status(existing_event["id"], "abgeschlossen")
+        return {
+            "matched_event_id": existing_event["id"],
+            "matched_event_typ": existing_event.get("typ"),
+            "matched_existing_event": True,
+        }
+
+    new_event_id = create_event(
+        {
+            "reise_id": reise_id,
+            "typ": art,
+            "titel": titel,
+            "status": "abgeschlossen",
+        }
+    )
+    attach_beleg_to_event(new_event_id, beleg_id)
+    return {
+        "created_event_id": new_event_id,
+        "matched_event_typ": art,
+        "matched_existing_event": False,
+    }
+
+
+# ----------------------------
 # Analyze core
 # ----------------------------
 
@@ -416,21 +482,6 @@ def compute_reise_status(detail: dict) -> dict:
         "hotel": "Hotel" in typen,
         "taxi": "Taxi" in typen,
     }
-
-
-def auto_create_event_for_analysis(reise_id: int, beleg_id: int, data: dict) -> int:
-    art = data.get("art_des_dokuments", "Unbekannt")
-    titel = art if art != "Unbekannt" else "Beleg"
-    event_id = create_event(
-        {
-            "reise_id": reise_id,
-            "typ": art,
-            "titel": titel,
-            "status": "abgeschlossen",
-        }
-    )
-    attach_beleg_to_event(event_id, beleg_id)
-    return event_id
 
 
 def analyze_text_internal(
@@ -478,7 +529,8 @@ def analyze_text_internal(
         update_event_status(event_id, "abgeschlossen")
         data["attached_event_id"] = event_id
     elif reise_id:
-        data["created_event_id"] = auto_create_event_for_analysis(reise_id, beleg_id, data)
+        event_result = attach_or_create_event_for_analysis(reise_id, beleg_id, data)
+        data.update(event_result)
 
     return data
 
