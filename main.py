@@ -35,7 +35,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.11b"
+APP_VERSION = "7.11c"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 
@@ -127,7 +127,6 @@ def anonymize_emails(text: str) -> str:
 def build_employee_name_patterns() -> List[re.Pattern]:
     patterns: List[re.Pattern] = []
     mitarbeiter = list_mitarbeiter(limit=5000)
-
     seen = set()
 
     for m in mitarbeiter:
@@ -137,41 +136,45 @@ def build_employee_name_patterns() -> List[re.Pattern]:
         if not vorname or not nachname:
             continue
 
-        vor_variants = normalize_variants(vorname)
-        nach_variants = normalize_variants(nachname)
-
-        for vv in vor_variants:
-            for nv in nach_variants:
+        for vv in normalize_variants(vorname):
+            for nv in normalize_variants(nachname):
                 key = (vv, nv)
                 if key in seen:
                     continue
                 seen.add(key)
 
-                # Titel + Vorname + beliebige Mittelnamen + Nachname
+                # Titel + Vorname + Mittelnamen + Nachname
                 patterns.append(
                     re.compile(
-                        rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}\b"
+                        rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}(?=[^A-Za-zÄÖÜäöüß]|$)"
                     )
                 )
 
-                # Vorname + beliebige Mittelnamen + Nachname
+                # Vorname + Mittelnamen + Nachname
                 patterns.append(
                     re.compile(
-                        rf"(?i)\b{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}\b"
+                        rf"(?i)\b{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}(?=[^A-Za-zÄÖÜäöüß]|$)"
                     )
                 )
 
-                # Nachname, Vorname (+ Mittelnamen)
+                # Nachname, Vorname + Mittelnamen
                 patterns.append(
                     re.compile(
-                        rf"(?i)\b{re.escape(nv)}\s*,\s*{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\b"
+                        rf"(?i)\b{re.escape(nv)}\s*,\s*{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*(?=[^A-Za-zÄÖÜäöüß]|$)"
                     )
                 )
 
-                # Exakte 2-teilige Umkehrung ohne Komma
+                # Verklebte Form: Titel + Vorname + Mittelnamen + Nachname + direkt folgendes Wort
                 patterns.append(
                     re.compile(
-                        rf"(?i)\b{re.escape(nv)}\s+{re.escape(vv)}\b"
+                        rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}(?=[A-Za-zÄÖÜäöüß])"
+                    )
+                )
+
+                # Verklebte Form: Vorname + Mittelnamen + Nachname + direkt folgendes Wort
+                patterns.append(
+                    re.compile(
+                        rf"(?i)\b{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}(?=[A-Za-zÄÖÜäöüß])"
                     )
                 )
 
@@ -193,23 +196,22 @@ def anonymize_employee_names(text: str) -> str:
 
         anonymized = pattern.sub(_replace, anonymized)
 
-    # Nachlaufende Aufräumung
+    # Zusätzliche Cleanup-Regeln für verklebte Namen
+    anonymized = re.sub(
+        r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?=[A-Za-zÄÖÜäöüß])",
+        r"\1 Max Mustermann",
+        anonymized,
+    )
+    anonymized = re.sub(
+        r"(?i)\bMax Mustermann(?=[A-Za-zÄÖÜäöüß])",
+        "Max Mustermann",
+        anonymized,
+    )
+
     anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
     anonymized = re.sub(
         r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+",
         r"\1 Max Mustermann",
-        anonymized,
-    )
-
-    # Falls bei PDF-Text "Mr Max Mustermann Nico" übrigbleibt, wegkürzen
-    anonymized = re.sub(
-        r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+[A-Za-zÄÖÜäöüß.\-]+)+\b",
-        r"\1 Max Mustermann",
-        anonymized,
-    )
-    anonymized = re.sub(
-        r"(?i)\bMax Mustermann(?:\s+[A-Za-zÄÖÜäöüß.\-]+)+\s+Max Mustermann\b",
-        "Max Mustermann",
         anonymized,
     )
 
