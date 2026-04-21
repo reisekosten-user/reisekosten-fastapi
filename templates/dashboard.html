@@ -3,41 +3,412 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Dashboard Mail Test 7.12b</title>
+  <title>Reisekosten Dashboard 7.12c</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 24px; background: #f5f7fb; color: #1f2937; }
-    .card { background: white; border: 1px solid #dbe2f0; border-radius: 14px; padding: 18px; max-width: 1100px; }
-    h2 { margin-top: 0; }
-    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
-    .col { flex: 1; min-width: 220px; }
-    label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 6px; }
-    input { width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 10px; }
-    button { background: #1f4ed8; color: white; border: none; border-radius: 10px; padding: 11px 14px; font-weight: 700; cursor: pointer; }
-    pre { background: #0f172a; color: #dbeafe; padding: 14px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; overflow: auto; }
-    .hint { color: #64748b; font-size: 13px; margin-top: 8px; }
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --line: #dbe2f0;
+      --primary: #1f4ed8;
+      --primary-dark: #163aa6;
+      --text: #1f2937;
+      --muted: #64748b;
+      --good: #166534;
+      --warn: #b45309;
+      --bad: #b91c1c;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
+
+    .header {
+      background: linear-gradient(90deg, #12327f, #2563eb);
+      color: white;
+      padding: 14px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .brand img {
+      height: 64px;
+      object-fit: contain;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 24px;
+    }
+
+    .brand .sub {
+      font-size: 13px;
+      opacity: 0.9;
+      margin-top: 3px;
+    }
+
+    .nav {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .nav button, .btn {
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .nav button:hover, .btn:hover { background: var(--primary-dark); }
+    .btn-light {
+      background: #e2e8f0;
+      color: #0f172a;
+    }
+
+    .container {
+      max-width: 1450px;
+      margin: 24px auto;
+      padding: 0 18px 40px 18px;
+    }
+
+    .status {
+      margin-bottom: 18px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      font-weight: 700;
+      background: #eff6ff;
+      color: #1d4ed8;
+      border: 1px solid #bfdbfe;
+    }
+
+    .error {
+      background: #fee2e2;
+      color: #b91c1c;
+      border-color: #fecaca;
+    }
+
+    .grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .grid-3 { grid-template-columns: repeat(3, 1fr); }
+    .grid-2 { grid-template-columns: 1.15fr 0.85fr; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 3px 14px rgba(15, 23, 42, 0.05);
+    }
+
+    .title {
+      margin: 0 0 8px 0;
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      background: #f8fbff;
+    }
+
+    .metric-label {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .metric-value {
+      margin-top: 6px;
+      font-size: 24px;
+      font-weight: 800;
+    }
+
+    .row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: end;
+    }
+
+    .col {
+      flex: 1;
+      min-width: 220px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      background: white;
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+
+    input[readonly] {
+      background: #e5e7eb;
+      color: #475569;
+    }
+
+    textarea {
+      min-height: 170px;
+      resize: vertical;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      background: white;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #e5edf7;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #eef4fb;
+      color: #334155;
+      font-size: 13px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .ok { background: #dcfce7; color: var(--good); }
+    .warn { background: #fef3c7; color: var(--warn); }
+    .bad { background: #fee2e2; color: var(--bad); }
+
+    pre {
+      background: #0f172a;
+      color: #dbeafe;
+      padding: 14px;
+      border-radius: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow: auto;
+      font-size: 13px;
+    }
+
+    .hidden { display: none; }
+
+    .section-tabs {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+
+    @media (max-width: 1100px) {
+      .grid-3, .grid-2 { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h2>Mail-Test / Mail-Analyse</h2>
-    <div class="row">
-      <div class="col">
-        <label>Betreff enthält</label>
-        <input id="subjectFilter" type="text" placeholder="z. B. 26-001" value="26-001" />
-      </div>
-      <div class="col" style="max-width:180px;">
-        <label>Anzahl</label>
-        <input id="mailLimit" type="number" min="1" max="10" value="3" />
-      </div>
-      <div class="col" style="max-width:240px;">
-        <button onclick="testMails()">Mails testen</button>
-      </div>
-      <div class="col" style="max-width:260px;">
-        <button onclick="analyzeMails()">Mails analysieren</button>
+  <div class="header">
+    <div class="brand">
+      <img src="/static/logo2.png" alt="Logo" />
+      <div>
+        <h1>Reisekosten System</h1>
+        <div class="sub">Version 7.12c · Dashboard komplett inkl. Mail-Test und Mail-Analyse</div>
       </div>
     </div>
-    <div class="hint">Verwendet: <code>/mail/test</code> und <code>/mail/analyze-latest</code> mit Betreff-Filter.</div>
-    <pre id="resultBox">Noch kein Ergebnis.</pre>
+
+    <div class="nav">
+      <button onclick="showSection('overview')">Übersicht</button>
+      <button onclick="showSection('scan')">Belegscan</button>
+      <button onclick="showSection('mail')">Mail-Test</button>
+      <button onclick="showSection('reisen')">Reisen</button>
+      <button onclick="showSection('mitarbeiter')">Mitarbeiter</button>
+      <button onclick="testHealth()">Health</button>
+      <button onclick="testAI()">AI-Test</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <div id="statusBox" class="status">Bereit.</div>
+
+    <div id="section-overview">
+      <div class="grid grid-3" style="margin-bottom:18px;">
+        <div class="metric">
+          <div class="metric-label">Belege</div>
+          <div class="metric-value" id="metricBelege">0</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Reisen</div>
+          <div class="metric-value" id="metricReisen">0</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Mitarbeiter</div>
+          <div class="metric-value" id="metricMitarbeiter">0</div>
+        </div>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="title">Reisen Übersicht</div>
+          <div class="subtitle">Klick auf ID für Detailansicht</div>
+          <div id="reisenTable"></div>
+        </div>
+
+        <div class="card">
+          <div class="title">Gespeicherte Belege</div>
+          <div class="subtitle">Neueste Belege zuerst</div>
+          <div id="belegeTable"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:18px;">
+        <div class="title">Mitarbeiter Übersicht</div>
+        <div class="subtitle">Aktive Mitarbeiter aus der PostgreSQL-Datenbank</div>
+        <div id="mitarbeiterTable"></div>
+      </div>
+    </div>
+
+    <div id="section-scan" class="hidden">
+      <div class="card">
+        <div class="title">Belegscan / Analyse</div>
+        <div class="subtitle">Anonymisierung: Namen → Max Mustermann, E-Mails → abc@123.com</div>
+
+        <div class="row">
+          <div class="col">
+            <label>Reise-ID optional</label>
+            <input id="scanReiseId" type="number" />
+          </div>
+          <div class="col">
+            <label>Event-ID optional</label>
+            <input id="scanEventId" type="number" />
+          </div>
+          <div class="col">
+            <label>OpenAI Modell optional</label>
+            <input id="aiModelInput" type="text" placeholder="z. B. gpt-5.4" />
+          </div>
+        </div>
+
+        <label>Dateiname</label>
+        <input id="filename" type="text" value="manuell.txt" />
+
+        <label>Textinhalt</label>
+        <textarea id="textInput" placeholder="Hier Text, E-Mail-Inhalt oder OCR-Text einfügen ..."></textarea>
+
+        <div class="row">
+          <button class="btn btn-light" onclick="previewAnonymizedText()">Anonymisierung Vorschau</button>
+          <button class="btn" onclick="analyzeText()">Text analysieren</button>
+        </div>
+
+        <div class="row" style="margin-top:16px;">
+          <div class="col">
+            <label>Datei auswählen</label>
+            <input id="fileInput" type="file" />
+          </div>
+        </div>
+
+        <div class="row">
+          <button class="btn btn-light" onclick="previewAnonymizedFile()">Datei anonymisieren</button>
+          <button class="btn" onclick="analyzeFile()">Datei analysieren</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="section-mail" class="hidden">
+      <div class="card">
+        <div class="title">Mail-Test / Mail-Analyse</div>
+        <div class="subtitle">Liest die Inbox per IMAP und filtert nach Betreff</div>
+
+        <div class="row">
+          <div class="col">
+            <label>Betreff enthält</label>
+            <input id="subjectFilter" type="text" placeholder="z. B. 26-001" value="26-001" />
+          </div>
+          <div class="col" style="max-width:180px;">
+            <label>Anzahl</label>
+            <input id="mailLimit" type="number" min="1" max="10" value="3" />
+          </div>
+          <div class="col" style="max-width:220px;">
+            <button class="btn btn-light" onclick="testMails()">Mails testen</button>
+          </div>
+          <div class="col" style="max-width:240px;">
+            <button class="btn" onclick="analyzeMails()">Mails analysieren</button>
+          </div>
+        </div>
+
+        <div class="hint">Verwendet <code>/mail/test</code> und <code>/mail/analyze-latest</code> mit Betreff-Filter.</div>
+      </div>
+    </div>
+
+    <div id="section-reisen" class="hidden">
+      <div class="card">
+        <div class="title">Reise-API Tests</div>
+        <div class="subtitle">Schneller Test von Reisen und Overview</div>
+        <div class="row">
+          <button class="btn" onclick="loadReisen()">Reisen laden</button>
+          <button class="btn btn-light" onclick="openUrl('/reisen')">/reisen öffnen</button>
+          <button class="btn btn-light" onclick="openUrl('/reisen/overview')">/reisen/overview öffnen</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="section-mitarbeiter" class="hidden">
+      <div class="card">
+        <div class="title">Mitarbeiter-API Tests</div>
+        <div class="subtitle">Schneller Test von Mitarbeiterdaten</div>
+        <div class="row">
+          <button class="btn" onclick="loadMitarbeiter()">Mitarbeiter laden</button>
+          <button class="btn btn-light" onclick="openUrl('/mitarbeiter')">/mitarbeiter öffnen</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:18px;">
+      <div class="title">Letztes Ergebnis / Debug</div>
+      <pre id="resultBox">Noch kein Ergebnis.</pre>
+    </div>
   </div>
 
   <script>
@@ -45,34 +416,272 @@
       return window.location.origin;
     }
 
+    function setStatus(message, isError = false) {
+      const box = document.getElementById('statusBox');
+      box.textContent = message;
+      box.className = isError ? 'status error' : 'status';
+    }
+
+    function showSection(name) {
+      const sections = ['overview', 'scan', 'mail', 'reisen', 'mitarbeiter'];
+      for (const s of sections) {
+        document.getElementById('section-' + s).classList.add('hidden');
+      }
+      document.getElementById('section-' + name).classList.remove('hidden');
+    }
+
     async function parseJsonResponse(res) {
       const txt = await res.text();
       try {
         return JSON.parse(txt);
       } catch {
-        throw new Error("Antwort war kein JSON: " + txt.substring(0, 500));
+        throw new Error('Antwort war kein JSON: ' + txt.substring(0, 500));
       }
     }
 
-    function buildUrl(path) {
+    function badge(status) {
+      if (status === 'ok') return '<span class="badge ok">OK</span>';
+      if (status === 'fehler') return '<span class="badge bad">Fehler</span>';
+      return '<span class="badge warn">Prüfen</span>';
+    }
+
+    function openUrl(path) {
+      window.open(api() + path, '_blank');
+    }
+
+    async function testHealth() {
+      try {
+        const res = await fetch(api() + '/health');
+        const data = await parseJsonResponse(res);
+        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
+        setStatus('Health OK.');
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
+    }
+
+    async function testAI() {
+      try {
+        const model = document.getElementById('aiModelInput').value.trim();
+        let url = api() + '/ai/test';
+        if (model) url += '?ai_model=' + encodeURIComponent(model);
+        const res = await fetch(url);
+        const data = await parseJsonResponse(res);
+        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
+        setStatus(data.status === 'ok' ? 'AI-Test erfolgreich.' : 'AI-Test fehlgeschlagen.', data.status !== 'ok');
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
+    }
+
+    async function loadBelege() {
+      try {
+        const res = await fetch(api() + '/belege');
+        const data = await parseJsonResponse(res);
+        document.getElementById('metricBelege').textContent = data.count || 0;
+        const rows = (data.belege || []).map(b => `
+          <tr>
+            <td>${b.id ?? ''}</td>
+            <td>${b.belegdatum ?? ''}</td>
+            <td>${b.art ?? ''}</td>
+            <td>${b.kosten ?? ''}</td>
+            <td>${b.waehrung ?? ''}</td>
+            <td>${b.created_at ?? ''}</td>
+          </tr>
+        `).join('');
+        document.getElementById('belegeTable').innerHTML = `
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Datum</th><th>Art</th><th>Kosten</th><th>Währung</th><th>Erstellt</th></tr>
+            </thead>
+            <tbody>${rows || '<tr><td colspan="6">Keine Belege vorhanden</td></tr>'}</tbody>
+          </table>
+        `;
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
+    }
+
+    async function loadReisen() {
+      try {
+        const res = await fetch(api() + '/reisen/overview');
+        const data = await parseJsonResponse(res);
+        document.getElementById('metricReisen').textContent = data.count || 0;
+        const rows = (data.reisen || []).map(r => `
+          <tr>
+            <td>${r.id ?? ''}</td>
+            <td>${r.reise_code ?? ''}</td>
+            <td>${r.reise_name ?? ''}</td>
+            <td>${r.anzahl_reisende ?? ''}</td>
+            <td>${r.flug ? '✔' : '—'}</td>
+            <td>${r.hotel ? '✔' : '—'}</td>
+            <td>${r.taxi ? '✔' : '—'}</td>
+            <td>${badge(r.status)}</td>
+            <td>${(r.warnungen || []).join(', ')}</td>
+          </tr>
+        `).join('');
+        document.getElementById('reisenTable').innerHTML = `
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Code</th><th>Reisename</th><th>Reisende</th><th>Flug</th><th>Hotel</th><th>Taxi</th><th>Status</th><th>Warnungen</th></tr>
+            </thead>
+            <tbody>${rows || '<tr><td colspan="9">Keine Reisen vorhanden</td></tr>'}</tbody>
+          </table>
+        `;
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
+    }
+
+    async function loadMitarbeiter() {
+      try {
+        const res = await fetch(api() + '/mitarbeiter');
+        const data = await parseJsonResponse(res);
+        document.getElementById('metricMitarbeiter').textContent = data.count || 0;
+        const rows = (data.mitarbeiter || []).map(m => `
+          <tr>
+            <td>${m.id ?? ''}</td>
+            <td>${m.kuerzel ?? ''}</td>
+            <td>${m.vollname ?? ''}</td>
+            <td>${m.geburtsdatum ?? ''}</td>
+            <td>${m.email ?? ''}</td>
+          </tr>
+        `).join('');
+        document.getElementById('mitarbeiterTable').innerHTML = `
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Kürzel</th><th>Name</th><th>Geburtsdatum</th><th>E-Mail</th></tr>
+            </thead>
+            <tbody>${rows || '<tr><td colspan="5">Keine Mitarbeiter vorhanden</td></tr>'}</tbody>
+          </table>
+        `;
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
+    }
+
+    async function previewAnonymizedText() {
+      try {
+        const res = await fetch(api() + '/anonymize/text', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            text: document.getElementById('textInput').value,
+            filename: document.getElementById('filename').value
+          })
+        });
+        const data = await parseJsonResponse(res);
+        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
+        setStatus('Text anonymisiert.');
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
+    }
+
+    async function analyzeText() {
+      try {
+        const res = await fetch(api() + '/analyze/text', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            text: document.getElementById('textInput').value,
+            filename: document.getElementById('filename').value,
+            reise_id: document.getElementById('scanReiseId').value ? parseInt(document.getElementById('scanReiseId').value, 10) : null,
+            event_id: document.getElementById('scanEventId').value ? parseInt(document.getElementById('scanEventId').value, 10) : null,
+            ai_model: document.getElementById('aiModelInput').value.trim() || null,
+          })
+        });
+        const data = await parseJsonResponse(res);
+        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
+        setStatus(data.status === 'ok' ? 'Textanalyse abgeschlossen.' : (data.detail || 'Analysefehler'), data.status !== 'ok');
+        await loadBelege();
+        await loadReisen();
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
+    }
+
+    async function previewAnonymizedFile() {
+      try {
+        const input = document.getElementById('fileInput');
+        if (!input.files || !input.files[0]) {
+          setStatus('Bitte zuerst eine Datei auswählen.', true);
+          return;
+        }
+        const formData = new FormData();
+        formData.append('file', input.files[0]);
+        const res = await fetch(api() + '/anonymize/file', {method: 'POST', body: formData});
+        const data = await parseJsonResponse(res);
+        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
+        setStatus('Datei anonymisiert.');
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
+    }
+
+    async function analyzeFile() {
+      try {
+        const input = document.getElementById('fileInput');
+        if (!input.files || !input.files[0]) {
+          setStatus('Bitte zuerst eine Datei auswählen.', true);
+          return;
+        }
+        let url = api() + '/analyze/file';
+        const qp = [];
+        if (document.getElementById('scanReiseId').value) qp.push('reise_id=' + encodeURIComponent(document.getElementById('scanReiseId').value));
+        if (document.getElementById('scanEventId').value) qp.push('event_id=' + encodeURIComponent(document.getElementById('scanEventId').value));
+        if (document.getElementById('aiModelInput').value.trim()) qp.push('ai_model=' + encodeURIComponent(document.getElementById('aiModelInput').value.trim()));
+        if (qp.length) url += '?' + qp.join('&');
+        const formData = new FormData();
+        formData.append('file', input.files[0]);
+        const res = await fetch(url, {method: 'POST', body: formData});
+        const data = await parseJsonResponse(res);
+        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
+        setStatus(data.status === 'ok' ? 'Dateianalyse abgeschlossen.' : (data.detail || 'Analysefehler'), data.status !== 'ok');
+        await loadBelege();
+        await loadReisen();
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
+    }
+
+    function buildMailUrl(path) {
       const subject = document.getElementById('subjectFilter').value.trim();
       const limit = document.getElementById('mailLimit').value || '3';
-      const qp = ["limit=" + encodeURIComponent(limit)];
-      if (subject) qp.push("subject_contains=" + encodeURIComponent(subject));
-      return api() + path + "?" + qp.join('&');
+      const qp = ['limit=' + encodeURIComponent(limit)];
+      if (subject) qp.push('subject_contains=' + encodeURIComponent(subject));
+      return api() + path + '?' + qp.join('&');
     }
 
     async function testMails() {
-      const res = await fetch(buildUrl('/mail/test'));
-      const data = await parseJsonResponse(res);
-      document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
+      try {
+        const res = await fetch(buildMailUrl('/mail/test'));
+        const data = await parseJsonResponse(res);
+        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
+        setStatus(data.status === 'ok' ? 'Mails geladen.' : (data.detail || 'Mailfehler'), data.status !== 'ok');
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
     }
 
     async function analyzeMails() {
-      const res = await fetch(buildUrl('/mail/analyze-latest'));
-      const data = await parseJsonResponse(res);
-      document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
+      try {
+        const res = await fetch(buildMailUrl('/mail/analyze-latest'));
+        const data = await parseJsonResponse(res);
+        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
+        setStatus(data.status === 'ok' ? 'Mails analysiert.' : (data.detail || 'Mailanalysefehler'), data.status !== 'ok');
+        await loadBelege();
+      } catch (e) {
+        setStatus(e.message || String(e), true);
+      }
     }
+
+    window.onload = async function () {
+      await testHealth();
+      await loadBelege();
+      await loadReisen();
+      await loadMitarbeiter();
+    };
   </script>
 </body>
 </html>
