@@ -50,7 +50,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.on_event("startup")
-def startup():
+def startup() -> None:
     init_db()
 
 
@@ -92,65 +92,108 @@ class EventStatusRequest(BaseModel):
     status: str
 
 
+# ----------------------------
+# Text / PDF extraction
+# ----------------------------
+
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     reader = PdfReader(BytesIO(pdf_bytes))
-    return "\n".join([p.extract_text() or "" for p in reader.pages])
+    return "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
 
 
 def normalize_variants(value: str) -> List[str]:
     if not value:
         return []
     base = value.strip().lower()
-    return list({
-        base,
-        base.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss"),
-        base.replace("ä", "a").replace("ö", "o").replace("ü", "u").replace("ß", "ss"),
-    })
+    return list(
+        {
+            base,
+            base.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss"),
+            base.replace("ä", "a").replace("ö", "o").replace("ü", "u").replace("ß", "ss"),
+        }
+    )
 
+
+# ----------------------------
+# Anonymization
+# ----------------------------
 
 def anonymize_emails(text: str) -> str:
-    return re.sub(r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b", "abc@123.com", text, flags=re.IGNORECASE)
+    return re.sub(
+        r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b",
+        "abc@123.com",
+        text,
+        flags=re.IGNORECASE,
+    )
 
 
 def build_employee_name_patterns() -> List[re.Pattern]:
     patterns: List[re.Pattern] = []
     seen = set()
+
     for m in list_mitarbeiter(limit=5000):
         vorname = (m.get("vorname") or "").strip()
         nachname = (m.get("nachname") or "").strip()
         if not vorname or not nachname:
             continue
+
         for vv in normalize_variants(vorname):
             for nv in normalize_variants(nachname):
                 key = (vv, nv)
                 if key in seen:
                     continue
                 seen.add(key)
-                patterns.append(re.compile(rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}(?=[^A-Za-zÄÖÜäöüß]|$)"))
-                patterns.append(re.compile(rf"(?i)\b{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}(?=[^A-Za-zÄÖÜäöüß]|$)"))
-                patterns.append(re.compile(rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}(?=[A-Za-zÄÖÜäöüß])"))
-                patterns.append(re.compile(rf"(?i)\b{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}(?=[A-Za-zÄÖÜäöüß])"))
+
+                patterns.append(
+                    re.compile(
+                        rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}(?=[^A-Za-zÄÖÜäöüß]|$)"
+                    )
+                )
+                patterns.append(
+                    re.compile(
+                        rf"(?i)\b{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}(?=[^A-Za-zÄÖÜäöüß]|$)"
+                    )
+                )
+                patterns.append(
+                    re.compile(
+                        rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}(?=[A-Za-zÄÖÜäöüß])"
+                    )
+                )
+                patterns.append(
+                    re.compile(
+                        rf"(?i)\b{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}(?=[A-Za-zÄÖÜäöüß])"
+                    )
+                )
     return patterns
 
 
 def anonymize_employee_names(text: str) -> str:
     anonymized = text
-    patterns = build_employee_name_patterns()
-    for pattern in patterns:
+    for pattern in build_employee_name_patterns():
         def _replace(match: re.Match) -> str:
             groups = match.groups()
             if groups and groups[0] and groups[0].lower() in {"mr", "mrs", "ms", "herr", "frau"}:
                 return f"{groups[0]} Max Mustermann"
             return "Max Mustermann"
+
         anonymized = pattern.sub(_replace, anonymized)
+
     anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
-    anonymized = re.sub(r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+", r"\1 Max Mustermann", anonymized)
+    anonymized = re.sub(
+        r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+",
+        r"\1 Max Mustermann",
+        anonymized,
+    )
     return anonymized
 
 
 def anonymize_document_text(text: str) -> str:
     return anonymize_emails(anonymize_employee_names(text))
 
+
+# ----------------------------
+# Prompt / OpenAI
+# ----------------------------
 
 def build_json_prompt(document_text: str, filename: str = "nicht vorhanden") -> str:
     schema = {
@@ -175,6 +218,7 @@ def build_json_prompt(document_text: str, filename: str = "nicht vorhanden") -> 
         "waehrung_der_kosten": "",
         "warnungen": [],
     }
+
     return f"""
 Bitte analysiere mir das folgende PDF/EMAIL/BELEG.
 
@@ -185,12 +229,12 @@ Nutze genau diese Felder:
 {json.dumps(schema, ensure_ascii=False, indent=2)}
 
 Regeln:
-- \"art_des_dokuments\" nur: \"Zug\", \"Flug\", \"Hotel\", \"Taxi\", \"Unbekannt\"
-- Wenn ein Feld nicht vorhanden ist: \"nicht vorhanden\"
-- \"wie_viele_reisesegmente\" ist eine Zahl
-- Für jedes Reisesegment einen Eintrag in \"reisesegmente\"
+- "art_des_dokuments" nur: "Zug", "Flug", "Hotel", "Taxi", "Unbekannt"
+- Wenn ein Feld nicht vorhanden ist: "nicht vorhanden"
+- "wie_viele_reisesegmente" ist eine Zahl
+- Für jedes Reisesegment einen Eintrag in "reisesegmente"
 - Zeiten möglichst inklusive Zeitzonenhinweis, falls vorhanden
-- \"kosten_mit_steuern\" und \"kosten_ohne_steuern\" getrennt angeben
+- "kosten_mit_steuern" und "kosten_ohne_steuern" getrennt angeben
 - Währung separat angeben
 
 Dateiname: {filename}
@@ -203,6 +247,7 @@ TEXT:
 def call_openai_json(prompt: str, model: Optional[str] = None) -> dict:
     if not OPENAI_API_KEY:
         return {"status": "error", "detail": "OPENAI_API_KEY ist nicht gesetzt"}
+
     client = OpenAI(api_key=OPENAI_API_KEY)
     use_model = model or OPENAI_MODEL
     response = client.chat.completions.create(
@@ -240,12 +285,88 @@ def ensure_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
     return base
 
 
+# ----------------------------
+# Mail helpers
+# ----------------------------
+
+def extract_plain_text_from_email_message(msg) -> str:
+    bodies: List[str] = []
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            disposition = str(part.get("Content-Disposition") or "")
+            if "attachment" in disposition.lower():
+                continue
+            if content_type == "text/plain":
+                payload = part.get_payload(decode=True)
+                if payload:
+                    bodies.append(payload.decode(errors="ignore"))
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            bodies.append(payload.decode(errors="ignore"))
+
+    return "\n\n".join([b for b in bodies if b]).strip()
+
+
+def read_latest_mails(limit: int = 3, subject_contains: Optional[str] = None) -> List[Dict[str, str]]:
+    if not IMAP_HOST or not IMAP_USER or not IMAP_PASS:
+        raise RuntimeError("IMAP config fehlt")
+
+    mail = imaplib.IMAP4_SSL(IMAP_HOST)
+    mail.login(IMAP_USER, IMAP_PASS)
+    mail.select("inbox")
+
+    result, data = mail.search(None, "ALL")
+    if result != "OK":
+        raise RuntimeError("IMAP Suche fehlgeschlagen")
+
+    ids = data[0].split()
+    mails: List[Dict[str, str]] = []
+
+    for msg_id in reversed(ids):
+        res, msg_data = mail.fetch(msg_id, "(RFC822)")
+        if res != "OK":
+            continue
+
+        raw_email = msg_data[0][1]
+        msg = email.message_from_bytes(raw_email)
+        subject = msg.get("Subject", "")
+        body = extract_plain_text_from_email_message(msg)
+
+        if subject_contains and subject_contains.lower() not in subject.lower():
+            continue
+
+        mails.append({
+            "subject": subject,
+            "body": body,
+            "preview": body[:500],
+        })
+
+        if len(mails) >= limit:
+            break
+
+    try:
+        mail.logout()
+    except Exception:
+        pass
+
+    return mails
+
+
+# ----------------------------
+# Analyze core
+# ----------------------------
+
 def compute_reise_status(detail: dict) -> dict:
     events = detail.get("events", [])
     reisende = detail.get("reisende", [])
     typen = [e.get("typ") for e in events]
+
     warnungen = []
     status = "ok"
+
     if len(reisende) == 0:
         warnungen.append("Keine Reisenden zugeordnet")
         status = "fehler"
@@ -256,6 +377,7 @@ def compute_reise_status(detail: dict) -> dict:
     if len(events) == 0:
         warnungen.append("Keine Events vorhanden")
         status = "fehler"
+
     return {
         "status": status,
         "warnungen": warnungen,
@@ -265,15 +387,17 @@ def compute_reise_status(detail: dict) -> dict:
     }
 
 
-def auto_create_event_for_analysis(reise_id: int, beleg_id: int, data: dict):
+def auto_create_event_for_analysis(reise_id: int, beleg_id: int, data: dict) -> int:
     art = data.get("art_des_dokuments", "Unbekannt")
     titel = art if art != "Unbekannt" else "Beleg"
-    event_id = create_event({
-        "reise_id": reise_id,
-        "typ": art,
-        "titel": titel,
-        "status": "abgeschlossen",
-    })
+    event_id = create_event(
+        {
+            "reise_id": reise_id,
+            "typ": art,
+            "titel": titel,
+            "status": "abgeschlossen",
+        }
+    )
     attach_beleg_to_event(event_id, beleg_id)
     return event_id
 
@@ -308,12 +432,14 @@ def analyze_text_internal(
     data["ai_model"] = ai_model_override or OPENAI_MODEL
     data["anonymized_preview"] = anonymized_text[:4000]
 
-    beleg_id = insert_beleg({
-        "belegdatum": data.get("belegdatum"),
-        "art": data.get("art_des_dokuments"),
-        "kosten": data.get("kosten_mit_steuern"),
-        "waehrung": data.get("waehrung_der_kosten"),
-    })
+    beleg_id = insert_beleg(
+        {
+            "belegdatum": data.get("belegdatum"),
+            "art": data.get("art_des_dokuments"),
+            "kosten": data.get("kosten_mit_steuern"),
+            "waehrung": data.get("waehrung_der_kosten"),
+        }
+    )
     data["beleg_id"] = beleg_id
 
     if event_id:
@@ -325,6 +451,10 @@ def analyze_text_internal(
 
     return data
 
+
+# ----------------------------
+# API routes
+# ----------------------------
 
 @app.get("/")
 def root():
@@ -362,67 +492,6 @@ def ai_test(ai_model: Optional[str] = Query(default=None)):
     }
 
 
-def extract_plain_text_from_email_message(msg) -> str:
-    bodies: List[str] = []
-    if msg.is_multipart():
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            disposition = str(part.get("Content-Disposition") or "")
-            if "attachment" in disposition.lower():
-                continue
-            if content_type == "text/plain":
-                payload = part.get_payload(decode=True)
-                if payload:
-                    bodies.append(payload.decode(errors="ignore"))
-    else:
-        payload = msg.get_payload(decode=True)
-        if payload:
-            bodies.append(payload.decode(errors="ignore"))
-    return "
-
-".join([b for b in bodies if b]).strip()
-
-
-def read_latest_mails(limit: int = 3, subject_contains: Optional[str] = None) -> List[Dict[str, str]]:
-    if not IMAP_HOST or not IMAP_USER or not IMAP_PASS:
-        raise RuntimeError("IMAP config fehlt")
-    mail = imaplib.IMAP4_SSL(IMAP_HOST)
-    mail.login(IMAP_USER, IMAP_PASS)
-    mail.select("inbox")
-    result, data = mail.search(None, "ALL")
-    if result != "OK":
-        raise RuntimeError("IMAP Suche fehlgeschlagen")
-    ids = data[0].split()
-    mails: List[Dict[str, str]] = []
-
-    for msg_id in reversed(ids):
-        res, msg_data = mail.fetch(msg_id, "(RFC822)")
-        if res != "OK":
-            continue
-        raw_email = msg_data[0][1]
-        msg = email.message_from_bytes(raw_email)
-        subject = msg.get("Subject", "")
-        body = extract_plain_text_from_email_message(msg)
-
-        if subject_contains and subject_contains.lower() not in subject.lower():
-            continue
-
-        mails.append({
-            "subject": subject,
-            "body": body,
-            "preview": body[:500],
-        })
-
-        if len(mails) >= limit:
-            break
-
-    try:
-        mail.logout()
-    except Exception:
-        pass
-    return mails
-
-
 @app.get("/mail/test")
 def mail_test(
     limit: int = Query(default=3, ge=1, le=20),
@@ -434,10 +503,7 @@ def mail_test(
             "status": "ok",
             "count": len(mails),
             "subject_filter": subject_contains,
-            "mails": [
-                {"subject": m["subject"], "preview": m["preview"]}
-                for m in mails
-            ],
+            "mails": [{"subject": m["subject"], "preview": m["preview"]} for m in mails],
         }
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
