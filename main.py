@@ -36,7 +36,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.12d"
+APP_VERSION = "7.12e"
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
@@ -162,13 +162,21 @@ def anonymize_employee_names(text: str) -> str:
         for variant in normalize_variants(reverse):
             anonymized = re.sub(re.escape(variant), "Max Mustermann", anonymized, flags=re.IGNORECASE)
 
-    # 4. Typische Felder glätten
+        # 4. Anrede + nur Nachname, z. B. Herr Diesslin / Mr Diesslin
+        for nv in normalize_variants(nachname):
+            anonymized = re.sub(
+                rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(nv)}\b",
+                lambda match: f"{match.group(1)} Max Mustermann",
+                anonymized,
+            )
+
+    # 5. Typische Felder glätten
     anonymized = re.sub(r"(?i)(Guest\s*name\s*:\s*)[^\r\n]+", r"\1Max Mustermann", anonymized)
     anonymized = re.sub(r"(?i)(This Marriott\.com reservation email has been forwarded to you by\s+)[^\r\n]+", r"\1Max Mustermann", anonymized)
     anonymized = re.sub(r"(?i)(An\s*:\s*)[^<\r\n]+", r"\1Max Mustermann ", anonymized)
     anonymized = re.sub(r"(?i)(Betreff\s*:\s*)Max Mustermann\s*\([^\)]*\)", r"\1Max Mustermann", anonymized)
 
-    # 5. Cleanup
+    # 6. Cleanup
     anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
     anonymized = re.sub(
         r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+",
