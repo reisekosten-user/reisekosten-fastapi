@@ -362,35 +362,94 @@ def ai_test(ai_model: Optional[str] = Query(default=None)):
     }
 
 
+def extract_plain_text_from_email_message(msg) -> str:
+    bodies: List[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            disposition = str(part.get("Content-Disposition") or "")
+            if "attachment" in disposition.lower():
+                continue
+            if content_type == "text/plain":
+                payload = part.get_payload(decode=True)
+                if payload:
+                    bodies.append(payload.decode(errors="ignore"))
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            bodies.append(payload.decode(errors="ignore"))
+    return "
+
+".join([b for b in bodies if b]).strip()
+
+
+def read_latest_mails(limit: int = 3) -> List[Dict[str, str]]:
+    if not IMAP_HOST or not IMAP_USER or not IMAP_PASS:
+        raise RuntimeError("IMAP config fehlt")
+    mail = imaplib.IMAP4_SSL(IMAP_HOST)
+    mail.login(IMAP_USER, IMAP_PASS)
+    mail.select("inbox")
+    result, data = mail.search(None, "ALL")
+    if result != "OK":
+        raise RuntimeError("IMAP Suche fehlgeschlagen")
+    ids = data[0].split()
+    latest_ids = ids[-limit:]
+    mails: List[Dict[str, str]] = []
+    for msg_id in reversed(latest_ids):
+        res, msg_data = mail.fetch(msg_id, "(RFC822)")
+        if res != "OK":
+            continue
+        raw_email = msg_data[0][1]
+        msg = email.message_from_bytes(raw_email)
+        subject = msg.get("Subject", "")
+        body = extract_plain_text_from_email_message(msg)
+        mails.append({
+            "subject": subject,
+            "body": body,
+            "preview": body[:500],
+        })
+    try:
+        mail.logout()
+    except Exception:
+        pass
+    return mails
+
+
 @app.get("/mail/test")
 def mail_test():
-    if not IMAP_HOST or not IMAP_USER or not IMAP_PASS:
-        return {"status": "error", "detail": "IMAP config fehlt"}
     try:
-        mail = imaplib.IMAP4_SSL(IMAP_HOST)
-        mail.login(IMAP_USER, IMAP_PASS)
-        mail.select("inbox")
-        result, data = mail.search(None, "ALL")
-        ids = data[0].split()
-        latest_ids = ids[-3:]
-        mails = []
-        for i in latest_ids:
-            res, msg_data = mail.fetch(i, "(RFC822)")
-            raw_email = msg_data[0][1]
-            msg = email.message_from_bytes(raw_email)
-            subject = msg.get("Subject", "")
-            body = ""
-            if msg.is_multipart():
-                for part in msg.walk():
-                    if part.get_content_type() == "text/plain":
-                        payload = part.get_payload(decode=True)
-                        body = payload.decode(errors="ignore") if payload else ""
-                        break
-            else:
-                payload = msg.get_payload(decode=True)
-                body = payload.decode(errors="ignore") if payload else ""
-            mails.append({"subject": subject, "preview": body[:500]})
-        return {"status": "ok", "mails": mails}
+        mails = read_latest_mails(limit=3)
+        return {
+            "status": "ok",
+            "mails": [
+                {"subject": m["subject"], "preview": m["preview"]}
+                for m in mails
+            ],
+        }
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
+@app.get("/mail/analyze-latest")
+def mail_analyze_latest(limit: int = Query(default=3, ge=1, le=10)):
+    try:
+        mails = read_latest_mails(limit=limit)
+        analyzed = []
+        for m in mails:
+            result = analyze_text_internal(
+                m["body"],
+                filename=f"mail:{m['subject']}",
+                reise_id=None,
+                event_id=None,
+                ai_provider_override="openai",
+                ai_model_override=None,
+            )
+            analyzed.append({
+                "subject": m["subject"],
+                "preview": m["preview"],
+                "analysis": result,
+            })
+        return {"status": "ok", "count": len(analyzed), "results": analyzed}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
 
