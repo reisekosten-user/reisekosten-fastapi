@@ -36,7 +36,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.12e"
+APP_VERSION = "7.13"
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
@@ -115,6 +115,47 @@ def normalize_variants(value: str) -> List[str]:
 
 
 # ----------------------------
+# Reisecode helpers
+# ----------------------------
+
+def extract_reise_code_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    match = re.search(r"\b(\d{2}-\d{3})\b", text)
+    if match:
+        return match.group(1)
+    return None
+
+
+def find_reise_by_code(reise_code: str) -> Optional[Dict[str, Any]]:
+    if not reise_code:
+        return None
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, reise_code, reise_name
+                    FROM reisen
+                    WHERE reise_code = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (reise_code,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "reise_code": row[1],
+                    "reise_name": row[2],
+                }
+    except Exception:
+        return None
+
+
+# ----------------------------
 # Anonymization
 # ----------------------------
 
@@ -139,12 +180,10 @@ def anonymize_employee_names(text: str) -> str:
         forward = f"{vorname} {nachname}"
         reverse = f"{nachname} {vorname}"
 
-        # 1. Exakte 2-teilige Namen zuerst
         for candidate in [forward, reverse]:
             for variant in normalize_variants(candidate):
                 anonymized = re.sub(re.escape(variant), "Max Mustermann", anonymized, flags=re.IGNORECASE)
 
-        # 2. Mit Titel und optionalem Mittelteil: Vorname ... Nachname
         for vv in normalize_variants(vorname):
             for nv in normalize_variants(nachname):
                 anonymized = re.sub(
@@ -158,11 +197,6 @@ def anonymize_employee_names(text: str) -> str:
                     anonymized,
                 )
 
-        # 3. Häufige Hotel-/Mail-Formate mit Nachname Vorname
-        for variant in normalize_variants(reverse):
-            anonymized = re.sub(re.escape(variant), "Max Mustermann", anonymized, flags=re.IGNORECASE)
-
-        # 4. Anrede + nur Nachname, z. B. Herr Diesslin / Mr Diesslin
         for nv in normalize_variants(nachname):
             anonymized = re.sub(
                 rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(nv)}\b",
@@ -170,13 +204,11 @@ def anonymize_employee_names(text: str) -> str:
                 anonymized,
             )
 
-    # 5. Typische Felder glätten
     anonymized = re.sub(r"(?i)(Guest\s*name\s*:\s*)[^\r\n]+", r"\1Max Mustermann", anonymized)
     anonymized = re.sub(r"(?i)(This Marriott\.com reservation email has been forwarded to you by\s+)[^\r\n]+", r"\1Max Mustermann", anonymized)
     anonymized = re.sub(r"(?i)(An\s*:\s*)[^<\r\n]+", r"\1Max Mustermann ", anonymized)
     anonymized = re.sub(r"(?i)(Betreff\s*:\s*)Max Mustermann\s*\([^\)]*\)", r"\1Max Mustermann", anonymized)
 
-    # 6. Cleanup
     anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
     anonymized = re.sub(
         r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+",
@@ -516,20 +548,32 @@ def mail_analyze_latest(
     try:
         mails = read_latest_mails(limit=limit, subject_contains=subject_contains)
         analyzed = []
+
         for m in mails:
+            detected_reise_code = extract_reise_code_from_text(m["subject"])
+            detected_reise = find_reise_by_code(detected_reise_code) if detected_reise_code else None
+            detected_reise_id = detected_reise["id"] if detected_reise else None
+
             result = analyze_text_internal(
                 m["body"],
                 filename=f"mail:{m['subject']}",
-                reise_id=None,
+                reise_id=detected_reise_id,
                 event_id=None,
                 ai_provider_override="openai",
                 ai_model_override=None,
             )
-            analyzed.append({
-                "subject": m["subject"],
-                "preview": m["preview"],
-                "analysis": result,
-            })
+
+            analyzed.append(
+                {
+                    "subject": m["subject"],
+                    "preview": m["preview"],
+                    "detected_reise_code": detected_reise_code,
+                    "assigned_reise_id": detected_reise_id,
+                    "assigned_reise_name": detected_reise["reise_name"] if detected_reise else None,
+                    "analysis": result,
+                }
+            )
+
         return {
             "status": "ok",
             "count": len(analyzed),
