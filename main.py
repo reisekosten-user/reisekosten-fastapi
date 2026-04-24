@@ -37,7 +37,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.15"
+APP_VERSION = "7.16"
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
@@ -169,7 +169,6 @@ def ensure_belege_fingerprint_column() -> None:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_belege_fingerprint ON belege(fingerprint)")
             conn.commit()
     except Exception:
-        # System soll trotzdem starten, falls alte DB-Rechte/Schema abweichen.
         pass
 
 
@@ -211,6 +210,58 @@ def set_beleg_fingerprint(beleg_id: int, fingerprint: str) -> None:
             conn.commit()
     except Exception:
         pass
+
+
+# ----------------------------
+# Delete helpers for dashboard
+# ----------------------------
+
+def delete_mitarbeiter_by_id(mitarbeiter_id: int) -> None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM reise_reisende WHERE mitarbeiter_id = %s", (mitarbeiter_id,))
+            cur.execute("DELETE FROM mitarbeiter WHERE id = %s", (mitarbeiter_id,))
+        conn.commit()
+
+
+def delete_reise_by_id(reise_id: int) -> None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM event_belege WHERE event_id IN (SELECT id FROM events WHERE reise_id = %s)", (reise_id,))
+            cur.execute("DELETE FROM events WHERE reise_id = %s", (reise_id,))
+            cur.execute("DELETE FROM reise_reisende WHERE reise_id = %s", (reise_id,))
+            cur.execute("DELETE FROM reisen WHERE id = %s", (reise_id,))
+        conn.commit()
+
+
+def update_reise_basic(reise_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE reisen
+                   SET reise_name = %s,
+                       startdatum = %s,
+                       enddatum = %s,
+                       anzahl_reisende = %s
+                 WHERE id = %s
+                """,
+                (
+                    payload.get("reise_name"),
+                    payload.get("startdatum"),
+                    payload.get("enddatum"),
+                    payload.get("anzahl_reisende") or 1,
+                    reise_id,
+                ),
+            )
+            cur.execute("DELETE FROM reise_reisende WHERE reise_id = %s", (reise_id,))
+            for mitarbeiter_id in payload.get("mitarbeiter_ids") or []:
+                cur.execute(
+                    "INSERT INTO reise_reisende (reise_id, mitarbeiter_id, alias_name) VALUES (%s, %s, %s)",
+                    (reise_id, mitarbeiter_id, f"REISENDER_{mitarbeiter_id}"),
+                )
+        conn.commit()
+    return {"reise_id": reise_id}
 
 
 # ----------------------------
@@ -749,6 +800,15 @@ def mitarbeiter_update(mitarbeiter_id: int, payload: MitarbeiterCreateRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.delete("/mitarbeiter/{mitarbeiter_id}")
+def mitarbeiter_delete(mitarbeiter_id: int):
+    try:
+        delete_mitarbeiter_by_id(mitarbeiter_id)
+        return {"status": "ok", "deleted_mitarbeiter_id": mitarbeiter_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/reisen")
 def reisen_list():
     try:
@@ -784,6 +844,24 @@ def reisen_create(payload: ReiseCreateRequest):
     try:
         result = create_reise(payload.model_dump())
         return {"status": "ok", **result}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.put("/reisen/{reise_id}")
+def reisen_update(reise_id: int, payload: ReiseCreateRequest):
+    try:
+        result = update_reise_basic(reise_id, payload.model_dump())
+        return {"status": "ok", **result}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.delete("/reisen/{reise_id}")
+def reisen_delete(reise_id: int):
+    try:
+        delete_reise_by_id(reise_id)
+        return {"status": "ok", "deleted_reise_id": reise_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

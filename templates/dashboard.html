@@ -3,108 +3,70 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Reisekosten Dashboard 7.12c</title>
+  <title>Reisekosten Dashboard 7.16</title>
   <style>
     :root {
       --bg: #f5f7fb;
       --card: #ffffff;
       --line: #dbe2f0;
       --primary: #1f4ed8;
-      --primary-dark: #163aa6;
+      --primary-dark: #173ba8;
       --text: #1f2937;
       --muted: #64748b;
-      --good: #166534;
-      --warn: #b45309;
-      --bad: #b91c1c;
+      --danger: #b91c1c;
+      --danger-bg: #fee2e2;
+      --ok: #166534;
+      --ok-bg: #dcfce7;
     }
 
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
 
-    .header {
+    .topbar {
       background: linear-gradient(90deg, #12327f, #2563eb);
       color: white;
       padding: 14px 24px;
       display: flex;
+      align-items: center;
       justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
       gap: 16px;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-    }
-
-    .brand img {
-      height: 64px;
-      object-fit: contain;
-    }
-
-    .brand h1 {
-      margin: 0;
-      font-size: 24px;
-    }
-
-    .brand .sub {
-      font-size: 13px;
-      opacity: 0.9;
-      margin-top: 3px;
-    }
-
-    .nav {
-      display: flex;
-      gap: 10px;
       flex-wrap: wrap;
     }
 
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .brand img { height: 58px; object-fit: contain; }
+    .brand h1 { margin: 0; font-size: 24px; }
+    .brand .version { font-size: 13px; opacity: 0.92; margin-top: 3px; }
+
+    .nav { display: flex; flex-wrap: wrap; gap: 10px; }
     .nav button, .btn {
+      border: none;
       background: var(--primary);
       color: white;
-      border: none;
       border-radius: 10px;
       padding: 10px 14px;
       font-weight: 700;
       cursor: pointer;
     }
-
     .nav button:hover, .btn:hover { background: var(--primary-dark); }
-    .btn-light {
-      background: #e2e8f0;
-      color: #0f172a;
-    }
+    .btn-light { background: #e2e8f0; color: #0f172a; }
+    .btn-light:hover { background: #cbd5e1; }
+    .btn-danger { background: var(--danger); }
+    .btn-danger:hover { background: #7f1d1d; }
+    .icon-btn { padding: 7px 10px; border-radius: 8px; margin-right: 6px; }
 
-    .container {
-      max-width: 1450px;
-      margin: 24px auto;
-      padding: 0 18px 40px 18px;
-    }
-
+    .container { max-width: 1450px; margin: 22px auto; padding: 0 18px 42px; }
     .status {
-      margin-bottom: 18px;
-      padding: 12px 14px;
-      border-radius: 12px;
-      font-weight: 700;
       background: #eff6ff;
-      color: #1d4ed8;
       border: 1px solid #bfdbfe;
+      color: #1d4ed8;
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-weight: 700;
+      margin-bottom: 18px;
     }
-
-    .error {
-      background: #fee2e2;
-      color: #b91c1c;
-      border-color: #fecaca;
-    }
-
-    .grid {
-      display: grid;
-      gap: 18px;
-    }
-
-    .grid-3 { grid-template-columns: repeat(3, 1fr); }
-    .grid-2 { grid-template-columns: 1.15fr 0.85fr; }
+    .status.error { background: var(--danger-bg); border-color: #fecaca; color: var(--danger); }
+    .status.ok { background: var(--ok-bg); border-color: #bbf7d0; color: var(--ok); }
 
     .card {
       background: var(--card);
@@ -112,575 +74,478 @@
       border-radius: 16px;
       padding: 18px;
       box-shadow: 0 3px 14px rgba(15, 23, 42, 0.05);
-    }
-
-    .title {
-      margin: 0 0 8px 0;
-      font-size: 20px;
-      font-weight: 700;
-    }
-
-    .subtitle {
-      color: var(--muted);
-      font-size: 13px;
-      margin-bottom: 16px;
-    }
-
-    .metric {
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 14px;
-      background: #f8fbff;
-    }
-
-    .metric-label {
-      font-size: 12px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-    }
-
-    .metric-value {
-      margin-top: 6px;
-      font-size: 24px;
-      font-weight: 800;
-    }
-
-    .row {
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-      align-items: end;
-    }
-
-    .col {
-      flex: 1;
-      min-width: 220px;
-    }
-
-    label {
-      display: block;
-      font-size: 13px;
-      font-weight: 700;
-      margin-bottom: 6px;
-    }
-
-    input, select, textarea {
-      width: 100%;
-      padding: 10px 12px;
-      border: 1px solid #cbd5e1;
-      border-radius: 10px;
-      background: white;
-      font-size: 14px;
-      margin-bottom: 12px;
-    }
-
-    input[readonly] {
-      background: #e5e7eb;
-      color: #475569;
-    }
-
-    textarea {
-      min-height: 170px;
-      resize: vertical;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 14px;
-      background: white;
-      border-radius: 12px;
-      overflow: hidden;
-    }
-
-    th, td {
-      padding: 10px 12px;
-      border-bottom: 1px solid #e5edf7;
-      text-align: left;
-      vertical-align: top;
-    }
-
-    th {
-      background: #eef4fb;
-      color: #334155;
-      font-size: 13px;
-    }
-
-    .badge {
-      display: inline-block;
-      padding: 6px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
-    }
-
-    .ok { background: #dcfce7; color: var(--good); }
-    .warn { background: #fef3c7; color: var(--warn); }
-    .bad { background: #fee2e2; color: var(--bad); }
-
-    pre {
-      background: #0f172a;
-      color: #dbeafe;
-      padding: 14px;
-      border-radius: 12px;
-      white-space: pre-wrap;
-      word-break: break-word;
-      overflow: auto;
-      font-size: 13px;
-    }
-
-    .hidden { display: none; }
-
-    .section-tabs {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
       margin-bottom: 18px;
     }
 
-    .hint {
-      color: var(--muted);
-      font-size: 13px;
-      margin-top: 4px;
-    }
+    .card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+    h2 { margin: 0; font-size: 22px; }
+    .subtitle { color: var(--muted); font-size: 13px; margin-top: 4px; }
 
-    @media (max-width: 1100px) {
-      .grid-3, .grid-2 { grid-template-columns: 1fr; }
+    .grid { display: grid; gap: 14px; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 14px;
+      background: white;
+      margin-bottom: 12px;
     }
+    select[multiple] { min-height: 96px; }
+    input[readonly] { background: #e5e7eb; color: #475569; }
+    textarea { min-height: 150px; resize: vertical; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #e5edf7; vertical-align: top; }
+    th { background: #eef4fb; color: #334155; font-size: 13px; }
+
+    .hidden { display: none; }
+    .form-panel { background: #f8fbff; border: 1px solid #dbeafe; border-radius: 14px; padding: 14px; margin-bottom: 16px; }
+    .actions { white-space: nowrap; }
+    .small { color: var(--muted); font-size: 12px; }
+    pre { background: #0f172a; color: #dbeafe; padding: 14px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; overflow: auto; font-size: 13px; }
+
+    @media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
-  <div class="header">
+  <div class="topbar">
     <div class="brand">
       <img src="/static/logo2.png" alt="Logo" />
       <div>
         <h1>Reisekosten System</h1>
-        <div class="sub">Version 7.12c · Dashboard komplett inkl. Mail-Test und Mail-Analyse</div>
+        <div class="version">Version 7.16 · Mitarbeiter- und Reisen-Seiten mit Neu/Bearbeiten/Löschen</div>
       </div>
     </div>
-
     <div class="nav">
-      <button onclick="showSection('overview')">Übersicht</button>
-      <button onclick="showSection('scan')">Belegscan</button>
-      <button onclick="showSection('mail')">Mail-Test</button>
-      <button onclick="showSection('reisen')">Reisen</button>
-      <button onclick="showSection('mitarbeiter')">Mitarbeiter</button>
-      <button onclick="testHealth()">Health</button>
-      <button onclick="testAI()">AI-Test</button>
+      <button onclick="showPage('dashboard')">Dashboard</button>
+      <button onclick="showPage('mitarbeiter')">Mitarbeiter</button>
+      <button onclick="showPage('reisen')">Reisen</button>
+      <button onclick="showPage('mail')">Mail-Test</button>
+      <button onclick="showPage('debug')">Debug</button>
     </div>
   </div>
 
   <div class="container">
     <div id="statusBox" class="status">Bereit.</div>
 
-    <div id="section-overview">
-      <div class="grid grid-3" style="margin-bottom:18px;">
-        <div class="metric">
-          <div class="metric-label">Belege</div>
-          <div class="metric-value" id="metricBelege">0</div>
-        </div>
-        <div class="metric">
-          <div class="metric-label">Reisen</div>
-          <div class="metric-value" id="metricReisen">0</div>
-        </div>
-        <div class="metric">
-          <div class="metric-label">Mitarbeiter</div>
-          <div class="metric-value" id="metricMitarbeiter">0</div>
-        </div>
+    <section id="page-dashboard">
+      <div class="grid grid-3">
+        <div class="card"><h2 id="countMitarbeiter">0</h2><div class="subtitle">Mitarbeiter</div></div>
+        <div class="card"><h2 id="countReisen">0</h2><div class="subtitle">Reisen</div></div>
+        <div class="card"><h2 id="countBelege">0</h2><div class="subtitle">Belege</div></div>
       </div>
-
-      <div class="grid grid-2">
-        <div class="card">
-          <div class="title">Reisen Übersicht</div>
-          <div class="subtitle">Klick auf ID für Detailansicht</div>
-          <div id="reisenTable"></div>
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Übersicht</h2><div class="subtitle">Schnellzugriff auf Stammdaten und Tests</div></div>
         </div>
-
-        <div class="card">
-          <div class="title">Gespeicherte Belege</div>
-          <div class="subtitle">Neueste Belege zuerst</div>
-          <div id="belegeTable"></div>
-        </div>
+        <button class="btn" onclick="showPage('mitarbeiter')">Mitarbeiter öffnen</button>
+        <button class="btn" onclick="showPage('reisen')">Reisen öffnen</button>
+        <button class="btn btn-light" onclick="refreshAll()">Aktualisieren</button>
       </div>
+    </section>
 
-      <div class="card" style="margin-top:18px;">
-        <div class="title">Mitarbeiter Übersicht</div>
-        <div class="subtitle">Aktive Mitarbeiter aus der PostgreSQL-Datenbank</div>
+    <section id="page-mitarbeiter" class="hidden">
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Mitarbeiter</h2><div class="subtitle">Wichtige Spalten: Kürzel und Name</div></div>
+          <button class="btn" onclick="openMitarbeiterNew()">+ Neu</button>
+        </div>
+
+        <div id="mitarbeiterForm" class="form-panel hidden">
+          <h3 id="mitarbeiterFormTitle">Mitarbeiter anlegen</h3>
+          <input id="mitarbeiterId" type="hidden" />
+          <div class="grid grid-2">
+            <div><label>Kürzel</label><input id="mitarbeiterKuerzel" placeholder="z. B. RD" /></div>
+            <div><label>E-Mail</label><input id="mitarbeiterEmail" placeholder="name@firma.de" /></div>
+            <div><label>Vorname</label><input id="mitarbeiterVorname" /></div>
+            <div><label>Nachname</label><input id="mitarbeiterNachname" /></div>
+            <div><label>Geburtsdatum</label><input id="mitarbeiterGeburtsdatum" placeholder="TT.MM.JJJJ" /></div>
+          </div>
+          <button class="btn" onclick="saveMitarbeiter()">Speichern</button>
+          <button class="btn btn-light" onclick="closeMitarbeiterForm()">Abbrechen</button>
+        </div>
+
         <div id="mitarbeiterTable"></div>
       </div>
-    </div>
+    </section>
 
-    <div id="section-scan" class="hidden">
+    <section id="page-reisen" class="hidden">
       <div class="card">
-        <div class="title">Belegscan / Analyse</div>
-        <div class="subtitle">Anonymisierung: Namen → Max Mustermann, E-Mails → abc@123.com</div>
-
-        <div class="row">
-          <div class="col">
-            <label>Reise-ID optional</label>
-            <input id="scanReiseId" type="number" />
-          </div>
-          <div class="col">
-            <label>Event-ID optional</label>
-            <input id="scanEventId" type="number" />
-          </div>
-          <div class="col">
-            <label>OpenAI Modell optional</label>
-            <input id="aiModelInput" type="text" placeholder="z. B. gpt-5.4" />
-          </div>
+        <div class="card-head">
+          <div><h2>Reisen</h2><div class="subtitle">Wichtige Spalten: Reise-ID, Reisename, Reisende Kürzel</div></div>
+          <button class="btn" onclick="openReiseNew()">+ Neu</button>
         </div>
 
-        <label>Dateiname</label>
-        <input id="filename" type="text" value="manuell.txt" />
-
-        <label>Textinhalt</label>
-        <textarea id="textInput" placeholder="Hier Text, E-Mail-Inhalt oder OCR-Text einfügen ..."></textarea>
-
-        <div class="row">
-          <button class="btn btn-light" onclick="previewAnonymizedText()">Anonymisierung Vorschau</button>
-          <button class="btn" onclick="analyzeText()">Text analysieren</button>
-        </div>
-
-        <div class="row" style="margin-top:16px;">
-          <div class="col">
-            <label>Datei auswählen</label>
-            <input id="fileInput" type="file" />
+        <div id="reiseForm" class="form-panel hidden">
+          <h3 id="reiseFormTitle">Reise anlegen</h3>
+          <input id="reiseDbId" type="hidden" />
+          <div class="grid grid-2">
+            <div><label>Jahr</label><input id="reiseJahr" type="number" value="2026" onchange="loadNextCode()" /></div>
+            <div><label>Nächster Reisecode (vom System vergeben)</label><input id="reiseNextCode" readonly /></div>
+            <div><label>Reisename</label><input id="reiseName" placeholder="z. B. Lyon ECMA" /></div>
+            <div><label>Anzahl Reisende</label><input id="reiseAnzahl" type="number" value="1" min="1" /></div>
+            <div><label>Startdatum</label><input id="reiseStart" type="date" /></div>
+            <div><label>Enddatum</label><input id="reiseEnde" type="date" /></div>
           </div>
+          <label>Reisende auswählen</label>
+          <select id="reiseMitarbeiterSelect" multiple></select>
+          <div class="small">Mehrfachauswahl: Strg/CTRL gedrückt halten.</div><br />
+          <button class="btn" onclick="saveReise()">Speichern</button>
+          <button class="btn btn-light" onclick="closeReiseForm()">Abbrechen</button>
         </div>
 
-        <div class="row">
-          <button class="btn btn-light" onclick="previewAnonymizedFile()">Datei anonymisieren</button>
-          <button class="btn" onclick="analyzeFile()">Datei analysieren</button>
+        <div id="reisenTable"></div>
+      </div>
+    </section>
+
+    <section id="page-mail" class="hidden">
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Mail-Test / Mail-Analyse</h2><div class="subtitle">Betreff-Filter, Analyse und Duplikat-Check</div></div>
+        </div>
+        <div class="grid grid-3">
+          <div><label>Betreff enthält</label><input id="mailSubject" value="26-001" /></div>
+          <div><label>Anzahl</label><input id="mailLimit" type="number" value="3" min="1" max="10" /></div>
+          <div style="padding-top:22px;">
+            <button class="btn btn-light" onclick="mailTest()">Mails testen</button>
+            <button class="btn" onclick="mailAnalyze()">Mails analysieren</button>
+          </div>
         </div>
       </div>
-    </div>
+    </section>
 
-    <div id="section-mail" class="hidden">
+    <section id="page-debug" class="hidden">
       <div class="card">
-        <div class="title">Mail-Test / Mail-Analyse</div>
-        <div class="subtitle">Liest die Inbox per IMAP und filtert nach Betreff</div>
-
-        <div class="row">
-          <div class="col">
-            <label>Betreff enthält</label>
-            <input id="subjectFilter" type="text" placeholder="z. B. 26-001" value="26-001" />
-          </div>
-          <div class="col" style="max-width:180px;">
-            <label>Anzahl</label>
-            <input id="mailLimit" type="number" min="1" max="10" value="3" />
-          </div>
-          <div class="col" style="max-width:220px;">
-            <button class="btn btn-light" onclick="testMails()">Mails testen</button>
-          </div>
-          <div class="col" style="max-width:240px;">
-            <button class="btn" onclick="analyzeMails()">Mails analysieren</button>
-          </div>
+        <div class="card-head">
+          <div><h2>Debug / Ergebnis</h2><div class="subtitle">Letzte Serverantwort</div></div>
+          <button class="btn btn-light" onclick="health()">Health</button>
         </div>
-
-        <div class="hint">Verwendet <code>/mail/test</code> und <code>/mail/analyze-latest</code> mit Betreff-Filter.</div>
+        <pre id="resultBox">Noch kein Ergebnis.</pre>
       </div>
-    </div>
-
-    <div id="section-reisen" class="hidden">
-      <div class="card">
-        <div class="title">Reise-API Tests</div>
-        <div class="subtitle">Schneller Test von Reisen und Overview</div>
-        <div class="row">
-          <button class="btn" onclick="loadReisen()">Reisen laden</button>
-          <button class="btn btn-light" onclick="openUrl('/reisen')">/reisen öffnen</button>
-          <button class="btn btn-light" onclick="openUrl('/reisen/overview')">/reisen/overview öffnen</button>
-        </div>
-      </div>
-    </div>
-
-    <div id="section-mitarbeiter" class="hidden">
-      <div class="card">
-        <div class="title">Mitarbeiter-API Tests</div>
-        <div class="subtitle">Schneller Test von Mitarbeiterdaten</div>
-        <div class="row">
-          <button class="btn" onclick="loadMitarbeiter()">Mitarbeiter laden</button>
-          <button class="btn btn-light" onclick="openUrl('/mitarbeiter')">/mitarbeiter öffnen</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="card" style="margin-top:18px;">
-      <div class="title">Letztes Ergebnis / Debug</div>
-      <pre id="resultBox">Noch kein Ergebnis.</pre>
-    </div>
+    </section>
   </div>
 
   <script>
-    function api() {
-      return window.location.origin;
-    }
+    let mitarbeiterCache = [];
+    let reisenCache = [];
 
-    function setStatus(message, isError = false) {
+    function api() { return window.location.origin; }
+
+    function setStatus(msg, type = '') {
       const box = document.getElementById('statusBox');
-      box.textContent = message;
-      box.className = isError ? 'status error' : 'status';
+      box.textContent = msg;
+      box.className = 'status' + (type ? ' ' + type : '');
     }
 
-    function showSection(name) {
-      const sections = ['overview', 'scan', 'mail', 'reisen', 'mitarbeiter'];
-      for (const s of sections) {
-        document.getElementById('section-' + s).classList.add('hidden');
-      }
-      document.getElementById('section-' + name).classList.remove('hidden');
+    function showResult(data) {
+      document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
     }
 
-    async function parseJsonResponse(res) {
+    async function parseJson(res) {
       const txt = await res.text();
+      try { return JSON.parse(txt); } catch { throw new Error('Antwort war kein JSON: ' + txt.slice(0, 500)); }
+    }
+
+    async function requestJson(url, options = {}) {
+      const res = await fetch(url, options);
+      const data = await parseJson(res);
+      if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+      return data;
+    }
+
+    function showPage(name) {
+      ['dashboard', 'mitarbeiter', 'reisen', 'mail', 'debug'].forEach(p => document.getElementById('page-' + p).classList.add('hidden'));
+      document.getElementById('page-' + name).classList.remove('hidden');
+      if (name === 'mitarbeiter') loadMitarbeiter();
+      if (name === 'reisen') loadReisen();
+    }
+
+    async function health() {
       try {
-        return JSON.parse(txt);
-      } catch {
-        throw new Error('Antwort war kein JSON: ' + txt.substring(0, 500));
-      }
+        const data = await requestJson(api() + '/health');
+        showResult(data);
+        setStatus('Health OK: Version ' + data.version, 'ok');
+      } catch (e) { setStatus(e.message, 'error'); }
     }
 
-    function badge(status) {
-      if (status === 'ok') return '<span class="badge ok">OK</span>';
-      if (status === 'fehler') return '<span class="badge bad">Fehler</span>';
-      return '<span class="badge warn">Prüfen</span>';
+    async function refreshAll() {
+      await loadMitarbeiter(false);
+      await loadReisen(false);
+      await loadBelegeCount();
+      setStatus('Aktualisiert.', 'ok');
     }
 
-    function openUrl(path) {
-      window.open(api() + path, '_blank');
-    }
-
-    async function testHealth() {
+    async function loadBelegeCount() {
       try {
-        const res = await fetch(api() + '/health');
-        const data = await parseJsonResponse(res);
-        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
-        setStatus('Health OK.');
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
+        const data = await requestJson(api() + '/belege');
+        document.getElementById('countBelege').textContent = data.count || 0;
+      } catch (e) { document.getElementById('countBelege').textContent = '?'; }
     }
 
-    async function testAI() {
-      try {
-        const model = document.getElementById('aiModelInput').value.trim();
-        let url = api() + '/ai/test';
-        if (model) url += '?ai_model=' + encodeURIComponent(model);
-        const res = await fetch(url);
-        const data = await parseJsonResponse(res);
-        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
-        setStatus(data.status === 'ok' ? 'AI-Test erfolgreich.' : 'AI-Test fehlgeschlagen.', data.status !== 'ok');
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
+    // ---------------- Mitarbeiter ----------------
+    function fullName(m) {
+      return (m.vollname || m.klarname || ((m.vorname || '') + ' ' + (m.nachname || '')).trim() || '').trim();
     }
 
-    async function loadBelege() {
+    async function loadMitarbeiter(show = true) {
       try {
-        const res = await fetch(api() + '/belege');
-        const data = await parseJsonResponse(res);
-        document.getElementById('metricBelege').textContent = data.count || 0;
-        const rows = (data.belege || []).map(b => `
-          <tr>
-            <td>${b.id ?? ''}</td>
-            <td>${b.belegdatum ?? ''}</td>
-            <td>${b.art ?? ''}</td>
-            <td>${b.kosten ?? ''}</td>
-            <td>${b.waehrung ?? ''}</td>
-            <td>${b.created_at ?? ''}</td>
-          </tr>
-        `).join('');
-        document.getElementById('belegeTable').innerHTML = `
-          <table>
-            <thead>
-              <tr><th>ID</th><th>Datum</th><th>Art</th><th>Kosten</th><th>Währung</th><th>Erstellt</th></tr>
-            </thead>
-            <tbody>${rows || '<tr><td colspan="6">Keine Belege vorhanden</td></tr>'}</tbody>
-          </table>
-        `;
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
+        const data = await requestJson(api() + '/mitarbeiter');
+        mitarbeiterCache = data.mitarbeiter || [];
+        document.getElementById('countMitarbeiter').textContent = data.count || 0;
+        renderMitarbeiterTable();
+        renderMitarbeiterSelect();
+        if (show) setStatus('Mitarbeiter geladen.', 'ok');
+      } catch (e) { setStatus(e.message, 'error'); }
     }
 
-    async function loadReisen() {
-      try {
-        const res = await fetch(api() + '/reisen/overview');
-        const data = await parseJsonResponse(res);
-        document.getElementById('metricReisen').textContent = data.count || 0;
-        const rows = (data.reisen || []).map(r => `
-          <tr>
-            <td>${r.id ?? ''}</td>
-            <td>${r.reise_code ?? ''}</td>
-            <td>${r.reise_name ?? ''}</td>
-            <td>${r.anzahl_reisende ?? ''}</td>
-            <td>${r.flug ? '✔' : '—'}</td>
-            <td>${r.hotel ? '✔' : '—'}</td>
-            <td>${r.taxi ? '✔' : '—'}</td>
-            <td>${badge(r.status)}</td>
-            <td>${(r.warnungen || []).join(', ')}</td>
-          </tr>
-        `).join('');
-        document.getElementById('reisenTable').innerHTML = `
-          <table>
-            <thead>
-              <tr><th>ID</th><th>Code</th><th>Reisename</th><th>Reisende</th><th>Flug</th><th>Hotel</th><th>Taxi</th><th>Status</th><th>Warnungen</th></tr>
-            </thead>
-            <tbody>${rows || '<tr><td colspan="9">Keine Reisen vorhanden</td></tr>'}</tbody>
-          </table>
-        `;
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
+    function renderMitarbeiterTable() {
+      const rows = mitarbeiterCache.map(m => `
+        <tr>
+          <td>${m.kuerzel || ''}</td>
+          <td>${fullName(m)}</td>
+          <td class="actions">
+            <button class="btn btn-light icon-btn" title="Bearbeiten" onclick="editMitarbeiter(${m.id})">✏️</button>
+            <button class="btn btn-danger icon-btn" title="Löschen" onclick="deleteMitarbeiter(${m.id})">✖</button>
+          </td>
+        </tr>`).join('');
+      document.getElementById('mitarbeiterTable').innerHTML = `
+        <table>
+          <thead><tr><th>Kürzel</th><th>Name</th><th>Aktionen</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="3">Keine Mitarbeiter vorhanden</td></tr>'}</tbody>
+        </table>`;
     }
 
-    async function loadMitarbeiter() {
-      try {
-        const res = await fetch(api() + '/mitarbeiter');
-        const data = await parseJsonResponse(res);
-        document.getElementById('metricMitarbeiter').textContent = data.count || 0;
-        const rows = (data.mitarbeiter || []).map(m => `
-          <tr>
-            <td>${m.id ?? ''}</td>
-            <td>${m.kuerzel ?? ''}</td>
-            <td>${m.vollname ?? ''}</td>
-            <td>${m.geburtsdatum ?? ''}</td>
-            <td>${m.email ?? ''}</td>
-          </tr>
-        `).join('');
-        document.getElementById('mitarbeiterTable').innerHTML = `
-          <table>
-            <thead>
-              <tr><th>ID</th><th>Kürzel</th><th>Name</th><th>Geburtsdatum</th><th>E-Mail</th></tr>
-            </thead>
-            <tbody>${rows || '<tr><td colspan="5">Keine Mitarbeiter vorhanden</td></tr>'}</tbody>
-          </table>
-        `;
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
+    function openMitarbeiterNew() {
+      document.getElementById('mitarbeiterFormTitle').textContent = 'Mitarbeiter anlegen';
+      document.getElementById('mitarbeiterId').value = '';
+      document.getElementById('mitarbeiterKuerzel').value = '';
+      document.getElementById('mitarbeiterVorname').value = '';
+      document.getElementById('mitarbeiterNachname').value = '';
+      document.getElementById('mitarbeiterGeburtsdatum').value = '';
+      document.getElementById('mitarbeiterEmail').value = '';
+      document.getElementById('mitarbeiterForm').classList.remove('hidden');
     }
 
-    async function previewAnonymizedText() {
-      try {
-        const res = await fetch(api() + '/anonymize/text', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            text: document.getElementById('textInput').value,
-            filename: document.getElementById('filename').value
-          })
-        });
-        const data = await parseJsonResponse(res);
-        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
-        setStatus('Text anonymisiert.');
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
+    function closeMitarbeiterForm() { document.getElementById('mitarbeiterForm').classList.add('hidden'); }
+
+    function editMitarbeiter(id) {
+      const m = mitarbeiterCache.find(x => x.id === id);
+      if (!m) return;
+      document.getElementById('mitarbeiterFormTitle').textContent = 'Mitarbeiter bearbeiten';
+      document.getElementById('mitarbeiterId').value = m.id;
+      document.getElementById('mitarbeiterKuerzel').value = m.kuerzel || '';
+      document.getElementById('mitarbeiterVorname').value = m.vorname || '';
+      document.getElementById('mitarbeiterNachname').value = m.nachname || '';
+      document.getElementById('mitarbeiterGeburtsdatum').value = m.geburtsdatum || '';
+      document.getElementById('mitarbeiterEmail').value = m.email || '';
+      document.getElementById('mitarbeiterForm').classList.remove('hidden');
     }
 
-    async function analyzeText() {
+    async function saveMitarbeiter() {
       try {
-        const res = await fetch(api() + '/analyze/text', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            text: document.getElementById('textInput').value,
-            filename: document.getElementById('filename').value,
-            reise_id: document.getElementById('scanReiseId').value ? parseInt(document.getElementById('scanReiseId').value, 10) : null,
-            event_id: document.getElementById('scanEventId').value ? parseInt(document.getElementById('scanEventId').value, 10) : null,
-            ai_model: document.getElementById('aiModelInput').value.trim() || null,
-          })
-        });
-        const data = await parseJsonResponse(res);
-        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
-        setStatus(data.status === 'ok' ? 'Textanalyse abgeschlossen.' : (data.detail || 'Analysefehler'), data.status !== 'ok');
-        await loadBelege();
-        await loadReisen();
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
-    }
-
-    async function previewAnonymizedFile() {
-      try {
-        const input = document.getElementById('fileInput');
-        if (!input.files || !input.files[0]) {
-          setStatus('Bitte zuerst eine Datei auswählen.', true);
+        const id = document.getElementById('mitarbeiterId').value;
+        const payload = {
+          kuerzel: document.getElementById('mitarbeiterKuerzel').value.trim(),
+          vorname: document.getElementById('mitarbeiterVorname').value.trim(),
+          nachname: document.getElementById('mitarbeiterNachname').value.trim(),
+          geburtsdatum: document.getElementById('mitarbeiterGeburtsdatum').value.trim() || null,
+          email: document.getElementById('mitarbeiterEmail').value.trim() || null,
+          aktiv: true
+        };
+        if (!payload.kuerzel || !payload.vorname || !payload.nachname) {
+          setStatus('Bitte Kürzel, Vorname und Nachname ausfüllen.', 'error');
           return;
         }
-        const formData = new FormData();
-        formData.append('file', input.files[0]);
-        const res = await fetch(api() + '/anonymize/file', {method: 'POST', body: formData});
-        const data = await parseJsonResponse(res);
-        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
-        setStatus('Datei anonymisiert.');
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
+        const url = id ? api() + '/mitarbeiter/' + id : api() + '/mitarbeiter';
+        const method = id ? 'PUT' : 'POST';
+        const data = await requestJson(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+        showResult(data);
+        closeMitarbeiterForm();
+        await loadMitarbeiter();
+        setStatus('Mitarbeiter gespeichert.', 'ok');
+      } catch (e) { setStatus(e.message, 'error'); }
     }
 
-    async function analyzeFile() {
+    async function deleteMitarbeiter(id) {
+      const m = mitarbeiterCache.find(x => x.id === id);
+      if (!confirm('Mitarbeiter wirklich löschen?\n\n' + (m ? (m.kuerzel + ' - ' + fullName(m)) : id))) return;
       try {
-        const input = document.getElementById('fileInput');
-        if (!input.files || !input.files[0]) {
-          setStatus('Bitte zuerst eine Datei auswählen.', true);
+        const data = await requestJson(api() + '/mitarbeiter/' + id, { method: 'DELETE' });
+        showResult(data);
+        await loadMitarbeiter();
+        await loadReisen(false);
+        setStatus('Mitarbeiter gelöscht.', 'ok');
+      } catch (e) { setStatus(e.message, 'error'); }
+    }
+
+    // ---------------- Reisen ----------------
+    function renderMitarbeiterSelect(selectedIds = []) {
+      const select = document.getElementById('reiseMitarbeiterSelect');
+      if (!select) return;
+      const selectedSet = new Set(selectedIds.map(String));
+      select.innerHTML = mitarbeiterCache.map(m => `<option value="${m.id}" ${selectedSet.has(String(m.id)) ? 'selected' : ''}>${m.kuerzel || ''} - ${fullName(m)}</option>`).join('');
+    }
+
+    async function loadReisen(show = true) {
+      try {
+        const data = await requestJson(api() + '/reisen');
+        const baseReisen = data.reisen || [];
+        const detailed = [];
+        for (const r of baseReisen) {
+          try {
+            const d = await requestJson(api() + '/reisen/' + r.id);
+            detailed.push({ ...r, detail: d });
+          } catch { detailed.push({ ...r, detail: null }); }
+        }
+        reisenCache = detailed;
+        document.getElementById('countReisen').textContent = data.count || 0;
+        renderReisenTable();
+        if (show) setStatus('Reisen geladen.', 'ok');
+      } catch (e) { setStatus(e.message, 'error'); }
+    }
+
+    function reisendeKuerzel(r) {
+      const arr = (r.detail && r.detail.reisende) ? r.detail.reisende : [];
+      return arr.map(x => x.kuerzel || '').filter(Boolean).join(', ');
+    }
+
+    function renderReisenTable() {
+      const rows = reisenCache.map(r => `
+        <tr>
+          <td>${r.reise_code || ''}</td>
+          <td>${r.reise_name || ''}</td>
+          <td>${reisendeKuerzel(r) || '—'}</td>
+          <td class="actions">
+            <button class="btn btn-light icon-btn" title="Bearbeiten" onclick="editReise(${r.id})">✏️</button>
+            <button class="btn btn-danger icon-btn" title="Löschen" onclick="deleteReise(${r.id})">✖</button>
+          </td>
+        </tr>`).join('');
+      document.getElementById('reisenTable').innerHTML = `
+        <table>
+          <thead><tr><th>Reise-ID</th><th>Reisename</th><th>Reisende(r) Kürzel</th><th>Aktionen</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="4">Keine Reisen vorhanden</td></tr>'}</tbody>
+        </table>`;
+    }
+
+    async function loadNextCode() {
+      try {
+        const jahr = document.getElementById('reiseJahr').value || new Date().getFullYear();
+        const data = await requestJson(api() + '/reisen/next-code?jahr=' + encodeURIComponent(jahr));
+        document.getElementById('reiseNextCode').value = data.reise_code || data.next_code || JSON.stringify(data);
+      } catch { document.getElementById('reiseNextCode').value = 'nicht verfügbar'; }
+    }
+
+    async function openReiseNew() {
+      await loadMitarbeiter(false);
+      document.getElementById('reiseFormTitle').textContent = 'Reise anlegen';
+      document.getElementById('reiseDbId').value = '';
+      document.getElementById('reiseJahr').value = new Date().getFullYear();
+      document.getElementById('reiseName').value = '';
+      document.getElementById('reiseAnzahl').value = '1';
+      document.getElementById('reiseStart').value = '';
+      document.getElementById('reiseEnde').value = '';
+      renderMitarbeiterSelect([]);
+      await loadNextCode();
+      document.getElementById('reiseForm').classList.remove('hidden');
+    }
+
+    function closeReiseForm() { document.getElementById('reiseForm').classList.add('hidden'); }
+
+    async function editReise(id) {
+      await loadMitarbeiter(false);
+      const r = reisenCache.find(x => x.id === id);
+      if (!r) return;
+      const detail = r.detail || await requestJson(api() + '/reisen/' + id);
+      document.getElementById('reiseFormTitle').textContent = 'Reise bearbeiten';
+      document.getElementById('reiseDbId').value = r.id;
+      document.getElementById('reiseJahr').value = r.reise_jahr || new Date().getFullYear();
+      document.getElementById('reiseNextCode').value = r.reise_code || '';
+      document.getElementById('reiseName').value = r.reise_name || '';
+      document.getElementById('reiseAnzahl').value = r.anzahl_reisende || 1;
+      document.getElementById('reiseStart').value = r.startdatum || '';
+      document.getElementById('reiseEnde').value = r.enddatum || '';
+      renderMitarbeiterSelect((detail.reisende || []).map(x => x.id));
+      document.getElementById('reiseForm').classList.remove('hidden');
+    }
+
+    function selectedMitarbeiterIds() {
+      return Array.from(document.getElementById('reiseMitarbeiterSelect').selectedOptions).map(o => parseInt(o.value, 10));
+    }
+
+    async function saveReise() {
+      try {
+        const id = document.getElementById('reiseDbId').value;
+        const ids = selectedMitarbeiterIds();
+        const payload = {
+          reise_jahr: parseInt(document.getElementById('reiseJahr').value, 10),
+          reise_name: document.getElementById('reiseName').value.trim(),
+          startdatum: document.getElementById('reiseStart').value || null,
+          enddatum: document.getElementById('reiseEnde').value || null,
+          anzahl_reisende: parseInt(document.getElementById('reiseAnzahl').value || '1', 10),
+          mitarbeiter_ids: ids
+        };
+        if (!payload.reise_name) {
+          setStatus('Bitte Reisename ausfüllen.', 'error');
           return;
         }
-        let url = api() + '/analyze/file';
-        const qp = [];
-        if (document.getElementById('scanReiseId').value) qp.push('reise_id=' + encodeURIComponent(document.getElementById('scanReiseId').value));
-        if (document.getElementById('scanEventId').value) qp.push('event_id=' + encodeURIComponent(document.getElementById('scanEventId').value));
-        if (document.getElementById('aiModelInput').value.trim()) qp.push('ai_model=' + encodeURIComponent(document.getElementById('aiModelInput').value.trim()));
-        if (qp.length) url += '?' + qp.join('&');
-        const formData = new FormData();
-        formData.append('file', input.files[0]);
-        const res = await fetch(url, {method: 'POST', body: formData});
-        const data = await parseJsonResponse(res);
-        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
-        setStatus(data.status === 'ok' ? 'Dateianalyse abgeschlossen.' : (data.detail || 'Analysefehler'), data.status !== 'ok');
-        await loadBelege();
+        const url = id ? api() + '/reisen/' + id : api() + '/reisen';
+        const method = id ? 'PUT' : 'POST';
+        const data = await requestJson(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+        showResult(data);
+        closeReiseForm();
         await loadReisen();
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
+        setStatus('Reise gespeichert.', 'ok');
+      } catch (e) { setStatus(e.message, 'error'); }
     }
 
-    function buildMailUrl(path) {
-      const subject = document.getElementById('subjectFilter').value.trim();
+    async function deleteReise(id) {
+      const r = reisenCache.find(x => x.id === id);
+      if (!confirm('Reise wirklich löschen?\n\n' + (r ? (r.reise_code + ' - ' + r.reise_name) : id))) return;
+      try {
+        const data = await requestJson(api() + '/reisen/' + id, { method: 'DELETE' });
+        showResult(data);
+        await loadReisen();
+        setStatus('Reise gelöscht.', 'ok');
+      } catch (e) { setStatus(e.message, 'error'); }
+    }
+
+    // ---------------- Mail ----------------
+    function mailUrl(path) {
+      const subject = document.getElementById('mailSubject').value.trim();
       const limit = document.getElementById('mailLimit').value || '3';
-      const qp = ['limit=' + encodeURIComponent(limit)];
-      if (subject) qp.push('subject_contains=' + encodeURIComponent(subject));
-      return api() + path + '?' + qp.join('&');
+      const qs = ['limit=' + encodeURIComponent(limit)];
+      if (subject) qs.push('subject_contains=' + encodeURIComponent(subject));
+      return api() + path + '?' + qs.join('&');
     }
 
-    async function testMails() {
+    async function mailTest() {
       try {
-        const res = await fetch(buildMailUrl('/mail/test'));
-        const data = await parseJsonResponse(res);
-        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
-        setStatus(data.status === 'ok' ? 'Mails geladen.' : (data.detail || 'Mailfehler'), data.status !== 'ok');
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
+        const data = await requestJson(mailUrl('/mail/test'));
+        showResult(data);
+        showPage('debug');
+        setStatus('Mail-Test geladen.', 'ok');
+      } catch (e) { setStatus(e.message, 'error'); }
     }
 
-    async function analyzeMails() {
+    async function mailAnalyze() {
       try {
-        const res = await fetch(buildMailUrl('/mail/analyze-latest'));
-        const data = await parseJsonResponse(res);
-        document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
-        setStatus(data.status === 'ok' ? 'Mails analysiert.' : (data.detail || 'Mailanalysefehler'), data.status !== 'ok');
-        await loadBelege();
-      } catch (e) {
-        setStatus(e.message || String(e), true);
-      }
+        const data = await requestJson(mailUrl('/mail/analyze-latest'));
+        showResult(data);
+        showPage('debug');
+        await loadBelegeCount();
+        await loadReisen(false);
+        setStatus('Mail-Analyse abgeschlossen.', 'ok');
+      } catch (e) { setStatus(e.message, 'error'); }
     }
 
-    window.onload = async function () {
-      await testHealth();
-      await loadBelege();
-      await loadReisen();
-      await loadMitarbeiter();
+    window.onload = async function() {
+      await health();
+      await refreshAll();
     };
   </script>
 </body>
