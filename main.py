@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -36,7 +37,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.14"
+APP_VERSION = "7.15"
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
@@ -52,6 +53,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    ensure_belege_fingerprint_column()
 
 
 class AnalyzeTextRequest(BaseModel):
@@ -114,6 +116,10 @@ def normalize_variants(value: str) -> List[str]:
     )
 
 
+def normalize_for_fingerprint(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
 # ----------------------------
 # Reisecode helpers
 # ----------------------------
@@ -146,13 +152,65 @@ def find_reise_by_code(reise_code: str) -> Optional[Dict[str, Any]]:
                 row = cur.fetchone()
                 if not row:
                     return None
-                return {
-                    "id": row[0],
-                    "reise_code": row[1],
-                    "reise_name": row[2],
-                }
+                return {"id": row[0], "reise_code": row[1], "reise_name": row[2]}
     except Exception:
         return None
+
+
+# ----------------------------
+# DB duplicate helpers
+# ----------------------------
+
+def ensure_belege_fingerprint_column() -> None:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS fingerprint TEXT")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_belege_fingerprint ON belege(fingerprint)")
+            conn.commit()
+    except Exception:
+        # System soll trotzdem starten, falls alte DB-Rechte/Schema abweichen.
+        pass
+
+
+def build_beleg_fingerprint(filename: str, data: Dict[str, Any], reise_id: Optional[int]) -> str:
+    parts = [
+        normalize_for_fingerprint(reise_id or "no-reise"),
+        normalize_for_fingerprint(filename),
+        normalize_for_fingerprint(data.get("art_des_dokuments")),
+        normalize_for_fingerprint(data.get("belegdatum")),
+        normalize_for_fingerprint(data.get("buchungsnummer_code")),
+        normalize_for_fingerprint(data.get("ticketnummer")),
+        normalize_for_fingerprint(data.get("kosten_mit_steuern")),
+        normalize_for_fingerprint(data.get("waehrung_der_kosten")),
+    ]
+    raw = "|".join(parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def find_beleg_by_fingerprint(fingerprint: str) -> Optional[int]:
+    if not fingerprint:
+        return None
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM belege WHERE fingerprint = %s ORDER BY id DESC LIMIT 1", (fingerprint,))
+                row = cur.fetchone()
+                return int(row[0]) if row else None
+    except Exception:
+        return None
+
+
+def set_beleg_fingerprint(beleg_id: int, fingerprint: str) -> None:
+    if not beleg_id or not fingerprint:
+        return
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE belege SET fingerprint = %s WHERE id = %s", (fingerprint, beleg_id))
+            conn.commit()
+    except Exception:
+        pass
 
 
 # ----------------------------
@@ -369,11 +427,7 @@ def read_latest_mails(limit: int = 3, subject_contains: Optional[str] = None) ->
         if subject_contains and subject_contains.lower() not in subject.lower():
             continue
 
-        mails.append({
-            "subject": subject,
-            "body": body,
-            "preview": body[:500],
-        })
+        mails.append({"subject": subject, "body": body, "preview": body[:500]})
 
         if len(mails) >= limit:
             break
@@ -436,20 +490,9 @@ def attach_or_create_event_for_analysis(reise_id: int, beleg_id: int, data: dict
             "matched_existing_event": True,
         }
 
-    new_event_id = create_event(
-        {
-            "reise_id": reise_id,
-            "typ": art,
-            "titel": titel,
-            "status": "abgeschlossen",
-        }
-    )
+    new_event_id = create_event({"reise_id": reise_id, "typ": art, "titel": titel, "status": "abgeschlossen"})
     attach_beleg_to_event(new_event_id, beleg_id)
-    return {
-        "created_event_id": new_event_id,
-        "matched_event_typ": art,
-        "matched_existing_event": False,
-    }
+    return {"created_event_id": new_event_id, "matched_event_typ": art, "matched_existing_event": False}
 
 
 # ----------------------------
@@ -475,13 +518,7 @@ def compute_reise_status(detail: dict) -> dict:
         warnungen.append("Keine Events vorhanden")
         status = "fehler"
 
-    return {
-        "status": status,
-        "warnungen": warnungen,
-        "flug": "Flug" in typen,
-        "hotel": "Hotel" in typen,
-        "taxi": "Taxi" in typen,
-    }
+    return {"status": status, "warnungen": warnungen, "flug": "Flug" in typen, "hotel": "Hotel" in typen, "taxi": "Taxi" in typen}
 
 
 def analyze_text_internal(
@@ -514,6 +551,27 @@ def analyze_text_internal(
     data["ai_model"] = ai_model_override or OPENAI_MODEL
     data["anonymized_preview"] = anonymized_text[:4000]
 
+    fingerprint = build_beleg_fingerprint(filename, data, reise_id)
+    existing_beleg_id = find_beleg_by_fingerprint(fingerprint)
+
+    data["fingerprint"] = fingerprint
+    data["duplicate_detected"] = bool(existing_beleg_id)
+
+    if existing_beleg_id:
+        data["existing_beleg_id"] = existing_beleg_id
+        data["beleg_id"] = existing_beleg_id
+        data["duplicate_action"] = "skipped_insert_existing_beleg_used"
+
+        if event_id:
+            attach_beleg_to_event(event_id, existing_beleg_id)
+            update_event_status(event_id, "abgeschlossen")
+            data["attached_event_id"] = event_id
+        elif reise_id:
+            event_result = attach_or_create_event_for_analysis(reise_id, existing_beleg_id, data)
+            data.update(event_result)
+
+        return data
+
     beleg_id = insert_beleg(
         {
             "belegdatum": data.get("belegdatum"),
@@ -522,7 +580,11 @@ def analyze_text_internal(
             "waehrung": data.get("waehrung_der_kosten"),
         }
     )
+    set_beleg_fingerprint(beleg_id, fingerprint)
+
     data["beleg_id"] = beleg_id
+    data["existing_beleg_id"] = None
+    data["duplicate_action"] = "inserted_new_beleg"
 
     if event_id:
         attach_beleg_to_event(event_id, beleg_id)
@@ -567,36 +629,20 @@ def dashboard():
 def ai_test(ai_model: Optional[str] = Query(default=None)):
     prompt = build_json_prompt("Testbeleg: Hotel in Berlin, Check-in 01.05.2026, Check-out 03.05.2026, Total 300 EUR.")
     raw = call_openai_json(prompt, ai_model)
-    return {
-        "status": "ok" if not (isinstance(raw, dict) and raw.get("status") == "error") else "error",
-        "ai_provider": "openai",
-        "ai_model": ai_model or OPENAI_MODEL,
-        "result": raw,
-    }
+    return {"status": "ok" if not (isinstance(raw, dict) and raw.get("status") == "error") else "error", "ai_provider": "openai", "ai_model": ai_model or OPENAI_MODEL, "result": raw}
 
 
 @app.get("/mail/test")
-def mail_test(
-    limit: int = Query(default=3, ge=1, le=20),
-    subject_contains: Optional[str] = Query(default=None),
-):
+def mail_test(limit: int = Query(default=3, ge=1, le=20), subject_contains: Optional[str] = Query(default=None)):
     try:
         mails = read_latest_mails(limit=limit, subject_contains=subject_contains)
-        return {
-            "status": "ok",
-            "count": len(mails),
-            "subject_filter": subject_contains,
-            "mails": [{"subject": m["subject"], "preview": m["preview"]} for m in mails],
-        }
+        return {"status": "ok", "count": len(mails), "subject_filter": subject_contains, "mails": [{"subject": m["subject"], "preview": m["preview"]} for m in mails]}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
 
 
 @app.get("/mail/analyze-latest")
-def mail_analyze_latest(
-    limit: int = Query(default=3, ge=1, le=10),
-    subject_contains: Optional[str] = Query(default=None),
-):
+def mail_analyze_latest(limit: int = Query(default=3, ge=1, le=10), subject_contains: Optional[str] = Query(default=None)):
     try:
         mails = read_latest_mails(limit=limit, subject_contains=subject_contains)
         analyzed = []
@@ -626,12 +672,7 @@ def mail_analyze_latest(
                 }
             )
 
-        return {
-            "status": "ok",
-            "count": len(analyzed),
-            "subject_filter": subject_contains,
-            "results": analyzed,
-        }
+        return {"status": "ok", "count": len(analyzed), "subject_filter": subject_contains, "results": analyzed}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
 
@@ -649,6 +690,7 @@ def reset_db():
                 cur.execute("DROP TABLE IF EXISTS reisen CASCADE")
             conn.commit()
         init_db()
+        ensure_belege_fingerprint_column()
         return {"status": "ok", "message": "DB reset done"}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
@@ -729,15 +771,6 @@ def reisen_overview():
         return {"status": "error", "detail": str(exc)}
 
 
-@app.get("/reisen/{reise_id}")
-def reisen_detail(reise_id: int):
-    try:
-        detail = get_reise_detail(reise_id)
-        return {**detail, **compute_reise_status(detail)}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
-
-
 @app.get("/reisen/next-code")
 def reisen_next_code(jahr: int = Query(...)):
     try:
@@ -781,14 +814,19 @@ def events_update_status(event_id: int, payload: EventStatusRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/reisen/{reise_id}")
+def reisen_detail(reise_id: int):
+    try:
+        detail = get_reise_detail(reise_id)
+        return {**detail, **compute_reise_status(detail)}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
 @app.post("/anonymize/text")
 def anonymize_text(payload: AnalyzeTextRequest):
     try:
-        return {
-            "status": "ok",
-            "filename": payload.filename or "text-input.txt",
-            "anonymized_text": anonymize_document_text(payload.text),
-        }
+        return {"status": "ok", "filename": payload.filename or "text-input.txt", "anonymized_text": anonymize_document_text(payload.text)}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -806,14 +844,7 @@ async def anonymize_file(file: UploadFile = File(...)):
 @app.post("/analyze/text")
 def analyze_text(payload: AnalyzeTextRequest):
     try:
-        return analyze_text_internal(
-            payload.text,
-            payload.filename or "text-input.txt",
-            payload.reise_id,
-            payload.event_id,
-            payload.ai_provider,
-            payload.ai_model,
-        )
+        return analyze_text_internal(payload.text, payload.filename or "text-input.txt", payload.reise_id, payload.event_id, payload.ai_provider, payload.ai_model)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
