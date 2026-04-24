@@ -3,27 +3,31 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Reisekosten Dashboard 7.16</title>
+  <title>Reisekosten Dashboard 7.17</title>
   <style>
     :root {
       --bg: #f5f7fb;
       --card: #ffffff;
       --line: #dbe2f0;
-      --primary: #1f4ed8;
-      --primary-dark: #173ba8;
+      --primary: #12327f;
+      --primary-2: #2563eb;
+      --primary-dark: #0f2868;
       --text: #1f2937;
       --muted: #64748b;
       --danger: #b91c1c;
       --danger-bg: #fee2e2;
       --ok: #166534;
       --ok-bg: #dcfce7;
+      --warn: #92400e;
+      --warn-bg: #fef3c7;
+      --silver: #d7dde8;
     }
 
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
 
     .topbar {
-      background: linear-gradient(90deg, #12327f, #2563eb);
+      background: var(--primary);
       color: white;
       padding: 14px 24px;
       display: flex;
@@ -33,15 +37,30 @@
       flex-wrap: wrap;
     }
 
-    .brand { display: flex; align-items: center; gap: 14px; }
-    .brand img { height: 58px; object-fit: contain; }
+    .brand { display: flex; align-items: center; gap: 14px; cursor: pointer; }
+    .logo-box {
+      height: 58px;
+      min-width: 92px;
+      padding: 8px 12px;
+      border-radius: 12px;
+      background: var(--primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid rgba(255,255,255,0.14);
+    }
+    .brand img {
+      height: 42px;
+      object-fit: contain;
+      filter: grayscale(1) brightness(2.2) contrast(0.75) opacity(0.92);
+    }
     .brand h1 { margin: 0; font-size: 24px; }
     .brand .version { font-size: 13px; opacity: 0.92; margin-top: 3px; }
 
     .nav { display: flex; flex-wrap: wrap; gap: 10px; }
     .nav button, .btn {
       border: none;
-      background: var(--primary);
+      background: var(--primary-2);
       color: white;
       border-radius: 10px;
       padding: 10px 14px;
@@ -79,6 +98,7 @@
 
     .card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
     h2 { margin: 0; font-size: 22px; }
+    h3 { margin-top: 0; }
     .subtitle { color: var(--muted); font-size: 13px; margin-top: 4px; }
 
     .grid { display: grid; gap: 14px; }
@@ -109,16 +129,24 @@
     .small { color: var(--muted); font-size: 12px; }
     pre { background: #0f172a; color: #dbeafe; padding: 14px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; overflow: auto; font-size: 13px; }
 
+    .pill { display: inline-block; padding: 4px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+    .pill-plan { background: #dbeafe; color: #1d4ed8; }
+    .pill-now { background: var(--warn-bg); color: var(--warn); }
+    .pill-done { background: var(--ok-bg); color: var(--ok); }
+    .linkish { color: var(--primary-2); font-weight: 800; text-decoration: underline; cursor: pointer; }
+    .reise-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .event-row-title { font-weight: 800; }
+
     @media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <div class="topbar">
-    <div class="brand">
-      <img src="/static/logo2.png" alt="Logo" />
+    <div class="brand" onclick="showPage('dashboard')" title="Zum Dashboard">
+      <div class="logo-box"><img src="/static/logo2.png" alt="Logo" /></div>
       <div>
         <h1>Reisekosten System</h1>
-        <div class="version">Version 7.16 · Mitarbeiter- und Reisen-Seiten mit Neu/Bearbeiten/Löschen</div>
+        <div class="version">Version 7.17 · Reisen nach geplant/aktuell/abgeschlossen · Reiseseite</div>
       </div>
     </div>
     <div class="nav">
@@ -139,13 +167,27 @@
         <div class="card"><h2 id="countReisen">0</h2><div class="subtitle">Reisen</div></div>
         <div class="card"><h2 id="countBelege">0</h2><div class="subtitle">Belege</div></div>
       </div>
+
       <div class="card">
         <div class="card-head">
-          <div><h2>Übersicht</h2><div class="subtitle">Schnellzugriff auf Stammdaten und Tests</div></div>
+          <div><h2>Geplante Reisen</h2><div class="subtitle">Startdatum liegt in der Zukunft</div></div>
+          <button class="btn btn-light" onclick="loadReisen(false)">Aktualisieren</button>
         </div>
-        <button class="btn" onclick="showPage('mitarbeiter')">Mitarbeiter öffnen</button>
-        <button class="btn" onclick="showPage('reisen')">Reisen öffnen</button>
-        <button class="btn btn-light" onclick="refreshAll()">Aktualisieren</button>
+        <div id="dashboardReisenPlan"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Aktuelle Reisen</h2><div class="subtitle">Heute liegt zwischen Start- und Enddatum</div></div>
+        </div>
+        <div id="dashboardReisenAktuell"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Abgeschlossene Reisen</h2><div class="subtitle">Enddatum liegt in der Vergangenheit</div></div>
+        </div>
+        <div id="dashboardReisenAbgeschlossen"></div>
       </div>
     </section>
 
@@ -177,7 +219,7 @@
     <section id="page-reisen" class="hidden">
       <div class="card">
         <div class="card-head">
-          <div><h2>Reisen</h2><div class="subtitle">Wichtige Spalten: Reise-ID, Reisename, Reisende Kürzel</div></div>
+          <div><h2>Reisen</h2><div class="subtitle">Reise-ID ist anklickbar und öffnet die individuelle Reiseseite</div></div>
           <button class="btn" onclick="openReiseNew()">+ Neu</button>
         </div>
 
@@ -200,6 +242,22 @@
         </div>
 
         <div id="reisenTable"></div>
+      </div>
+    </section>
+
+    <section id="page-reise-detail" class="hidden">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="reise-title">
+              <h2 id="reiseDetailTitle">Reise</h2>
+              <span id="reiseDetailStatus" class="pill pill-plan">Status</span>
+            </div>
+            <div id="reiseDetailSub" class="subtitle"></div>
+          </div>
+          <button class="btn btn-light" onclick="showPage('reisen')">Zurück zu Reisen</button>
+        </div>
+        <div id="reiseDetailContent"></div>
       </div>
     </section>
 
@@ -233,6 +291,7 @@
   <script>
     let mitarbeiterCache = [];
     let reisenCache = [];
+    let currentReiseDetail = null;
 
     function api() { return window.location.origin; }
 
@@ -259,8 +318,9 @@
     }
 
     function showPage(name) {
-      ['dashboard', 'mitarbeiter', 'reisen', 'mail', 'debug'].forEach(p => document.getElementById('page-' + p).classList.add('hidden'));
+      ['dashboard', 'mitarbeiter', 'reisen', 'reise-detail', 'mail', 'debug'].forEach(p => document.getElementById('page-' + p).classList.add('hidden'));
       document.getElementById('page-' + name).classList.remove('hidden');
+      if (name === 'dashboard') loadReisen(false);
       if (name === 'mitarbeiter') loadMitarbeiter();
       if (name === 'reisen') loadReisen();
     }
@@ -287,11 +347,33 @@
       } catch (e) { document.getElementById('countBelege').textContent = '?'; }
     }
 
-    // ---------------- Mitarbeiter ----------------
     function fullName(m) {
       return (m.vollname || m.klarname || ((m.vorname || '') + ' ' + (m.nachname || '')).trim() || '').trim();
     }
 
+    function todayISO() {
+      const d = new Date();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${d.getFullYear()}-${m}-${day}`;
+    }
+
+    function reiseTimeBucket(r) {
+      const t = todayISO();
+      if (r.startdatum && r.startdatum > t) return 'planned';
+      if (r.enddatum && r.enddatum < t) return 'done';
+      if (r.startdatum && r.enddatum && r.startdatum <= t && r.enddatum >= t) return 'current';
+      if (r.startdatum && !r.enddatum && r.startdatum <= t) return 'current';
+      return 'planned';
+    }
+
+    function bucketLabel(bucket) {
+      if (bucket === 'current') return '<span class="pill pill-now">aktuell</span>';
+      if (bucket === 'done') return '<span class="pill pill-done">abgeschlossen</span>';
+      return '<span class="pill pill-plan">geplant</span>';
+    }
+
+    // ---------------- Mitarbeiter ----------------
     async function loadMitarbeiter(show = true) {
       try {
         const data = await requestJson(api() + '/mitarbeiter');
@@ -405,6 +487,7 @@
         reisenCache = detailed;
         document.getElementById('countReisen').textContent = data.count || 0;
         renderReisenTable();
+        renderDashboardReisen();
         if (show) setStatus('Reisen geladen.', 'ok');
       } catch (e) { setStatus(e.message, 'error'); }
     }
@@ -414,10 +497,36 @@
       return arr.map(x => x.kuerzel || '').filter(Boolean).join(', ');
     }
 
+    function reiseCodeLink(r) {
+      return `<span class="linkish" onclick="openReiseDetail(${r.id})">${r.reise_code || ''}</span>`;
+    }
+
+    function renderReisenMiniTable(items, elementId) {
+      const rows = items.map(r => `
+        <tr>
+          <td>${reiseCodeLink(r)}</td>
+          <td>${r.reise_name || ''}</td>
+          <td>${reisendeKuerzel(r) || '—'}</td>
+          <td>${r.startdatum || '—'} bis ${r.enddatum || '—'}</td>
+          <td>${bucketLabel(reiseTimeBucket(r))}</td>
+        </tr>`).join('');
+      document.getElementById(elementId).innerHTML = `
+        <table>
+          <thead><tr><th>Reise-ID</th><th>Reisename</th><th>Reisende</th><th>Zeitraum</th><th>Status</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="5">Keine Reisen in dieser Gruppe</td></tr>'}</tbody>
+        </table>`;
+    }
+
+    function renderDashboardReisen() {
+      renderReisenMiniTable(reisenCache.filter(r => reiseTimeBucket(r) === 'planned'), 'dashboardReisenPlan');
+      renderReisenMiniTable(reisenCache.filter(r => reiseTimeBucket(r) === 'current'), 'dashboardReisenAktuell');
+      renderReisenMiniTable(reisenCache.filter(r => reiseTimeBucket(r) === 'done'), 'dashboardReisenAbgeschlossen');
+    }
+
     function renderReisenTable() {
       const rows = reisenCache.map(r => `
         <tr>
-          <td>${r.reise_code || ''}</td>
+          <td>${reiseCodeLink(r)}</td>
           <td>${r.reise_name || ''}</td>
           <td>${reisendeKuerzel(r) || '—'}</td>
           <td class="actions">
@@ -512,6 +621,96 @@
         await loadReisen();
         setStatus('Reise gelöscht.', 'ok');
       } catch (e) { setStatus(e.message, 'error'); }
+    }
+
+    // ---------------- Reise Detail ----------------
+    async function openReiseDetail(id) {
+      try {
+        const detail = await requestJson(api() + '/reisen/' + id);
+        currentReiseDetail = detail;
+        renderReiseDetail(detail);
+        showPage('reise-detail');
+        setStatus('Reiseseite geladen.', 'ok');
+      } catch (e) { setStatus(e.message, 'error'); }
+    }
+
+    function eventDateSortValue(e) {
+      const raw = (e.created_at || '').slice(0, 10);
+      return raw || '9999-99-99';
+    }
+
+    function eventDateText(e) {
+      return e.created_at ? String(e.created_at).slice(0, 10) : '—';
+    }
+
+    function eventRouteText(e) {
+      if ((e.typ || '').toLowerCase() === 'hotel') return 'Check-in / Check-out wird aus Belegdetails in Version 7.18 tabellarisch ergänzt';
+      return 'Abfahrt/Ziel/Uhrzeit wird aus Segmentdetails in Version 7.18 tabellarisch ergänzt';
+    }
+
+    function renderReiseDetail(detail) {
+      const r = detail.reise || {};
+      const bucket = reiseTimeBucket({ startdatum: r.startdatum, enddatum: r.enddatum });
+      document.getElementById('reiseDetailTitle').innerHTML = `${r.reise_code || ''} · ${r.reise_name || ''}`;
+      document.getElementById('reiseDetailStatus').outerHTML = bucketLabel(bucket).replace('pill ', 'pill ');
+      document.getElementById('reiseDetailSub').textContent = `${r.startdatum || 'kein Startdatum'} bis ${r.enddatum || 'kein Enddatum'} · Reisende: ${(detail.reisende || []).map(x => x.kuerzel).join(', ') || '—'}`;
+
+      const events = (detail.events || []).slice().sort((a, b) => eventDateSortValue(a).localeCompare(eventDateSortValue(b)));
+      const rows = events.map(e => `
+        <tr>
+          <td><span class="event-row-title">${e.typ || 'Event'}</span></td>
+          <td>${eventDateText(e)}</td>
+          <td>${eventRouteText(e)}</td>
+          <td>${e.status || '—'}</td>
+          <td>${e.beleg_anzahl || 0}</td>
+          <td class="actions">
+            <button class="btn btn-light icon-btn" title="Bearbeiten" onclick="eventEditPlaceholder(${e.id})">✏️</button>
+            <button class="btn btn-danger icon-btn" title="Löschen" onclick="eventDeletePlaceholder(${e.id})">✖</button>
+            <button class="btn icon-btn" title="Beleg anzeigen" onclick="openEventBelege(${e.id})">Beleg</button>
+          </td>
+        </tr>`).join('');
+
+      document.getElementById('reiseDetailContent').innerHTML = `
+        <div class="card" style="box-shadow:none;">
+          <h3>Vorschlag Aufbau individuelle Reiseseite</h3>
+          <div class="subtitle">
+            Chronologische Reise-Events in Zeilen. Später werden hier die echten Segmentdaten aus der Analyse verwendet:
+            Art / Datum / Abfahrt mit Ziel und Uhrzeit / Ankunft mit Ziel und Uhrzeit. Bei Hotel: Check-in / Check-out.
+            Der Button „Beleg“ soll später Original-PDF, Mail-als-PDF oder Handyfoto öffnen.
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Art</th>
+              <th>Datum</th>
+              <th>Abfahrt / Ankunft / Hotelaufenthalt</th>
+              <th>Status</th>
+              <th>Belege</th>
+              <th>Aktionen</th>
+            </tr>
+          </thead>
+          <tbody>${rows || '<tr><td colspan="6">Noch keine Events vorhanden</td></tr>'}</tbody>
+        </table>`;
+    }
+
+    async function openEventBelege(eventId) {
+      try {
+        const data = await requestJson(api() + '/events/' + eventId);
+        showResult(data);
+        showPage('debug');
+        setStatus('Event-/Belegdetails geladen. Original-PDF-Anzeige folgt in der nächsten Backend-Stufe.', 'ok');
+      } catch (e) { setStatus(e.message, 'error'); }
+    }
+
+    function eventEditPlaceholder(eventId) {
+      setStatus('Event bearbeiten folgt als nächster Schritt. Event-ID: ' + eventId, 'ok');
+    }
+
+    function eventDeletePlaceholder(eventId) {
+      if (confirm('Event wirklich löschen?\n\nEvent-ID: ' + eventId + '\n\nBackend-Löschen ergänzen wir im nächsten Schritt.')) {
+        setStatus('Event-Löschen ist vorbereitet, Backend-Endpunkt folgt.', 'ok');
+      }
     }
 
     // ---------------- Mail ----------------
