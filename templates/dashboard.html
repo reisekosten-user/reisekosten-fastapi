@@ -25,7 +25,7 @@
     body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--light);color:var(--text)}
 
     .topbar{
-      min-height:136px;
+      min-height:120px;
       background:linear-gradient(135deg,var(--navy3),var(--navy2));
       color:white;
       display:flex;
@@ -35,8 +35,8 @@
       box-shadow:0 6px 18px rgba(0,0,0,.18);
     }
     .brand{display:flex;align-items:center;gap:22px;cursor:pointer}
-    .logo-wrap{width:310px;height:94px;display:flex;align-items:center;overflow:hidden}
-    .logo-wrap img{width:300px;height:auto;filter:grayscale(1) brightness(2.5) contrast(.55) opacity(.94);mix-blend-mode:screen}
+    .logo-wrap{width:300px;height:84px;display:flex;align-items:center;overflow:hidden}
+    .logo-wrap img{width:290px;height:auto;filter:grayscale(1) brightness(2.5) contrast(.55) opacity(.94);mix-blend-mode:screen}
 
     .nav{display:flex;align-items:center;gap:28px;font-size:17px;font-weight:600}
     .nav button{background:none;border:none;color:white;font:inherit;cursor:pointer;padding:18px 8px;border-bottom:4px solid transparent;border-radius:0}
@@ -53,17 +53,17 @@
     .status.error{background:#fee2e2;border-color:#fecaca;color:#b91c1c}
 
     .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:26px;margin-bottom:38px}
-    .summary-card{background:white;border:1px solid var(--line);border-radius:9px;box-shadow:var(--shadow);padding:30px 28px;display:flex;align-items:center;gap:28px;min-height:128px}
-    .iconbox{width:70px;height:70px;background:linear-gradient(135deg,var(--navy3),var(--blue));border-radius:10px;display:flex;align-items:center;justify-content:center;color:white;font-size:34px;box-shadow:0 7px 15px rgba(0,80,152,.25)}
+    .summary-card{background:white;border:1px solid var(--line);border-radius:9px;box-shadow:var(--shadow);padding:22px 24px;display:flex;align-items:center;gap:22px;min-height:108px}
+    .iconbox{width:58px;height:58px;background:linear-gradient(135deg,var(--navy3),var(--blue));border-radius:10px;display:flex;align-items:center;justify-content:center;color:white;font-size:28px;box-shadow:0 7px 15px rgba(0,80,152,.25)}
     .summary-label{font-size:18px;margin-bottom:6px}
-    .summary-number{font-size:34px;font-weight:800;color:#071a35;line-height:1}
+    .summary-number{font-size:30px;font-weight:800;color:#071a35;line-height:1}
     .summary-sub{font-size:16px;margin-top:8px;color:#1b2d46}
 
     .section{margin-top:34px}
     .table-card{background:white;border:1px solid var(--line);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
     table{width:100%;border-collapse:collapse;background:white}
-    th{background:#fbfcff;color:#0c1d34;text-align:left;font-weight:800;font-size:15px;padding:18px;border-bottom:1px solid var(--line);border-right:1px solid var(--line)}
-    td{padding:18px;border-bottom:1px solid var(--line);border-right:1px solid var(--line);vertical-align:middle;font-size:16px}
+    th{background:#fbfcff;color:#0c1d34;text-align:left;font-weight:800;font-size:15px;padding:12px 14px;border-bottom:1px solid var(--line);border-right:1px solid var(--line)}
+    td{padding:10px 14px;border-bottom:1px solid var(--line);border-right:1px solid var(--line);vertical-align:middle;font-size:16px}
     tr:last-child td{border-bottom:none}
     th:last-child,td:last-child{border-right:none}
 
@@ -98,7 +98,7 @@
 <body>
   <header class="topbar">
     <div class="brand" onclick="showPage('dashboard')">
-      <div class="logo-wrap"><img src="/static/logo2.png" alt="Herrhammer Logo"></div>
+      <div class="logo-wrap"><img src="/static/logo3.png" alt="Herrhammer Logo"></div>
     </div>
     <nav class="nav">
       <button id="nav-dashboard" class="active" onclick="showPage('dashboard')">⚙ Dashboard</button>
