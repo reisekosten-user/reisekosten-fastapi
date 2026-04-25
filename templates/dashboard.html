@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Reisekosten Dashboard 7.20</title>
+  <title>Reisekosten Dashboard 7.21</title>
   <style>
     :root {
       --bg: #f5f7fb; --card: #ffffff; --line: #dbe2f0; --blue: #12327f; --blue2: #2563eb; --blueDark: #0f2868;
@@ -47,6 +47,7 @@
     .pill { display: inline-block; padding: 4px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
     .pill-plan { background: #dbeafe; color: #1d4ed8; } .pill-now { background: var(--warnBg); color: var(--warn); } .pill-done { background: var(--okBg); color: var(--ok); }
     .linkish { color: var(--blue2); font-weight: 800; text-decoration: underline; cursor: pointer; }
+    .art-cell { font-weight: 800; color: #0f172a; }
     .event-title { font-weight: 800; color: #0f172a; } .event-sub { color: var(--muted); font-size: 12px; margin-top: 3px; line-height: 1.3; }
     .nowrap { white-space: nowrap; }
     @media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } .logo-box { width: 210px; height: 78px; } .logo-box img { width: 205px; } }
@@ -56,7 +57,7 @@
   <div class="topbar">
     <div class="brand" onclick="showPage('dashboard')" title="Zum Dashboard">
       <div class="logo-box"><img src="/static/logo2.png" alt="Logo" /></div>
-      <div><h1>Reisekosten System</h1><div class="version">Version 7.20 · deutsche Datumsformate · Events je Datum/Uhrzeit einzeln</div></div>
+      <div><h1>Reisekosten System</h1><div class="version">Version 7.21 · Hotel Check-out morgens / Check-in abends · Art fett</div></div>
     </div>
     <div class="nav">
       <button onclick="showPage('dashboard')">Dashboard</button><button onclick="showPage('mitarbeiter')">Mitarbeiter</button><button onclick="showPage('reisen')">Reisen</button><button onclick="showPage('mail')">Mail-Test</button><button onclick="showPage('debug')">Debug</button>
@@ -158,15 +159,15 @@ async function deleteReise(id){ const r=reisenCache.find(x=>x.id===id); if(!conf
 function parseAnalysisFromBeleg(b){ if(!b)return{}; const raw=b.analysis_json||b.analysis||''; if(typeof raw==='object')return raw; if(!raw)return{}; try{return JSON.parse(raw);}catch{return{};} }
 function analysesFromEventDetail(eventDetail){ const out=[]; for(const b of (eventDetail.belege||[])){ const a=parseAnalysisFromBeleg(b); if(Object.keys(a).length) out.push({beleg:b,analysis:a}); } return out; }
 function belegButtons(belegId){ return belegId ? `<button class="btn icon-btn" onclick="openPdf(${belegId})">${belegId}</button>` : '—'; }
-function eventNameForSegment(a, ev, s, kind){ const typ=(a.art_des_dokuments||ev.typ||'').toLowerCase(); if(typ==='hotel') return s.ankunft_ort || a.hotel || a.buchungsnummer_code || ev.titel || ev.typ || 'Hotel'; return s.transportunternehmen_und_nummer || a.buchungsnummer_code || ev.titel || ev.typ || 'Event'; }
+function eventNameForSegment(a, ev, s){ const typ=(a.art_des_dokuments||ev.typ||'').toLowerCase(); if(typ==='hotel') return s.ankunft_ort || a.hotel || a.buchungsnummer_code || ev.titel || ev.typ || 'Hotel'; return s.transportunternehmen_und_nummer || a.buchungsnummer_code || ev.titel || ev.typ || 'Event'; }
 function buildRowsFromAnalysis(ev, ed, beleg, a){
   const rows=[]; const typ=(a.art_des_dokuments||ev.typ||'Event'); const typL=typ.toLowerCase(); const belegId=beleg?.id || '';
   if(typL==='hotel'){
     const s=(a.reisesegmente||[])[0]||{};
     const checkIn=s.abreise_datum_und_zeit || a.check_in || a.belegdatum || ev.created_at;
     const checkOut=s.ankunft_datum_und_zeit || a.check_out || checkIn;
-    rows.push({art:'Hotel Check-in', datum:dateDE(checkIn), sort:`${sortDateKey(checkIn)}${sortTimeKey(checkIn)}`, zeit:timePart(checkIn)||'—', event:eventNameForSegment(a,ev,s,'checkin'), sub:a.buchungsnummer_code||'', belegId, status:ev.status||'—', eventId:ev.id});
-    rows.push({art:'Hotel Check-out', datum:dateDE(checkOut), sort:`${sortDateKey(checkOut)}${sortTimeKey(checkOut)}`, zeit:timePart(checkOut)||'—', event:eventNameForSegment(a,ev,s,'checkout'), sub:a.buchungsnummer_code||'', belegId, status:ev.status||'—', eventId:ev.id});
+    rows.push({art:'Hotel Check-in', datum:dateDE(checkIn), sort:`${sortDateKey(checkIn)}9998`, zeit:timePart(checkIn)||'—', event:eventNameForSegment(a,ev,s), sub:a.buchungsnummer_code||'', belegId, status:ev.status||'—', eventId:ev.id});
+    rows.push({art:'Hotel Check-out', datum:dateDE(checkOut), sort:`${sortDateKey(checkOut)}0001`, zeit:timePart(checkOut)||'—', event:eventNameForSegment(a,ev,s), sub:a.buchungsnummer_code||'', belegId, status:ev.status||'—', eventId:ev.id});
     return rows;
   }
   const segs=a.reisesegmente||[];
@@ -174,7 +175,7 @@ function buildRowsFromAnalysis(ev, ed, beleg, a){
     for(const s of segs){
       const start=s.abreise_datum_und_zeit || a.belegdatum || ev.created_at;
       const end=s.ankunft_datum_und_zeit || start;
-      rows.push({art:typ, datum:dateDE(start), sort:`${sortDateKey(start)}${sortTimeKey(start)}`, zeit:`${timePart(start)||'—'}–${timePart(end)||'—'}`, event:eventNameForSegment(a,ev,s,'segment'), sub:`${s.abreise_ort||''} → ${s.ankunft_ort||''}`, belegId, status:ev.status||'—', eventId:ev.id});
+      rows.push({art:typ, datum:dateDE(start), sort:`${sortDateKey(start)}${sortTimeKey(start)}`, zeit:`${timePart(start)||'—'}–${timePart(end)||'—'}`, event:eventNameForSegment(a,ev,s), sub:`${s.abreise_ort||''} → ${s.ankunft_ort||''}`, belegId, status:ev.status||'—', eventId:ev.id});
     }
     return rows;
   }
@@ -195,7 +196,7 @@ async function openReiseDetail(id){
       else { eventRows.push({art:ev.typ||'Event', datum:dateDE(ev.created_at), sort:`${sortDateKey(ev.created_at)}${sortTimeKey(ev.created_at)}`, zeit:'—', event:ev.titel||ev.typ||'Event', sub:'Keine Analyse gespeichert', belegId:'', status:ev.status||'—', eventId:ev.id}); }
     }
     eventRows.sort((a,b)=>a.sort.localeCompare(b.sort));
-    const rows=eventRows.map(x=>`<tr><td>${esc(x.art)}</td><td class="nowrap">${esc(x.datum)}</td><td class="nowrap">${esc(x.zeit)}</td><td><div class="event-title">${esc(x.event)}</div><div class="event-sub">${esc(x.sub)}</div></td><td>${belegButtons(x.belegId)}</td><td>${esc(x.status)}</td><td class="actions"><button class="btn-light icon-btn" onclick="eventEditPlaceholder(${x.eventId})">✏️</button><button class="btn-danger icon-btn" onclick="deleteEvent(${x.eventId},${id})">✖</button></td></tr>`).join('');
+    const rows=eventRows.map(x=>`<tr><td class="art-cell">${esc(x.art)}</td><td class="nowrap">${esc(x.datum)}</td><td class="nowrap">${esc(x.zeit)}</td><td><div class="event-title">${esc(x.event)}</div><div class="event-sub">${esc(x.sub)}</div></td><td>${belegButtons(x.belegId)}</td><td>${esc(x.status)}</td><td class="actions"><button class="btn-light icon-btn" onclick="eventEditPlaceholder(${x.eventId})">✏️</button><button class="btn-danger icon-btn" onclick="deleteEvent(${x.eventId},${id})">✖</button></td></tr>`).join('');
     document.getElementById('reiseDetailContent').innerHTML=`<table><thead><tr><th>Art</th><th>Datum</th><th>Uhrzeit von/bis</th><th>Event</th><th>BelegNr.</th><th>Status</th><th>Aktionen</th></tr></thead><tbody>${rows||'<tr><td colspan="7">Noch keine Events vorhanden</td></tr>'}</tbody></table>`;
     showPage('reise-detail'); setStatus('Reiseseite geladen.','ok');
   }catch(e){setStatus(e.message,'error');}
