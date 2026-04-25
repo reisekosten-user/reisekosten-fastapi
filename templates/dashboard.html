@@ -3,57 +3,19 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Reisekosten Dashboard 7.19</title>
+  <title>Reisekosten Dashboard 7.20</title>
   <style>
     :root {
-      --bg: #f5f7fb;
-      --card: #ffffff;
-      --line: #dbe2f0;
-      --blue: #12327f;
-      --blue2: #2563eb;
-      --blueDark: #0f2868;
-      --text: #1f2937;
-      --muted: #64748b;
-      --danger: #b91c1c;
-      --dangerBg: #fee2e2;
-      --ok: #166534;
-      --okBg: #dcfce7;
-      --warn: #92400e;
-      --warnBg: #fef3c7;
+      --bg: #f5f7fb; --card: #ffffff; --line: #dbe2f0; --blue: #12327f; --blue2: #2563eb; --blueDark: #0f2868;
+      --text: #1f2937; --muted: #64748b; --danger: #b91c1c; --dangerBg: #fee2e2; --ok: #166534; --okBg: #dcfce7;
+      --warn: #92400e; --warnBg: #fef3c7;
     }
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
-
-    .topbar {
-      background: var(--blue);
-      color: white;
-      padding: 14px 24px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 18px;
-      flex-wrap: wrap;
-      min-height: 118px;
-    }
+    .topbar { background: var(--blue); color: white; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; gap: 18px; flex-wrap: wrap; min-height: 118px; }
     .brand { display: flex; align-items: center; gap: 18px; cursor: pointer; }
-    .logo-box {
-      width: 260px;
-      height: 92px;
-      background: var(--blue);
-      display: flex;
-      align-items: center;
-      justify-content: flex-start;
-      overflow: hidden;
-      border-radius: 0;
-      border: none;
-    }
-    .logo-box img {
-      width: 250px;
-      height: auto;
-      object-fit: contain;
-      filter: grayscale(1) brightness(2.6) contrast(0.45) opacity(0.92);
-      mix-blend-mode: screen;
-    }
+    .logo-box { width: 260px; height: 92px; background: var(--blue); display: flex; align-items: center; justify-content: flex-start; overflow: hidden; border-radius: 0; border: none; }
+    .logo-box img { width: 250px; height: auto; object-fit: contain; filter: grayscale(1) brightness(2.6) contrast(0.45) opacity(0.92); mix-blend-mode: screen; }
     .brand h1 { margin: 0; font-size: 25px; }
     .version { font-size: 13px; opacity: 0.92; margin-top: 3px; }
     .nav { display: flex; flex-wrap: wrap; gap: 10px; }
@@ -64,38 +26,28 @@
     .btn-danger { background: var(--danger); }
     .btn-danger:hover { background: #7f1d1d; }
     .icon-btn { padding: 7px 10px; border-radius: 8px; margin-right: 6px; margin-bottom: 4px; }
-
     .container { max-width: 1500px; margin: 22px auto; padding: 0 18px 42px; }
     .status { background: #eff6ff; border: 1px solid #bfdbfe; color: #1d4ed8; border-radius: 12px; padding: 12px 14px; font-weight: 700; margin-bottom: 18px; }
     .status.error { background: var(--dangerBg); border-color: #fecaca; color: var(--danger); }
     .status.ok { background: var(--okBg); border-color: #bbf7d0; color: var(--ok); }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; box-shadow: 0 3px 14px rgba(15,23,42,0.05); margin-bottom: 18px; }
     .card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
-    h2 { margin: 0; font-size: 22px; }
-    h3 { margin-top: 0; }
+    h2 { margin: 0; font-size: 22px; } h3 { margin-top: 0; }
     .subtitle { color: var(--muted); font-size: 13px; margin-top: 4px; }
-    .grid { display: grid; gap: 14px; }
-    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid { display: grid; gap: 14px; } .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 6px; }
     input, textarea, select { width: 100%; border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; font-size: 14px; background: white; margin-bottom: 12px; }
-    select[multiple] { min-height: 96px; }
-    input[readonly] { background: #e5e7eb; color: #475569; }
+    select[multiple] { min-height: 96px; } input[readonly] { background: #e5e7eb; color: #475569; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #e5edf7; vertical-align: top; }
     th { background: #eef4fb; color: #334155; font-size: 13px; }
-    .hidden { display: none; }
-    .form-panel { background: #f8fbff; border: 1px solid #dbeafe; border-radius: 14px; padding: 14px; margin-bottom: 16px; }
-    .actions { white-space: nowrap; }
-    .small { color: var(--muted); font-size: 12px; }
+    .hidden { display: none; } .form-panel { background: #f8fbff; border: 1px solid #dbeafe; border-radius: 14px; padding: 14px; margin-bottom: 16px; }
+    .actions { white-space: nowrap; } .small { color: var(--muted); font-size: 12px; }
     pre { background: #0f172a; color: #dbeafe; padding: 14px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; overflow: auto; font-size: 13px; }
     .pill { display: inline-block; padding: 4px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
-    .pill-plan { background: #dbeafe; color: #1d4ed8; }
-    .pill-now { background: var(--warnBg); color: var(--warn); }
-    .pill-done { background: var(--okBg); color: var(--ok); }
+    .pill-plan { background: #dbeafe; color: #1d4ed8; } .pill-now { background: var(--warnBg); color: var(--warn); } .pill-done { background: var(--okBg); color: var(--ok); }
     .linkish { color: var(--blue2); font-weight: 800; text-decoration: underline; cursor: pointer; }
-    .event-title { font-weight: 800; color: #0f172a; }
-    .event-sub { color: var(--muted); font-size: 12px; margin-top: 3px; line-height: 1.3; }
+    .event-title { font-weight: 800; color: #0f172a; } .event-sub { color: var(--muted); font-size: 12px; margin-top: 3px; line-height: 1.3; }
     .nowrap { white-space: nowrap; }
     @media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } .logo-box { width: 210px; height: 78px; } .logo-box img { width: 205px; } }
   </style>
@@ -104,17 +56,10 @@
   <div class="topbar">
     <div class="brand" onclick="showPage('dashboard')" title="Zum Dashboard">
       <div class="logo-box"><img src="/static/logo2.png" alt="Logo" /></div>
-      <div>
-        <h1>Reisekosten System</h1>
-        <div class="version">Version 7.19 · sortierte Eventtabelle · silbernes Logo</div>
-      </div>
+      <div><h1>Reisekosten System</h1><div class="version">Version 7.20 · deutsche Datumsformate · Events je Datum/Uhrzeit einzeln</div></div>
     </div>
     <div class="nav">
-      <button onclick="showPage('dashboard')">Dashboard</button>
-      <button onclick="showPage('mitarbeiter')">Mitarbeiter</button>
-      <button onclick="showPage('reisen')">Reisen</button>
-      <button onclick="showPage('mail')">Mail-Test</button>
-      <button onclick="showPage('debug')">Debug</button>
+      <button onclick="showPage('dashboard')">Dashboard</button><button onclick="showPage('mitarbeiter')">Mitarbeiter</button><button onclick="showPage('reisen')">Reisen</button><button onclick="showPage('mail')">Mail-Test</button><button onclick="showPage('debug')">Debug</button>
     </div>
   </div>
 
@@ -122,11 +67,7 @@
     <div id="statusBox" class="status">Bereit.</div>
 
     <section id="page-dashboard">
-      <div class="grid grid-3">
-        <div class="card"><h2 id="countMitarbeiter">0</h2><div class="subtitle">Mitarbeiter</div></div>
-        <div class="card"><h2 id="countReisen">0</h2><div class="subtitle">Reisen</div></div>
-        <div class="card"><h2 id="countBelege">0</h2><div class="subtitle">Belege</div></div>
-      </div>
+      <div class="grid grid-3"><div class="card"><h2 id="countMitarbeiter">0</h2><div class="subtitle">Mitarbeiter</div></div><div class="card"><h2 id="countReisen">0</h2><div class="subtitle">Reisen</div></div><div class="card"><h2 id="countBelege">0</h2><div class="subtitle">Belege</div></div></div>
       <div class="card"><div class="card-head"><div><h2>Geplante Reisen</h2><div class="subtitle">Startdatum liegt in der Zukunft</div></div><button class="btn-light" onclick="loadReisen(false)">Aktualisieren</button></div><div id="dashboardReisenPlan"></div></div>
       <div class="card"><div class="card-head"><div><h2>Aktuelle Reisen</h2><div class="subtitle">Heute liegt zwischen Start- und Enddatum</div></div></div><div id="dashboardReisenAktuell"></div></div>
       <div class="card"><div class="card-head"><div><h2>Abgeschlossene Reisen</h2><div class="subtitle">Enddatum liegt in der Vergangenheit</div></div></div><div id="dashboardReisenAbgeschlossen"></div></div>
@@ -135,48 +76,27 @@
     <section id="page-mitarbeiter" class="hidden">
       <div class="card">
         <div class="card-head"><div><h2>Mitarbeiter</h2><div class="subtitle">Kürzel und Name</div></div><button onclick="openMitarbeiterNew()">+ Neu</button></div>
-        <div id="mitarbeiterForm" class="form-panel hidden">
-          <h3 id="mitarbeiterFormTitle">Mitarbeiter anlegen</h3><input id="mitarbeiterId" type="hidden" />
+        <div id="mitarbeiterForm" class="form-panel hidden"><h3 id="mitarbeiterFormTitle">Mitarbeiter anlegen</h3><input id="mitarbeiterId" type="hidden" />
           <div class="grid grid-2"><div><label>Kürzel</label><input id="mitarbeiterKuerzel" /></div><div><label>E-Mail</label><input id="mitarbeiterEmail" /></div><div><label>Vorname</label><input id="mitarbeiterVorname" /></div><div><label>Nachname</label><input id="mitarbeiterNachname" /></div><div><label>Geburtsdatum</label><input id="mitarbeiterGeburtsdatum" /></div></div>
           <button onclick="saveMitarbeiter()">Speichern</button><button class="btn-light" onclick="closeMitarbeiterForm()">Abbrechen</button>
-        </div>
-        <div id="mitarbeiterTable"></div>
+        </div><div id="mitarbeiterTable"></div>
       </div>
     </section>
 
     <section id="page-reisen" class="hidden">
       <div class="card">
         <div class="card-head"><div><h2>Reisen</h2><div class="subtitle">Reise-ID anklicken für Details</div></div><button onclick="openReiseNew()">+ Neu</button></div>
-        <div id="reiseForm" class="form-panel hidden">
-          <h3 id="reiseFormTitle">Reise anlegen</h3><input id="reiseDbId" type="hidden" />
+        <div id="reiseForm" class="form-panel hidden"><h3 id="reiseFormTitle">Reise anlegen</h3><input id="reiseDbId" type="hidden" />
           <div class="grid grid-2"><div><label>Jahr</label><input id="reiseJahr" type="number" value="2026" onchange="loadNextCode()" /></div><div><label>Nächster Reisecode</label><input id="reiseNextCode" readonly /></div><div><label>Reisename</label><input id="reiseName" /></div><div><label>Anzahl Reisende</label><input id="reiseAnzahl" type="number" value="1" min="1" /></div><div><label>Startdatum</label><input id="reiseStart" type="date" /></div><div><label>Enddatum</label><input id="reiseEnde" type="date" /></div></div>
           <label>Reisende auswählen</label><select id="reiseMitarbeiterSelect" multiple></select><div class="small">Mehrfachauswahl: Strg/CTRL gedrückt halten.</div><br />
           <button onclick="saveReise()">Speichern</button><button class="btn-light" onclick="closeReiseForm()">Abbrechen</button>
-        </div>
-        <div id="reisenTable"></div>
+        </div><div id="reisenTable"></div>
       </div>
     </section>
 
-    <section id="page-reise-detail" class="hidden">
-      <div class="card">
-        <div class="card-head">
-          <div><h2 id="reiseDetailTitle">Reise</h2><div id="reiseDetailSub" class="subtitle"></div></div>
-          <button class="btn-light" onclick="showPage('reisen')">Zurück zu Reisen</button>
-        </div>
-        <div id="reiseDetailContent"></div>
-      </div>
-    </section>
-
-    <section id="page-mail" class="hidden">
-      <div class="card">
-        <div class="card-head"><div><h2>Mail-Test / Mail-Analyse</h2><div class="subtitle">Betreff-Filter, Analyse und Duplikat-Check</div></div></div>
-        <div class="grid grid-3"><div><label>Betreff enthält</label><input id="mailSubject" value="26-001" /></div><div><label>Anzahl</label><input id="mailLimit" type="number" value="3" min="1" max="10" /></div><div style="padding-top:22px;"><button class="btn-light" onclick="mailTest()">Mails testen</button><button onclick="mailAnalyze()">Mails analysieren</button></div></div>
-      </div>
-    </section>
-
-    <section id="page-debug" class="hidden">
-      <div class="card"><div class="card-head"><div><h2>Debug</h2><div class="subtitle">Letzte Serverantwort</div></div><button class="btn-light" onclick="health()">Health</button></div><pre id="resultBox">Noch kein Ergebnis.</pre></div>
-    </section>
+    <section id="page-reise-detail" class="hidden"><div class="card"><div class="card-head"><div><h2 id="reiseDetailTitle">Reise</h2><div id="reiseDetailSub" class="subtitle"></div></div><button class="btn-light" onclick="showPage('reisen')">Zurück zu Reisen</button></div><div id="reiseDetailContent"></div></div></section>
+    <section id="page-mail" class="hidden"><div class="card"><div class="card-head"><div><h2>Mail-Test / Mail-Analyse</h2><div class="subtitle">Betreff-Filter, Analyse und Duplikat-Check</div></div></div><div class="grid grid-3"><div><label>Betreff enthält</label><input id="mailSubject" value="26-001" /></div><div><label>Anzahl</label><input id="mailLimit" type="number" value="3" min="1" max="10" /></div><div style="padding-top:22px;"><button class="btn-light" onclick="mailTest()">Mails testen</button><button onclick="mailAnalyze()">Mails analysieren</button></div></div></div></section>
+    <section id="page-debug" class="hidden"><div class="card"><div class="card-head"><div><h2>Debug</h2><div class="subtitle">Letzte Serverantwort</div></div><button class="btn-light" onclick="health()">Health</button></div><pre id="resultBox">Noch kein Ergebnis.</pre></div></section>
   </div>
 
 <script>
@@ -193,7 +113,22 @@ async function health(){ try{const d=await requestJson(api()+'/health'); showRes
 async function refreshAll(){ await loadMitarbeiter(false); await loadReisen(false); await loadBelegeCount(); }
 async function loadBelegeCount(){ try{const d=await requestJson(api()+'/belege'); document.getElementById('countBelege').textContent=d.count||0;}catch{document.getElementById('countBelege').textContent='?';} }
 function fullName(m){ return (m.vollname||m.klarname||((m.vorname||'')+' '+(m.nachname||'')).trim()||'').trim(); }
-function todayISO(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+
+function pad2(v){ return String(v).padStart(2,'0'); }
+function todayISO(){ const d=new Date(); return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; }
+function toDateObj(v){
+  v=String(v||'').trim();
+  let m=v.match(/(\d{4})-(\d{2})-(\d{2})/); if(m)return {y:m[1],mo:m[2],d:m[3]};
+  m=v.match(/(\d{2})\.(\d{2})\.(\d{4})/); if(m)return {y:m[3],mo:m[2],d:m[1]};
+  const mons={JAN:'01',FEB:'02',MAR:'03',APR:'04',MAY:'05',JUN:'06',JUL:'07',AUG:'08',SEP:'09',OCT:'10',NOV:'11',DEC:'12',JANUAR:'01',FEBRUAR:'02',MÄRZ:'03',MAERZ:'03',APRIL:'04',MAI:'05',JUNI:'06',JULI:'07',AUGUST:'08',SEPTEMBER:'09',OKTOBER:'10',NOVEMBER:'11',DEZEMBER:'12'};
+  m=v.match(/(\d{1,2})\s*([A-Za-zÄÖÜäöü]+)\s*(\d{4})/); if(m){const mon=mons[m[2].toUpperCase()]||''; if(mon)return {y:m[3],mo:mon,d:pad2(m[1])};}
+  m=v.match(/(\d{1,2})([A-Za-z]{3})(\d{4})/); if(m){const mon=mons[m[2].toUpperCase()]||''; if(mon)return {y:m[3],mo:mon,d:pad2(m[1])};}
+  return null;
+}
+function dateDE(v){ const o=toDateObj(v); return o ? `${o.d}.${o.mo}.${o.y}` : (v ? String(v).slice(0,10) : '—'); }
+function sortDateKey(v){ const o=toDateObj(v); return o ? `${o.y}${o.mo}${o.d}` : '99999999'; }
+function timePart(v){ const m=String(v||'').match(/\d{1,2}:\d{2}/); return m ? m[0].padStart(5,'0') : ''; }
+function sortTimeKey(v){ return timePart(v).replace(':','') || '9999'; }
 function reiseTimeBucket(r){ const t=todayISO(); if(r.startdatum&&r.startdatum>t)return'planned'; if(r.enddatum&&r.enddatum<t)return'done'; if(r.startdatum&&r.enddatum&&r.startdatum<=t&&r.enddatum>=t)return'current'; return'planned'; }
 function bucketLabel(b){ if(b==='current')return'<span class="pill pill-now">aktuell</span>'; if(b==='done')return'<span class="pill pill-done">abgeschlossen</span>'; return'<span class="pill pill-plan">geplant</span>'; }
 
@@ -209,7 +144,7 @@ function renderMitarbeiterSelect(selectedIds=[]){ const s=document.getElementByI
 async function loadReisen(show=true){ try{const d=await requestJson(api()+'/reisen'); const base=d.reisen||[]; const detailed=[]; for(const r of base){ try{const det=await requestJson(api()+'/reisen/'+r.id); detailed.push({...r,detail:det});}catch{detailed.push({...r,detail:null});} } reisenCache=detailed; document.getElementById('countReisen').textContent=d.count||0; renderReisenTable(); renderDashboardReisen(); if(show)setStatus('Reisen geladen.','ok');}catch(e){setStatus(e.message,'error');} }
 function reisendeKuerzel(r){ const arr=(r.detail&&r.detail.reisende)?r.detail.reisende:[]; return arr.map(x=>x.kuerzel||'').filter(Boolean).join(', '); }
 function reiseCodeLink(r){ return `<span class="linkish" onclick="openReiseDetail(${r.id})">${esc(r.reise_code)}</span>`; }
-function renderReisenMiniTable(items,id){ const rows=items.map(r=>`<tr><td>${reiseCodeLink(r)}</td><td>${esc(r.reise_name)}</td><td>${esc(reisendeKuerzel(r)||'—')}</td><td>${esc(r.startdatum||'—')} bis ${esc(r.enddatum||'—')}</td><td>${bucketLabel(reiseTimeBucket(r))}</td></tr>`).join(''); document.getElementById(id).innerHTML=`<table><thead><tr><th>Reise-ID</th><th>Reisename</th><th>Reisende</th><th>Zeitraum</th><th>Status</th></tr></thead><tbody>${rows||'<tr><td colspan="5">Keine Reisen in dieser Gruppe</td></tr>'}</tbody></table>`; }
+function renderReisenMiniTable(items,id){ const rows=items.map(r=>`<tr><td>${reiseCodeLink(r)}</td><td>${esc(r.reise_name)}</td><td>${esc(reisendeKuerzel(r)||'—')}</td><td>${esc(dateDE(r.startdatum))} bis ${esc(dateDE(r.enddatum))}</td><td>${bucketLabel(reiseTimeBucket(r))}</td></tr>`).join(''); document.getElementById(id).innerHTML=`<table><thead><tr><th>Reise-ID</th><th>Reisename</th><th>Reisende</th><th>Zeitraum</th><th>Status</th></tr></thead><tbody>${rows||'<tr><td colspan="5">Keine Reisen in dieser Gruppe</td></tr>'}</tbody></table>`; }
 function renderDashboardReisen(){ renderReisenMiniTable(reisenCache.filter(r=>reiseTimeBucket(r)==='planned'),'dashboardReisenPlan'); renderReisenMiniTable(reisenCache.filter(r=>reiseTimeBucket(r)==='current'),'dashboardReisenAktuell'); renderReisenMiniTable(reisenCache.filter(r=>reiseTimeBucket(r)==='done'),'dashboardReisenAbgeschlossen'); }
 function renderReisenTable(){ const rows=reisenCache.map(r=>`<tr><td>${reiseCodeLink(r)}</td><td>${esc(r.reise_name)}</td><td>${esc(reisendeKuerzel(r)||'—')}</td><td class="actions"><button class="btn-light icon-btn" onclick="editReise(${r.id})">✏️</button><button class="btn-danger icon-btn" onclick="deleteReise(${r.id})">✖</button></td></tr>`).join(''); document.getElementById('reisenTable').innerHTML=`<table><thead><tr><th>Reise-ID</th><th>Reisename</th><th>Reisende(r) Kürzel</th><th>Aktionen</th></tr></thead><tbody>${rows||'<tr><td colspan="4">Keine Reisen vorhanden</td></tr>'}</tbody></table>`; }
 async function loadNextCode(){ try{const jahr=document.getElementById('reiseJahr').value||new Date().getFullYear(); const d=await requestJson(api()+'/reisen/next-code?jahr='+encodeURIComponent(jahr)); document.getElementById('reiseNextCode').value=d.reise_code||d.next_code||JSON.stringify(d);}catch{document.getElementById('reiseNextCode').value='nicht verfügbar';} }
@@ -221,21 +156,53 @@ async function saveReise(){ try{const id=document.getElementById('reiseDbId').va
 async function deleteReise(id){ const r=reisenCache.find(x=>x.id===id); if(!confirm('Reise wirklich löschen?\n\n'+(r?(r.reise_code+' - '+r.reise_name):id)))return; try{const d=await requestJson(api()+'/reisen/'+id,{method:'DELETE'}); showResult(d); await loadReisen(); setStatus('Reise gelöscht.','ok');}catch(e){setStatus(e.message,'error');} }
 
 function parseAnalysisFromBeleg(b){ if(!b)return{}; const raw=b.analysis_json||b.analysis||''; if(typeof raw==='object')return raw; if(!raw)return{}; try{return JSON.parse(raw);}catch{return{};} }
-function firstAnalysis(eventDetail){ const belege=eventDetail.belege||[]; for(const b of belege){ const a=parseAnalysisFromBeleg(b); if(Object.keys(a).length)return a; } return {}; }
-function firstBelegId(eventDetail){ const b=(eventDetail.belege||[])[0]; return b ? b.id : ''; }
-function belegButtons(eventDetail){ const belege=eventDetail.belege||[]; if(!belege.length)return '—'; return belege.map(b=>`<button class="btn icon-btn" onclick="openPdf(${b.id})">${b.id}</button>`).join(' '); }
-function getEventName(a, ev){ const typ=(a.art_des_dokuments||ev.typ||'').toLowerCase(); if(typ==='hotel'){ const seg=(a.reisesegmente||[])[0]||{}; return seg.ankunft_ort || a.hotel || a.buchungsnummer_code || ev.titel || ev.typ || 'Hotel'; } const seg=(a.reisesegmente||[])[0]||{}; return seg.transportunternehmen_und_nummer || a.buchungsnummer_code || ev.titel || ev.typ || 'Event'; }
-function getEventDate(a, ev){ const typ=(a.art_des_dokuments||ev.typ||'').toLowerCase(); const seg=(a.reisesegmente||[])[0]||{}; if(typ==='hotel') return datePart(seg.abreise_datum_und_zeit || a.belegdatum || ev.created_at); return datePart(seg.abreise_datum_und_zeit || a.belegdatum || ev.created_at); }
-function datePart(v){ v=String(v||''); const iso=v.match(/\d{4}-\d{2}-\d{2}/); if(iso)return iso[0]; const de=v.match(/\d{2}\.\d{2}\.\d{4}/); if(de)return de[0]; const compact=v.match(/\d{1,2}[A-Z]{3}\d{4}/i); if(compact)return compact[0]; return v.slice(0,10)||'—'; }
-function timePart(v){ v=String(v||''); const t=v.match(/\d{1,2}:\d{2}/); return t ? t[0] : ''; }
-function getTimeRange(a, ev){ const typ=(a.art_des_dokuments||ev.typ||'').toLowerCase(); const segs=a.reisesegmente||[]; if(typ==='hotel'){ const s=segs[0]||{}; const from=datePart(s.abreise_datum_und_zeit||''); const to=datePart(s.ankunft_datum_und_zeit||''); return `Check-in ${esc(from||'—')}<br>Check-out ${esc(to||'—')}`; }
- if(!segs.length)return '—'; return segs.map((s,i)=>`${i+1}. ${esc(timePart(s.abreise_datum_und_zeit)||'—')}–${esc(timePart(s.ankunft_datum_und_zeit)||'—')}<div class="event-sub">${esc(s.abreise_ort||'')} → ${esc(s.ankunft_ort||'')}</div>`).join('<br>'); }
-function eventSortKey(item){ const a=item.analysis; const ev=item.event; const seg=(a.reisesegmente||[])[0]||{}; return String(seg.abreise_datum_und_zeit || a.belegdatum || ev.created_at || '9999'); }
-async function openReiseDetail(id){ try{ const detail=await requestJson(api()+'/reisen/'+id); const r=detail.reise||reisenCache.find(x=>x.id===id)||{}; document.getElementById('reiseDetailTitle').textContent=`${r.reise_code||''} · ${r.reise_name||''}`; document.getElementById('reiseDetailSub').textContent=`${r.startdatum||'kein Startdatum'} bis ${r.enddatum||'kein Enddatum'} · Reisende: ${(detail.reisende||[]).map(x=>x.kuerzel).join(', ')||'—'}`; const items=[]; for(const ev of (detail.events||[])){ let ed={belege:[]}; try{ed=await requestJson(api()+'/events/'+ev.id);}catch{} const a=firstAnalysis(ed); items.push({event:ev,eventDetail:ed,analysis:a}); } items.sort((x,y)=>eventSortKey(x).localeCompare(eventSortKey(y))); const rows=items.map(item=>{ const ev=item.event, ed=item.eventDetail, a=item.analysis; return `<tr><td>${esc(a.art_des_dokuments||ev.typ||'Event')}</td><td class="nowrap">${esc(getEventDate(a,ev))}</td><td>${getTimeRange(a,ev)}</td><td><div class="event-title">${esc(getEventName(a,ev))}</div><div class="event-sub">${esc(a.buchungsnummer_code||'')}</div></td><td>${belegButtons(ed)}</td><td>${esc(ev.status||'—')}</td><td class="actions"><button class="btn-light icon-btn" onclick="eventEditPlaceholder(${ev.id})">✏️</button><button class="btn-danger icon-btn" onclick="deleteEvent(${ev.id},${id})">✖</button></td></tr>`; }).join(''); document.getElementById('reiseDetailContent').innerHTML=`<table><thead><tr><th>Art</th><th>Datum</th><th>Uhrzeit von/bis</th><th>Event</th><th>BelegNr.</th><th>Status</th><th>Aktionen</th></tr></thead><tbody>${rows||'<tr><td colspan="7">Noch keine Events vorhanden</td></tr>'}</tbody></table>`; showPage('reise-detail'); setStatus('Reiseseite geladen.','ok'); }catch(e){setStatus(e.message,'error');} }
+function analysesFromEventDetail(eventDetail){ const out=[]; for(const b of (eventDetail.belege||[])){ const a=parseAnalysisFromBeleg(b); if(Object.keys(a).length) out.push({beleg:b,analysis:a}); } return out; }
+function belegButtons(belegId){ return belegId ? `<button class="btn icon-btn" onclick="openPdf(${belegId})">${belegId}</button>` : '—'; }
+function eventNameForSegment(a, ev, s, kind){ const typ=(a.art_des_dokuments||ev.typ||'').toLowerCase(); if(typ==='hotel') return s.ankunft_ort || a.hotel || a.buchungsnummer_code || ev.titel || ev.typ || 'Hotel'; return s.transportunternehmen_und_nummer || a.buchungsnummer_code || ev.titel || ev.typ || 'Event'; }
+function buildRowsFromAnalysis(ev, ed, beleg, a){
+  const rows=[]; const typ=(a.art_des_dokuments||ev.typ||'Event'); const typL=typ.toLowerCase(); const belegId=beleg?.id || '';
+  if(typL==='hotel'){
+    const s=(a.reisesegmente||[])[0]||{};
+    const checkIn=s.abreise_datum_und_zeit || a.check_in || a.belegdatum || ev.created_at;
+    const checkOut=s.ankunft_datum_und_zeit || a.check_out || checkIn;
+    rows.push({art:'Hotel Check-in', datum:dateDE(checkIn), sort:`${sortDateKey(checkIn)}${sortTimeKey(checkIn)}`, zeit:timePart(checkIn)||'—', event:eventNameForSegment(a,ev,s,'checkin'), sub:a.buchungsnummer_code||'', belegId, status:ev.status||'—', eventId:ev.id});
+    rows.push({art:'Hotel Check-out', datum:dateDE(checkOut), sort:`${sortDateKey(checkOut)}${sortTimeKey(checkOut)}`, zeit:timePart(checkOut)||'—', event:eventNameForSegment(a,ev,s,'checkout'), sub:a.buchungsnummer_code||'', belegId, status:ev.status||'—', eventId:ev.id});
+    return rows;
+  }
+  const segs=a.reisesegmente||[];
+  if(segs.length){
+    for(const s of segs){
+      const start=s.abreise_datum_und_zeit || a.belegdatum || ev.created_at;
+      const end=s.ankunft_datum_und_zeit || start;
+      rows.push({art:typ, datum:dateDE(start), sort:`${sortDateKey(start)}${sortTimeKey(start)}`, zeit:`${timePart(start)||'—'}–${timePart(end)||'—'}`, event:eventNameForSegment(a,ev,s,'segment'), sub:`${s.abreise_ort||''} → ${s.ankunft_ort||''}`, belegId, status:ev.status||'—', eventId:ev.id});
+    }
+    return rows;
+  }
+  const d=a.belegdatum || ev.created_at;
+  rows.push({art:typ, datum:dateDE(d), sort:`${sortDateKey(d)}${sortTimeKey(d)}`, zeit:'—', event:a.buchungsnummer_code||ev.titel||ev.typ||'Event', sub:'', belegId, status:ev.status||'—', eventId:ev.id});
+  return rows;
+}
+async function openReiseDetail(id){
+  try{
+    const detail=await requestJson(api()+'/reisen/'+id); const r=detail.reise||reisenCache.find(x=>x.id===id)||{};
+    document.getElementById('reiseDetailTitle').textContent=`${r.reise_code||''} · ${r.reise_name||''}`;
+    document.getElementById('reiseDetailSub').textContent=`${dateDE(r.startdatum)||'kein Startdatum'} bis ${dateDE(r.enddatum)||'kein Enddatum'} · Reisende: ${(detail.reisende||[]).map(x=>x.kuerzel).join(', ')||'—'}`;
+    const eventRows=[];
+    for(const ev of (detail.events||[])){
+      let ed={belege:[]}; try{ed=await requestJson(api()+'/events/'+ev.id);}catch{}
+      const pairs=analysesFromEventDetail(ed);
+      if(pairs.length){ for(const p of pairs){ eventRows.push(...buildRowsFromAnalysis(ev,ed,p.beleg,p.analysis)); } }
+      else { eventRows.push({art:ev.typ||'Event', datum:dateDE(ev.created_at), sort:`${sortDateKey(ev.created_at)}${sortTimeKey(ev.created_at)}`, zeit:'—', event:ev.titel||ev.typ||'Event', sub:'Keine Analyse gespeichert', belegId:'', status:ev.status||'—', eventId:ev.id}); }
+    }
+    eventRows.sort((a,b)=>a.sort.localeCompare(b.sort));
+    const rows=eventRows.map(x=>`<tr><td>${esc(x.art)}</td><td class="nowrap">${esc(x.datum)}</td><td class="nowrap">${esc(x.zeit)}</td><td><div class="event-title">${esc(x.event)}</div><div class="event-sub">${esc(x.sub)}</div></td><td>${belegButtons(x.belegId)}</td><td>${esc(x.status)}</td><td class="actions"><button class="btn-light icon-btn" onclick="eventEditPlaceholder(${x.eventId})">✏️</button><button class="btn-danger icon-btn" onclick="deleteEvent(${x.eventId},${id})">✖</button></td></tr>`).join('');
+    document.getElementById('reiseDetailContent').innerHTML=`<table><thead><tr><th>Art</th><th>Datum</th><th>Uhrzeit von/bis</th><th>Event</th><th>BelegNr.</th><th>Status</th><th>Aktionen</th></tr></thead><tbody>${rows||'<tr><td colspan="7">Noch keine Events vorhanden</td></tr>'}</tbody></table>`;
+    showPage('reise-detail'); setStatus('Reiseseite geladen.','ok');
+  }catch(e){setStatus(e.message,'error');}
+}
 function openPdf(id){ window.open(api()+'/belege/'+id+'/pdf','_blank'); }
 async function deleteEvent(eventId,reiseId){ if(!confirm('Event wirklich löschen?'))return; try{const d=await requestJson(api()+'/events/'+eventId,{method:'DELETE'}); showResult(d); await openReiseDetail(reiseId); setStatus('Event gelöscht.','ok');}catch(e){setStatus(e.message,'error');} }
 function eventEditPlaceholder(id){ setStatus('Event bearbeiten folgt später. Event-ID: '+id,'ok'); }
-
 function mailUrl(path){ const subject=document.getElementById('mailSubject').value.trim(); const limit=document.getElementById('mailLimit').value||'3'; const qs=['limit='+encodeURIComponent(limit)]; if(subject)qs.push('subject_contains='+encodeURIComponent(subject)); return api()+path+'?'+qs.join('&'); }
 async function mailTest(){ try{const d=await requestJson(mailUrl('/mail/test')); showResult(d); showPage('debug'); setStatus('Mail-Test geladen.','ok');}catch(e){setStatus(e.message,'error');} }
 async function mailAnalyze(){ try{const d=await requestJson(mailUrl('/mail/analyze-latest')); showResult(d); showPage('debug'); await loadBelegeCount(); await loadReisen(false); setStatus('Mail-Analyse abgeschlossen.','ok');}catch(e){setStatus(e.message,'error');} }
