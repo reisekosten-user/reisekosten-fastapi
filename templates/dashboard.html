@@ -1,113 +1,211 @@
 <!DOCTYPE html>
 <html lang="de">
 <head>
-<meta charset="UTF-8">
-<title>Reisekosten Dashboard</title>
-<style>
-body{font-family:Arial;margin:0;background:#f5f7fa}
-.header{background:#1e3a8a;color:#fff;padding:10px 20px;font-size:20px;cursor:pointer}
-.container{padding:20px}
-table{width:100%;border-collapse:collapse;background:#fff}
-th,td{padding:10px;border-bottom:1px solid #ddd;text-align:left}
-th{background:#e5e7eb}
-.btn{padding:5px 10px;margin:2px;border:none;border-radius:4px;cursor:pointer}
-.edit{background:#3b82f6;color:#fff}
-.delete{background:#ef4444;color:#fff}
-.beleg{background:#10b981;color:#fff}
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reisekosten Dashboard 7.18</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --line: #dbe2f0;
+      --blue: #12327f;
+      --blue2: #2563eb;
+      --blueDark: #0f2868;
+      --text: #1f2937;
+      --muted: #64748b;
+      --danger: #b91c1c;
+      --dangerBg: #fee2e2;
+      --ok: #166534;
+      --okBg: #dcfce7;
+      --warn: #92400e;
+      --warnBg: #fef3c7;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
+    .topbar { background: var(--blue); color: white; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    .brand { display: flex; align-items: center; gap: 14px; cursor: pointer; }
+    .logo-box { height: 58px; min-width: 92px; padding: 8px 12px; border-radius: 12px; background: var(--blue); display: flex; align-items: center; justify-content: center; border: 1px solid rgba(255,255,255,0.16); }
+    .logo-box img { height: 42px; object-fit: contain; filter: grayscale(1) brightness(2.2) contrast(0.75) opacity(0.92); }
+    .brand h1 { margin: 0; font-size: 24px; }
+    .version { font-size: 13px; opacity: 0.92; margin-top: 3px; }
+    .nav { display: flex; flex-wrap: wrap; gap: 10px; }
+    button, .btn { border: none; background: var(--blue2); color: white; border-radius: 10px; padding: 10px 14px; font-weight: 700; cursor: pointer; }
+    button:hover, .btn:hover { background: var(--blueDark); }
+    .btn-light { background: #e2e8f0; color: #0f172a; }
+    .btn-light:hover { background: #cbd5e1; }
+    .btn-danger { background: var(--danger); }
+    .btn-danger:hover { background: #7f1d1d; }
+    .icon-btn { padding: 7px 10px; border-radius: 8px; margin-right: 6px; }
+    .container { max-width: 1450px; margin: 22px auto; padding: 0 18px 42px; }
+    .status { background: #eff6ff; border: 1px solid #bfdbfe; color: #1d4ed8; border-radius: 12px; padding: 12px 14px; font-weight: 700; margin-bottom: 18px; }
+    .status.error { background: var(--dangerBg); border-color: #fecaca; color: var(--danger); }
+    .status.ok { background: var(--okBg); border-color: #bbf7d0; color: var(--ok); }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; box-shadow: 0 3px 14px rgba(15,23,42,0.05); margin-bottom: 18px; }
+    .card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+    h2 { margin: 0; font-size: 22px; }
+    h3 { margin-top: 0; }
+    .subtitle { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .grid { display: grid; gap: 14px; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+    input, textarea, select { width: 100%; border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; font-size: 14px; background: white; margin-bottom: 12px; }
+    select[multiple] { min-height: 96px; }
+    input[readonly] { background: #e5e7eb; color: #475569; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #e5edf7; vertical-align: top; }
+    th { background: #eef4fb; color: #334155; font-size: 13px; }
+    .hidden { display: none; }
+    .form-panel { background: #f8fbff; border: 1px solid #dbeafe; border-radius: 14px; padding: 14px; margin-bottom: 16px; }
+    .actions { white-space: nowrap; }
+    .small { color: var(--muted); font-size: 12px; }
+    pre { background: #0f172a; color: #dbeafe; padding: 14px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; overflow: auto; font-size: 13px; }
+    .pill { display: inline-block; padding: 4px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+    .pill-plan { background: #dbeafe; color: #1d4ed8; }
+    .pill-now { background: var(--warnBg); color: var(--warn); }
+    .pill-done { background: var(--okBg); color: var(--ok); }
+    .linkish { color: var(--blue2); font-weight: 800; text-decoration: underline; cursor: pointer; }
+    .segment { margin-bottom: 8px; line-height: 1.35; }
+    .segment b { color: #0f172a; }
+    @media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+  </style>
 </head>
 <body>
-<div class="header" onclick="goDashboard()">Reisekosten System</div>
-<div class="container">
-<h2>Reise Details</h2>
-<div id="reiseInfo"></div>
-<table>
-<thead>
-<tr>
-<th>Art</th>
-<th>Datum</th>
-<th>Details</th>
-<th>Status</th>
-<th>Beleg</th>
-<th>Aktion</th>
-</tr>
-</thead>
-<tbody id="eventsTable"></tbody>
-</table>
-</div>
+  <div class="topbar">
+    <div class="brand" onclick="showPage('dashboard')" title="Zum Dashboard">
+      <div class="logo-box"><img src="/static/logo2.png" alt="Logo" /></div>
+      <div>
+        <h1>Reisekosten System</h1>
+        <div class="version">Version 7.18 · echte Eventdaten / Beleg-PDF / Reisenübersicht</div>
+      </div>
+    </div>
+    <div class="nav">
+      <button onclick="showPage('dashboard')">Dashboard</button>
+      <button onclick="showPage('mitarbeiter')">Mitarbeiter</button>
+      <button onclick="showPage('reisen')">Reisen</button>
+      <button onclick="showPage('mail')">Mail-Test</button>
+      <button onclick="showPage('debug')">Debug</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <div id="statusBox" class="status">Bereit.</div>
+
+    <section id="page-dashboard">
+      <div class="grid grid-3">
+        <div class="card"><h2 id="countMitarbeiter">0</h2><div class="subtitle">Mitarbeiter</div></div>
+        <div class="card"><h2 id="countReisen">0</h2><div class="subtitle">Reisen</div></div>
+        <div class="card"><h2 id="countBelege">0</h2><div class="subtitle">Belege</div></div>
+      </div>
+      <div class="card"><div class="card-head"><div><h2>Geplante Reisen</h2><div class="subtitle">Startdatum liegt in der Zukunft</div></div><button class="btn-light" onclick="loadReisen(false)">Aktualisieren</button></div><div id="dashboardReisenPlan"></div></div>
+      <div class="card"><div class="card-head"><div><h2>Aktuelle Reisen</h2><div class="subtitle">Heute liegt zwischen Start- und Enddatum</div></div></div><div id="dashboardReisenAktuell"></div></div>
+      <div class="card"><div class="card-head"><div><h2>Abgeschlossene Reisen</h2><div class="subtitle">Enddatum liegt in der Vergangenheit</div></div></div><div id="dashboardReisenAbgeschlossen"></div></div>
+    </section>
+
+    <section id="page-mitarbeiter" class="hidden">
+      <div class="card">
+        <div class="card-head"><div><h2>Mitarbeiter</h2><div class="subtitle">Kürzel und Name</div></div><button onclick="openMitarbeiterNew()">+ Neu</button></div>
+        <div id="mitarbeiterForm" class="form-panel hidden">
+          <h3 id="mitarbeiterFormTitle">Mitarbeiter anlegen</h3><input id="mitarbeiterId" type="hidden" />
+          <div class="grid grid-2"><div><label>Kürzel</label><input id="mitarbeiterKuerzel" /></div><div><label>E-Mail</label><input id="mitarbeiterEmail" /></div><div><label>Vorname</label><input id="mitarbeiterVorname" /></div><div><label>Nachname</label><input id="mitarbeiterNachname" /></div><div><label>Geburtsdatum</label><input id="mitarbeiterGeburtsdatum" /></div></div>
+          <button onclick="saveMitarbeiter()">Speichern</button><button class="btn-light" onclick="closeMitarbeiterForm()">Abbrechen</button>
+        </div>
+        <div id="mitarbeiterTable"></div>
+      </div>
+    </section>
+
+    <section id="page-reisen" class="hidden">
+      <div class="card">
+        <div class="card-head"><div><h2>Reisen</h2><div class="subtitle">Reise-ID anklicken für Details</div></div><button onclick="openReiseNew()">+ Neu</button></div>
+        <div id="reiseForm" class="form-panel hidden">
+          <h3 id="reiseFormTitle">Reise anlegen</h3><input id="reiseDbId" type="hidden" />
+          <div class="grid grid-2"><div><label>Jahr</label><input id="reiseJahr" type="number" value="2026" onchange="loadNextCode()" /></div><div><label>Nächster Reisecode</label><input id="reiseNextCode" readonly /></div><div><label>Reisename</label><input id="reiseName" /></div><div><label>Anzahl Reisende</label><input id="reiseAnzahl" type="number" value="1" min="1" /></div><div><label>Startdatum</label><input id="reiseStart" type="date" /></div><div><label>Enddatum</label><input id="reiseEnde" type="date" /></div></div>
+          <label>Reisende auswählen</label><select id="reiseMitarbeiterSelect" multiple></select><div class="small">Mehrfachauswahl: Strg/CTRL gedrückt halten.</div><br />
+          <button onclick="saveReise()">Speichern</button><button class="btn-light" onclick="closeReiseForm()">Abbrechen</button>
+        </div>
+        <div id="reisenTable"></div>
+      </div>
+    </section>
+
+    <section id="page-reise-detail" class="hidden">
+      <div class="card">
+        <div class="card-head">
+          <div><h2 id="reiseDetailTitle">Reise</h2><div id="reiseDetailSub" class="subtitle"></div></div>
+          <button class="btn-light" onclick="showPage('reisen')">Zurück zu Reisen</button>
+        </div>
+        <div id="reiseDetailContent"></div>
+      </div>
+    </section>
+
+    <section id="page-mail" class="hidden">
+      <div class="card">
+        <div class="card-head"><div><h2>Mail-Test / Mail-Analyse</h2><div class="subtitle">Betreff-Filter, Analyse und Duplikat-Check</div></div></div>
+        <div class="grid grid-3"><div><label>Betreff enthält</label><input id="mailSubject" value="26-001" /></div><div><label>Anzahl</label><input id="mailLimit" type="number" value="3" min="1" max="10" /></div><div style="padding-top:22px;"><button class="btn-light" onclick="mailTest()">Mails testen</button><button onclick="mailAnalyze()">Mails analysieren</button></div></div>
+      </div>
+    </section>
+
+    <section id="page-debug" class="hidden">
+      <div class="card"><div class="card-head"><div><h2>Debug</h2><div class="subtitle">Letzte Serverantwort</div></div><button class="btn-light" onclick="health()">Health</button></div><pre id="resultBox">Noch kein Ergebnis.</pre></div>
+    </section>
+  </div>
 
 <script>
-const api = "";
-const params = new URLSearchParams(window.location.search);
-const reiseId = params.get("reise_id") || 1;
+let mitarbeiterCache = [];
+let reisenCache = [];
+function api(){ return window.location.origin; }
+function esc(v){ return String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function setStatus(msg,type=''){ const b=document.getElementById('statusBox'); b.textContent=msg; b.className='status'+(type?' '+type:''); }
+function showResult(data){ document.getElementById('resultBox').textContent=JSON.stringify(data,null,2); }
+async function parseJson(res){ const txt=await res.text(); try{return JSON.parse(txt)}catch{throw new Error('Antwort war kein JSON: '+txt.slice(0,500));} }
+async function requestJson(url,opt={}){ const res=await fetch(url,opt); const data=await parseJson(res); if(!res.ok) throw new Error(data.detail||JSON.stringify(data)); return data; }
+function showPage(name){ ['dashboard','mitarbeiter','reisen','reise-detail','mail','debug'].forEach(p=>document.getElementById('page-'+p).classList.add('hidden')); document.getElementById('page-'+name).classList.remove('hidden'); if(name==='dashboard') loadReisen(false); if(name==='mitarbeiter') loadMitarbeiter(); if(name==='reisen') loadReisen(); }
+async function health(){ try{const d=await requestJson(api()+'/health'); showResult(d); setStatus('Health OK: Version '+d.version,'ok');}catch(e){setStatus(e.message,'error');} }
+async function refreshAll(){ await loadMitarbeiter(false); await loadReisen(false); await loadBelegeCount(); }
+async function loadBelegeCount(){ try{const d=await requestJson(api()+'/belege'); document.getElementById('countBelege').textContent=d.count||0;}catch{document.getElementById('countBelege').textContent='?';} }
+function fullName(m){ return (m.vollname||m.klarname||((m.vorname||'')+' '+(m.nachname||'')).trim()||'').trim(); }
+function todayISO(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+function reiseTimeBucket(r){ const t=todayISO(); if(r.startdatum&&r.startdatum>t)return'planned'; if(r.enddatum&&r.enddatum<t)return'done'; if(r.startdatum&&r.enddatum&&r.startdatum<=t&&r.enddatum>=t)return'current'; return'planned'; }
+function bucketLabel(b){ if(b==='current')return'<span class="pill pill-now">aktuell</span>'; if(b==='done')return'<span class="pill pill-done">abgeschlossen</span>'; return'<span class="pill pill-plan">geplant</span>'; }
 
-function goDashboard(){ window.location.href = "/dashboard" }
+async function loadMitarbeiter(show=true){ try{const d=await requestJson(api()+'/mitarbeiter'); mitarbeiterCache=d.mitarbeiter||[]; document.getElementById('countMitarbeiter').textContent=d.count||0; renderMitarbeiterTable(); renderMitarbeiterSelect(); if(show)setStatus('Mitarbeiter geladen.','ok');}catch(e){setStatus(e.message,'error');} }
+function renderMitarbeiterTable(){ const rows=mitarbeiterCache.map(m=>`<tr><td>${esc(m.kuerzel)}</td><td>${esc(fullName(m))}</td><td class="actions"><button class="btn-light icon-btn" onclick="editMitarbeiter(${m.id})">✏️</button><button class="btn-danger icon-btn" onclick="deleteMitarbeiter(${m.id})">✖</button></td></tr>`).join(''); document.getElementById('mitarbeiterTable').innerHTML=`<table><thead><tr><th>Kürzel</th><th>Name</th><th>Aktionen</th></tr></thead><tbody>${rows||'<tr><td colspan="3">Keine Mitarbeiter vorhanden</td></tr>'}</tbody></table>`; }
+function openMitarbeiterNew(){ ['mitarbeiterId','mitarbeiterKuerzel','mitarbeiterVorname','mitarbeiterNachname','mitarbeiterGeburtsdatum','mitarbeiterEmail'].forEach(id=>document.getElementById(id).value=''); document.getElementById('mitarbeiterFormTitle').textContent='Mitarbeiter anlegen'; document.getElementById('mitarbeiterForm').classList.remove('hidden'); }
+function closeMitarbeiterForm(){ document.getElementById('mitarbeiterForm').classList.add('hidden'); }
+function editMitarbeiter(id){ const m=mitarbeiterCache.find(x=>x.id===id); if(!m)return; document.getElementById('mitarbeiterFormTitle').textContent='Mitarbeiter bearbeiten'; document.getElementById('mitarbeiterId').value=m.id; document.getElementById('mitarbeiterKuerzel').value=m.kuerzel||''; document.getElementById('mitarbeiterVorname').value=m.vorname||''; document.getElementById('mitarbeiterNachname').value=m.nachname||''; document.getElementById('mitarbeiterGeburtsdatum').value=m.geburtsdatum||''; document.getElementById('mitarbeiterEmail').value=m.email||''; document.getElementById('mitarbeiterForm').classList.remove('hidden'); }
+async function saveMitarbeiter(){ try{const id=document.getElementById('mitarbeiterId').value; const payload={kuerzel:document.getElementById('mitarbeiterKuerzel').value.trim(),vorname:document.getElementById('mitarbeiterVorname').value.trim(),nachname:document.getElementById('mitarbeiterNachname').value.trim(),geburtsdatum:document.getElementById('mitarbeiterGeburtsdatum').value.trim()||null,email:document.getElementById('mitarbeiterEmail').value.trim()||null,aktiv:true}; if(!payload.kuerzel||!payload.vorname||!payload.nachname){setStatus('Bitte Kürzel, Vorname und Nachname ausfüllen.','error');return;} const data=await requestJson(api()+(id?'/mitarbeiter/'+id:'/mitarbeiter'),{method:id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); showResult(data); closeMitarbeiterForm(); await loadMitarbeiter(); setStatus('Mitarbeiter gespeichert.','ok');}catch(e){setStatus(e.message,'error');} }
+async function deleteMitarbeiter(id){ const m=mitarbeiterCache.find(x=>x.id===id); if(!confirm('Mitarbeiter wirklich löschen?\n\n'+(m?(m.kuerzel+' - '+fullName(m)):id)))return; try{const d=await requestJson(api()+'/mitarbeiter/'+id,{method:'DELETE'}); showResult(d); await loadMitarbeiter(); await loadReisen(false); setStatus('Mitarbeiter gelöscht.','ok');}catch(e){setStatus(e.message,'error');} }
 
-async function load(){
-  const res = await fetch(api+"/reisen/"+reiseId);
-  const data = await res.json();
+function renderMitarbeiterSelect(selectedIds=[]){ const s=document.getElementById('reiseMitarbeiterSelect'); if(!s)return; const set=new Set(selectedIds.map(String)); s.innerHTML=mitarbeiterCache.map(m=>`<option value="${m.id}" ${set.has(String(m.id))?'selected':''}>${esc(m.kuerzel)} - ${esc(fullName(m))}</option>`).join(''); }
+async function loadReisen(show=true){ try{const d=await requestJson(api()+'/reisen'); const base=d.reisen||[]; const detailed=[]; for(const r of base){ try{const det=await requestJson(api()+'/reisen/'+r.id); detailed.push({...r,detail:det});}catch{detailed.push({...r,detail:null});} } reisenCache=detailed; document.getElementById('countReisen').textContent=d.count||0; renderReisenTable(); renderDashboardReisen(); if(show)setStatus('Reisen geladen.','ok');}catch(e){setStatus(e.message,'error');} }
+function reisendeKuerzel(r){ const arr=(r.detail&&r.detail.reisende)?r.detail.reisende:[]; return arr.map(x=>x.kuerzel||'').filter(Boolean).join(', '); }
+function reiseCodeLink(r){ return `<span class="linkish" onclick="openReiseDetail(${r.id})">${esc(r.reise_code)}</span>`; }
+function renderReisenMiniTable(items,id){ const rows=items.map(r=>`<tr><td>${reiseCodeLink(r)}</td><td>${esc(r.reise_name)}</td><td>${esc(reisendeKuerzel(r)||'—')}</td><td>${esc(r.startdatum||'—')} bis ${esc(r.enddatum||'—')}</td><td>${bucketLabel(reiseTimeBucket(r))}</td></tr>`).join(''); document.getElementById(id).innerHTML=`<table><thead><tr><th>Reise-ID</th><th>Reisename</th><th>Reisende</th><th>Zeitraum</th><th>Status</th></tr></thead><tbody>${rows||'<tr><td colspan="5">Keine Reisen in dieser Gruppe</td></tr>'}</tbody></table>`; }
+function renderDashboardReisen(){ renderReisenMiniTable(reisenCache.filter(r=>reiseTimeBucket(r)==='planned'),'dashboardReisenPlan'); renderReisenMiniTable(reisenCache.filter(r=>reiseTimeBucket(r)==='current'),'dashboardReisenAktuell'); renderReisenMiniTable(reisenCache.filter(r=>reiseTimeBucket(r)==='done'),'dashboardReisenAbgeschlossen'); }
+function renderReisenTable(){ const rows=reisenCache.map(r=>`<tr><td>${reiseCodeLink(r)}</td><td>${esc(r.reise_name)}</td><td>${esc(reisendeKuerzel(r)||'—')}</td><td class="actions"><button class="btn-light icon-btn" onclick="editReise(${r.id})">✏️</button><button class="btn-danger icon-btn" onclick="deleteReise(${r.id})">✖</button></td></tr>`).join(''); document.getElementById('reisenTable').innerHTML=`<table><thead><tr><th>Reise-ID</th><th>Reisename</th><th>Reisende(r) Kürzel</th><th>Aktionen</th></tr></thead><tbody>${rows||'<tr><td colspan="4">Keine Reisen vorhanden</td></tr>'}</tbody></table>`; }
+async function loadNextCode(){ try{const jahr=document.getElementById('reiseJahr').value||new Date().getFullYear(); const d=await requestJson(api()+'/reisen/next-code?jahr='+encodeURIComponent(jahr)); document.getElementById('reiseNextCode').value=d.reise_code||d.next_code||JSON.stringify(d);}catch{document.getElementById('reiseNextCode').value='nicht verfügbar';} }
+async function openReiseNew(){ await loadMitarbeiter(false); document.getElementById('reiseFormTitle').textContent='Reise anlegen'; ['reiseDbId','reiseName','reiseStart','reiseEnde'].forEach(id=>document.getElementById(id).value=''); document.getElementById('reiseJahr').value=new Date().getFullYear(); document.getElementById('reiseAnzahl').value='1'; renderMitarbeiterSelect([]); await loadNextCode(); document.getElementById('reiseForm').classList.remove('hidden'); }
+function closeReiseForm(){ document.getElementById('reiseForm').classList.add('hidden'); }
+async function editReise(id){ await loadMitarbeiter(false); const r=reisenCache.find(x=>x.id===id); if(!r)return; const det=r.detail||await requestJson(api()+'/reisen/'+id); document.getElementById('reiseFormTitle').textContent='Reise bearbeiten'; document.getElementById('reiseDbId').value=r.id; document.getElementById('reiseJahr').value=r.reise_jahr||new Date().getFullYear(); document.getElementById('reiseNextCode').value=r.reise_code||''; document.getElementById('reiseName').value=r.reise_name||''; document.getElementById('reiseAnzahl').value=r.anzahl_reisende||1; document.getElementById('reiseStart').value=r.startdatum||''; document.getElementById('reiseEnde').value=r.enddatum||''; renderMitarbeiterSelect((det.reisende||[]).map(x=>x.id)); document.getElementById('reiseForm').classList.remove('hidden'); }
+function selectedMitarbeiterIds(){ return Array.from(document.getElementById('reiseMitarbeiterSelect').selectedOptions).map(o=>parseInt(o.value,10)); }
+async function saveReise(){ try{const id=document.getElementById('reiseDbId').value; const payload={reise_jahr:parseInt(document.getElementById('reiseJahr').value,10),reise_name:document.getElementById('reiseName').value.trim(),startdatum:document.getElementById('reiseStart').value||null,enddatum:document.getElementById('reiseEnde').value||null,anzahl_reisende:parseInt(document.getElementById('reiseAnzahl').value||'1',10),mitarbeiter_ids:selectedMitarbeiterIds()}; if(!payload.reise_name){setStatus('Bitte Reisename ausfüllen.','error');return;} const d=await requestJson(api()+(id?'/reisen/'+id:'/reisen'),{method:id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); showResult(d); closeReiseForm(); await loadReisen(); setStatus('Reise gespeichert.','ok');}catch(e){setStatus(e.message,'error');} }
+async function deleteReise(id){ const r=reisenCache.find(x=>x.id===id); if(!confirm('Reise wirklich löschen?\n\n'+(r?(r.reise_code+' - '+r.reise_name):id)))return; try{const d=await requestJson(api()+'/reisen/'+id,{method:'DELETE'}); showResult(d); await loadReisen(); setStatus('Reise gelöscht.','ok');}catch(e){setStatus(e.message,'error');} }
 
-  document.getElementById("reiseInfo").innerHTML = `
-    <b>${data.reise_code} · ${data.reise_name}</b><br>
-    ${data.startdatum} bis ${data.enddatum}
-  `;
+function parseAnalysisFromBeleg(b){ if(!b)return{}; const raw=b.analysis_json||b.analysis||''; if(typeof raw==='object')return raw; if(!raw)return{}; try{return JSON.parse(raw);}catch{return{};} }
+function firstAnalysis(eventDetail){ const belege=eventDetail.belege||[]; for(const b of belege){ const a=parseAnalysisFromBeleg(b); if(Object.keys(a).length)return a; } return {}; }
+function detailTextFromAnalysis(a, fallbackTyp){ const typ=(a.art_des_dokuments||fallbackTyp||'').toLowerCase(); if(typ==='flug'||typ==='zug'||typ==='taxi'){ const segs=a.reisesegmente||[]; if(!segs.length)return '-'; return segs.map((s,i)=>`<div class="segment"><b>${i+1}.</b> ${esc(s.abreise_ort||'')} ${esc(s.abreise_datum_und_zeit||'')} → ${esc(s.ankunft_ort||'')} ${esc(s.ankunft_datum_und_zeit||'')}<br><span class="small">${esc(s.transportunternehmen_und_nummer||'')}</span></div>`).join(''); }
+ if(typ==='hotel'){ const s=(a.reisesegmente||[])[0]||{}; return `<div class="segment"><b>Check-in:</b> ${esc(s.abreise_datum_und_zeit||a.check_in||'nicht vorhanden')}<br><b>Check-out:</b> ${esc(s.ankunft_datum_und_zeit||a.check_out||'nicht vorhanden')}<br><span class="small">${esc(s.ankunft_ort||a.hotel||'')}</span></div>`; }
+ return '-'; }
+function belegButtons(eventDetail){ const belege=eventDetail.belege||[]; if(!belege.length)return '—'; return belege.map(b=>`<button class="btn icon-btn" onclick="openPdf(${b.id})">Beleg ${b.id}</button>`).join('<br>'); }
+async function openReiseDetail(id){ try{ const detail=await requestJson(api()+'/reisen/'+id); const r=detail.reise||reisenCache.find(x=>x.id===id)||{}; document.getElementById('reiseDetailTitle').textContent=`${r.reise_code||''} · ${r.reise_name||''}`; document.getElementById('reiseDetailSub').textContent=`${r.startdatum||'kein Startdatum'} bis ${r.enddatum||'kein Enddatum'} · Reisende: ${(detail.reisende||[]).map(x=>x.kuerzel).join(', ')||'—'}`; const rows=[]; const events=(detail.events||[]).slice().sort((a,b)=>String(a.created_at||'').localeCompare(String(b.created_at||''))); for(const ev of events){ let ed={belege:[]}; try{ed=await requestJson(api()+'/events/'+ev.id);}catch{} const a=firstAnalysis(ed); const belegDate=a.belegdatum||String(ev.created_at||'').slice(0,10)||'—'; rows.push(`<tr><td>${esc(ev.typ||a.art_des_dokuments||'Event')}</td><td>${esc(belegDate)}</td><td>${detailTextFromAnalysis(a,ev.typ)}</td><td>${esc(ev.status||'—')}</td><td>${belegButtons(ed)}</td><td class="actions"><button class="btn-light icon-btn" onclick="eventEditPlaceholder(${ev.id})">✏️</button><button class="btn-danger icon-btn" onclick="deleteEvent(${ev.id},${id})">✖</button></td></tr>`); } document.getElementById('reiseDetailContent').innerHTML=`<table><thead><tr><th>Art</th><th>Datum</th><th>Abfahrt / Ankunft / Hotelaufenthalt</th><th>Status</th><th>Beleg</th><th>Aktionen</th></tr></thead><tbody>${rows.join('')||'<tr><td colspan="6">Noch keine Events vorhanden</td></tr>'}</tbody></table>`; showPage('reise-detail'); setStatus('Reiseseite geladen.','ok'); }catch(e){setStatus(e.message,'error');} }
+function openPdf(id){ window.open(api()+'/belege/'+id+'/pdf','_blank'); }
+async function deleteEvent(eventId,reiseId){ if(!confirm('Event wirklich löschen?'))return; try{const d=await requestJson(api()+'/events/'+eventId,{method:'DELETE'}); showResult(d); await openReiseDetail(reiseId); setStatus('Event gelöscht.','ok');}catch(e){setStatus(e.message,'error');} }
+function eventEditPlaceholder(id){ setStatus('Event bearbeiten folgt später. Event-ID: '+id,'ok'); }
 
-  const tbody = document.getElementById("eventsTable");
-  tbody.innerHTML = "";
-
-  for(const ev of data.events){
-    const ed = await fetch(api+"/events/"+ev.id).then(r=>r.json());
-
-    let details = "";
-
-    if(ed.belege.length > 0){
-      const b = ed.belege[0];
-      const a = JSON.parse(b.analysis_json || "{}");
-
-      if(a.art_des_dokuments === "Flug"){
-        details = a.reisesegmente.map(s =>
-          `${s.abreise_ort} ${s.abreise_datum_und_zeit} → ${s.ankunft_ort} ${s.ankunft_datum_und_zeit}`
-        ).join("<br>");
-      }
-      else if(a.art_des_dokuments === "Hotel"){
-        details = `Check-in: ${a.reisesegmente?.[0]?.abreise_datum_und_zeit || ""}<br>
-                   Check-out: ${a.reisesegmente?.[0]?.ankunft_datum_und_zeit || ""}`;
-      }
-    }
-
-    const belegBtn = ed.beleg_pdf_urls.length
-      ? `<button class='btn beleg' onclick='openPdf(${ed.beleg_pdf_urls[0].beleg_id})'>Beleg</button>`
-      : "-";
-
-    const row = `
-      <tr>
-        <td>${ev.typ}</td>
-        <td>${ev.created_at?.slice(0,10)}</td>
-        <td>${details || "-"}</td>
-        <td>${ev.status}</td>
-        <td>${belegBtn}</td>
-        <td>
-          <button class='btn edit'>✏️</button>
-          <button class='btn delete' onclick='del(${ev.id})'>❌</button>
-        </td>
-      </tr>
-    `;
-
-    tbody.innerHTML += row;
-  }
-}
-
-function openPdf(id){
-  window.open(`/belege/${id}/pdf`,"_blank");
-}
-
-async function del(id){
-  if(!confirm("wirklich löschen?")) return;
-  await fetch(`/events/${id}`,{method:"DELETE"});
-  load();
-}
-
-load();
+function mailUrl(path){ const subject=document.getElementById('mailSubject').value.trim(); const limit=document.getElementById('mailLimit').value||'3'; const qs=['limit='+encodeURIComponent(limit)]; if(subject)qs.push('subject_contains='+encodeURIComponent(subject)); return api()+path+'?'+qs.join('&'); }
+async function mailTest(){ try{const d=await requestJson(mailUrl('/mail/test')); showResult(d); showPage('debug'); setStatus('Mail-Test geladen.','ok');}catch(e){setStatus(e.message,'error');} }
+async function mailAnalyze(){ try{const d=await requestJson(mailUrl('/mail/analyze-latest')); showResult(d); showPage('debug'); await loadBelegeCount(); await loadReisen(false); setStatus('Mail-Analyse abgeschlossen.','ok');}catch(e){setStatus(e.message,'error');} }
+window.onload=async function(){ await health(); await refreshAll(); };
 </script>
 </body>
 </html>
