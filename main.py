@@ -11,7 +11,7 @@ from io import BytesIO
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel
@@ -37,7 +37,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.16"
+APP_VERSION = "7.18"
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
@@ -53,7 +53,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.on_event("startup")
 def startup() -> None:
     init_db()
-    ensure_belege_fingerprint_column()
+    ensure_belege_extra_columns()
 
 
 class AnalyzeTextRequest(BaseModel):
@@ -158,14 +158,18 @@ def find_reise_by_code(reise_code: str) -> Optional[Dict[str, Any]]:
 
 
 # ----------------------------
-# DB duplicate helpers
+# DB helpers
 # ----------------------------
 
-def ensure_belege_fingerprint_column() -> None:
+def ensure_belege_extra_columns() -> None:
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS fingerprint TEXT")
+                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS source_filename TEXT")
+                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS original_text TEXT")
+                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS anonymized_text TEXT")
+                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS analysis_json TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_belege_fingerprint ON belege(fingerprint)")
             conn.commit()
     except Exception:
@@ -200,16 +204,76 @@ def find_beleg_by_fingerprint(fingerprint: str) -> Optional[int]:
         return None
 
 
-def set_beleg_fingerprint(beleg_id: int, fingerprint: str) -> None:
-    if not beleg_id or not fingerprint:
+def update_beleg_extra_data(
+    beleg_id: int,
+    fingerprint: str,
+    filename: str,
+    original_text: str,
+    anonymized_text: str,
+    analysis_data: Dict[str, Any],
+) -> None:
+    if not beleg_id:
         return
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE belege SET fingerprint = %s WHERE id = %s", (fingerprint, beleg_id))
+                cur.execute(
+                    """
+                    UPDATE belege
+                       SET fingerprint = %s,
+                           source_filename = %s,
+                           original_text = %s,
+                           anonymized_text = %s,
+                           analysis_json = %s
+                     WHERE id = %s
+                    """,
+                    (
+                        fingerprint,
+                        filename,
+                        original_text[:300000],
+                        anonymized_text[:300000],
+                        json.dumps(analysis_data, ensure_ascii=False)[:300000],
+                        beleg_id,
+                    ),
+                )
             conn.commit()
     except Exception:
         pass
+
+
+def get_beleg_record(beleg_id: int) -> Optional[Dict[str, Any]]:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM belege WHERE id = %s", (beleg_id,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                return dict(zip(cols, row))
+    except Exception:
+        return None
+
+
+def list_belege_for_event(event_id: int) -> List[Dict[str, Any]]:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT b.*
+                    FROM belege b
+                    JOIN event_belege eb ON eb.beleg_id = b.id
+                    WHERE eb.event_id = %s
+                    ORDER BY b.id DESC
+                    """,
+                    (event_id,),
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, r)) for r in rows]
+    except Exception:
+        return []
 
 
 # ----------------------------
@@ -231,6 +295,14 @@ def delete_reise_by_id(reise_id: int) -> None:
             cur.execute("DELETE FROM events WHERE reise_id = %s", (reise_id,))
             cur.execute("DELETE FROM reise_reisende WHERE reise_id = %s", (reise_id,))
             cur.execute("DELETE FROM reisen WHERE id = %s", (reise_id,))
+        conn.commit()
+
+
+def delete_event_by_id(event_id: int) -> None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM event_belege WHERE event_id = %s", (event_id,))
+            cur.execute("DELETE FROM events WHERE id = %s", (event_id,))
         conn.commit()
 
 
@@ -547,6 +619,84 @@ def attach_or_create_event_for_analysis(reise_id: int, beleg_id: int, data: dict
 
 
 # ----------------------------
+# PDF generation without extra packages
+# ----------------------------
+
+def _pdf_escape(value: str) -> str:
+    value = (value or "").replace("\r", "")
+    value = value.encode("latin-1", errors="replace").decode("latin-1")
+    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _wrap_text(text: str, width: int = 92, max_lines: int = 180) -> List[str]:
+    lines: List[str] = []
+    for raw in (text or "").split("\n"):
+        raw = raw.rstrip()
+        while len(raw) > width:
+            lines.append(raw[:width])
+            raw = raw[width:]
+            if len(lines) >= max_lines:
+                return lines + ["... gekuerzt ..."]
+        lines.append(raw)
+        if len(lines) >= max_lines:
+            return lines + ["... gekuerzt ..."]
+    return lines
+
+
+def make_simple_pdf(title: str, body: str) -> bytes:
+    lines = [title, "", f"Erzeugt: {datetime.utcnow().isoformat()} UTC", ""] + _wrap_text(body)
+    pages: List[List[str]] = []
+    page_size = 52
+    for i in range(0, len(lines), page_size):
+        pages.append(lines[i:i + page_size])
+    if not pages:
+        pages = [[title]]
+
+    objects: List[bytes] = []
+    page_refs: List[int] = []
+
+    def add_obj(content: bytes) -> int:
+        objects.append(content)
+        return len(objects)
+
+    catalog_id = add_obj(b"<< /Type /Catalog /Pages 2 0 R >>")
+    pages_id = add_obj(b"PLACEHOLDER")
+    font_id = add_obj(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
+    for page_lines in pages:
+        content_parts = ["BT", "/F1 10 Tf", "50 800 Td", "14 TL"]
+        for line in page_lines:
+            content_parts.append(f"({_pdf_escape(line)}) Tj")
+            content_parts.append("T*")
+        content_parts.append("ET")
+        stream = "\n".join(content_parts).encode("latin-1", errors="replace")
+        stream_id = add_obj(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
+        page_id = add_obj(
+            f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {stream_id} 0 R >>".encode()
+        )
+        page_refs.append(page_id)
+
+    kids = " ".join(f"{pid} 0 R" for pid in page_refs)
+    objects[pages_id - 1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_refs)} >>".encode()
+
+    out = BytesIO()
+    out.write(b"%PDF-1.4\n")
+    offsets = [0]
+    for idx, obj in enumerate(objects, start=1):
+        offsets.append(out.tell())
+        out.write(f"{idx} 0 obj\n".encode())
+        out.write(obj)
+        out.write(b"\nendobj\n")
+    xref_pos = out.tell()
+    out.write(f"xref\n0 {len(objects) + 1}\n".encode())
+    out.write(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        out.write(f"{off:010d} 00000 n \n".encode())
+    out.write(f"trailer\n<< /Size {len(objects) + 1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode())
+    return out.getvalue()
+
+
+# ----------------------------
 # Analyze core
 # ----------------------------
 
@@ -612,6 +762,7 @@ def analyze_text_internal(
         data["existing_beleg_id"] = existing_beleg_id
         data["beleg_id"] = existing_beleg_id
         data["duplicate_action"] = "skipped_insert_existing_beleg_used"
+        update_beleg_extra_data(existing_beleg_id, fingerprint, filename, text, anonymized_text, data)
 
         if event_id:
             attach_beleg_to_event(event_id, existing_beleg_id)
@@ -631,7 +782,7 @@ def analyze_text_internal(
             "waehrung": data.get("waehrung_der_kosten"),
         }
     )
-    set_beleg_fingerprint(beleg_id, fingerprint)
+    update_beleg_extra_data(beleg_id, fingerprint, filename, text, anonymized_text, data)
 
     data["beleg_id"] = beleg_id
     data["existing_beleg_id"] = None
@@ -741,7 +892,7 @@ def reset_db():
                 cur.execute("DROP TABLE IF EXISTS reisen CASCADE")
             conn.commit()
         init_db()
-        ensure_belege_fingerprint_column()
+        ensure_belege_extra_columns()
         return {"status": "ok", "message": "DB reset done"}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
@@ -762,6 +913,40 @@ def belege():
         return {"count": len(items), "belege": items}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
+
+
+@app.get("/belege/{beleg_id}")
+def beleg_detail(beleg_id: int):
+    rec = get_beleg_record(beleg_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
+    return {"status": "ok", "beleg": rec, "pdf_url": f"/belege/{beleg_id}/pdf"}
+
+
+@app.get("/belege/{beleg_id}/pdf")
+def beleg_pdf(beleg_id: int):
+    rec = get_beleg_record(beleg_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
+
+    title = f"Beleg {beleg_id} - {rec.get('art') or rec.get('art_des_dokuments') or ''}"
+    body_parts = [
+        f"Beleg-ID: {beleg_id}",
+        f"Datei/Quelle: {rec.get('source_filename') or 'nicht gespeichert'}",
+        f"Belegdatum: {rec.get('belegdatum') or 'nicht vorhanden'}",
+        f"Art: {rec.get('art') or 'nicht vorhanden'}",
+        f"Kosten: {rec.get('kosten') or 'nicht vorhanden'} {rec.get('waehrung') or ''}",
+        f"Fingerprint: {rec.get('fingerprint') or 'nicht vorhanden'}",
+        "",
+        "--- Original / Mail-Text / OCR-Text ---",
+        rec.get("original_text") or "Für ältere Belege wurde der Originaltext noch nicht gespeichert. Bitte Beleg ab Version 7.18 erneut einlesen.",
+    ]
+    pdf_bytes = make_simple_pdf(title, "\n".join(body_parts))
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"inline; filename=beleg_{beleg_id}.pdf"},
+    )
 
 
 @app.get("/mitarbeiter")
@@ -878,9 +1063,24 @@ def events_create(payload: EventCreateRequest):
 @app.get("/events/{event_id}")
 def events_detail(event_id: int):
     try:
-        return get_event_detail(event_id)
+        detail = get_event_detail(event_id)
+        belege_items = list_belege_for_event(event_id)
+        return {
+            **detail,
+            "belege": belege_items,
+            "beleg_pdf_urls": [{"beleg_id": b.get("id"), "pdf_url": f"/belege/{b.get('id')}/pdf"} for b in belege_items if b.get("id")],
+        }
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
+
+
+@app.delete("/events/{event_id}")
+def events_delete(event_id: int):
+    try:
+        delete_event_by_id(event_id)
+        return {"status": "ok", "deleted_event_id": event_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.put("/events/{event_id}/status")
