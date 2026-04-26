@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import email
 import hashlib
+import imaplib
 import json
+import mimetypes
 import os
 import re
-import imaplib
-import email
-import mimetypes
 import uuid
 from datetime import datetime
 from io import BytesIO
@@ -40,7 +40,8 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "7.22"
+APP_VERSION = "7.23"
+
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
@@ -51,6 +52,9 @@ IMAP_PASS = os.getenv("IMAP_PASS")
 
 ORIGINAL_UPLOAD_DIR = Path(os.getenv("ORIGINAL_UPLOAD_DIR", "uploads/original_belege"))
 ORIGINAL_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+GENERATED_PDF_DIR = Path(os.getenv("GENERATED_PDF_DIR", "uploads/generated_pdfs"))
+GENERATED_PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Reisekosten API", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -101,8 +105,11 @@ class EventStatusRequest(BaseModel):
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
-    reader = PdfReader(BytesIO(pdf_bytes))
-    return "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes))
+        return "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"PDF konnte nicht gelesen werden: {exc}") from exc
 
 
 def normalize_variants(value: str) -> List[str]:
@@ -146,12 +153,8 @@ def save_original_text_as_file(filename: str, text: str, content_type: str = "te
 
 
 def extract_reise_code_from_text(text: str) -> Optional[str]:
-    if not text:
-        return None
-    match = re.search(r"\b(\d{2}-\d{3})\b", text)
-    if match:
-        return match.group(1)
-    return None
+    match = re.search(r"\b(\d{2}-\d{3})\b", text or "")
+    return match.group(1) if match else None
 
 
 def find_reise_by_code(reise_code: str) -> Optional[Dict[str, Any]]:
@@ -190,6 +193,7 @@ def ensure_belege_extra_columns() -> None:
                 cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS original_file_path TEXT")
                 cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS original_filename TEXT")
                 cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS original_content_type TEXT")
+                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS generated_pdf_path TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_belege_fingerprint ON belege(fingerprint)")
             conn.commit()
     except Exception:
@@ -207,8 +211,7 @@ def build_beleg_fingerprint(filename: str, data: Dict[str, Any], reise_id: Optio
         normalize_for_fingerprint(data.get("kosten_mit_steuern")),
         normalize_for_fingerprint(data.get("waehrung_der_kosten")),
     ]
-    raw = "|".join(parts)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
 def find_beleg_by_fingerprint(fingerprint: str) -> Optional[int]:
@@ -234,6 +237,7 @@ def update_beleg_extra_data(
     original_file_path: Optional[str] = None,
     original_filename: Optional[str] = None,
     original_content_type: Optional[str] = None,
+    generated_pdf_path: Optional[str] = None,
 ) -> None:
     if not beleg_id:
         return
@@ -250,7 +254,8 @@ def update_beleg_extra_data(
                            analysis_json = %s,
                            original_file_path = COALESCE(%s, original_file_path),
                            original_filename = COALESCE(%s, original_filename),
-                           original_content_type = COALESCE(%s, original_content_type)
+                           original_content_type = COALESCE(%s, original_content_type),
+                           generated_pdf_path = COALESCE(%s, generated_pdf_path)
                      WHERE id = %s
                     """,
                     (
@@ -262,9 +267,20 @@ def update_beleg_extra_data(
                         original_file_path,
                         original_filename,
                         original_content_type,
+                        generated_pdf_path,
                         beleg_id,
                     ),
                 )
+            conn.commit()
+    except Exception:
+        pass
+
+
+def update_beleg_generated_pdf_path(beleg_id: int, generated_pdf_path: str) -> None:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE belege SET generated_pdf_path = %s WHERE id = %s", (generated_pdf_path, beleg_id))
             conn.commit()
     except Exception:
         pass
@@ -377,9 +393,7 @@ def anonymize_employee_names(text: str) -> str:
         nachname = (m.get("nachname") or "").strip()
         if not vorname or not nachname:
             continue
-        forward = f"{vorname} {nachname}"
-        reverse = f"{nachname} {vorname}"
-        for candidate in [forward, reverse]:
+        for candidate in [f"{vorname} {nachname}", f"{nachname} {vorname}"]:
             for variant in normalize_variants(candidate):
                 anonymized = re.sub(re.escape(variant), "Max Mustermann", anonymized, flags=re.IGNORECASE)
         for vv in normalize_variants(vorname):
@@ -509,15 +523,17 @@ def extract_plain_text_from_email_message(msg) -> str:
             disposition = str(part.get("Content-Disposition") or "")
             if "attachment" in disposition.lower():
                 continue
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            decoded = payload.decode(errors="ignore")
             if content_type == "text/plain":
-                payload = part.get_payload(decode=True)
-                if payload:
-                    bodies.append(payload.decode(errors="ignore"))
+                bodies.append(decoded)
             elif content_type == "text/html" and not bodies:
-                payload = part.get_payload(decode=True)
-                if payload:
-                    html = payload.decode(errors="ignore")
-                    bodies.append(re.sub(r"<[^>]+>", " ", html))
+                text = re.sub(r"<br\s*/?>", "\n", decoded, flags=re.IGNORECASE)
+                text = re.sub(r"</p\s*>", "\n", text, flags=re.IGNORECASE)
+                text = re.sub(r"<[^>]+>", " ", text)
+                bodies.append(text)
     else:
         payload = msg.get_payload(decode=True)
         if payload:
@@ -540,15 +556,21 @@ def read_latest_mails(limit: int = 3, subject_contains: Optional[str] = None) ->
         res, msg_data = mail.fetch(msg_id, "(RFC822)")
         if res != "OK":
             continue
-        raw_email = msg_data[0][1]
-        msg = email.message_from_bytes(raw_email)
-        subject = email.header.decode_header(msg.get("Subject", ""))[0][0]
-        if isinstance(subject, bytes):
-            subject = subject.decode(errors="ignore")
+        raw_email_bytes = msg_data[0][1]
+        msg = email.message_from_bytes(raw_email_bytes)
+        subject_raw = email.header.decode_header(msg.get("Subject", ""))[0][0]
+        subject = subject_raw.decode(errors="ignore") if isinstance(subject_raw, bytes) else str(subject_raw)
         body = extract_plain_text_from_email_message(msg)
-        if subject_contains and subject_contains.lower() not in str(subject).lower():
+        if subject_contains and subject_contains.lower() not in subject.lower():
             continue
-        mails.append({"subject": str(subject), "body": body, "preview": body[:500], "raw_email": raw_email.decode("utf-8", errors="replace")})
+        mails.append(
+            {
+                "subject": subject,
+                "body": body,
+                "preview": body[:500],
+                "raw_email": raw_email_bytes.decode("utf-8", errors="replace"),
+            }
+        )
         if len(mails) >= limit:
             break
     try:
@@ -578,7 +600,13 @@ def find_existing_event_for_reise(reise_id: int, beleg_typ: str) -> Optional[Dic
                 row = cur.fetchone()
                 if not row:
                     return None
-                return {"id": row[0], "typ": row[1], "titel": row[2], "status": row[3], "created_at": row[4].isoformat() if hasattr(row[4], "isoformat") else row[4]}
+                return {
+                    "id": row[0],
+                    "typ": row[1],
+                    "titel": row[2],
+                    "status": row[3],
+                    "created_at": row[4].isoformat() if hasattr(row[4], "isoformat") else row[4],
+                }
     except Exception:
         return None
 
@@ -596,16 +624,19 @@ def attach_or_create_event_for_analysis(reise_id: int, beleg_id: int, data: dict
     return {"created_event_id": new_event_id, "matched_event_typ": art, "matched_existing_event": False}
 
 
-def _pdf_escape(value: str) -> str:
+def pdf_escape(value: str) -> str:
     value = (value or "").replace("\r", "")
     value = value.encode("latin-1", errors="replace").decode("latin-1")
     return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def _wrap_text(text: str, width: int = 92, max_lines: int = 220) -> List[str]:
+def wrap_text(text: str, width: int = 92, max_lines: int = 300) -> List[str]:
     lines: List[str] = []
     for raw in (text or "").split("\n"):
         raw = raw.rstrip()
+        if not raw:
+            lines.append("")
+            continue
         while len(raw) > width:
             lines.append(raw[:width])
             raw = raw[width:]
@@ -617,14 +648,10 @@ def _wrap_text(text: str, width: int = 92, max_lines: int = 220) -> List[str]:
     return lines
 
 
-def make_simple_pdf(title: str, body: str) -> bytes:
-    lines = [title, "", f"Erzeugt: {datetime.utcnow().isoformat()} UTC", ""] + _wrap_text(body)
-    pages: List[List[str]] = []
+def make_simple_pdf_bytes(title: str, body: str) -> bytes:
+    lines = [title, "", f"Erzeugt: {datetime.utcnow().isoformat()} UTC", ""] + wrap_text(body)
     page_size = 52
-    for i in range(0, len(lines), page_size):
-        pages.append(lines[i:i + page_size])
-    if not pages:
-        pages = [[title]]
+    pages = [lines[i : i + page_size] for i in range(0, len(lines), page_size)] or [[title]]
     objects: List[bytes] = []
     page_refs: List[int] = []
 
@@ -635,18 +662,23 @@ def make_simple_pdf(title: str, body: str) -> bytes:
     catalog_id = add_obj(b"<< /Type /Catalog /Pages 2 0 R >>")
     pages_id = add_obj(b"PLACEHOLDER")
     font_id = add_obj(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
     for page_lines in pages:
         content_parts = ["BT", "/F1 10 Tf", "50 800 Td", "14 TL"]
         for line in page_lines:
-            content_parts.append(f"({_pdf_escape(line)}) Tj")
+            content_parts.append(f"({pdf_escape(line)}) Tj")
             content_parts.append("T*")
         content_parts.append("ET")
         stream = "\n".join(content_parts).encode("latin-1", errors="replace")
         stream_id = add_obj(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
-        page_id = add_obj(f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {stream_id} 0 R >>".encode())
+        page_id = add_obj(
+            f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {stream_id} 0 R >>".encode()
+        )
         page_refs.append(page_id)
+
     kids = " ".join(f"{pid} 0 R" for pid in page_refs)
     objects[pages_id - 1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_refs)} >>".encode()
+
     out = BytesIO()
     out.write(b"%PDF-1.4\n")
     offsets = [0]
@@ -662,6 +694,29 @@ def make_simple_pdf(title: str, body: str) -> bytes:
         out.write(f"{off:010d} 00000 n \n".encode())
     out.write(f"trailer\n<< /Size {len(objects) + 1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode())
     return out.getvalue()
+
+
+def generate_beleg_pdf_file(beleg_id: int, rec: Dict[str, Any]) -> Path:
+    cached = rec.get("generated_pdf_path")
+    if cached and os.path.exists(cached):
+        return Path(cached)
+
+    pdf_path = GENERATED_PDF_DIR / f"beleg_{beleg_id}.pdf"
+    title = f"Reisekosten Beleg BE-{beleg_id:04d}"
+    body_parts = [
+        f"Beleg-ID: BE-{beleg_id:04d}",
+        f"Datei/Quelle: {rec.get('source_filename') or rec.get('original_filename') or 'nicht gespeichert'}",
+        f"Belegdatum: {rec.get('belegdatum') or 'nicht vorhanden'}",
+        f"Art: {rec.get('art') or 'nicht vorhanden'}",
+        f"Kosten: {rec.get('kosten') or 'nicht vorhanden'} {rec.get('waehrung') or ''}",
+        f"Fingerprint: {rec.get('fingerprint') or 'nicht vorhanden'}",
+        "",
+        "--- Original / Mail-Text / OCR-Text ---",
+        rec.get("original_text") or "Für diesen Beleg wurde kein Originaltext gespeichert. Bitte Beleg ab Version 7.23 erneut einlesen.",
+    ]
+    pdf_path.write_bytes(make_simple_pdf_bytes(title, "\n".join(body_parts)))
+    update_beleg_generated_pdf_path(beleg_id, str(pdf_path))
+    return pdf_path
 
 
 def compute_reise_status(detail: dict) -> dict:
@@ -696,7 +751,15 @@ def analyze_text_internal(
     prompt = build_json_prompt(anonymized_text, filename=filename)
     raw = call_openai_json(prompt, ai_model_override)
     if isinstance(raw, dict) and raw.get("status") == "error":
-        return {"status": "error", "detail": raw.get("detail", "Analysefehler"), "version": APP_VERSION, "ai_provider": "openai", "ai_model": ai_model_override or OPENAI_MODEL, "anonymized_preview": anonymized_text[:4000]}
+        return {
+            "status": "error",
+            "detail": raw.get("detail", "Analysefehler"),
+            "version": APP_VERSION,
+            "ai_provider": "openai",
+            "ai_model": ai_model_override or OPENAI_MODEL,
+            "anonymized_preview": anonymized_text[:4000],
+        }
+
     data = ensure_defaults(raw)
     data["status"] = "ok"
     data["version"] = APP_VERSION
@@ -704,16 +767,28 @@ def analyze_text_internal(
     data["ai_provider"] = "openai"
     data["ai_model"] = ai_model_override or OPENAI_MODEL
     data["anonymized_preview"] = anonymized_text[:4000]
+
     fingerprint = build_beleg_fingerprint(filename, data, reise_id)
     existing_beleg_id = find_beleg_by_fingerprint(fingerprint)
     data["fingerprint"] = fingerprint
     data["duplicate_detected"] = bool(existing_beleg_id)
     original_file_info = original_file_info or {}
+
     if existing_beleg_id:
         data["existing_beleg_id"] = existing_beleg_id
         data["beleg_id"] = existing_beleg_id
         data["duplicate_action"] = "skipped_insert_existing_beleg_used"
-        update_beleg_extra_data(existing_beleg_id, fingerprint, filename, text, anonymized_text, data, original_file_info.get("original_file_path"), original_file_info.get("original_filename"), original_file_info.get("original_content_type"))
+        update_beleg_extra_data(
+            existing_beleg_id,
+            fingerprint,
+            filename,
+            text,
+            anonymized_text,
+            data,
+            original_file_info.get("original_file_path"),
+            original_file_info.get("original_filename"),
+            original_file_info.get("original_content_type"),
+        )
         if event_id:
             attach_beleg_to_event(event_id, existing_beleg_id)
             update_event_status(event_id, "abgeschlossen")
@@ -721,11 +796,30 @@ def analyze_text_internal(
         elif reise_id:
             data.update(attach_or_create_event_for_analysis(reise_id, existing_beleg_id, data))
         return data
-    beleg_id = insert_beleg({"belegdatum": data.get("belegdatum"), "art": data.get("art_des_dokuments"), "kosten": data.get("kosten_mit_steuern"), "waehrung": data.get("waehrung_der_kosten")})
-    update_beleg_extra_data(beleg_id, fingerprint, filename, text, anonymized_text, data, original_file_info.get("original_file_path"), original_file_info.get("original_filename"), original_file_info.get("original_content_type"))
+
+    beleg_id = insert_beleg(
+        {
+            "belegdatum": data.get("belegdatum"),
+            "art": data.get("art_des_dokuments"),
+            "kosten": data.get("kosten_mit_steuern"),
+            "waehrung": data.get("waehrung_der_kosten"),
+        }
+    )
+    update_beleg_extra_data(
+        beleg_id,
+        fingerprint,
+        filename,
+        text,
+        anonymized_text,
+        data,
+        original_file_info.get("original_file_path"),
+        original_file_info.get("original_filename"),
+        original_file_info.get("original_content_type"),
+    )
     data["beleg_id"] = beleg_id
     data["existing_beleg_id"] = None
     data["duplicate_action"] = "inserted_new_beleg"
+
     if event_id:
         attach_beleg_to_event(event_id, beleg_id)
         update_event_status(event_id, "abgeschlossen")
@@ -742,7 +836,18 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": APP_VERSION, "ai_provider": AI_PROVIDER, "openai_configured": bool(OPENAI_API_KEY), "openai_model": OPENAI_MODEL, "imap_host_configured": bool(IMAP_HOST), "imap_user_configured": bool(IMAP_USER), "imap_pass_configured": bool(IMAP_PASS), "original_upload_dir": str(ORIGINAL_UPLOAD_DIR)}
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "ai_provider": AI_PROVIDER,
+        "openai_configured": bool(OPENAI_API_KEY),
+        "openai_model": OPENAI_MODEL,
+        "imap_host_configured": bool(IMAP_HOST),
+        "imap_user_configured": bool(IMAP_USER),
+        "imap_pass_configured": bool(IMAP_PASS),
+        "original_upload_dir": str(ORIGINAL_UPLOAD_DIR),
+        "generated_pdf_dir": str(GENERATED_PDF_DIR),
+    }
 
 
 @app.get("/dashboard")
@@ -754,7 +859,12 @@ def dashboard():
 def ai_test(ai_model: Optional[str] = Query(default=None)):
     prompt = build_json_prompt("Testbeleg: Hotel in Berlin, Check-in 01.05.2026, Check-out 03.05.2026, Total 300 EUR.")
     raw = call_openai_json(prompt, ai_model)
-    return {"status": "ok" if not (isinstance(raw, dict) and raw.get("status") == "error") else "error", "ai_provider": "openai", "ai_model": ai_model or OPENAI_MODEL, "result": raw}
+    return {
+        "status": "ok" if not (isinstance(raw, dict) and raw.get("status") == "error") else "error",
+        "ai_provider": "openai",
+        "ai_model": ai_model or OPENAI_MODEL,
+        "result": raw,
+    }
 
 
 @app.get("/mail/test")
@@ -776,8 +886,25 @@ def mail_analyze_latest(limit: int = Query(default=3, ge=1, le=10), subject_cont
             detected_reise = find_reise_by_code(detected_reise_code) if detected_reise_code else None
             detected_reise_id = detected_reise["id"] if detected_reise else None
             original_info = save_original_text_as_file(f"mail_{safe_filename(m['subject'])}.eml", m.get("raw_email") or m.get("body") or "", "message/rfc822")
-            result = analyze_text_internal(m["body"], filename=f"mail:{m['subject']}", reise_id=detected_reise_id, event_id=None, ai_provider_override="openai", ai_model_override=None, original_file_info=original_info)
-            analyzed.append({"subject": m["subject"], "preview": m["preview"], "detected_reise_code": detected_reise_code, "assigned_reise_id": detected_reise_id, "assigned_reise_name": detected_reise["reise_name"] if detected_reise else None, "analysis": result})
+            result = analyze_text_internal(
+                m["body"],
+                filename=f"mail:{m['subject']}",
+                reise_id=detected_reise_id,
+                event_id=None,
+                ai_provider_override="openai",
+                ai_model_override=None,
+                original_file_info=original_info,
+            )
+            analyzed.append(
+                {
+                    "subject": m["subject"],
+                    "preview": m["preview"],
+                    "detected_reise_code": detected_reise_code,
+                    "assigned_reise_id": detected_reise_id,
+                    "assigned_reise_name": detected_reise["reise_name"] if detected_reise else None,
+                    "analysis": result,
+                }
+            )
         return {"status": "ok", "count": len(analyzed), "subject_filter": subject_contains, "results": analyzed}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
@@ -834,7 +961,7 @@ def beleg_original(beleg_id: int):
         raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
     path = rec.get("original_file_path")
     if not path or not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Originaldatei wurde für diesen Beleg noch nicht gespeichert. Bitte Beleg ab Version 7.22 erneut einlesen.")
+        raise HTTPException(status_code=404, detail="Originaldatei wurde für diesen Beleg noch nicht gespeichert. Bitte Beleg ab Version 7.23 erneut einlesen.")
     filename = rec.get("original_filename") or rec.get("source_filename") or f"beleg_{beleg_id}"
     media_type = rec.get("original_content_type") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
     return FileResponse(path, media_type=media_type, filename=filename)
@@ -845,29 +972,20 @@ def beleg_pdf(beleg_id: int):
     rec = get_beleg_record(beleg_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
+
     path = rec.get("original_file_path")
     filename = rec.get("original_filename") or rec.get("source_filename") or f"beleg_{beleg_id}"
     content_type = rec.get("original_content_type") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
     if path and os.path.exists(path):
         lower = filename.lower()
         if lower.endswith(".pdf") or content_type == "application/pdf":
             return FileResponse(path, media_type="application/pdf", filename=filename)
         if lower.endswith((".jpg", ".jpeg", ".png", ".webp")) or content_type.startswith("image/"):
             return FileResponse(path, media_type=content_type, filename=filename)
-    title = f"Beleg {beleg_id} - {rec.get('art') or ''}"
-    body_parts = [
-        f"Beleg-ID: {beleg_id}",
-        f"Datei/Quelle: {rec.get('source_filename') or filename or 'nicht gespeichert'}",
-        f"Belegdatum: {rec.get('belegdatum') or 'nicht vorhanden'}",
-        f"Art: {rec.get('art') or 'nicht vorhanden'}",
-        f"Kosten: {rec.get('kosten') or 'nicht vorhanden'} {rec.get('waehrung') or ''}",
-        f"Fingerprint: {rec.get('fingerprint') or 'nicht vorhanden'}",
-        "",
-        "--- Original / Mail-Text / OCR-Text ---",
-        rec.get("original_text") or "Für diesen Beleg wurde kein Originaltext gespeichert. Bitte Beleg ab Version 7.22 erneut einlesen.",
-    ]
-    pdf_bytes = make_simple_pdf(title, "\n".join(body_parts))
-    return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": f"inline; filename=beleg_{beleg_id}.pdf"})
+
+    pdf_path = generate_beleg_pdf_file(beleg_id, rec)
+    return FileResponse(str(pdf_path), media_type="application/pdf", filename=f"beleg_{beleg_id}.pdf")
 
 
 @app.get("/mitarbeiter")
@@ -972,6 +1090,15 @@ def reisen_delete(reise_id: int):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/reisen/{reise_id}")
+def reisen_detail(reise_id: int):
+    try:
+        detail = get_reise_detail(reise_id)
+        return {**detail, **compute_reise_status(detail)}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
 @app.post("/events")
 def events_create(payload: EventCreateRequest):
     try:
@@ -986,7 +1113,15 @@ def events_detail(event_id: int):
     try:
         detail = get_event_detail(event_id)
         belege_items = list_belege_for_event(event_id)
-        return {**detail, "belege": belege_items, "beleg_pdf_urls": [{"beleg_id": b.get("id"), "pdf_url": f"/belege/{b.get('id')}/pdf", "original_url": f"/belege/{b.get('id')}/original"} for b in belege_items if b.get("id")]}
+        return {
+            **detail,
+            "belege": belege_items,
+            "beleg_pdf_urls": [
+                {"beleg_id": b.get("id"), "pdf_url": f"/belege/{b.get('id')}/pdf", "original_url": f"/belege/{b.get('id')}/original"}
+                for b in belege_items
+                if b.get("id")
+            ],
+        }
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
 
@@ -1007,15 +1142,6 @@ def events_update_status(event_id: int, payload: EventStatusRequest):
         return {"status": "ok", "event_id": event_id, "new_status": payload.status}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/reisen/{reise_id}")
-def reisen_detail(reise_id: int):
-    try:
-        detail = get_reise_detail(reise_id)
-        return {**detail, **compute_reise_status(detail)}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
 
 
 @app.post("/anonymize/text")
@@ -1040,7 +1166,15 @@ async def anonymize_file(file: UploadFile = File(...)):
 def analyze_text(payload: AnalyzeTextRequest):
     try:
         original_info = save_original_text_as_file(payload.filename or "text-input.txt", payload.text, "text/plain")
-        return analyze_text_internal(payload.text, payload.filename or "text-input.txt", payload.reise_id, payload.event_id, payload.ai_provider, payload.ai_model, original_file_info=original_info)
+        return analyze_text_internal(
+            payload.text,
+            payload.filename or "text-input.txt",
+            payload.reise_id,
+            payload.event_id,
+            payload.ai_provider,
+            payload.ai_model,
+            original_file_info=original_info,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1057,6 +1191,14 @@ async def analyze_file(
         content = await file.read()
         original_info = save_original_file(file.filename or "upload", content, file.content_type)
         text = extract_text_from_pdf(content) if (file.filename or "").lower().endswith(".pdf") else content.decode("utf-8", errors="replace")
-        return analyze_text_internal(text, file.filename or "upload", reise_id, event_id, ai_provider, ai_model, original_file_info=original_info)
+        return analyze_text_internal(
+            text,
+            file.filename or "upload",
+            reise_id,
+            event_id,
+            ai_provider,
+            ai_model,
+            original_file_info=original_info,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
