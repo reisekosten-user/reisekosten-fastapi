@@ -3,200 +3,96 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Reisekosten System 7.23</title>
+  <title>Reisekosten System 7.24</title>
   <style>
     :root{
-      --navy:#003b78;
-      --navy2:#005098;
-      --navy3:#002d61;
-      --blue:#0053a6;
-      --light:#f7f9fc;
-      --card:#ffffff;
-      --line:#dfe7f2;
-      --text:#0f1f36;
-      --muted:#607086;
-      --ok:#1f8a3b;
-      --okBg:#e7f7eb;
-      --danger:#e11d28;
-      --shadow:0 8px 24px rgba(0,45,97,.08);
+      --navy:#003b78;--navy2:#005098;--navy3:#002d61;--blue:#0053a6;
+      --light:#f7f9fc;--card:#fff;--line:#dfe7f2;--text:#0f1f36;--muted:#607086;
+      --ok:#1f8a3b;--okBg:#e7f7eb;--danger:#e11d28;--shadow:0 8px 24px rgba(0,45,97,.08)
     }
-
     *{box-sizing:border-box}
     body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--light);color:var(--text)}
 
-    .topbar{
-      min-height:120px;
-      background:linear-gradient(135deg,var(--navy3),var(--navy2));
-      color:white;
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      padding:22px 34px;
-      box-shadow:0 6px 18px rgba(0,0,0,.18);
-    }
-    .brand{display:flex;align-items:center;gap:22px;cursor:pointer}
-    .logo-wrap{width:300px;height:84px;display:flex;align-items:center;overflow:hidden}
-    .logo-wrap img{width:290px;height:auto;filter:grayscale(1) brightness(2.5) contrast(.55) opacity(.94);mix-blend-mode:screen}
+    .topbar{min-height:120px;background:linear-gradient(135deg,var(--navy3),var(--navy2));color:white;display:flex;align-items:center;justify-content:space-between;padding:22px 34px;box-shadow:0 6px 18px rgba(0,0,0,.18)}
+    .brand{display:flex;align-items:center;gap:22px;cursor:pointer}.logo-wrap{width:300px;height:84px;display:flex;align-items:center;overflow:hidden}.logo-wrap img{width:290px;height:auto;filter:grayscale(1) brightness(2.5) contrast(.55) opacity(.94);mix-blend-mode:screen}
+    .nav{display:flex;align-items:center;gap:24px;font-size:16px;font-weight:700}.nav button{background:none;border:none;color:white;font:inherit;cursor:pointer;padding:16px 6px;border-bottom:4px solid transparent}.nav button.active{border-bottom-color:white}.nav button:hover{border-bottom-color:rgba(255,255,255,.7)}.versionTop{opacity:.95;white-space:nowrap;font-size:15px}
 
-    .nav{display:flex;align-items:center;gap:28px;font-size:17px;font-weight:600}
-    .nav button{background:none;border:none;color:white;font:inherit;cursor:pointer;padding:18px 8px;border-bottom:4px solid transparent;border-radius:0}
-    .nav button.active{border-bottom-color:white}
-    .nav button:hover{border-bottom-color:rgba(255,255,255,.7)}
-    .versionTop{opacity:.95;white-space:nowrap;font-size:16px}
+    .page{max-width:1360px;margin:0 auto;padding:28px 34px 90px}
+    h1{font-size:30px;color:#073a7a;margin:0 0 18px;font-weight:800}h2{font-size:21px;color:#073a7a;margin:0 0 12px;font-weight:800}
+    .status{background:#edf6ff;border:1px solid #cfe4ff;color:#074f9e;border-radius:10px;padding:9px 12px;margin-bottom:18px;font-weight:700;font-size:13px}.status.ok{background:#e7f7eb;border-color:#bfe8c9;color:#17652d}.status.error{background:#fee2e2;border-color:#fecaca;color:#b91c1c}
 
-    .page{max-width:1360px;margin:0 auto;padding:46px 34px 110px}
-    h1{font-size:34px;color:#073a7a;margin:0 0 28px;font-weight:800}
-    h2{font-size:24px;color:#073a7a;margin:0 0 18px;font-weight:800}
+    .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-bottom:24px}.summary-card{background:white;border:1px solid var(--line);border-radius:9px;box-shadow:var(--shadow);padding:14px 18px;display:flex;align-items:center;gap:16px;min-height:78px}.iconbox{width:44px;height:44px;background:linear-gradient(135deg,var(--navy3),var(--blue));border-radius:10px;display:flex;align-items:center;justify-content:center;color:white;font-size:22px;box-shadow:0 5px 10px rgba(0,80,152,.22)}.summary-label{font-size:14px;margin-bottom:3px}.summary-number{font-size:24px;font-weight:800;color:#071a35;line-height:1}.summary-sub{font-size:12px;margin-top:4px;color:#1b2d46}
 
-    .status{background:#edf6ff;border:1px solid #cfe4ff;color:#074f9e;border-radius:12px;padding:13px 16px;margin-bottom:22px;font-weight:700}
-    .status.ok{background:#e7f7eb;border-color:#bfe8c9;color:#17652d}
-    .status.error{background:#fee2e2;border-color:#fecaca;color:#b91c1c}
+    .section{margin-top:20px}.table-card{background:white;border:1px solid var(--line);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
+    table{width:100%;border-collapse:collapse;background:white;table-layout:auto}th{background:#fbfcff;color:#0c1d34;text-align:left;font-weight:800;font-size:13px;padding:6px 8px;border-bottom:1px solid var(--line);border-right:1px solid var(--line)}td{padding:3px 8px;border-bottom:1px solid var(--line);border-right:1px solid var(--line);vertical-align:middle;font-size:13px;line-height:1.05}tr:last-child td{border-bottom:none}th:last-child,td:last-child{border-right:none;width:1%;white-space:nowrap}
 
-    .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:26px;margin-bottom:38px}
-    .summary-card{background:white;border:1px solid var(--line);border-radius:9px;box-shadow:var(--shadow);padding:22px 24px;display:flex;align-items:center;gap:22px;min-height:108px}
-    .iconbox{width:58px;height:58px;background:linear-gradient(135deg,var(--navy3),var(--blue));border-radius:10px;display:flex;align-items:center;justify-content:center;color:white;font-size:28px;box-shadow:0 7px 15px rgba(0,80,152,.25)}
-    .summary-label{font-size:18px;margin-bottom:6px}
-    .summary-number{font-size:30px;font-weight:800;color:#071a35;line-height:1}
-    .summary-sub{font-size:16px;margin-top:8px;color:#1b2d46}
+    .btn{border:none;border-radius:7px;background:linear-gradient(135deg,var(--navy3),var(--blue));color:white;padding:8px 14px;font-weight:800;cursor:pointer;font-size:13px}.btn:hover{filter:brightness(.92)}.btn-light{background:#edf2f8;color:#0d2548;border:1px solid #d8e2ee}.btn-danger{background:white;color:var(--danger);border:1px solid #ffd0d0}.iconBtn{background:white;border:1px solid #d9e3ef;border-radius:6px;padding:3px 6px;margin-right:4px;color:#0d2548;cursor:pointer;font-size:14px;line-height:1}.iconBtn:hover{background:#edf6ff}
+    .pill{display:inline-block;padding:3px 8px;border-radius:7px;font-weight:700;font-size:12px}.pill-ok{background:var(--okBg);color:var(--ok);border:1px solid #abe2b8}.pill-now{background:var(--okBg);color:var(--ok);border:1px solid #abe2b8}.pill-plan{background:#eaf2ff;color:#1455a0;border:1px solid #cde2ff}.pill-done{background:#eef2f7;color:#38516e;border:1px solid #d8e2ef}
+    .link{color:#005bff;text-decoration:none;font-weight:700;cursor:pointer}.link:hover{text-decoration:underline}.art{font-weight:900;white-space:nowrap;line-height:1.05}.event-title{font-weight:900;line-height:1.05}.event-sub{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.08}.nowrap{white-space:nowrap}.actions{display:flex;gap:3px;align-items:center;white-space:nowrap}
 
-    .section{margin-top:34px}
-    .table-card{background:white;border:1px solid var(--line);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
-    table{width:100%;border-collapse:collapse;background:white}
-    th{background:#fbfcff;color:#0c1d34;text-align:left;font-weight:800;font-size:15px;padding:12px 14px;border-bottom:1px solid var(--line);border-right:1px solid var(--line)}
-    td{padding:10px 14px;border-bottom:1px solid var(--line);border-right:1px solid var(--line);vertical-align:middle;font-size:16px}
-    tr:last-child td{border-bottom:none}
-    th:last-child,td:last-child{border-right:none}
-
-    .btn{border:none;border-radius:8px;background:linear-gradient(135deg,var(--navy3),var(--blue));color:white;padding:12px 24px;font-weight:800;cursor:pointer;font-size:15px}
-    .btn:hover{filter:brightness(.92)}
-    .btn-light{background:#edf2f8;color:#0d2548;border:1px solid #d8e2ee}
-    .btn-danger{background:white;color:var(--danger);border:1px solid #ffd0d0;padding:9px 11px}
-    .iconBtn{background:white;border:1px solid #d9e3ef;border-radius:8px;padding:9px 11px;margin-right:6px;color:#0d2548;cursor:pointer;font-size:18px}
-    .iconBtn:hover{background:#edf6ff}
-
-    .pill{display:inline-block;padding:6px 12px;border-radius:8px;font-weight:700;font-size:14px}
-    .pill-ok{background:var(--okBg);color:var(--ok);border:1px solid #abe2b8}
-    .pill-now{background:var(--okBg);color:var(--ok);border:1px solid #abe2b8}
-    .pill-plan{background:#eaf2ff;color:#1455a0;border:1px solid #cde2ff}
-    .pill-done{background:#eef2f7;color:#38516e;border:1px solid #d8e2ef}
-
-    .link{color:#005bff;text-decoration:none;font-weight:700;cursor:pointer}.link:hover{text-decoration:underline}
-    .art{font-weight:900}.event-title{font-weight:900}.event-sub{font-size:14px;color:var(--muted);margin-top:6px;line-height:1.35}.nowrap{white-space:nowrap}
-
-    .hidden{display:none!important}
-    .form-panel{background:white;border:1px solid var(--line);border-radius:10px;padding:22px;margin:18px 0;box-shadow:var(--shadow)}
-    .grid{display:grid;gap:18px}.grid2{grid-template-columns:repeat(2,1fr)}.grid3{grid-template-columns:repeat(3,1fr)}
-    label{display:block;font-weight:800;margin-bottom:7px;color:#183150}
-    input,select,textarea{width:100%;border:1px solid #cfdbea;border-radius:8px;padding:12px;font-size:16px;background:white;margin-bottom:14px}select[multiple]{min-height:110px}
-    pre{background:#071a35;color:#e3f0ff;border-radius:10px;padding:18px;white-space:pre-wrap;overflow:auto}
-
-    footer{background:linear-gradient(135deg,var(--navy3),var(--navy2));color:white;padding:28px 34px;display:flex;justify-content:space-between;gap:20px;font-size:15px;margin-top:60px}
-
-    @media(max-width:950px){.topbar{align-items:flex-start}.nav{width:100%;gap:16px;flex-wrap:wrap}.summary{grid-template-columns:1fr}.grid2,.grid3{grid-template-columns:1fr}.logo-wrap{width:240px}.logo-wrap img{width:235px}.page{padding:28px 18px}}
+    .hidden{display:none!important}.form-panel{background:white;border:1px solid var(--line);border-radius:10px;padding:16px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;gap:12px}.grid2{grid-template-columns:repeat(2,1fr)}label{display:block;font-weight:800;margin-bottom:5px;color:#183150;font-size:13px}input,select,textarea{width:100%;border:1px solid #cfdbea;border-radius:8px;padding:8px;font-size:14px;background:white;margin-bottom:10px}select[multiple]{min-height:95px}pre{background:#071a35;color:#e3f0ff;border-radius:10px;padding:14px;white-space:pre-wrap;overflow:auto;font-size:12px}
+    footer{background:linear-gradient(135deg,var(--navy3),var(--navy2));color:white;padding:24px 34px;display:flex;justify-content:space-between;gap:20px;font-size:14px;margin-top:50px}
+    @media(max-width:950px){.topbar{align-items:flex-start}.nav{width:100%;gap:12px;flex-wrap:wrap}.summary{grid-template-columns:1fr}.grid2{grid-template-columns:1fr}.logo-wrap{width:240px}.logo-wrap img{width:235px}.page{padding:22px 14px}}
   </style>
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand" onclick="showPage('dashboard')">
-      <div class="logo-wrap"><img src="/static/logo3.png" alt="Herrhammer Logo"></div>
+<header class="topbar">
+  <div class="brand" onclick="showPage('dashboard')"><div class="logo-wrap"><img src="/static/logo3.png" alt="Herrhammer Logo"></div></div>
+  <nav class="nav">
+    <button id="nav-dashboard" class="active" onclick="showPage('dashboard')">⚙ Dashboard</button>
+    <button id="nav-mitarbeiter" onclick="showPage('mitarbeiter')">👥 Mitarbeiter</button>
+    <button id="nav-reisen" onclick="showPage('reisen')">▣ Reisen</button>
+    <span class="versionTop">Version 7.24</span>
+    <button onclick="showPage('debug')">↪ Debug</button>
+  </nav>
+</header>
+
+<main class="page">
+  <div id="statusBox" class="status">Bereit.</div>
+
+  <section id="page-dashboard">
+    <h1>Reisekosten System</h1>
+    <div class="summary">
+      <div class="summary-card"><div class="iconbox">▣</div><div><div class="summary-label">Geplant</div><div id="countGeplant" class="summary-number">0</div><div class="summary-sub">Reisen</div></div></div>
+      <div class="summary-card"><div class="iconbox">✈</div><div><div class="summary-label">Aktuell</div><div id="countAktuell" class="summary-number">0</div><div class="summary-sub">Reisen</div></div></div>
+      <div class="summary-card"><div class="iconbox">✓</div><div><div class="summary-label">Abgeschlossen</div><div id="countAbgeschlossen" class="summary-number">0</div><div class="summary-sub">Reisen</div></div></div>
     </div>
-    <nav class="nav">
-      <button id="nav-dashboard" class="active" onclick="showPage('dashboard')">⚙ Dashboard</button>
-      <button id="nav-mitarbeiter" onclick="showPage('mitarbeiter')">👥 Mitarbeiter</button>
-      <button id="nav-reisen" onclick="showPage('reisen')">▣ Reisen</button>
-      <span class="versionTop">Version 7.23</span>
-      <button onclick="showPage('debug')">↪ Debug</button>
-    </nav>
-  </header>
+    <div class="section"><h2>Aktuelle Reisen</h2><div id="dashboardReisenAktuell" class="table-card"></div></div>
+    <div class="section"><h2>Geplante Reisen</h2><div id="dashboardReisenPlan" class="table-card"></div></div>
+    <div class="section"><h2>Abgeschlossene Reisen</h2><div id="dashboardReisenAbgeschlossen" class="table-card"></div></div>
+  </section>
 
-  <main class="page">
-    <div id="statusBox" class="status">Bereit.</div>
+  <section id="page-mitarbeiter" class="hidden">
+    <h1>Mitarbeiter</h1><button class="btn" onclick="openMitarbeiterNew()">+ Neu</button>
+    <div id="mitarbeiterForm" class="form-panel hidden"><h2 id="mitarbeiterFormTitle">Mitarbeiter anlegen</h2><input id="mitarbeiterId" type="hidden"><div class="grid grid2"><div><label>Kürzel</label><input id="mitarbeiterKuerzel"></div><div><label>E-Mail</label><input id="mitarbeiterEmail"></div><div><label>Vorname</label><input id="mitarbeiterVorname"></div><div><label>Nachname</label><input id="mitarbeiterNachname"></div><div><label>Geburtsdatum</label><input id="mitarbeiterGeburtsdatum"></div></div><button class="btn" onclick="saveMitarbeiter()">Speichern</button> <button class="btn btn-light" onclick="closeMitarbeiterForm()">Abbrechen</button></div>
+    <div id="mitarbeiterTable" class="table-card"></div>
+  </section>
 
-    <section id="page-dashboard">
-      <h1>Reisekosten System</h1>
-      <div class="summary">
-        <div class="summary-card"><div class="iconbox">▣</div><div><div class="summary-label">Geplant</div><div id="countGeplant" class="summary-number">0</div><div class="summary-sub">Reisen</div></div></div>
-        <div class="summary-card"><div class="iconbox">✈</div><div><div class="summary-label">Aktuell</div><div id="countAktuell" class="summary-number">0</div><div class="summary-sub">Reisen</div></div></div>
-        <div class="summary-card"><div class="iconbox">✓</div><div><div class="summary-label">Abgeschlossen</div><div id="countAbgeschlossen" class="summary-number">0</div><div class="summary-sub">Reisen</div></div></div>
-      </div>
+  <section id="page-reisen" class="hidden">
+    <h1>Reisen</h1><button class="btn" onclick="openReiseNew()">+ Neu</button>
+    <div id="reiseForm" class="form-panel hidden"><h2 id="reiseFormTitle">Reise anlegen</h2><input id="reiseDbId" type="hidden"><div class="grid grid2"><div><label>Jahr</label><input id="reiseJahr" type="number" value="2026" onchange="loadNextCode()"></div><div><label>Nächster Reisecode</label><input id="reiseNextCode" readonly></div><div><label>Reisename</label><input id="reiseName"></div><div><label>Anzahl Reisende</label><input id="reiseAnzahl" type="number" value="1"></div><div><label>Startdatum</label><input id="reiseStart" type="date"></div><div><label>Enddatum</label><input id="reiseEnde" type="date"></div></div><label>Reisende auswählen</label><select id="reiseMitarbeiterSelect" multiple></select><button class="btn" onclick="saveReise()">Speichern</button> <button class="btn btn-light" onclick="closeReiseForm()">Abbrechen</button></div>
+    <div id="reisenTable" class="table-card"></div>
+  </section>
 
-      <div class="section"><h2>Aktuelle Reisen</h2><div id="dashboardReisenAktuell" class="table-card"></div></div>
-      <div class="section"><h2>Geplante Reisen</h2><div id="dashboardReisenPlan" class="table-card"></div></div>
-      <div class="section"><h2>Abgeschlossene Reisen</h2><div id="dashboardReisenAbgeschlossen" class="table-card"></div></div>
-    </section>
+  <section id="page-reise-detail" class="hidden">
+    <h1 id="reiseDetailTitle">Reise</h1><div id="reiseDetailSub" style="margin-top:-12px;margin-bottom:18px;color:#607086;font-size:14px"></div><button class="btn btn-light" onclick="showPage('reisen')">Zurück zu Reisen</button>
+    <div class="section"><h2>Alle Reise Events</h2><div id="reiseDetailContent" class="table-card"></div></div>
+  </section>
 
-    <section id="page-mitarbeiter" class="hidden">
-      <h1>Mitarbeiter</h1>
-      <button class="btn" onclick="openMitarbeiterNew()">+ Neu</button>
-      <div id="mitarbeiterForm" class="form-panel hidden">
-        <h2 id="mitarbeiterFormTitle">Mitarbeiter anlegen</h2><input id="mitarbeiterId" type="hidden">
-        <div class="grid grid2"><div><label>Kürzel</label><input id="mitarbeiterKuerzel"></div><div><label>E-Mail</label><input id="mitarbeiterEmail"></div><div><label>Vorname</label><input id="mitarbeiterVorname"></div><div><label>Nachname</label><input id="mitarbeiterNachname"></div><div><label>Geburtsdatum</label><input id="mitarbeiterGeburtsdatum"></div></div>
-        <button class="btn" onclick="saveMitarbeiter()">Speichern</button> <button class="btn btn-light" onclick="closeMitarbeiterForm()">Abbrechen</button>
-      </div>
-      <div id="mitarbeiterTable" class="table-card"></div>
-    </section>
-
-    <section id="page-reisen" class="hidden">
-      <h1>Reisen</h1>
-      <button class="btn" onclick="openReiseNew()">+ Neu</button>
-      <div id="reiseForm" class="form-panel hidden">
-        <h2 id="reiseFormTitle">Reise anlegen</h2><input id="reiseDbId" type="hidden">
-        <div class="grid grid2"><div><label>Jahr</label><input id="reiseJahr" type="number" value="2026" onchange="loadNextCode()"></div><div><label>Nächster Reisecode</label><input id="reiseNextCode" readonly></div><div><label>Reisename</label><input id="reiseName"></div><div><label>Anzahl Reisende</label><input id="reiseAnzahl" type="number" value="1"></div><div><label>Startdatum</label><input id="reiseStart" type="date"></div><div><label>Enddatum</label><input id="reiseEnde" type="date"></div></div>
-        <label>Reisende auswählen</label><select id="reiseMitarbeiterSelect" multiple></select>
-        <button class="btn" onclick="saveReise()">Speichern</button> <button class="btn btn-light" onclick="closeReiseForm()">Abbrechen</button>
-      </div>
-      <div id="reisenTable" class="table-card"></div>
-    </section>
-
-    <section id="page-reise-detail" class="hidden">
-      <h1 id="reiseDetailTitle">Reise</h1>
-      <div id="reiseDetailSub" style="margin-top:-18px;margin-bottom:26px;color:#607086;font-size:16px"></div>
-      <button class="btn btn-light" onclick="showPage('reisen')">Zurück zu Reisen</button>
-      <div class="section"><h2>Alle Reise Events</h2><div id="reiseDetailContent" class="table-card"></div></div>
-    </section>
-
-    <section id="page-debug" class="hidden">
-      <h1>Debug</h1>
-      <button class="btn" onclick="health()">Health</button>
-      <pre id="resultBox">Noch kein Ergebnis.</pre>
-    </section>
-  </main>
-
-  <footer><div>Reisekosten System<br>© 2026 Kerzenmaschinen Herrhammer Kürschner</div><div>Version 7.23<br>Alle Rechte vorbehalten</div></footer>
+  <section id="page-debug" class="hidden"><h1>Debug</h1><button class="btn" onclick="health()">Health</button><pre id="resultBox">Noch kein Ergebnis.</pre></section>
+</main>
+<footer><div>Reisekosten System<br>© 2026 Kerzenmaschinen Herrhammer Kürschner</div><div>Version 7.24<br>Alle Rechte vorbehalten</div></footer>
 
 <script>
-let mitarbeiterCache=[];let reisenCache=[];
-function api(){return window.location.origin}function esc(v){return String(v??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-function setStatus(m,t=''){const b=document.getElementById('statusBox');b.textContent=m;b.className='status '+t}function showResult(d){document.getElementById('resultBox').textContent=JSON.stringify(d,null,2)}
-async function parseJson(r){const t=await r.text();try{return JSON.parse(t)}catch{throw new Error('Antwort war kein JSON: '+t.slice(0,300))}}async function requestJson(u,o={}){const r=await fetch(u,o);const d=await parseJson(r);if(!r.ok)throw new Error(d.detail||JSON.stringify(d));return d}
-function showPage(n){['dashboard','mitarbeiter','reisen','reise-detail','debug'].forEach(p=>document.getElementById('page-'+p).classList.add('hidden'));document.getElementById('page-'+n).classList.remove('hidden');['dashboard','mitarbeiter','reisen'].forEach(p=>document.getElementById('nav-'+p)?.classList.toggle('active',p===n));if(n==='dashboard')loadReisen(false);if(n==='mitarbeiter')loadMitarbeiter();if(n==='reisen')loadReisen()}
-async function health(){try{const d=await requestJson(api()+'/health');showResult(d);setStatus('Health OK: Version '+d.version,'ok')}catch(e){setStatus(e.message,'error')}}
-function pad2(v){return String(v).padStart(2,'0')}function todayISO(){const d=new Date();return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`}
-function toDateObj(v){v=String(v||'').trim();let m=v.match(/(\d{4})-(\d{2})-(\d{2})/);if(m)return{y:m[1],mo:m[2],d:m[3]};m=v.match(/(\d{2})\.(\d{2})\.(\d{4})/);if(m)return{y:m[3],mo:m[2],d:m[1]};const mons={JAN:'01',FEB:'02',MAR:'03',APR:'04',MAY:'05',JUN:'06',JUL:'07',AUG:'08',SEP:'09',OCT:'10',NOV:'11',DEC:'12',MAI:'05',MÄRZ:'03',MAERZ:'03'};m=v.match(/(\d{1,2})\s*([A-Za-zÄÖÜäöü]+)\s*(\d{4})/);if(m){const mon=mons[m[2].toUpperCase()]||'';if(mon)return{y:m[3],mo:mon,d:pad2(m[1])}}m=v.match(/(\d{1,2})([A-Za-z]{3})(\d{4})/);if(m){const mon=mons[m[2].toUpperCase()]||'';if(mon)return{y:m[3],mo:mon,d:pad2(m[1])}}return null}
-function dateDE(v){const o=toDateObj(v);return o?`${o.d}.${o.mo}.${o.y}`:(v?String(v).slice(0,10):'—')}function sortDateKey(v){const o=toDateObj(v);return o?`${o.y}${o.mo}${o.d}`:'99999999'}function timePart(v){const m=String(v||'').match(/\d{1,2}:\d{2}/);return m?m[0].padStart(5,'0'):''}function sortTimeKey(v){return timePart(v).replace(':','')||'9999'}
-function fullName(m){return(m.vollname||m.klarname||((m.vorname||'')+' '+(m.nachname||'')).trim()||'').trim()}function reiseTimeBucket(r){const t=todayISO();if(r.startdatum&&r.startdatum>t)return'planned';if(r.enddatum&&r.enddatum<t)return'done';if(r.startdatum&&r.enddatum&&r.startdatum<=t&&r.enddatum>=t)return'current';return'planned'}
-function statusPill(b){if(b==='current')return'<span class="pill pill-now">aktuell</span>';if(b==='planned')return'<span class="pill pill-plan">geplant</span>';return'<span class="pill pill-done">abgeschlossen</span>'}
-async function loadMitarbeiter(){try{const d=await requestJson(api()+'/mitarbeiter');mitarbeiterCache=d.mitarbeiter||[];renderMitarbeiterTable();renderMitarbeiterSelect();setStatus('Mitarbeiter geladen.','ok')}catch(e){setStatus(e.message,'error')}}
-function renderMitarbeiterTable(){const rows=mitarbeiterCache.map(m=>`<tr><td>${esc(m.kuerzel)}</td><td>${esc(fullName(m))}</td><td><button class="iconBtn" onclick="editMitarbeiter(${m.id})">✎</button><button class="iconBtn btn-danger" onclick="deleteMitarbeiter(${m.id})">🗑</button></td></tr>`).join('');document.getElementById('mitarbeiterTable').innerHTML=`<table><thead><tr><th>Kürzel</th><th>Name</th><th>Aktionen</th></tr></thead><tbody>${rows||'<tr><td colspan="3">Keine Mitarbeiter</td></tr>'}</tbody></table>`}
-function openMitarbeiterNew(){['mitarbeiterId','mitarbeiterKuerzel','mitarbeiterVorname','mitarbeiterNachname','mitarbeiterGeburtsdatum','mitarbeiterEmail'].forEach(id=>document.getElementById(id).value='');document.getElementById('mitarbeiterForm').classList.remove('hidden')}function closeMitarbeiterForm(){document.getElementById('mitarbeiterForm').classList.add('hidden')}
-function editMitarbeiter(id){const m=mitarbeiterCache.find(x=>x.id===id);if(!m)return;document.getElementById('mitarbeiterId').value=m.id;document.getElementById('mitarbeiterKuerzel').value=m.kuerzel||'';document.getElementById('mitarbeiterVorname').value=m.vorname||'';document.getElementById('mitarbeiterNachname').value=m.nachname||'';document.getElementById('mitarbeiterGeburtsdatum').value=m.geburtsdatum||'';document.getElementById('mitarbeiterEmail').value=m.email||'';document.getElementById('mitarbeiterForm').classList.remove('hidden')}
-async function saveMitarbeiter(){try{const id=document.getElementById('mitarbeiterId').value;const p={kuerzel:mitarbeiterKuerzel.value.trim(),vorname:mitarbeiterVorname.value.trim(),nachname:mitarbeiterNachname.value.trim(),geburtsdatum:mitarbeiterGeburtsdatum.value.trim()||null,email:mitarbeiterEmail.value.trim()||null,aktiv:true};const d=await requestJson(api()+(id?'/mitarbeiter/'+id:'/mitarbeiter'),{method:id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});showResult(d);closeMitarbeiterForm();await loadMitarbeiter()}catch(e){setStatus(e.message,'error')}}
-async function deleteMitarbeiter(id){if(!confirm('Mitarbeiter wirklich löschen?'))return;try{await requestJson(api()+'/mitarbeiter/'+id,{method:'DELETE'});await loadMitarbeiter()}catch(e){setStatus(e.message,'error')}}
-function renderMitarbeiterSelect(sel=[]){const s=document.getElementById('reiseMitarbeiterSelect');if(!s)return;const set=new Set(sel.map(String));s.innerHTML=mitarbeiterCache.map(m=>`<option value="${m.id}" ${set.has(String(m.id))?'selected':''}>${esc(m.kuerzel)} - ${esc(fullName(m))}</option>`).join('')}
-async function loadReisen(show=true){try{const d=await requestJson(api()+'/reisen');const base=d.reisen||[];const detailed=[];for(const r of base){try{const det=await requestJson(api()+'/reisen/'+r.id);detailed.push({...r,detail:det})}catch{detailed.push({...r,detail:null})}}reisenCache=detailed;renderDashboard();renderReisenTable();if(show)setStatus('Reisen geladen.','ok')}catch(e){setStatus(e.message,'error')}}
-function reisendeKuerzel(r){return((r.detail&&r.detail.reisende)||[]).map(x=>x.kuerzel).filter(Boolean).join(', ')}function linkReise(r){return`<span class="link" onclick="openReiseDetail(${r.id})">${esc(r.reise_code)}</span>`}
-function renderMini(items,id){const rows=items.map(r=>`<tr><td>${linkReise(r)}</td><td>${esc(reisendeKuerzel(r)||'—')}</td><td>${esc(r.reise_name)}</td><td>${dateDE(r.startdatum)}</td><td>${dateDE(r.enddatum)}</td><td>${statusPill(reiseTimeBucket(r))}</td><td><button class="btn" onclick="openReiseDetail(${r.id})">Öffnen</button></td></tr>`).join('');document.getElementById(id).innerHTML=`<table><thead><tr><th>Reise ID</th><th>Mitarbeiter</th><th>Reiseziel</th><th>von</th><th>bis</th><th>Status</th><th>Aktionen</th></tr></thead><tbody>${rows||'<tr><td colspan="7">Keine Reisen</td></tr>'}</tbody></table>`}
-function renderDashboard(){const p=reisenCache.filter(r=>reiseTimeBucket(r)==='planned'),c=reisenCache.filter(r=>reiseTimeBucket(r)==='current'),d=reisenCache.filter(r=>reiseTimeBucket(r)==='done');countGeplant.textContent=p.length;countAktuell.textContent=c.length;countAbgeschlossen.textContent=d.length;renderMini(c,'dashboardReisenAktuell');renderMini(p,'dashboardReisenPlan');renderMini(d,'dashboardReisenAbgeschlossen')}
-function renderReisenTable(){const rows=reisenCache.map(r=>`<tr><td>${linkReise(r)}</td><td>${esc(r.reise_name)}</td><td>${esc(reisendeKuerzel(r)||'—')}</td><td><button class="iconBtn" onclick="editReise(${r.id})">✎</button><button class="iconBtn btn-danger" onclick="deleteReise(${r.id})">🗑</button></td></tr>`).join('');reisenTable.innerHTML=`<table><thead><tr><th>Reise ID</th><th>Reisename</th><th>Reisende(r)</th><th>Aktionen</th></tr></thead><tbody>${rows||'<tr><td colspan="4">Keine Reisen</td></tr>'}</tbody></table>`}
-async function loadNextCode(){try{const d=await requestJson(api()+'/reisen/next-code?jahr='+encodeURIComponent(reiseJahr.value));reiseNextCode.value=d.reise_code||d.next_code||''}catch{reiseNextCode.value=''}}async function openReiseNew(){await loadMitarbeiter();['reiseDbId','reiseName','reiseStart','reiseEnde'].forEach(id=>document.getElementById(id).value='');reiseJahr.value=new Date().getFullYear();reiseAnzahl.value='1';renderMitarbeiterSelect([]);await loadNextCode();reiseForm.classList.remove('hidden')}function closeReiseForm(){reiseForm.classList.add('hidden')}
-async function editReise(id){await loadMitarbeiter();const r=reisenCache.find(x=>x.id===id);if(!r)return;const det=r.detail||await requestJson(api()+'/reisen/'+id);reiseDbId.value=r.id;reiseJahr.value=r.reise_jahr||new Date().getFullYear();reiseNextCode.value=r.reise_code||'';reiseName.value=r.reise_name||'';reiseAnzahl.value=r.anzahl_reisende||1;reiseStart.value=r.startdatum||'';reiseEnde.value=r.enddatum||'';renderMitarbeiterSelect((det.reisende||[]).map(x=>x.id));reiseForm.classList.remove('hidden')}
-function selectedIds(){return Array.from(reiseMitarbeiterSelect.selectedOptions).map(o=>parseInt(o.value,10))}async function saveReise(){try{const id=reiseDbId.value;const p={reise_jahr:parseInt(reiseJahr.value,10),reise_name:reiseName.value.trim(),startdatum:reiseStart.value||null,enddatum:reiseEnde.value||null,anzahl_reisende:parseInt(reiseAnzahl.value||'1',10),mitarbeiter_ids:selectedIds()};await requestJson(api()+(id?'/reisen/'+id:'/reisen'),{method:id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});closeReiseForm();await loadReisen()}catch(e){setStatus(e.message,'error')}}async function deleteReise(id){if(!confirm('Reise wirklich löschen?'))return;try{await requestJson(api()+'/reisen/'+id,{method:'DELETE'});await loadReisen()}catch(e){setStatus(e.message,'error')}}
-function parseA(b){const raw=b?.analysis_json||b?.analysis||'';if(typeof raw==='object')return raw;try{return raw?JSON.parse(raw):{}}catch{return{}}}function analyses(ed){return(ed.belege||[]).map(b=>({beleg:b,analysis:parseA(b)})).filter(x=>Object.keys(x.analysis).length)}
-function eventName(a,ev,s){const typ=(a.art_des_dokuments||ev.typ||'').toLowerCase();if(typ==='hotel')return s.ankunft_ort||a.hotel||a.buchungsnummer_code||ev.titel||'Hotel';return s.transportunternehmen_und_nummer||a.buchungsnummer_code||ev.titel||'Event'}
-function rowFrom(ev,b,a){const out=[];const typ=(a.art_des_dokuments||ev.typ||'Event');const tl=typ.toLowerCase();const bid=b?.id||'';if(tl==='hotel'){const s=(a.reisesegmente||[])[0]||{};const ci=s.abreise_datum_und_zeit||a.check_in||a.belegdatum||ev.created_at;const co=s.ankunft_datum_und_zeit||a.check_out||ci;out.push({art:'▦ Hotel (Check-out)',datum:dateDE(co),sort:sortDateKey(co)+'0001',zeit:timePart(co)||'00:00',event:eventName(a,ev,s),sub:'Check-out',bid,status:ev.status,eventId:ev.id});out.push({art:'▦ Hotel (Check-in)',datum:dateDE(ci),sort:sortDateKey(ci)+'9998',zeit:timePart(ci)||'23:59',event:eventName(a,ev,s),sub:'Check-in',bid,status:ev.status,eventId:ev.id});return out}const segs=a.reisesegmente||[];if(segs.length){for(const s of segs){const st=s.abreise_datum_und_zeit||a.belegdatum||ev.created_at;const en=s.ankunft_datum_und_zeit||st;out.push({art:'✈ '+typ,datum:dateDE(st),sort:sortDateKey(st)+sortTimeKey(st),zeit:(timePart(st)||'—')+' - '+(timePart(en)||'—'),event:eventName(a,ev,s),sub:(s.abreise_ort||'')+' → '+(s.ankunft_ort||''),bid,status:ev.status,eventId:ev.id})}return out}const d=a.belegdatum||ev.created_at;return[{art:typ,datum:dateDE(d),sort:sortDateKey(d)+sortTimeKey(d),zeit:'—',event:a.buchungsnummer_code||ev.titel||typ,sub:'',bid,status:ev.status,eventId:ev.id}]}
-async function openReiseDetail(id){try{const detail=await requestJson(api()+'/reisen/'+id);const r=detail.reise||reisenCache.find(x=>x.id===id)||{};reiseDetailTitle.textContent=(r.reise_code||'')+' · '+(r.reise_name||'');reiseDetailSub.textContent=`${dateDE(r.startdatum)} bis ${dateDE(r.enddatum)} · Reisende: ${((detail.reisende||[]).map(x=>x.kuerzel).join(', ')||'—')}`;let rows=[];for(const ev of detail.events||[]){let ed={belege:[]};try{ed=await requestJson(api()+'/events/'+ev.id)}catch{}const pairs=analyses(ed);if(pairs.length){for(const p of pairs)rows.push(...rowFrom(ev,p.beleg,p.analysis))}else rows.push({art:ev.typ,datum:dateDE(ev.created_at),sort:sortDateKey(ev.created_at)+'9999',zeit:'—',event:ev.titel||ev.typ,sub:'Keine Analyse gespeichert',bid:'',status:ev.status,eventId:ev.id})}rows.sort((a,b)=>a.sort.localeCompare(b.sort));reiseDetailContent.innerHTML=`<table><thead><tr><th>Art</th><th>Datum</th><th>Uhrzeit von/bis</th><th>Event</th><th>BelegNr.</th><th>Status</th><th>Aktionen</th></tr></thead><tbody>${rows.map(x=>`<tr><td class="art">${esc(x.art)}</td><td class="nowrap">${esc(x.datum)}</td><td class="nowrap">${esc(x.zeit)}</td><td><div class="event-title">${esc(x.event)}</div><div class="event-sub">${esc(x.sub)}</div></td><td>${x.bid?`<span class="link" onclick="openPdf(${x.bid})">BE-${String(x.bid).padStart(4,'0')}</span>`:'—'}</td><td><span class="pill pill-ok">${esc(x.status||'ok')}</span></td><td><button class="iconBtn" onclick="openPdf(${x.bid})">▣</button><button class="iconBtn" onclick="openOriginal(${x.bid})">👁</button><button class="iconBtn btn-danger" onclick="deleteEvent(${x.eventId},${id})">🗑</button></td></tr>`).join('')||'<tr><td colspan="7">Keine Events</td></tr>'}</tbody></table>`;showPage('reise-detail');setStatus('Reise geladen.','ok')}catch(e){setStatus(e.message,'error')}}
-function openPdf(id){if(id)window.open(api()+'/belege/'+id+'/pdf','_blank')}function openOriginal(id){if(id)window.open(api()+'/belege/'+id+'/original','_blank')}async function deleteEvent(eid,rid){if(!confirm('Event wirklich löschen?'))return;try{await requestJson(api()+'/events/'+eid,{method:'DELETE'});await openReiseDetail(rid)}catch(e){setStatus(e.message,'error')}}
-window.onload=async()=>{await health();await loadMitarbeiter();await loadReisen(false)};
+let mitarbeiterCache=[];let reisenCache=[];function api(){return window.location.origin}function esc(v){return String(v??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}function setStatus(m,t=''){const b=document.getElementById('statusBox');b.textContent=m;b.className='status '+t}function showResult(d){document.getElementById('resultBox').textContent=JSON.stringify(d,null,2)}async function parseJson(r){const t=await r.text();try{return JSON.parse(t)}catch{throw new Error('Antwort war kein JSON: '+t.slice(0,300))}}async function requestJson(u,o={}){const r=await fetch(u,o);const d=await parseJson(r);if(!r.ok)throw new Error(d.detail||JSON.stringify(d));return d}
+function showPage(n){['dashboard','mitarbeiter','reisen','reise-detail','debug'].forEach(p=>document.getElementById('page-'+p).classList.add('hidden'));document.getElementById('page-'+n).classList.remove('hidden');['dashboard','mitarbeiter','reisen'].forEach(p=>document.getElementById('nav-'+p)?.classList.toggle('active',p===n));if(n==='dashboard')loadReisen(false);if(n==='mitarbeiter')loadMitarbeiter();if(n==='reisen')loadReisen()}async function health(){try{const d=await requestJson(api()+'/health');showResult(d);setStatus('Health OK: Version '+d.version,'ok')}catch(e){setStatus(e.message,'error')}}
+function pad2(v){return String(v).padStart(2,'0')}function todayISO(){const d=new Date();return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`}function toDateObj(v){v=String(v||'').trim();let m=v.match(/(\d{4})-(\d{2})-(\d{2})/);if(m)return{y:m[1],mo:m[2],d:m[3]};m=v.match(/(\d{2})\.(\d{2})\.(\d{4})/);if(m)return{y:m[3],mo:m[2],d:m[1]};const mons={JAN:'01',FEB:'02',MAR:'03',APR:'04',MAY:'05',JUN:'06',JUL:'07',AUG:'08',SEP:'09',OCT:'10',NOV:'11',DEC:'12',MAI:'05',MÄRZ:'03',MAERZ:'03'};m=v.match(/(\d{1,2})\s*([A-Za-zÄÖÜäöü]+)\s*(\d{4})/);if(m){const mon=mons[m[2].toUpperCase()]||'';if(mon)return{y:m[3],mo:mon,d:pad2(m[1])}}m=v.match(/(\d{1,2})([A-Za-z]{3})(\d{4})/);if(m){const mon=mons[m[2].toUpperCase()]||'';if(mon)return{y:m[3],mo:mon,d:pad2(m[1])}}return null}function dateDE(v){const o=toDateObj(v);return o?`${o.d}.${o.mo}.${o.y}`:(v?String(v).slice(0,10):'—')}function sortDateKey(v){const o=toDateObj(v);return o?`${o.y}${o.mo}${o.d}`:'99999999'}function timePart(v){const m=String(v||'').match(/\d{1,2}:\d{2}/);return m?m[0].padStart(5,'0'):''}function sortTimeKey(v){return timePart(v).replace(':','')||'9999'}
+function fullName(m){return(m.vollname||m.klarname||((m.vorname||'')+' '+(m.nachname||'')).trim()||'').trim()}function reiseTimeBucket(r){const t=todayISO();if(r.startdatum&&r.startdatum>t)return'planned';if(r.enddatum&&r.enddatum<t)return'done';if(r.startdatum&&r.enddatum&&r.startdatum<=t&&r.enddatum>=t)return'current';return'planned'}function statusPill(b){if(b==='current')return'<span class="pill pill-now">aktuell</span>';if(b==='planned')return'<span class="pill pill-plan">geplant</span>';return'<span class="pill pill-done">abgeschlossen</span>'}
+async function loadMitarbeiter(){try{const d=await requestJson(api()+'/mitarbeiter');mitarbeiterCache=d.mitarbeiter||[];renderMitarbeiterTable();renderMitarbeiterSelect();setStatus('Mitarbeiter geladen.','ok')}catch(e){setStatus(e.message,'error')}}function renderMitarbeiterTable(){const rows=mitarbeiterCache.map(m=>`<tr><td>${esc(m.kuerzel)}</td><td>${esc(fullName(m))}</td><td><div class="actions"><button class="iconBtn" onclick="editMitarbeiter(${m.id})">✎</button><button class="iconBtn btn-danger" onclick="deleteMitarbeiter(${m.id})">×</button></div></td></tr>`).join('');mitarbeiterTable.innerHTML=`<table><thead><tr><th>Kürzel</th><th>Name</th><th>Aktionen</th></tr></thead><tbody>${rows||'<tr><td colspan="3">Keine Mitarbeiter</td></tr>'}</tbody></table>`}function openMitarbeiterNew(){['mitarbeiterId','mitarbeiterKuerzel','mitarbeiterVorname','mitarbeiterNachname','mitarbeiterGeburtsdatum','mitarbeiterEmail'].forEach(id=>document.getElementById(id).value='');mitarbeiterForm.classList.remove('hidden')}function closeMitarbeiterForm(){mitarbeiterForm.classList.add('hidden')}function editMitarbeiter(id){const m=mitarbeiterCache.find(x=>x.id===id);if(!m)return;mitarbeiterId.value=m.id;mitarbeiterKuerzel.value=m.kuerzel||'';mitarbeiterVorname.value=m.vorname||'';mitarbeiterNachname.value=m.nachname||'';mitarbeiterGeburtsdatum.value=m.geburtsdatum||'';mitarbeiterEmail.value=m.email||'';mitarbeiterForm.classList.remove('hidden')}async function saveMitarbeiter(){try{const id=mitarbeiterId.value;const p={kuerzel:mitarbeiterKuerzel.value.trim(),vorname:mitarbeiterVorname.value.trim(),nachname:mitarbeiterNachname.value.trim(),geburtsdatum:mitarbeiterGeburtsdatum.value.trim()||null,email:mitarbeiterEmail.value.trim()||null,aktiv:true};await requestJson(api()+(id?'/mitarbeiter/'+id:'/mitarbeiter'),{method:id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});closeMitarbeiterForm();await loadMitarbeiter()}catch(e){setStatus(e.message,'error')}}async function deleteMitarbeiter(id){if(!confirm('Mitarbeiter wirklich löschen?'))return;try{await requestJson(api()+'/mitarbeiter/'+id,{method:'DELETE'});await loadMitarbeiter()}catch(e){setStatus(e.message,'error')}}function renderMitarbeiterSelect(sel=[]){if(!reiseMitarbeiterSelect)return;const set=new Set(sel.map(String));reiseMitarbeiterSelect.innerHTML=mitarbeiterCache.map(m=>`<option value="${m.id}" ${set.has(String(m.id))?'selected':''}>${esc(m.kuerzel)} - ${esc(fullName(m))}</option>`).join('')}
+async function loadReisen(show=true){try{const d=await requestJson(api()+'/reisen');const base=d.reisen||[];const detailed=[];for(const r of base){try{const det=await requestJson(api()+'/reisen/'+r.id);detailed.push({...r,detail:det})}catch{detailed.push({...r,detail:null})}}reisenCache=detailed;renderDashboard();renderReisenTable();if(show)setStatus('Reisen geladen.','ok')}catch(e){setStatus(e.message,'error')}}function reisendeKuerzel(r){return((r.detail&&r.detail.reisende)||[]).map(x=>x.kuerzel).filter(Boolean).join(', ')}function linkReise(r){return`<span class="link" onclick="openReiseDetail(${r.id})">${esc(r.reise_code)}</span>`}function renderMini(items,id){const rows=items.map(r=>`<tr><td>${linkReise(r)}</td><td>${esc(reisendeKuerzel(r)||'—')}</td><td>${esc(r.reise_name)}</td><td>${dateDE(r.startdatum)}</td><td>${dateDE(r.enddatum)}</td><td>${statusPill(reiseTimeBucket(r))}</td><td><button class="btn" onclick="openReiseDetail(${r.id})">Öffnen</button></td></tr>`).join('');document.getElementById(id).innerHTML=`<table><thead><tr><th>Reise ID</th><th>Mitarbeiter</th><th>Reiseziel</th><th>von</th><th>bis</th><th>Status</th><th>Aktionen</th></tr></thead><tbody>${rows||'<tr><td colspan="7">Keine Reisen</td></tr>'}</tbody></table>`}function renderDashboard(){const p=reisenCache.filter(r=>reiseTimeBucket(r)==='planned'),c=reisenCache.filter(r=>reiseTimeBucket(r)==='current'),d=reisenCache.filter(r=>reiseTimeBucket(r)==='done');countGeplant.textContent=p.length;countAktuell.textContent=c.length;countAbgeschlossen.textContent=d.length;renderMini(c,'dashboardReisenAktuell');renderMini(p,'dashboardReisenPlan');renderMini(d,'dashboardReisenAbgeschlossen')}function renderReisenTable(){const rows=reisenCache.map(r=>`<tr><td>${linkReise(r)}</td><td>${esc(r.reise_name)}</td><td>${esc(reisendeKuerzel(r)||'—')}</td><td><div class="actions"><button class="iconBtn" onclick="editReise(${r.id})">✎</button><button class="iconBtn btn-danger" onclick="deleteReise(${r.id})">×</button></div></td></tr>`).join('');reisenTable.innerHTML=`<table><thead><tr><th>Reise ID</th><th>Reisename</th><th>Reisende(r)</th><th>Aktionen</th></tr></thead><tbody>${rows||'<tr><td colspan="4">Keine Reisen</td></tr>'}</tbody></table>`}
+async function loadNextCode(){try{const d=await requestJson(api()+'/reisen/next-code?jahr='+encodeURIComponent(reiseJahr.value));reiseNextCode.value=d.reise_code||d.next_code||''}catch{reiseNextCode.value=''}}async function openReiseNew(){await loadMitarbeiter();['reiseDbId','reiseName','reiseStart','reiseEnde'].forEach(id=>document.getElementById(id).value='');reiseJahr.value=new Date().getFullYear();reiseAnzahl.value='1';renderMitarbeiterSelect([]);await loadNextCode();reiseForm.classList.remove('hidden')}function closeReiseForm(){reiseForm.classList.add('hidden')}async function editReise(id){await loadMitarbeiter();const r=reisenCache.find(x=>x.id===id);if(!r)return;const det=r.detail||await requestJson(api()+'/reisen/'+id);reiseDbId.value=r.id;reiseJahr.value=r.reise_jahr||new Date().getFullYear();reiseNextCode.value=r.reise_code||'';reiseName.value=r.reise_name||'';reiseAnzahl.value=r.anzahl_reisende||1;reiseStart.value=r.startdatum||'';reiseEnde.value=r.enddatum||'';renderMitarbeiterSelect((det.reisende||[]).map(x=>x.id));reiseForm.classList.remove('hidden')}function selectedIds(){return Array.from(reiseMitarbeiterSelect.selectedOptions).map(o=>parseInt(o.value,10))}async function saveReise(){try{const id=reiseDbId.value;const p={reise_jahr:parseInt(reiseJahr.value,10),reise_name:reiseName.value.trim(),startdatum:reiseStart.value||null,enddatum:reiseEnde.value||null,anzahl_reisende:parseInt(reiseAnzahl.value||'1',10),mitarbeiter_ids:selectedIds()};await requestJson(api()+(id?'/reisen/'+id:'/reisen'),{method:id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});closeReiseForm();await loadReisen()}catch(e){setStatus(e.message,'error')}}async function deleteReise(id){if(!confirm('Reise wirklich löschen?'))return;try{await requestJson(api()+'/reisen/'+id,{method:'DELETE'});await loadReisen()}catch(e){setStatus(e.message,'error')}}
+function parseA(b){const raw=b?.analysis_json||b?.analysis||'';if(typeof raw==='object')return raw;try{return raw?JSON.parse(raw):{}}catch{return{}}}function analyses(ed){return(ed.belege||[]).map(b=>({beleg:b,analysis:parseA(b)})).filter(x=>Object.keys(x.analysis).length)}function eventName(a,ev,s){const typ=(a.art_des_dokuments||ev.typ||'').toLowerCase();if(typ==='hotel')return s.ankunft_ort||a.hotel||a.buchungsnummer_code||ev.titel||'Hotel';return s.transportunternehmen_und_nummer||a.buchungsnummer_code||ev.titel||'Event'}function rowFrom(ev,b,a){const out=[];const typ=(a.art_des_dokuments||ev.typ||'Event');const tl=typ.toLowerCase();const bid=b?.id||'';if(tl==='hotel'){const s=(a.reisesegmente||[])[0]||{};const ci=s.abreise_datum_und_zeit||a.check_in||a.belegdatum||ev.created_at;const co=s.ankunft_datum_und_zeit||a.check_out||ci;out.push({art:'▦ Hotel (Check-out)',datum:dateDE(co),sort:sortDateKey(co)+'0001',zeit:timePart(co)||'00:00',event:eventName(a,ev,s),sub:'Check-out',bid,status:ev.status,eventId:ev.id});out.push({art:'▦ Hotel (Check-in)',datum:dateDE(ci),sort:sortDateKey(ci)+'9998',zeit:timePart(ci)||'23:59',event:eventName(a,ev,s),sub:'Check-in',bid,status:ev.status,eventId:ev.id});return out}const segs=a.reisesegmente||[];if(segs.length){for(const s of segs){const st=s.abreise_datum_und_zeit||a.belegdatum||ev.created_at;const en=s.ankunft_datum_und_zeit||st;out.push({art:'✈ '+typ,datum:dateDE(st),sort:sortDateKey(st)+sortTimeKey(st),zeit:(timePart(st)||'—')+' - '+(timePart(en)||'—'),event:eventName(a,ev,s),sub:(s.abreise_ort||'')+' → '+(s.ankunft_ort||''),bid,status:ev.status,eventId:ev.id})}return out}const d=a.belegdatum||ev.created_at;return[{art:typ,datum:dateDE(d),sort:sortDateKey(d)+sortTimeKey(d),zeit:'—',event:a.buchungsnummer_code||ev.titel||typ,sub:'',bid,status:ev.status,eventId:ev.id}]}
+async function openReiseDetail(id){try{const detail=await requestJson(api()+'/reisen/'+id);const r=detail.reise||reisenCache.find(x=>x.id===id)||{};reiseDetailTitle.textContent=(r.reise_code||'')+' · '+(r.reise_name||'');reiseDetailSub.textContent=`${dateDE(r.startdatum)} bis ${dateDE(r.enddatum)} · Reisende: ${((detail.reisende||[]).map(x=>x.kuerzel).join(', ')||'—')}`;let rows=[];for(const ev of detail.events||[]){let ed={belege:[]};try{ed=await requestJson(api()+'/events/'+ev.id)}catch{}const pairs=analyses(ed);if(pairs.length){for(const p of pairs)rows.push(...rowFrom(ev,p.beleg,p.analysis))}else rows.push({art:ev.typ,datum:dateDE(ev.created_at),sort:sortDateKey(ev.created_at)+'9999',zeit:'—',event:ev.titel||ev.typ,sub:'Keine Analyse gespeichert',bid:'',status:ev.status,eventId:ev.id})}rows.sort((a,b)=>a.sort.localeCompare(b.sort));reiseDetailContent.innerHTML=`<table><thead><tr><th>Art</th><th>Datum</th><th>Uhrzeit von/bis</th><th>Event</th><th>BelegNr.</th><th>Status</th><th>Aktionen</th></tr></thead><tbody>${rows.map(x=>`<tr><td class="art">${esc(x.art)}</td><td class="nowrap">${esc(x.datum)}</td><td class="nowrap">${esc(x.zeit)}</td><td><div class="event-title">${esc(x.event)}</div><div class="event-sub">${esc(x.sub)}</div></td><td>${x.bid?`<span class="link" onclick="openPdf(${x.bid})">BE-${String(x.bid).padStart(4,'0')}</span>`:'—'}</td><td><span class="pill pill-ok">${esc(x.status||'ok')}</span></td><td><div class="actions"><button class="iconBtn" onclick="openPdf(${x.bid})">▣</button><button class="iconBtn" onclick="openOriginal(${x.bid})">👁</button><button class="iconBtn btn-danger" onclick="deleteEvent(${x.eventId},${id})">×</button></div></td></tr>`).join('')||'<tr><td colspan="7">Keine Events</td></tr>'}</tbody></table>`;showPage('reise-detail');setStatus('Reise geladen.','ok')}catch(e){setStatus(e.message,'error')}}function openPdf(id){if(id)window.open(api()+'/belege/'+id+'/pdf','_blank')}function openOriginal(id){if(id)window.open(api()+'/belege/'+id+'/original','_blank')}async function deleteEvent(eid,rid){if(!confirm('Event wirklich löschen?'))return;try{await requestJson(api()+'/events/'+eid,{method:'DELETE'});await openReiseDetail(rid)}catch(e){setStatus(e.message,'error')}}window.onload=async()=>{await health();await loadMitarbeiter();await loadReisen(false)};
 </script>
 </body>
 </html>
