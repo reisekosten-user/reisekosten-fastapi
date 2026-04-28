@@ -8,7 +8,7 @@ import mimetypes
 import os
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,7 +40,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "8.0"
+APP_VERSION = "8.1"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -125,6 +125,32 @@ def ensure_db_extensions() -> None:
                 cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS original_content_type TEXT")
                 cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS generated_pdf_path TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_belege_fingerprint ON belege(fingerprint)")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS mail_import_log (
+                        id SERIAL PRIMARY KEY,
+                        mail_key TEXT UNIQUE,
+                        subject TEXT,
+                        imported_at TEXT,
+                        status TEXT,
+                        detail TEXT
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS vma_tage (
+                        id SERIAL PRIMARY KEY,
+                        reise_id INTEGER NOT NULL,
+                        tag DATE NOT NULL,
+                        land TEXT DEFAULT 'Deutschland',
+                        ort TEXT DEFAULT '',
+                        fruehstueck BOOLEAN DEFAULT FALSE,
+                        mittag BOOLEAN DEFAULT FALSE,
+                        abend BOOLEAN DEFAULT FALSE,
+                        betrag NUMERIC DEFAULT 0,
+                        notiz TEXT DEFAULT '',
+                        updated_at TEXT,
+                        UNIQUE(reise_id, tag)
+                    )
+                """)
             conn.commit()
     except Exception:
         # App soll auch starten, wenn DB noch nicht bereit ist.
@@ -242,6 +268,136 @@ def normalize_analysis_dates(data: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(segment, dict):
             segment["abreise_datum_und_zeit"] = normalize_analysis_date(segment.get("abreise_datum_und_zeit"))
             segment["ankunft_datum_und_zeit"] = normalize_analysis_date(segment.get("ankunft_datum_und_zeit"))
+    return data
+
+
+def _month_to_number(mon: str) -> Optional[str]:
+    months = {
+        "JAN": "01", "JANUAR": "01", "FEB": "02", "FEBRUAR": "02", "MAR": "03", "MÄR": "03", "MÄRZ": "03", "MAER": "03", "MAERZ": "03",
+        "APR": "04", "APRIL": "04", "MAY": "05", "MAI": "05", "JUN": "06", "JUNI": "06", "JUL": "07", "JULI": "07",
+        "AUG": "08", "AUGUST": "08", "SEP": "09", "SEPTEMBER": "09", "OCT": "10", "OKT": "10", "OKTOBER": "10",
+        "NOV": "11", "NOVEMBER": "11", "DEC": "12", "DEZ": "12", "DEZEMBER": "12",
+    }
+    return months.get((mon or "").strip().upper())
+
+
+def parse_hotel_date_to_iso(value: Any, default_time: str) -> Optional[str]:
+    """Parst typische Hotel-Check-in/Check-out-Daten robust nach YYYY-MM-DD HH:MM."""
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "nicht vorhanden":
+        return None
+
+    m = re.search(r"\b(20\d{2})-(\d{2})-(\d{2})(?:[ T]+(\d{1,2}:\d{2}))?", text)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)} {m.group(4) or default_time}"
+
+    m = re.search(r"\b(\d{1,2})[-./](\d{1,2})[-./](\d{2}|\d{4})(?:\D+(\d{1,2}:\d{2}))?", text)
+    if m:
+        y = int(m.group(3))
+        if y < 100:
+            y += 2000
+        return f"{y:04d}-{int(m.group(2)):02d}-{int(m.group(1)):02d} {m.group(4) or default_time}"
+
+    m = re.search(r"\b(\d{1,2})\s*([A-Za-zÄÖÜäöü]{3,9})\s*,?\s*(20\d{2})(?:\D+(\d{1,2}:\d{2}))?", text)
+    if m:
+        mon = _month_to_number(m.group(2))
+        if mon:
+            return f"{int(m.group(3)):04d}-{mon}-{int(m.group(1)):02d} {m.group(4) or default_time}"
+
+    m = re.search(r"\b([A-Za-zÄÖÜäöü]{3,9})\s+(\d{1,2}),?\s*(20\d{2})(?:\D+(\d{1,2}:\d{2}))?", text)
+    if m:
+        mon = _month_to_number(m.group(1))
+        if mon:
+            return f"{int(m.group(3)):04d}-{mon}-{int(m.group(2)):02d} {m.group(4) or default_time}"
+
+    m = re.search(r"\b(\d{1,2})([A-Za-z]{3})(20\d{2})(?:\D+(\d{1,2}:\d{2}))?", text)
+    if m:
+        mon = _month_to_number(m.group(2))
+        if mon:
+            return f"{int(m.group(3)):04d}-{mon}-{int(m.group(1)):02d} {m.group(4) or default_time}"
+
+    return None
+
+
+def _find_date_after_keywords(text: str, keywords: List[str], default_time: str) -> Optional[str]:
+    if not text:
+        return None
+    date_pattern = r"((?:20\d{2}-\d{2}-\d{2})|(?:\d{1,2}[-./]\d{1,2}[-./](?:\d{2}|\d{4}))|(?:\d{1,2}\s*[A-Za-zÄÖÜäöü]{3,9}\s*,?\s*20\d{2})|(?:[A-Za-zÄÖÜäöü]{3,9}\s+\d{1,2},?\s*20\d{2})|(?:\d{1,2}[A-Za-z]{3}20\d{2}))"
+    for kw in keywords:
+        pattern = rf"(?is){kw}[^\n\r]{{0,90}}?{date_pattern}[^\n\r]{{0,30}}?(\d{{1,2}}:\d{{2}})?"
+        m = re.search(pattern, text)
+        if m:
+            candidate = m.group(1)
+            if m.lastindex and m.group(m.lastindex) and ':' in m.group(m.lastindex):
+                candidate += " " + m.group(m.lastindex)
+            parsed = parse_hotel_date_to_iso(candidate, default_time)
+            if parsed:
+                return parsed
+    return None
+
+
+def extract_hotel_dates_from_text(text: str) -> Tuple[Optional[str], Optional[str]]:
+    checkin = _find_date_after_keywords(
+        text,
+        [r"check\s*[- ]?in", r"arrival", r"ankunft", r"anreise", r"von", r"from"],
+        "23:59",
+    )
+    checkout = _find_date_after_keywords(
+        text,
+        [r"check\s*[- ]?out", r"departure", r"abreise", r"bis", r"to"],
+        "00:00",
+    )
+    return checkin, checkout
+
+
+def enhance_hotel_analysis(data: Dict[str, Any], original_text: str) -> Dict[str, Any]:
+    """Korrigiert Hotelbelege: Check-in/Check-out statt Rechnungsdatum für die Timeline verwenden."""
+    if not isinstance(data, dict):
+        return data
+    art = str(data.get("art_des_dokuments") or "").strip().lower()
+    if art != "hotel":
+        return data
+
+    segs = data.get("reisesegmente") or []
+    first = segs[0] if segs and isinstance(segs[0], dict) else {}
+
+    checkin = (
+        parse_hotel_date_to_iso(first.get("abreise_datum_und_zeit"), "23:59")
+        or parse_hotel_date_to_iso(data.get("check_in"), "23:59")
+        or parse_hotel_date_to_iso(data.get("checkin"), "23:59")
+        or parse_hotel_date_to_iso(data.get("check-in"), "23:59")
+    )
+    checkout = (
+        parse_hotel_date_to_iso(first.get("ankunft_datum_und_zeit"), "00:00")
+        or parse_hotel_date_to_iso(data.get("check_out"), "00:00")
+        or parse_hotel_date_to_iso(data.get("checkout"), "00:00")
+        or parse_hotel_date_to_iso(data.get("check-out"), "00:00")
+    )
+
+    text_checkin, text_checkout = extract_hotel_dates_from_text(original_text or "")
+    checkin = text_checkin or checkin
+    checkout = text_checkout or checkout
+
+    if not checkin and not checkout:
+        checkin = parse_hotel_date_to_iso(data.get("belegdatum"), "23:59")
+        checkout = checkin
+
+    hotel_name = first.get("ankunft_ort") or data.get("hotel") or data.get("anbieter") or data.get("buchungsnummer_code") or "Hotel"
+    data["check_in"] = checkin or "nicht vorhanden"
+    data["check_out"] = checkout or "nicht vorhanden"
+    data["reisesegmente"] = [{
+        "index": 1,
+        "abreise_datum_und_zeit": checkin or "nicht vorhanden",
+        "ankunft_datum_und_zeit": checkout or "nicht vorhanden",
+        "abreise_ort": hotel_name,
+        "ankunft_ort": hotel_name,
+        "transportunternehmen_und_nummer": "Hotelaufenthalt",
+    }]
+    data["wie_viele_reisesegmente"] = 1
+    if not (checkin and checkout):
+        data.setdefault("warnungen", []).append("Hotel Check-in/Check-out bitte prüfen")
     return data
 
 
@@ -370,7 +526,7 @@ Regeln:
 - "wie_viele_reisesegmente" ist eine Zahl
 - Für jedes Reisesegment einen Eintrag in "reisesegmente"
 - Für Flüge/Züge/Taxi: jedes echte Teilsegment separat ausgeben.
-- Für Hotel: genau ein Segment ausgeben: abreise_datum_und_zeit = Check-in, ankunft_datum_und_zeit = Check-out, ankunft_ort = Hotelname + Ort.
+- Für Hotel: IMMER genau ein Segment ausgeben: abreise_datum_und_zeit = Check-in-Datum/Uhrzeit, ankunft_datum_und_zeit = Check-out-Datum/Uhrzeit, ankunft_ort = Hotelname + Ort. Das Beleg-/Rechnungsdatum darf bei Hotel NICHT als Check-in verwendet werden, wenn Check-in/Check-out im Dokument stehen.
 - Datumswerte bevorzugt als YYYY-MM-DD HH:MM ausgeben. Wenn im Dokument nur TT-MM-JJ steht, trotzdem korrekt als 20JJ-MM-TT interpretieren.
 - Zeiten möglichst inklusive Zeitzonenhinweis, falls vorhanden.
 - "kosten_mit_steuern" und "kosten_ohne_steuern" getrennt angeben.
@@ -819,6 +975,7 @@ def analyze_text_internal(
         }
 
     data = ensure_defaults(raw)
+    data = enhance_hotel_analysis(data, text)
     data["status"] = "ok"
     data["version"] = APP_VERSION
     data["generated_at_utc"] = datetime.utcnow().isoformat()
@@ -940,14 +1097,41 @@ def read_latest_mails(limit: int = 3, subject_contains: Optional[str] = None) ->
         subject_raw = email.header.decode_header(msg.get("Subject", ""))[0][0]
         subject = subject_raw.decode(errors="ignore") if isinstance(subject_raw, bytes) else str(subject_raw)
         body = extract_plain_text_from_email_message(msg)
+        attachments: List[Dict[str, Any]] = []
+        try:
+            for part in msg.walk() if msg.is_multipart() else []:
+                disposition = str(part.get("Content-Disposition") or "").lower()
+                filename = part.get_filename()
+                if not filename and "attachment" not in disposition:
+                    continue
+                payload = part.get_payload(decode=True)
+                if not payload:
+                    continue
+                if filename:
+                    decoded_name = email.header.decode_header(filename)[0][0]
+                    filename = decoded_name.decode(errors="ignore") if isinstance(decoded_name, bytes) else str(decoded_name)
+                else:
+                    filename = "mail_anhang"
+                attachments.append({
+                    "filename": safe_filename(filename),
+                    "content": payload,
+                    "content_type": part.get_content_type() or mimetypes.guess_type(filename)[0] or "application/octet-stream",
+                })
+        except Exception:
+            attachments = []
         if subject_contains and subject_contains.lower() not in subject.lower():
             continue
         mails.append(
             {
+                "imap_id": msg_id.decode("ascii", errors="ignore") if isinstance(msg_id, bytes) else str(msg_id),
+                "message_id": str(msg.get("Message-ID") or ""),
+                "date": str(msg.get("Date") or ""),
+                "from": str(msg.get("From") or ""),
                 "subject": subject,
                 "body": body,
                 "preview": body[:500],
                 "raw_email": raw_email_bytes.decode("utf-8", errors="replace"),
+                "attachments": attachments,
             }
         )
         if len(mails) >= limit:
@@ -1048,6 +1232,211 @@ def update_reise_basic(reise_id: int, payload: Dict[str, Any]) -> Dict[str, Any]
     return {"reise_id": reise_id}
 
 
+
+# ============================================================
+# MAIL CHECK + VMA HELPERS 8.1
+# ============================================================
+
+def mail_key_for_message(m: Dict[str, str]) -> str:
+    base = m.get("message_id") or "|".join([m.get("subject", ""), m.get("date", ""), m.get("from", "")])
+    return hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def mail_already_imported(mail_key: str) -> bool:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM mail_import_log WHERE mail_key = %s LIMIT 1", (mail_key,))
+                return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def mark_mail_imported(mail_key: str, subject: str, status: str, detail: str = "") -> None:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO mail_import_log (mail_key, subject, imported_at, status, detail)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (mail_key) DO NOTHING
+                    """,
+                    (mail_key, subject[:500], datetime.utcnow().isoformat(), status, detail[:2000]),
+                )
+            conn.commit()
+    except Exception:
+        pass
+
+
+def check_and_import_mails(limit: int = 20, only_new: bool = True, subject_contains: Optional[str] = None) -> Dict[str, Any]:
+    ensure_db_extensions()
+    mails = read_latest_mails(limit=limit, subject_contains=subject_contains)
+    results = []
+    skipped_known = 0
+    duplicates = 0
+    imported = 0
+    errors = 0
+    for m in mails:
+        key = mail_key_for_message(m)
+        if only_new and mail_already_imported(key):
+            skipped_known += 1
+            continue
+        try:
+            detected_reise_code = extract_reise_code_from_text(m.get("subject") or "")
+            detected_reise = find_reise_by_code(detected_reise_code) if detected_reise_code else None
+            detected_reise_id = detected_reise["id"] if detected_reise else None
+            mail_results = []
+            attachments = m.get("attachments") or []
+            if attachments:
+                for att in attachments:
+                    original_info = save_original_file(att.get("filename") or "mail_anhang", att.get("content") or b"", att.get("content_type"))
+                    text = extract_text_from_upload(att.get("filename") or "mail_anhang", att.get("content") or b"")
+                    result = analyze_text_internal(
+                        text,
+                        filename=f"mail:{m.get('subject') or ''}:{att.get('filename') or 'Anhang'}",
+                        reise_id=detected_reise_id,
+                        event_id=None,
+                        ai_provider_override="openai",
+                        ai_model_override=None,
+                        original_file_info=original_info,
+                    )
+                    mail_results.append(result)
+                    if result.get("duplicate_detected"):
+                        duplicates += 1
+                    else:
+                        imported += 1
+            else:
+                original_info = save_original_text_as_file(
+                    f"mail_{safe_filename(m.get('subject') or 'ohne_betreff')}.eml",
+                    m.get("raw_email") or m.get("body") or "",
+                    "message/rfc822",
+                )
+                result = analyze_text_internal(
+                    m.get("body") or "",
+                    filename=f"mail:{m.get('subject') or ''}",
+                    reise_id=detected_reise_id,
+                    event_id=None,
+                    ai_provider_override="openai",
+                    ai_model_override=None,
+                    original_file_info=original_info,
+                )
+                mail_results.append(result)
+                if result.get("duplicate_detected"):
+                    duplicates += 1
+                else:
+                    imported += 1
+            mark_mail_imported(key, m.get("subject") or "", "ok", json.dumps({"reise_code": detected_reise_code, "results": len(mail_results)}, ensure_ascii=False))
+            results.append({
+                "subject": m.get("subject"),
+                "detected_reise_code": detected_reise_code,
+                "assigned_reise_id": detected_reise_id,
+                "attachments": len(attachments),
+                "items": [
+                    {
+                        "duplicate_detected": bool(r.get("duplicate_detected")),
+                        "beleg_id": r.get("beleg_id"),
+                        "existing_beleg_id": r.get("existing_beleg_id"),
+                    }
+                    for r in mail_results
+                ],
+            })
+        except Exception as exc:
+            errors += 1
+            mark_mail_imported(key, m.get("subject") or "", "error", str(exc))
+            results.append({"subject": m.get("subject"), "status": "error", "detail": str(exc)})
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "checked": len(mails),
+        "imported": imported,
+        "duplicates": duplicates,
+        "skipped_known": skipped_known,
+        "errors": errors,
+        "results": results,
+    }
+
+
+def vma_amount_for_day(tag: date, start: Optional[date], end: Optional[date], fruehstueck: bool, mittag: bool, abend: bool) -> float:
+    base = 28.0
+    if start and end and (tag == start or tag == end):
+        base = 14.0
+    deduction = 0.0
+    if fruehstueck:
+        deduction += 28.0 * 0.20
+    if mittag:
+        deduction += 28.0 * 0.40
+    if abend:
+        deduction += 28.0 * 0.40
+    return max(0.0, round(base - deduction, 2))
+
+
+def ensure_vma_days(reise_id: int) -> None:
+    detail = get_reise_detail(reise_id)
+    r = detail.get("reise") or {}
+    if not r.get("startdatum") or not r.get("enddatum"):
+        return
+    try:
+        start = datetime.fromisoformat(str(r["startdatum"])).date()
+        end = datetime.fromisoformat(str(r["enddatum"])).date()
+    except Exception:
+        return
+    if end < start:
+        return
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                current = start
+                while current <= end:
+                    betrag = vma_amount_for_day(current, start, end, False, False, False)
+                    cur.execute(
+                        """
+                        INSERT INTO vma_tage (reise_id, tag, land, ort, fruehstueck, mittag, abend, betrag, notiz, updated_at)
+                        VALUES (%s, %s, 'Deutschland', '', FALSE, FALSE, FALSE, %s, '', %s)
+                        ON CONFLICT (reise_id, tag) DO NOTHING
+                        """,
+                        (reise_id, current.isoformat(), betrag, datetime.utcnow().isoformat()),
+                    )
+                    current += timedelta(days=1)
+            conn.commit()
+    except Exception:
+        pass
+
+
+def list_vma_days(reise_id: int) -> List[Dict[str, Any]]:
+    ensure_vma_days(reise_id)
+    detail = get_reise_detail(reise_id)
+    r = detail.get("reise") or {}
+    try:
+        start = datetime.fromisoformat(str(r.get("startdatum"))).date() if r.get("startdatum") else None
+        end = datetime.fromisoformat(str(r.get("enddatum"))).date() if r.get("enddatum") else None
+    except Exception:
+        start = end = None
+    rows: List[Dict[str, Any]] = []
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, reise_id, tag, land, ort, fruehstueck, mittag, abend, betrag, notiz FROM vma_tage WHERE reise_id = %s ORDER BY tag", (reise_id,))
+                dbrows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+        for raw in dbrows:
+            row = dict(zip(cols, raw))
+            tag = row.get("tag")
+            if not isinstance(tag, date):
+                try:
+                    tag = datetime.fromisoformat(str(tag)).date()
+                except Exception:
+                    tag = None
+            amount = vma_amount_for_day(tag, start, end, bool(row.get("fruehstueck")), bool(row.get("mittag")), bool(row.get("abend"))) if tag else float(row.get("betrag") or 0)
+            row["betrag"] = amount
+            row["tag"] = tag.isoformat() if tag else str(row.get("tag") or "")
+            row["tag_display"] = tag.strftime("%d.%m.%Y") if tag else str(row.get("tag") or "")
+            rows.append(row)
+    except Exception:
+        return []
+    return rows
+
+
 # ============================================================
 # ROUTES
 # ============================================================
@@ -1089,6 +1478,28 @@ def ai_test(ai_model: Optional[str] = Query(default=None)):
         "ai_model": ai_model or OPENAI_MODEL,
         "result": raw,
     }
+
+
+
+@app.get("/mail/check")
+def mail_check_get(limit: int = Query(default=20, ge=1, le=50), only_new: bool = Query(default=True), subject_contains: Optional[str] = Query(default=None)):
+    try:
+        return check_and_import_mails(limit=limit, only_new=only_new, subject_contains=subject_contains)
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc), "version": APP_VERSION}
+
+
+@app.post("/mail/check")
+def mail_check_post(limit: int = Query(default=20, ge=1, le=50), only_new: bool = Query(default=True), subject_contains: Optional[str] = Query(default=None)):
+    try:
+        return check_and_import_mails(limit=limit, only_new=only_new, subject_contains=subject_contains)
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc), "version": APP_VERSION}
+
+
+@app.post("/mail/fetch")
+def mail_fetch_alias(limit: int = Query(default=20, ge=1, le=50)):
+    return mail_check_post(limit=limit, only_new=True)
 
 
 @app.get("/mail/test")
@@ -1321,6 +1732,46 @@ def reisen_detail(reise_id: int):
         return {**detail, **compute_reise_status(detail)}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
+
+
+
+@app.get("/reisen/{reise_id}/vma")
+def reisen_vma(reise_id: int):
+    try:
+        return {"status": "ok", "reise_id": reise_id, "tage": list_vma_days(reise_id)}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
+@app.post("/reisen/{reise_id}/vma/{vma_id}")
+def reisen_vma_update(reise_id: int, vma_id: int, payload: Dict[str, Any]):
+    try:
+        fr = bool(payload.get("fruehstueck"))
+        mi = bool(payload.get("mittag"))
+        ab = bool(payload.get("abend"))
+        land = str(payload.get("land") or "Deutschland")
+        ort = str(payload.get("ort") or "")
+        notiz = str(payload.get("notiz") or "")
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT tag FROM vma_tage WHERE id = %s AND reise_id = %s", (vma_id, reise_id))
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="VMA-Tag nicht gefunden")
+                cur.execute(
+                    """
+                    UPDATE vma_tage
+                       SET land=%s, ort=%s, fruehstueck=%s, mittag=%s, abend=%s, notiz=%s, updated_at=%s
+                     WHERE id=%s AND reise_id=%s
+                    """,
+                    (land, ort, fr, mi, ab, notiz, datetime.utcnow().isoformat(), vma_id, reise_id),
+                )
+            conn.commit()
+        return {"status": "ok", "tage": list_vma_days(reise_id)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/events")
