@@ -40,7 +40,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "8.0"
+APP_VERSION = "7.27"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -538,7 +538,7 @@ def list_belege_for_event(event_id: int) -> List[Dict[str, Any]]:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT DISTINCT b.*
+                    SELECT b.*
                     FROM belege b
                     JOIN event_belege eb ON eb.beleg_id = b.id
                     WHERE eb.event_id = %s
@@ -551,42 +551,6 @@ def list_belege_for_event(event_id: int) -> List[Dict[str, Any]]:
                 return [dict(zip(cols, r)) for r in rows]
     except Exception:
         return []
-
-
-def safe_attach_beleg_to_event(event_id: int, beleg_id: int) -> None:
-    """Verknüpft Beleg und Event nur einmal.
-    Wichtig für Version 8.0: erkannte Duplikate dürfen nicht mehrfach in der Reiseseite erscheinen.
-    """
-    if not event_id or not beleg_id:
-        return
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT 1 FROM event_belege WHERE event_id = %s AND beleg_id = %s LIMIT 1",
-                    (event_id, beleg_id),
-                )
-                if cur.fetchone():
-                    return
-        safe_attach_beleg_to_event(event_id, beleg_id)
-    except Exception:
-        # Fallback: bestehende Datenbankfunktion verwenden, falls die Prüfung wegen alter Struktur scheitert.
-        try:
-            safe_attach_beleg_to_event(event_id, beleg_id)
-        except Exception:
-            pass
-
-
-def cleanup_unused_original_file(original_file_info: Optional[Dict[str, str]]) -> None:
-    """Löscht frisch gespeicherte Originaldateien, wenn nach der Analyse ein Duplikat erkannt wurde.
-    Der zuerst gespeicherte Originalbeleg bleibt erhalten.
-    """
-    try:
-        path = (original_file_info or {}).get("original_file_path")
-        if path and os.path.exists(path):
-            os.remove(path)
-    except Exception:
-        pass
 
 
 # ============================================================
@@ -653,7 +617,7 @@ def make_event_title(data: Dict[str, Any]) -> str:
 def attach_or_create_event_for_analysis(reise_id: int, beleg_id: int, data: dict) -> Dict[str, Any]:
     existing_event = find_matching_event_for_reise(reise_id, data)
     if existing_event:
-        safe_attach_beleg_to_event(existing_event["id"], beleg_id)
+        attach_beleg_to_event(existing_event["id"], beleg_id)
         update_event_status(existing_event["id"], "abgeschlossen")
         return {
             "matched_event_id": existing_event["id"],
@@ -664,7 +628,7 @@ def attach_or_create_event_for_analysis(reise_id: int, beleg_id: int, data: dict
     art = data.get("art_des_dokuments", "Unbekannt")
     titel = make_event_title(data)
     new_event_id = create_event({"reise_id": reise_id, "typ": art, "titel": titel, "status": "abgeschlossen"})
-    safe_attach_beleg_to_event(new_event_id, beleg_id)
+    attach_beleg_to_event(new_event_id, beleg_id)
     return {"created_event_id": new_event_id, "matched_event_typ": art, "matched_existing_event": False}
 
 
@@ -836,7 +800,6 @@ def analyze_text_internal(
         data["existing_beleg_id"] = existing_beleg_id
         data["beleg_id"] = existing_beleg_id
         data["duplicate_action"] = "skipped_insert_existing_beleg_used"
-        cleanup_unused_original_file(original_file_info)
         update_beleg_extra_data(
             existing_beleg_id,
             fingerprint,
@@ -844,12 +807,12 @@ def analyze_text_internal(
             text,
             anonymized_text,
             data,
-            None,
-            None,
-            None,
+            original_file_info.get("original_file_path"),
+            original_file_info.get("original_filename"),
+            original_file_info.get("original_content_type"),
         )
         if event_id:
-            safe_attach_beleg_to_event(event_id, existing_beleg_id)
+            attach_beleg_to_event(event_id, existing_beleg_id)
             update_event_status(event_id, "abgeschlossen")
             data["attached_event_id"] = event_id
         elif reise_id:
@@ -881,7 +844,7 @@ def analyze_text_internal(
     data["duplicate_action"] = "inserted_new_beleg"
 
     if event_id:
-        safe_attach_beleg_to_event(event_id, beleg_id)
+        attach_beleg_to_event(event_id, beleg_id)
         update_event_status(event_id, "abgeschlossen")
         data["attached_event_id"] = event_id
     elif reise_id:
@@ -1070,7 +1033,6 @@ def health():
         "imap_pass_configured": bool(IMAP_PASS),
         "original_upload_dir": str(ORIGINAL_UPLOAD_DIR),
         "generated_pdf_dir": str(GENERATED_PDF_DIR),
-        "duplicate_detection": "active",
     }
 
 
