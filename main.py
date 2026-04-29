@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import uuid
+import threading
 from datetime import datetime, date, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -40,7 +41,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "8.2"
+APP_VERSION = "8.2a"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -55,6 +56,15 @@ ORIGINAL_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 GENERATED_PDF_DIR = Path(os.getenv("GENERATED_PDF_DIR", "uploads/generated_pdfs"))
 GENERATED_PDF_DIR.mkdir(parents=True, exist_ok=True)
+ 
+# Version 8.2a: Render-Speicherschutz
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+MAX_PDF_PAGES_FOR_TEXT = int(os.getenv("MAX_PDF_PAGES_FOR_TEXT", "8"))
+MAX_ANALYSIS_TEXT_CHARS = int(os.getenv("MAX_ANALYSIS_TEXT_CHARS", "60000"))
+MAX_DB_TEXT_CHARS = int(os.getenv("MAX_DB_TEXT_CHARS", "80000"))
+MAX_MAILS_PER_CHECK = int(os.getenv("MAX_MAILS_PER_CHECK", "5"))
+MAX_MAIL_ATTACHMENTS_PER_CHECK = int(os.getenv("MAX_MAIL_ATTACHMENTS_PER_CHECK", "5"))
+ANALYSIS_LOCK = threading.Lock()
 
 app = FastAPI(title="Reisekosten API", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -185,9 +195,20 @@ def save_original_text_as_file(filename: str, text: str, content_type: str = "te
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+    """Speicherschonende PDF-Textextraktion für Render.
+    Original-PDF bleibt vollständig gespeichert; für KI werden nur erste Seiten/Textlimit genutzt.
+    """
     try:
         reader = PdfReader(BytesIO(pdf_bytes))
-        return "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
+        parts: List[str] = []
+        total = 0
+        for page in list(reader.pages)[:MAX_PDF_PAGES_FOR_TEXT]:
+            txt = page.extract_text() or ""
+            parts.append(txt)
+            total += len(txt)
+            if total >= MAX_ANALYSIS_TEXT_CHARS:
+                break
+        return "\n".join(parts).strip()[:MAX_ANALYSIS_TEXT_CHARS]
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"PDF konnte nicht gelesen werden: {exc}") from exc
 
@@ -196,7 +217,14 @@ def extract_text_from_upload(filename: str, content: bytes) -> str:
     lower = (filename or "").lower()
     if lower.endswith(".pdf"):
         return extract_text_from_pdf(content)
-    return content.decode("utf-8", errors="replace")
+    return (content or b"").decode("utf-8", errors="replace")[:MAX_ANALYSIS_TEXT_CHARS]
+
+
+async def read_upload_limited(file: UploadFile) -> bytes:
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"Datei zu groß. Limit: {MAX_UPLOAD_BYTES // (1024*1024)} MB pro Beleg.")
+    return content
 
 
 # ============================================================
@@ -585,7 +613,7 @@ Regeln:
 Dateiname: {filename}
 
 TEXT:
-{document_text[:120000]}
+{document_text[:MAX_ANALYSIS_TEXT_CHARS]}
 """.strip()
 
 
@@ -705,9 +733,9 @@ def update_beleg_extra_data(
                     (
                         fingerprint,
                         filename,
-                        original_text[:300000],
-                        anonymized_text[:300000],
-                        json.dumps(analysis_data, ensure_ascii=False)[:300000],
+                        original_text[:MAX_DB_TEXT_CHARS],
+                        anonymized_text[:MAX_DB_TEXT_CHARS],
+                        json.dumps(analysis_data, ensure_ascii=False)[:MAX_DB_TEXT_CHARS],
                         original_file_path,
                         original_filename,
                         original_content_type,
@@ -1325,92 +1353,66 @@ def mark_mail_imported(mail_key: str, subject: str, status: str, detail: str = "
         pass
 
 
-def check_and_import_mails(limit: int = 20, only_new: bool = True, subject_contains: Optional[str] = None) -> Dict[str, Any]:
+def check_and_import_mails(limit: int = 5, only_new: bool = True, subject_contains: Optional[str] = None) -> Dict[str, Any]:
     ensure_db_extensions()
-    mails = read_latest_mails(limit=limit, subject_contains=subject_contains)
-    results = []
-    skipped_known = 0
-    duplicates = 0
-    imported = 0
-    errors = 0
-    for m in mails:
-        key = mail_key_for_message(m)
-        if only_new and mail_already_imported(key):
-            skipped_known += 1
-            continue
-        try:
-            detected_reise_code = extract_reise_code_from_text(m.get("subject") or "")
-            detected_reise = find_reise_by_code(detected_reise_code) if detected_reise_code else None
-            detected_reise_id = detected_reise["id"] if detected_reise else None
-            mail_results = []
-            attachments = m.get("attachments") or []
-            if attachments:
-                for att in attachments:
-                    original_info = save_original_file(att.get("filename") or "mail_anhang", att.get("content") or b"", att.get("content_type"))
-                    text = extract_text_from_upload(att.get("filename") or "mail_anhang", att.get("content") or b"")
-                    result = analyze_text_internal(
-                        text,
-                        filename=f"mail:{m.get('subject') or ''}:{att.get('filename') or 'Anhang'}",
-                        reise_id=detected_reise_id,
-                        event_id=None,
-                        ai_provider_override="openai",
-                        ai_model_override=None,
-                        original_file_info=original_info,
-                    )
-                    mail_results.append(result)
-                    if result.get("duplicate_detected"):
-                        duplicates += 1
-                    else:
-                        imported += 1
-            else:
-                original_info = save_original_text_as_file(
-                    f"mail_{safe_filename(m.get('subject') or 'ohne_betreff')}.eml",
-                    m.get("raw_email") or m.get("body") or "",
-                    "message/rfc822",
-                )
-                result = analyze_text_internal(
-                    m.get("body") or "",
-                    filename=f"mail:{m.get('subject') or ''}",
-                    reise_id=detected_reise_id,
-                    event_id=None,
-                    ai_provider_override="openai",
-                    ai_model_override=None,
-                    original_file_info=original_info,
-                )
-                mail_results.append(result)
-                if result.get("duplicate_detected"):
-                    duplicates += 1
+    if not ANALYSIS_LOCK.acquire(blocking=False):
+        return {"status": "busy", "detail": "Eine Analyse oder Mailprüfung läuft bereits. Bitte kurz warten.", "version": APP_VERSION}
+    try:
+        limit = max(1, min(int(limit or 5), MAX_MAILS_PER_CHECK))
+        mails = read_latest_mails(limit=limit, subject_contains=subject_contains)
+        results = []
+        skipped_known = 0
+        duplicates = 0
+        imported = 0
+        errors = 0
+        attachments_processed_total = 0
+        for m in mails:
+            key = mail_key_for_message(m)
+            if only_new and mail_already_imported(key):
+                skipped_known += 1
+                continue
+            try:
+                detected_reise_code = extract_reise_code_from_text(m.get("subject") or "")
+                detected_reise = find_reise_by_code(detected_reise_code) if detected_reise_code else None
+                detected_reise_id = detected_reise["id"] if detected_reise else None
+                mail_results = []
+                attachments = m.get("attachments") or []
+                if attachments:
+                    for att in attachments:
+                        if attachments_processed_total >= MAX_MAIL_ATTACHMENTS_PER_CHECK:
+                            break
+                        fname = att.get("filename") or "mail_anhang"
+                        ctype = att.get("content_type") or ""
+                        content = att.get("content") or b""
+                        if len(content) > MAX_UPLOAD_BYTES:
+                            mail_results.append({"status": "skipped", "reason": "Anhang zu groß", "filename": fname})
+                            continue
+                        if ctype.startswith("image/") and not fname.lower().endswith((".pdf", ".txt", ".eml")):
+                            mail_results.append({"status": "skipped", "reason": "Bildanalyse in 8.2a manuell", "filename": fname})
+                            continue
+                        original_info = save_original_file(fname, content, ctype)
+                        text = extract_text_from_upload(fname, content)
+                        result = analyze_text_internal(text, filename=f"mail:{m.get('subject') or ''}:{fname}", reise_id=detected_reise_id, event_id=None, ai_provider_override="openai", ai_model_override=None, original_file_info=original_info)
+                        attachments_processed_total += 1
+                        mail_results.append(result)
+                        if result.get("duplicate_detected"): duplicates += 1
+                        elif result.get("status") == "ok": imported += 1
                 else:
-                    imported += 1
-            mark_mail_imported(key, m.get("subject") or "", "ok", json.dumps({"reise_code": detected_reise_code, "results": len(mail_results)}, ensure_ascii=False))
-            results.append({
-                "subject": m.get("subject"),
-                "detected_reise_code": detected_reise_code,
-                "assigned_reise_id": detected_reise_id,
-                "attachments": len(attachments),
-                "items": [
-                    {
-                        "duplicate_detected": bool(r.get("duplicate_detected")),
-                        "beleg_id": r.get("beleg_id"),
-                        "existing_beleg_id": r.get("existing_beleg_id"),
-                    }
-                    for r in mail_results
-                ],
-            })
-        except Exception as exc:
-            errors += 1
-            mark_mail_imported(key, m.get("subject") or "", "error", str(exc))
-            results.append({"subject": m.get("subject"), "status": "error", "detail": str(exc)})
-    return {
-        "status": "ok",
-        "version": APP_VERSION,
-        "checked": len(mails),
-        "imported": imported,
-        "duplicates": duplicates,
-        "skipped_known": skipped_known,
-        "errors": errors,
-        "results": results,
-    }
+                    body = (m.get("body") or "")[:MAX_ANALYSIS_TEXT_CHARS]
+                    original_info = save_original_text_as_file(f"mail_{safe_filename(m.get('subject') or 'ohne_betreff')}.eml", (m.get("raw_email") or body)[:MAX_DB_TEXT_CHARS], "message/rfc822")
+                    result = analyze_text_internal(body, filename=f"mail:{m.get('subject') or ''}", reise_id=detected_reise_id, event_id=None, ai_provider_override="openai", ai_model_override=None, original_file_info=original_info)
+                    mail_results.append(result)
+                    if result.get("duplicate_detected"): duplicates += 1
+                    elif result.get("status") == "ok": imported += 1
+                mark_mail_imported(key, m.get("subject") or "", "ok", json.dumps({"reise_code": detected_reise_code, "results": len(mail_results)}, ensure_ascii=False))
+                results.append({"subject": m.get("subject"), "detected_reise_code": detected_reise_code, "assigned_reise_id": detected_reise_id, "attachments": len(attachments), "items": [{"status": r.get("status"), "duplicate_detected": bool(r.get("duplicate_detected")), "beleg_id": r.get("beleg_id"), "existing_beleg_id": r.get("existing_beleg_id"), "reason": r.get("reason")} for r in mail_results]})
+            except Exception as exc:
+                errors += 1
+                mark_mail_imported(key, m.get("subject") or "", "error", str(exc))
+                results.append({"subject": m.get("subject"), "status": "error", "detail": str(exc)})
+        return {"status": "ok", "version": APP_VERSION, "checked": len(mails), "imported": imported, "duplicates": duplicates, "skipped_known": skipped_known, "errors": errors, "results": results}
+    finally:
+        ANALYSIS_LOCK.release()
 
 
 def vma_amount_for_day(tag: date, start: Optional[date], end: Optional[date], fruehstueck: bool, mittag: bool, abend: bool) -> float:
@@ -1538,7 +1540,7 @@ def ai_test(ai_model: Optional[str] = Query(default=None)):
 
 
 @app.get("/mail/check")
-def mail_check_get(limit: int = Query(default=20, ge=1, le=50), only_new: bool = Query(default=True), subject_contains: Optional[str] = Query(default=None)):
+def mail_check_get(limit: int = Query(default=5, ge=1, le=10), only_new: bool = Query(default=True), subject_contains: Optional[str] = Query(default=None)):
     try:
         return check_and_import_mails(limit=limit, only_new=only_new, subject_contains=subject_contains)
     except Exception as exc:
@@ -1546,7 +1548,7 @@ def mail_check_get(limit: int = Query(default=20, ge=1, le=50), only_new: bool =
 
 
 @app.post("/mail/check")
-def mail_check_post(limit: int = Query(default=20, ge=1, le=50), only_new: bool = Query(default=True), subject_contains: Optional[str] = Query(default=None)):
+def mail_check_post(limit: int = Query(default=5, ge=1, le=10), only_new: bool = Query(default=True), subject_contains: Optional[str] = Query(default=None)):
     try:
         return check_and_import_mails(limit=limit, only_new=only_new, subject_contains=subject_contains)
     except Exception as exc:
@@ -1554,7 +1556,7 @@ def mail_check_post(limit: int = Query(default=20, ge=1, le=50), only_new: bool 
 
 
 @app.post("/mail/fetch")
-def mail_fetch_alias(limit: int = Query(default=20, ge=1, le=50)):
+def mail_fetch_alias(limit: int = Query(default=5, ge=1, le=10)):
     return mail_check_post(limit=limit, only_new=True)
 
 
@@ -1839,6 +1841,14 @@ def reisen_vma_update(reise_id: int, vma_id: int, payload: Dict[str, Any]):
 
 
 
+@app.get("/api/reisen/{reise_id}/vma")
+def reisen_vma_api_alias(reise_id: int):
+    return reisen_vma(reise_id)
+
+@app.post("/api/reisen/{reise_id}/vma/{vma_id}")
+def reisen_vma_update_api_alias(reise_id: int, vma_id: int, payload: Dict[str, Any]):
+    return reisen_vma_update(reise_id, vma_id, payload)
+
 @app.get("/reisen/{reise_id}/unbekannte-belege")
 def reisen_unbekannte_belege(reise_id: int):
     """Liefert Belege/Events, die manuell kategorisiert werden sollten."""
@@ -1993,7 +2003,7 @@ def anonymize_text(payload: AnalyzeTextRequest):
 @app.post("/anonymize/file")
 async def anonymize_file(file: UploadFile = File(...)):
     try:
-        content = await file.read()
+        content = await read_upload_limited(file)
         text = extract_text_from_upload(file.filename or "upload", content)
         return {"status": "ok", "filename": file.filename or "upload", "anonymized_text": anonymize_document_text(text)}
     except Exception as exc:
@@ -2025,18 +2035,14 @@ async def analyze_file(
     ai_provider: Optional[str] = Query(default=None),
     ai_model: Optional[str] = Query(default=None),
 ):
+    if not ANALYSIS_LOCK.acquire(blocking=False):
+        return {"status": "busy", "detail": "Eine Analyse läuft bereits. Bitte kurz warten.", "version": APP_VERSION}
     try:
-        content = await file.read()
+        content = await read_upload_limited(file)
         original_info = save_original_file(file.filename or "upload", content, file.content_type)
         text = extract_text_from_upload(file.filename or "upload", content)
-        return analyze_text_internal(
-            text,
-            file.filename or "upload",
-            reise_id,
-            event_id,
-            ai_provider,
-            ai_model,
-            original_file_info=original_info,
-        )
+        return analyze_text_internal(text, file.filename or "upload", reise_id, event_id, ai_provider, ai_model, original_file_info=original_info)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        ANALYSIS_LOCK.release()
