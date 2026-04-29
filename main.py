@@ -40,7 +40,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "8.1"
+APP_VERSION = "8.2"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -339,16 +339,43 @@ def _find_date_after_keywords(text: str, keywords: List[str], default_time: str)
 
 
 def extract_hotel_dates_from_text(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """Sucht Hotel-Aufenthaltsdaten im Originaltext robuster als die KI-Ausgabe.
+    Unterstützt u. a. Check-in/out, Arrival/Departure, Stay Dates, From/To und Nights.
+    """
+    text = text or ""
     checkin = _find_date_after_keywords(
         text,
-        [r"check\s*[- ]?in", r"arrival", r"ankunft", r"anreise", r"von", r"from"],
+        [r"check\s*[- ]?in", r"arrival", r"ankunft", r"anreise", r"stay\s*from", r"from", r"von"],
         "23:59",
     )
     checkout = _find_date_after_keywords(
         text,
-        [r"check\s*[- ]?out", r"departure", r"abreise", r"bis", r"to"],
+        [r"check\s*[- ]?out", r"departure", r"abreise", r"stay\s*to", r"to", r"bis"],
         "00:00",
     )
+
+    # Muster: 20.04.2026 - 21.04.2026 / Apr 20, 2026 - Apr 21, 2026
+    date_pat = r"(20\d{2}-\d{2}-\d{2}|\d{1,2}[-./]\d{1,2}[-./](?:\d{2}|\d{4})|\d{1,2}\s*[A-Za-zÄÖÜäöü]{3,9}\s*,?\s*20\d{2}|[A-Za-zÄÖÜäöü]{3,9}\s+\d{1,2},?\s*20\d{2}|\d{1,2}[A-Za-z]{3}20\d{2})"
+    if not (checkin and checkout):
+        for m in re.finditer(rf"(?is)(stay|aufenthalt|nights?|übernachtungen?|dates?).{{0,80}}?{date_pat}.{{0,40}}?(?:-|–|to|bis).{{0,40}}?{date_pat}", text):
+            a = parse_hotel_date_to_iso(m.group(2), "23:59")
+            b = parse_hotel_date_to_iso(m.group(3), "00:00")
+            if a and b:
+                checkin = checkin or a
+                checkout = checkout or b
+                break
+
+    # Falls nur Check-in + Anzahl Nächte gefunden wurde.
+    if checkin and not checkout:
+        m = re.search(r"(?is)\b(\d{1,2})\s*(?:night|nights|nacht|nächte|uebernachtungen|übernachtungen)\b", text)
+        if m:
+            try:
+                n = int(m.group(1))
+                d0 = datetime.fromisoformat(checkin[:10]).date()
+                checkout = (d0 + timedelta(days=n)).isoformat() + " 00:00"
+            except Exception:
+                pass
+
     return checkin, checkout
 
 
@@ -357,6 +384,11 @@ def enhance_hotel_analysis(data: Dict[str, Any], original_text: str) -> Dict[str
     if not isinstance(data, dict):
         return data
     art = str(data.get("art_des_dokuments") or "").strip().lower()
+    hotel_signals = re.search(r"(?is)\b(check\s*[- ]?in|check\s*[- ]?out|arrival|departure|hotel|room|nights?|übernachtung|nacht)\b", original_text or "")
+    if art != "hotel" and hotel_signals:
+        data["art_des_dokuments"] = "Hotel"
+        art = "hotel"
+        data.setdefault("warnungen", []).append("Dokument wurde durch lokale Nachprüfung als Hotel erkannt")
     if art != "hotel":
         return data
 
@@ -509,6 +541,13 @@ def build_json_prompt(document_text: str, filename: str = "nicht vorhanden") -> 
         "kosten_mit_steuern": "",
         "kosten_ohne_steuern": "",
         "waehrung_der_kosten": "",
+        "hotel_name": "",
+        "check_in": "",
+        "check_out": "",
+        "confidence": 0.0,
+        "review_required": False,
+        "manual_category_needed": False,
+        "manual_reason": "",
         "warnungen": [],
     }
     return f"""
@@ -521,14 +560,24 @@ Nutze genau diese Felder:
 {json.dumps(schema, ensure_ascii=False, indent=2)}
 
 Regeln:
-- "art_des_dokuments" nur: "Zug", "Flug", "Hotel", "Taxi", "Unbekannt"
+- "art_des_dokuments" nur: "Zug", "Flug", "Hotel", "Taxi", "Bewirtung", "Parken", "Mietwagen", "Kraftstoff", "Unbekannt"
 - Wenn ein Feld nicht vorhanden ist: "nicht vorhanden"
-- "wie_viele_reisesegmente" ist eine Zahl
-- Für jedes Reisesegment einen Eintrag in "reisesegmente"
+- Wenn der Beleg nicht sicher erkannt wird: art_des_dokuments="Unbekannt", review_required=true, manual_category_needed=true und manual_reason ausfüllen.
+- "confidence" immer als Zahl 0.0 bis 1.0 ausgeben.
+- "wie_viele_reisesegmente" ist eine Zahl.
+- Für jedes Reisesegment einen Eintrag in "reisesegmente".
 - Für Flüge/Züge/Taxi: jedes echte Teilsegment separat ausgeben.
-- Für Hotel: IMMER genau ein Segment ausgeben: abreise_datum_und_zeit = Check-in-Datum/Uhrzeit, ankunft_datum_und_zeit = Check-out-Datum/Uhrzeit, ankunft_ort = Hotelname + Ort. Das Beleg-/Rechnungsdatum darf bei Hotel NICHT als Check-in verwendet werden, wenn Check-in/Check-out im Dokument stehen.
-- Datumswerte bevorzugt als YYYY-MM-DD HH:MM ausgeben. Wenn im Dokument nur TT-MM-JJ steht, trotzdem korrekt als 20JJ-MM-TT interpretieren.
-- Zeiten möglichst inklusive Zeitzonenhinweis, falls vorhanden.
+- IATA-Codes immer im Ortstext mitführen, wenn vorhanden, z. B. "Frankfurt (FRA)".
+- Für Hotel: IMMER genau ein Segment ausgeben:
+  * abreise_datum_und_zeit = Check-in-Datum/Uhrzeit
+  * ankunft_datum_und_zeit = Check-out-Datum/Uhrzeit
+  * hotel_name = Name des Hotels
+  * check_in = Check-in
+  * check_out = Check-out
+  * ankunft_ort = Hotelname + Ort
+- Bei Hotel hat Check-in/Check-out Priorität. Rechnungsdatum, Buchungsdatum oder Druckdatum dürfen NICHT als Aufenthaltsdatum verwendet werden, wenn Check-in/Check-out/Arrival/Departure/Stay Dates/Nights im Dokument stehen.
+- Falls Hotel nur "Nights" enthält: Check-out = Check-in + Nights.
+- Datumswerte bevorzugt als YYYY-MM-DD HH:MM ausgeben. Wenn im Dokument nur TT-MM-JJ steht, korrekt als 20JJ-MM-TT interpretieren.
 - "kosten_mit_steuern" und "kosten_ohne_steuern" getrennt angeben.
 - Währung separat angeben.
 - Wenn Ticketnummer und Rechnungsnummer vorhanden sind: Ticketnummer in ticketnummer; Rechnungsnummer/Bestätigung in buchungsnummer_code.
@@ -569,6 +618,13 @@ def ensure_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
         "kosten_mit_steuern": "nicht vorhanden",
         "kosten_ohne_steuern": "nicht vorhanden",
         "waehrung_der_kosten": "nicht vorhanden",
+        "hotel_name": "nicht vorhanden",
+        "check_in": "nicht vorhanden",
+        "check_out": "nicht vorhanden",
+        "confidence": 0.0,
+        "review_required": False,
+        "manual_category_needed": False,
+        "manual_reason": "",
         "warnungen": [],
     }
     if isinstance(data, dict):
@@ -1684,7 +1740,14 @@ def reisen_overview():
         enriched = []
         for r in items:
             detail = get_reise_detail(r["id"])
-            enriched.append({**r, **compute_reise_status(detail)})
+            reisende = detail.get("reisende") or []
+            enriched.append({
+                **r,
+                **compute_reise_status(detail),
+                "reisende": reisende,
+                "reisende_kuerzel": ", ".join([str(x.get("kuerzel") or "") for x in reisende if x.get("kuerzel")]),
+                "event_count": len(detail.get("events") or []),
+            })
         return {"count": len(enriched), "reisen": enriched}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
@@ -1772,6 +1835,106 @@ def reisen_vma_update(reise_id: int, vma_id: int, payload: Dict[str, Any]):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+
+
+@app.get("/reisen/{reise_id}/unbekannte-belege")
+def reisen_unbekannte_belege(reise_id: int):
+    """Liefert Belege/Events, die manuell kategorisiert werden sollten."""
+    try:
+        detail = get_reise_detail(reise_id)
+        items: List[Dict[str, Any]] = []
+        for ev in detail.get("events", []) or []:
+            belege = list_belege_for_event(ev.get("id"))
+            if not belege and str(ev.get("typ") or "").lower() in {"unbekannt", "unknown"}:
+                items.append({"event": ev, "beleg": None, "analysis": {}, "reason": "Event ohne Analyse"})
+            for b in belege:
+                raw = b.get("analysis_json")
+                try:
+                    a = json.loads(raw) if raw else {}
+                except Exception:
+                    a = {}
+                art = str(a.get("art_des_dokuments") or b.get("art") or ev.get("typ") or "").strip().lower()
+                needs_manual = art in {"", "unbekannt", "unknown"} or bool(a.get("manual_category_needed")) or bool(a.get("review_required") and float(a.get("confidence") or 0) < 0.70)
+                if needs_manual:
+                    items.append({
+                        "event": ev,
+                        "beleg": {k: v for k, v in b.items() if k not in {"original_text", "anonymized_text"}},
+                        "analysis": a,
+                        "reason": a.get("manual_reason") or "Beleg nicht sicher erkannt",
+                    })
+        return {"status": "ok", "reise_id": reise_id, "items": items}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc), "items": []}
+
+
+@app.post("/belege/{beleg_id}/manual-analysis")
+def beleg_manual_analysis(beleg_id: int, payload: Dict[str, Any]):
+    """Manuelle Korrektur für nicht erkannte Belege.
+    Erwartete Felder: reise_id, art_des_dokuments, belegdatum, kosten_mit_steuern, waehrung_der_kosten,
+    hotel_name/check_in/check_out oder reisesegmente.
+    """
+    try:
+        rec = get_beleg_record(beleg_id)
+        if not rec:
+            raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
+
+        old = {}
+        try:
+            old = json.loads(rec.get("analysis_json") or "{}")
+        except Exception:
+            old = {}
+
+        data = ensure_defaults({**old, **payload})
+        original_text = rec.get("original_text") or ""
+        data = enhance_hotel_analysis(data, original_text)
+        data["manual_category_needed"] = False
+        data["review_required"] = False
+        data["manual_corrected_at_utc"] = datetime.utcnow().isoformat()
+        data["status"] = "ok"
+
+        fingerprint = rec.get("fingerprint") or build_beleg_fingerprint(rec.get("source_filename") or rec.get("original_filename") or "", data, payload.get("reise_id"))
+        update_beleg_extra_data(
+            beleg_id,
+            fingerprint,
+            rec.get("source_filename") or rec.get("original_filename") or "manual",
+            original_text,
+            rec.get("anonymized_text") or anonymize_document_text(original_text),
+            data,
+            rec.get("original_file_path"),
+            rec.get("original_filename"),
+            rec.get("original_content_type"),
+            rec.get("generated_pdf_path"),
+        )
+
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE belege SET belegdatum=%s, art=%s, kosten=%s, waehrung=%s WHERE id=%s",
+                        (
+                            data.get("belegdatum"),
+                            data.get("art_des_dokuments"),
+                            data.get("kosten_mit_steuern"),
+                            data.get("waehrung_der_kosten"),
+                            beleg_id,
+                        ),
+                    )
+                conn.commit()
+        except Exception:
+            pass
+
+        reise_id = payload.get("reise_id")
+        if reise_id:
+            data.update(attach_or_create_event_for_analysis(int(reise_id), beleg_id, data))
+
+        return {"status": "ok", "beleg_id": beleg_id, "analysis": data}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 
 @app.post("/events")
