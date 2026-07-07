@@ -41,7 +41,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "8.2a"
+APP_VERSION = "9.0"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -56,6 +56,12 @@ ORIGINAL_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 GENERATED_PDF_DIR = Path(os.getenv("GENERATED_PDF_DIR", "uploads/generated_pdfs"))
 GENERATED_PDF_DIR.mkdir(parents=True, exist_ok=True)
+
+ANONYMIZED_PDF_DIR = Path(os.getenv("ANONYMIZED_PDF_DIR", "uploads/anonymized_belege"))
+ANONYMIZED_PDF_DIR.mkdir(parents=True, exist_ok=True)
+
+KI_RESPONSE_PDF_DIR = Path(os.getenv("KI_RESPONSE_PDF_DIR", "uploads/ki_response_pdfs"))
+KI_RESPONSE_PDF_DIR.mkdir(parents=True, exist_ok=True)
  
 # Version 8.2a: Render-Speicherschutz
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
@@ -134,7 +140,14 @@ def ensure_db_extensions() -> None:
                 cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS original_filename TEXT")
                 cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS original_content_type TEXT")
                 cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS generated_pdf_path TEXT")
+                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS anonymized_pdf_path TEXT")
+                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS ki_response_pdf_path TEXT")
+                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS workflow_status TEXT")
+                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS normalized_summary_json TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_belege_fingerprint ON belege(fingerprint)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_event_belege_event_id ON event_belege(event_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_event_belege_beleg_id ON event_belege(beleg_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_events_reise_id ON events(reise_id)")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS mail_import_log (
                         id SERIAL PRIMARY KEY,
@@ -710,6 +723,10 @@ def update_beleg_extra_data(
     original_filename: Optional[str] = None,
     original_content_type: Optional[str] = None,
     generated_pdf_path: Optional[str] = None,
+    anonymized_pdf_path: Optional[str] = None,
+    ki_response_pdf_path: Optional[str] = None,
+    workflow_status: Optional[str] = None,
+    normalized_summary_json: Optional[str] = None,
 ) -> None:
     if not beleg_id:
         return
@@ -727,7 +744,11 @@ def update_beleg_extra_data(
                            original_file_path = COALESCE(%s, original_file_path),
                            original_filename = COALESCE(%s, original_filename),
                            original_content_type = COALESCE(%s, original_content_type),
-                           generated_pdf_path = COALESCE(%s, generated_pdf_path)
+                           generated_pdf_path = COALESCE(%s, generated_pdf_path),
+                           anonymized_pdf_path = COALESCE(%s, anonymized_pdf_path),
+                           ki_response_pdf_path = COALESCE(%s, ki_response_pdf_path),
+                           workflow_status = COALESCE(%s, workflow_status),
+                           normalized_summary_json = COALESCE(%s, normalized_summary_json)
                      WHERE id = %s
                     """,
                     (
@@ -740,6 +761,10 @@ def update_beleg_extra_data(
                         original_filename,
                         original_content_type,
                         generated_pdf_path,
+                        anonymized_pdf_path,
+                        ki_response_pdf_path,
+                        workflow_status,
+                        normalized_summary_json,
                         beleg_id,
                     ),
                 )
@@ -756,6 +781,111 @@ def update_beleg_generated_pdf_path(beleg_id: int, generated_pdf_path: str) -> N
             conn.commit()
     except Exception:
         pass
+
+
+def safe_update_beleg_paths(
+    beleg_id: int,
+    anonymized_pdf_path: Optional[str] = None,
+    ki_response_pdf_path: Optional[str] = None,
+    workflow_status: Optional[str] = None,
+    normalized_summary_json: Optional[str] = None,
+) -> None:
+    if not beleg_id:
+        return
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE belege
+                       SET anonymized_pdf_path = COALESCE(%s, anonymized_pdf_path),
+                           ki_response_pdf_path = COALESCE(%s, ki_response_pdf_path),
+                           workflow_status = COALESCE(%s, workflow_status),
+                           normalized_summary_json = COALESCE(%s, normalized_summary_json)
+                     WHERE id = %s
+                    """,
+                    (anonymized_pdf_path, ki_response_pdf_path, workflow_status, normalized_summary_json, beleg_id),
+                )
+            conn.commit()
+    except Exception:
+        pass
+
+
+def dashboard_summary_from_analysis(data: Dict[str, Any]) -> Dict[str, Any]:
+    segs = data.get("reisesegmente") or []
+    first_seg = segs[0] if segs and isinstance(segs[0], dict) else {}
+    return {
+        "dashboard_fields": {
+            "art": data.get("art_des_dokuments") or "Unbekannt",
+            "belegdatum": data.get("belegdatum") or "nicht vorhanden",
+            "anbieter_event": make_event_title(data),
+            "betrag": data.get("kosten_mit_steuern") or "nicht vorhanden",
+            "waehrung": data.get("waehrung_der_kosten") or "nicht vorhanden",
+            "check_in": data.get("check_in") or first_seg.get("abreise_datum_und_zeit") or "nicht vorhanden",
+            "check_out": data.get("check_out") or first_seg.get("ankunft_datum_und_zeit") or "nicht vorhanden",
+            "segmente": len(segs),
+        },
+        "review_required": bool(data.get("review_required") or data.get("manual_category_needed")),
+        "confidence": data.get("confidence"),
+    }
+
+
+def write_anonymized_pdf_file(filename: str, anonymized_text: str) -> str:
+    safe = safe_filename(filename or "beleg")
+    stem = Path(safe).stem[:80] or "beleg"
+    path = ANONYMIZED_PDF_DIR / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:12]}_{stem}_anonymisiert.pdf"
+    body = "\n".join([
+        "ANONYMISIERTER BELEG - Versandinhalt an KI",
+        f"Quelldatei: {safe}",
+        f"Erzeugt: {datetime.utcnow().isoformat()} UTC",
+        "",
+        "Hinweis: Dieses PDF dokumentiert den anonymisierten Text/Extrakt, der für die KI-Analyse verwendet wird.",
+        "",
+        "--- Anonymisierter Inhalt ---",
+        (anonymized_text or "")[:MAX_ANALYSIS_TEXT_CHARS],
+    ])
+    path.write_bytes(make_simple_pdf_bytes("Anonymisierter Beleg", body))
+    return str(path)
+
+
+def write_ki_response_pdf_file(beleg_id: int, data: Dict[str, Any], raw_response: Any = None) -> str:
+    path = KI_RESPONSE_PDF_DIR / f"BE-{beleg_id:04d}_ki_response.pdf"
+    summary = dashboard_summary_from_analysis(data)
+    fields = summary.get("dashboard_fields", {})
+    body_lines = [
+        f"KI-ANTWORT / ANALYSE - BE-{beleg_id:04d}",
+        f"Erzeugt: {datetime.utcnow().isoformat()} UTC",
+        f"KI-Anbieter: {data.get('ai_provider') or 'openai'}",
+        f"Modell: {data.get('ai_model') or OPENAI_MODEL}",
+        "",
+        "=== FÜR DASHBOARD ÜBERNOMMENE FELDER ===",
+    ]
+    for k, v in fields.items():
+        body_lines.append(f"[DASHBOARD] {k}: {v}")
+    body_lines += [
+        "",
+        "=== PRÜFSTATUS ===",
+        f"Confidence: {data.get('confidence')}",
+        f"Manuelle Prüfung nötig: {bool(data.get('review_required') or data.get('manual_category_needed'))}",
+        f"Warnungen: {', '.join(map(str, data.get('warnungen') or []))}",
+        "",
+        "=== NORMALISIERTES JSON ===",
+        json.dumps(data, ensure_ascii=False, indent=2)[:MAX_DB_TEXT_CHARS],
+    ]
+    if raw_response is not None:
+        body_lines += ["", "=== ROHE KI-ANTWORT ===", json.dumps(raw_response, ensure_ascii=False, indent=2)[:MAX_DB_TEXT_CHARS]]
+    path.write_bytes(make_simple_pdf_bytes(f"KI-Antwort BE-{beleg_id:04d}", "\n".join(body_lines)))
+    return str(path)
+
+
+def workflow_status_for_analysis(data: Dict[str, Any]) -> str:
+    if data.get("duplicate_detected"):
+        return "duplikat"
+    if data.get("manual_category_needed") or str(data.get("art_des_dokuments") or "").lower() in {"unbekannt", "unknown"}:
+        return "prüfen"
+    if data.get("review_required"):
+        return "prüfen"
+    return "abgeschlossen"
 
 
 def get_beleg_record(beleg_id: int) -> Optional[Dict[str, Any]]:
@@ -1043,19 +1173,31 @@ def analyze_text_internal(
     ai_model_override: Optional[str] = None,
     original_file_info: Optional[Dict[str, str]] = None,
 ) -> dict:
+    """Version 9.0 Belegworkflow:
+    1) Original speichern (passiert vor Aufruf dieser Funktion)
+    2) anonymisierten Beleg als PDF speichern, bevor der Inhalt an die KI geht
+    3) KI-Antwort als eigenes PDF speichern
+    4) normalisierte Dashboard-Felder speichern
+    """
     anonymized_text = anonymize_document_text(text)
+    anonymized_pdf_path = write_anonymized_pdf_file(filename, anonymized_text)
     prompt = build_json_prompt(anonymized_text, filename=filename)
 
-    # Aktuell OpenAI als Standard. Mistral kann später wieder ergänzt werden.
     raw = call_openai_json(prompt, ai_model_override)
     if isinstance(raw, dict) and raw.get("status") == "error":
+        try:
+            err_pdf = write_ki_response_pdf_file(0, {"status": "error", "detail": raw.get("detail"), "ai_model": ai_model_override or OPENAI_MODEL}, raw)
+        except Exception:
+            err_pdf = None
         return {
             "status": "error",
             "detail": raw.get("detail", "Analysefehler"),
             "version": APP_VERSION,
             "ai_provider": "openai",
             "ai_model": ai_model_override or OPENAI_MODEL,
-            "anonymized_preview": anonymized_text[:4000],
+            "anonymized_pdf_path": anonymized_pdf_path,
+            "ki_response_pdf_path": err_pdf,
+            "anonymized_preview": anonymized_text[:2000],
         }
 
     data = ensure_defaults(raw)
@@ -1065,7 +1207,7 @@ def analyze_text_internal(
     data["generated_at_utc"] = datetime.utcnow().isoformat()
     data["ai_provider"] = "openai"
     data["ai_model"] = ai_model_override or OPENAI_MODEL
-    data["anonymized_preview"] = anonymized_text[:4000]
+    data["anonymized_preview"] = anonymized_text[:2000]
 
     fingerprint = build_beleg_fingerprint(filename, data, reise_id)
     existing_beleg_id = find_beleg_by_fingerprint(fingerprint)
@@ -1078,6 +1220,12 @@ def analyze_text_internal(
         data["beleg_id"] = existing_beleg_id
         data["duplicate_action"] = "skipped_insert_existing_beleg_used"
         cleanup_unused_original_file(original_file_info)
+        # Für Duplikate werden keine neuen Dateien sichtbar gemacht; der vorhandene Beleg bleibt Referenz.
+        try:
+            if anonymized_pdf_path and os.path.exists(anonymized_pdf_path):
+                os.remove(anonymized_pdf_path)
+        except Exception:
+            pass
         update_beleg_extra_data(
             existing_beleg_id,
             fingerprint,
@@ -1088,6 +1236,11 @@ def analyze_text_internal(
             None,
             None,
             None,
+            None,
+            None,
+            None,
+            "duplikat",
+            json.dumps(dashboard_summary_from_analysis(data), ensure_ascii=False),
         )
         if event_id:
             safe_attach_beleg_to_event(event_id, existing_beleg_id)
@@ -1105,6 +1258,10 @@ def analyze_text_internal(
             "waehrung": data.get("waehrung_der_kosten"),
         }
     )
+    ki_response_pdf_path = write_ki_response_pdf_file(beleg_id, data, raw)
+    workflow_status = workflow_status_for_analysis(data)
+    normalized_summary_json = json.dumps(dashboard_summary_from_analysis(data), ensure_ascii=False)
+
     update_beleg_extra_data(
         beleg_id,
         fingerprint,
@@ -1115,11 +1272,19 @@ def analyze_text_internal(
         original_file_info.get("original_file_path"),
         original_file_info.get("original_filename"),
         original_file_info.get("original_content_type"),
+        None,
+        anonymized_pdf_path,
+        ki_response_pdf_path,
+        workflow_status,
+        normalized_summary_json,
     )
 
     data["beleg_id"] = beleg_id
     data["existing_beleg_id"] = None
     data["duplicate_action"] = "inserted_new_beleg"
+    data["anonymized_pdf_url"] = f"/belege/{beleg_id}/anonymized"
+    data["ki_response_pdf_url"] = f"/belege/{beleg_id}/ki-response"
+    data["workflow_status"] = workflow_status
 
     if event_id:
         safe_attach_beleg_to_event(event_id, beleg_id)
@@ -1129,7 +1294,6 @@ def analyze_text_internal(
         data.update(attach_or_create_event_for_analysis(reise_id, beleg_id, data))
 
     return data
-
 
 # ============================================================
 # MAIL
@@ -1517,6 +1681,8 @@ def health():
         "imap_pass_configured": bool(IMAP_PASS),
         "original_upload_dir": str(ORIGINAL_UPLOAD_DIR),
         "generated_pdf_dir": str(GENERATED_PDF_DIR),
+        "anonymized_pdf_dir": str(ANONYMIZED_PDF_DIR),
+        "ki_response_pdf_dir": str(KI_RESPONSE_PDF_DIR),
         "duplicate_detection": "active",
     }
 
@@ -1644,7 +1810,7 @@ def beleg_detail(beleg_id: int):
     rec = get_beleg_record(beleg_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
-    return {"status": "ok", "beleg": rec, "pdf_url": f"/belege/{beleg_id}/pdf", "original_url": f"/belege/{beleg_id}/original"}
+    return {"status": "ok", "beleg": rec, "pdf_url": f"/belege/{beleg_id}/pdf", "original_url": f"/belege/{beleg_id}/original", "anonymized_url": f"/belege/{beleg_id}/anonymized", "ki_response_url": f"/belege/{beleg_id}/ki-response"}
 
 
 @app.get("/belege/{beleg_id}/original")
@@ -1658,6 +1824,33 @@ def beleg_original(beleg_id: int):
     filename = rec.get("original_filename") or rec.get("source_filename") or f"beleg_{beleg_id}"
     media_type = rec.get("original_content_type") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
     return FileResponse(path, media_type=media_type, filename=filename)
+
+
+@app.get("/belege/{beleg_id}/anonymized")
+def beleg_anonymized(beleg_id: int):
+    rec = get_beleg_record(beleg_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
+    path = rec.get("anonymized_pdf_path")
+    if not path or not os.path.exists(path):
+        # Fallback für Altbelege: anonymisiertes PDF aus gespeicherten anonymisierten Texten erzeugen.
+        text = rec.get("anonymized_text") or "Für diesen Beleg wurde noch kein anonymisierter Inhalt gespeichert. Bitte Beleg neu analysieren."
+        path = write_anonymized_pdf_file(rec.get("source_filename") or rec.get("original_filename") or f"beleg_{beleg_id}", text)
+        safe_update_beleg_paths(beleg_id, anonymized_pdf_path=path, workflow_status=rec.get("workflow_status") or "anonymisiert")
+    return FileResponse(path, media_type="application/pdf", filename=f"BE-{beleg_id:04d}_anonymisiert.pdf")
+
+
+@app.get("/belege/{beleg_id}/ki-response")
+def beleg_ki_response(beleg_id: int):
+    rec = get_beleg_record(beleg_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
+    path = rec.get("ki_response_pdf_path")
+    if not path or not os.path.exists(path):
+        data = json.loads(rec.get("analysis_json") or "{}") if rec.get("analysis_json") else {"status": "fehlt", "warnungen": ["Keine Analyse gespeichert"]}
+        path = write_ki_response_pdf_file(beleg_id, data, data)
+        safe_update_beleg_paths(beleg_id, ki_response_pdf_path=path, workflow_status=rec.get("workflow_status") or "ki_pdf_erzeugt")
+    return FileResponse(path, media_type="application/pdf", filename=f"BE-{beleg_id:04d}_ki_response.pdf")
 
 
 @app.get("/belege/{beleg_id}/pdf")
@@ -1848,6 +2041,56 @@ def reisen_vma_api_alias(reise_id: int):
 @app.post("/api/reisen/{reise_id}/vma/{vma_id}")
 def reisen_vma_update_api_alias(reise_id: int, vma_id: int, payload: Dict[str, Any]):
     return reisen_vma_update(reise_id, vma_id, payload)
+
+def workflow_row_for_beleg(beleg: Dict[str, Any], event: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    data = json.loads(beleg.get("analysis_json") or "{}") if beleg.get("analysis_json") else {}
+    summary = json.loads(beleg.get("normalized_summary_json") or "{}") if beleg.get("normalized_summary_json") else dashboard_summary_from_analysis(data)
+    fields = summary.get("dashboard_fields", {}) if isinstance(summary, dict) else {}
+    beleg_id = int(beleg.get("id"))
+    art = fields.get("art") or beleg.get("art") or data.get("art_des_dokuments") or "Unbekannt"
+    belegdatum = fields.get("belegdatum") or beleg.get("belegdatum") or data.get("belegdatum") or "nicht vorhanden"
+    betrag = fields.get("betrag") or beleg.get("kosten") or data.get("kosten_mit_steuern") or "nicht vorhanden"
+    waehrung = fields.get("waehrung") or beleg.get("waehrung") or data.get("waehrung_der_kosten") or ""
+    event_text = fields.get("anbieter_event") or (event or {}).get("titel") or make_event_title(data) if data else (event or {}).get("titel") or "Keine Analyse"
+    return {
+        "beleg_id": beleg_id,
+        "beleg_nr": f"BE-{beleg_id:04d}",
+        "quelle": beleg.get("quelle") or beleg.get("source") or "Upload/Mail",
+        "eingang": beleg.get("created_at") or beleg.get("belegdatum") or "",
+        "workflow_status": beleg.get("workflow_status") or ("prüfen" if str(art).lower() in {"unbekannt", "unknown"} else "analysiert"),
+        "art": art,
+        "belegdatum": belegdatum,
+        "event": event_text,
+        "kosten": (f"{betrag} {waehrung}".strip() if betrag and str(betrag).lower() != "nicht vorhanden" else "—"),
+        "original_url": f"/belege/{beleg_id}/original",
+        "anonymized_url": f"/belege/{beleg_id}/anonymized",
+        "ki_response_url": f"/belege/{beleg_id}/ki-response",
+        "pdf_url": f"/belege/{beleg_id}/pdf",
+        "hat_original": bool(beleg.get("original_file_path")),
+        "hat_anonymisiert": bool(beleg.get("anonymized_pdf_path") or beleg.get("anonymized_text")),
+        "hat_ki_response": bool(beleg.get("ki_response_pdf_path") or beleg.get("analysis_json")),
+        "review_required": bool(data.get("review_required") or data.get("manual_category_needed") or str(art).lower() in {"unbekannt", "unknown"}),
+    }
+
+
+@app.get("/reisen/{reise_id}/beleg-workflow")
+def reisen_beleg_workflow(reise_id: int):
+    try:
+        detail = get_reise_detail(reise_id)
+        rows: List[Dict[str, Any]] = []
+        seen: set[int] = set()
+        for ev in detail.get("events", []) or []:
+            for b in list_belege_for_event(ev.get("id")):
+                bid = int(b.get("id"))
+                if bid in seen:
+                    continue
+                seen.add(bid)
+                rows.append(workflow_row_for_beleg(b, ev))
+        rows.sort(key=lambda r: (str(r.get("eingang") or ""), int(r.get("beleg_id") or 0)))
+        return {"status": "ok", "version": APP_VERSION, "reise_id": reise_id, "rows": rows, "count": len(rows)}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc), "rows": []}
+
 
 @app.get("/reisen/{reise_id}/unbekannte-belege")
 def reisen_unbekannte_belege(reise_id: int):
