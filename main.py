@@ -41,7 +41,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "9.0"
+APP_VERSION = "9.0a"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -1666,6 +1666,57 @@ def list_vma_days(reise_id: int) -> List[Dict[str, Any]]:
 @app.get("/")
 def root():
     return {"status": "ok", "version": APP_VERSION}
+
+
+
+
+@app.get("/init")
+@app.post("/init")
+def init_route():
+    """Initialisiert/erweitert die Datenbank ohne Daten zu löschen.
+    Wichtig für Render nach Deploy: /init muss JSON zurückgeben und darf keine HTML-Fehlerseite erzeugen.
+    """
+    try:
+        init_db()
+        ensure_db_extensions()
+
+        # Kurzer DB-Selbsttest: diese Tabellen brauchen wir mindestens.
+        checks = {}
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                for table in ["mitarbeiter", "reisen", "events", "belege", "event_belege", "reise_reisende", "vma_tage", "mail_import_log"]:
+                    try:
+                        cur.execute(f"SELECT COUNT(*) FROM {table}")
+                        row = cur.fetchone()
+                        checks[table] = int(row[0]) if row else 0
+                    except Exception as table_exc:
+                        checks[table] = f"ERROR: {table_exc}"
+
+        return {
+            "status": "ok",
+            "version": APP_VERSION,
+            "message": "Datenbank initialisiert/erweitert. Keine Daten wurden gelöscht.",
+            "tables": checks,
+            "paths": {
+                "original_upload_dir": str(ORIGINAL_UPLOAD_DIR),
+                "generated_pdf_dir": str(GENERATED_PDF_DIR),
+                "anonymized_pdf_dir": str(ANONYMIZED_PDF_DIR),
+                "ki_response_pdf_dir": str(KI_RESPONSE_PDF_DIR),
+            },
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "version": APP_VERSION,
+            "detail": str(exc),
+            "hint": "Bitte Render-Logs prüfen. Häufige Ursache: Datenbankverbindung oder fehlende Basistabellen aus database.py.",
+        }
+
+
+@app.get("/api/init")
+@app.post("/api/init")
+def api_init_route():
+    return init_route()
 
 
 @app.get("/health")
