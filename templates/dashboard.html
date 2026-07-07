@@ -28,15 +28,15 @@
   </style>
 </head>
 <body>
-<header class="topbar"><div class="brand" onclick="showPage('dashboard')"><div class="logo-wrap"><img src="/static/logo3.png" alt="Herrhammer Logo"></div></div><nav class="nav"><button id="nav-dashboard" class="active" onclick="showPage('dashboard')">⚙ Dashboard</button><button id="nav-mitarbeiter" onclick="showPage('mitarbeiter')">👥 Mitarbeiter</button><button id="nav-reisen" onclick="showPage('reisen')">▣ Reisen</button><button onclick="manualMailCheck()">✉ Mail prüfen</button><span id="mailTimerInfo" class="mailInfo">Auto aus</span><span class="versionTop">Version 9.0a</span><button onclick="showPage('debug')">↪ Debug</button></nav></header>
+<header class="topbar"><div class="brand" onclick="showPage('dashboard')"><div class="logo-wrap"><img src="/static/logo3.png" alt="Herrhammer Logo"></div></div><nav class="nav"><button id="nav-dashboard" class="active" onclick="showPage('dashboard')">⚙ Dashboard</button><button id="nav-mitarbeiter" onclick="showPage('mitarbeiter')">👥 Mitarbeiter</button><button id="nav-reisen" onclick="showPage('reisen')">▣ Reisen</button><button onclick="manualMailCheck()">✉ Mail prüfen</button><span id="mailTimerInfo" class="mailInfo">Auto aus</span><span class="versionTop">Version 9.0b</span><button onclick="showPage('debug')">↪ Debug</button></nav></header>
 <main class="page">
   <div id="statusBox" class="status">Bereit.</div>
   <section id="page-dashboard"><h1>Reisekosten System</h1><div class="summary"><div class="summary-card"><div class="iconbox">▣</div><div><div class="summary-label">Geplant</div><div id="countGeplant" class="summary-number">0</div><div class="summary-sub">Reisen</div></div></div><div class="summary-card"><div class="iconbox">✈</div><div><div class="summary-label">Aktuell</div><div id="countAktuell" class="summary-number">0</div><div class="summary-sub">Reisen</div></div></div><div class="summary-card"><div class="iconbox">✓</div><div><div class="summary-label">Abgeschlossen</div><div id="countAbgeschlossen" class="summary-number">0</div><div class="summary-sub">Reisen</div></div></div></div><div class="section"><h2>Aktuelle Reisen</h2><div id="dashboardReisenAktuell" class="table-card"></div></div><div class="section"><h2>Geplante Reisen</h2><div id="dashboardReisenPlan" class="table-card"></div></div><div class="section"><h2>Abgeschlossene Reisen</h2><div id="dashboardReisenAbgeschlossen" class="table-card"></div></div></section>
   <section id="page-mitarbeiter" class="hidden"><h1>Mitarbeiter</h1><button class="btn" onclick="openMitarbeiterNew()">+ Neu</button><div id="mitarbeiterForm" class="form-panel hidden"><h2>Mitarbeiter anlegen</h2><input id="mitarbeiterId" type="hidden"><div class="grid grid2"><div><label>Kürzel</label><input id="mitarbeiterKuerzel"></div><div><label>E-Mail</label><input id="mitarbeiterEmail"></div><div><label>Vorname</label><input id="mitarbeiterVorname"></div><div><label>Nachname</label><input id="mitarbeiterNachname"></div><div><label>Geburtsdatum</label><input id="mitarbeiterGeburtsdatum"></div></div><button class="btn" onclick="saveMitarbeiter()">Speichern</button> <button class="btn btn-light" onclick="closeMitarbeiterForm()">Abbrechen</button></div><div id="mitarbeiterTable" class="table-card"></div></section>
   <section id="page-reisen" class="hidden"><h1>Reisen</h1><button class="btn" onclick="openReiseNew()">+ Neu</button><div id="reiseForm" class="form-panel hidden"><h2>Reise anlegen</h2><input id="reiseDbId" type="hidden"><div class="grid grid2"><div><label>Jahr</label><input id="reiseJahr" type="number" value="2026" onchange="loadNextCode()"></div><div><label>Nächster Reisecode</label><input id="reiseNextCode" readonly></div><div><label>Reisename</label><input id="reiseName"></div><div><label>Anzahl Reisende</label><input id="reiseAnzahl" type="number" value="1"></div><div><label>Startdatum</label><input id="reiseStart" type="date"></div><div><label>Enddatum</label><input id="reiseEnde" type="date"></div></div><label>Reisende auswählen</label><select id="reiseMitarbeiterSelect" multiple></select><button class="btn" onclick="saveReise()">Speichern</button> <button class="btn btn-light" onclick="closeReiseForm()">Abbrechen</button></div><div id="reisenTable" class="table-card"></div></section>
-  <section id="page-reise-detail" class="hidden"><h1 id="reiseDetailTitle">Reise</h1><div id="reiseDetailSub" style="margin-top:-12px;margin-bottom:18px;color:#607086;font-size:14px"></div><button class="btn btn-light" onclick="showPage('reisen')">Zurück zu Reisen</button><div class="section"><h2>Verpflegungsmehraufwand</h2><div id="vmaContent" class="table-card"><div style="padding:12px">VMA wird geladen...</div></div></div><div class="section"><h2>Belege zu dieser Reise hinzufügen und analysieren</h2><div class="panel"><div class="grid grid3"><div><label>Dateien auswählen</label><input id="reiseUploadFiles" type="file" multiple></div><div><label>Analyse</label><button class="btn" onclick="uploadAndAnalyzeCurrentReise()">Hochladen + analysieren</button></div><div><label>Prüfung</label><button class="btn btn-light" onclick="reloadCurrentReiseDetail()">Events neu laden</button></div></div><div class="event-sub">Version 9.0a Belegworkflow: Original speichern → anonymisiertes PDF erzeugen → KI-Antwort als PDF speichern. Bitte jeweils nur 1 Beleg pro Analyse hochladen.</div><div id="uploadProgress" class="analysisBox hidden"><pre id="uploadProgressPre"></pre></div></div></div><div class="section"><h2>Belegworkflow je Beleg</h2><div id="belegWorkflowContent" class="table-card"><div style="padding:12px">Belegworkflow wird geladen...</div></div></div><div class="section"><h2>Alle Reise Events nach Datum inkl. VMA</h2><div id="reiseDetailContent" class="table-card"></div></div><div class="section"><h2>Nicht erkannte Belege manuell bearbeiten</h2><div id="unknownBelegeContent" class="table-card"><div style="padding:12px">Wird geladen...</div></div></div><div class="section"><h2>Analysedaten prüfen</h2><div class="panel"><button class="btn btn-light" onclick="showCurrentAnalysis()">Analysedaten anzeigen</button><div id="analysisInspect" class="analysisBox hidden"><pre id="analysisInspectPre"></pre></div><div class="bottomNav"><button class="btn btn-light" onclick="scrollToTop()">Nach oben</button><button class="btn" onclick="showPage('dashboard')">Zum Dashboard</button><button class="btn btn-light" onclick="showPage('reisen')">Zu Reisen</button></div></div></div></section>
+  <section id="page-reise-detail" class="hidden"><h1 id="reiseDetailTitle">Reise</h1><div id="reiseDetailSub" style="margin-top:-12px;margin-bottom:18px;color:#607086;font-size:14px"></div><button class="btn btn-light" onclick="showPage('reisen')">Zurück zu Reisen</button><div class="section"><h2>Verpflegungsmehraufwand</h2><div id="vmaContent" class="table-card"><div style="padding:12px">VMA wird geladen...</div></div></div><div class="section"><h2>Belege zu dieser Reise hinzufügen und analysieren</h2><div class="panel"><div class="grid grid3"><div><label>Dateien auswählen</label><input id="reiseUploadFiles" type="file" multiple></div><div><label>Analyse</label><button class="btn" onclick="uploadAndAnalyzeCurrentReise()">Hochladen + analysieren</button></div><div><label>Prüfung</label><button class="btn btn-light" onclick="reloadCurrentReiseDetail()">Events neu laden</button></div></div><div class="event-sub">Version 9.0b Belegworkflow: Upload speichert sofort den Originalbeleg. Danach je Beleg separat anonymisieren und KI starten.</div><div id="uploadProgress" class="analysisBox hidden"><pre id="uploadProgressPre"></pre></div></div></div><div class="section"><h2>Belegworkflow je Beleg</h2><div id="belegWorkflowContent" class="table-card"><div style="padding:12px">Belegworkflow wird geladen...</div></div></div><div class="section"><h2>Alle Reise Events nach Datum inkl. VMA</h2><div id="reiseDetailContent" class="table-card"></div></div><div class="section"><h2>Nicht erkannte Belege manuell bearbeiten</h2><div id="unknownBelegeContent" class="table-card"><div style="padding:12px">Wird geladen...</div></div></div><div class="section"><h2>Analysedaten prüfen</h2><div class="panel"><button class="btn btn-light" onclick="showCurrentAnalysis()">Analysedaten anzeigen</button><div id="analysisInspect" class="analysisBox hidden"><pre id="analysisInspectPre"></pre></div><div class="bottomNav"><button class="btn btn-light" onclick="scrollToTop()">Nach oben</button><button class="btn" onclick="showPage('dashboard')">Zum Dashboard</button><button class="btn btn-light" onclick="showPage('reisen')">Zu Reisen</button></div></div></div></section>
   <section id="page-debug" class="hidden"><h1>Debug</h1><button class="btn" onclick="health()">Health</button><pre id="resultBox">Noch kein Ergebnis.</pre></section>
-</main><footer><div>Reisekosten System<br>© 2026 Kerzenmaschinen Herrhammer Kürschner</div><div>Version 9.0a<br>Alle Rechte vorbehalten</div></footer>
+</main><footer><div>Reisekosten System<br>© 2026 Kerzenmaschinen Herrhammer Kürschner</div><div>Version 9.0b<br>Alle Rechte vorbehalten</div></footer>
 <script>
 let mitarbeiterCache=[];let reisenCache=[];let currentReiseId=null;let currentReiseDetail=null;let currentRows=[];let currentAnalysis=[];
 function api(){return window.location.origin}function esc(v){return String(v??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}function setStatus(m,t=''){const b=document.getElementById('statusBox');b.textContent=m;b.className='status '+t}function showResult(d){document.getElementById('resultBox').textContent=JSON.stringify(d,null,2)}async function parseJson(r){const t=await r.text();try{return JSON.parse(t)}catch{throw new Error('Antwort war kein JSON: '+t.slice(0,300))}}async function requestJson(u,o={}){const r=await fetch(u,o);const d=await parseJson(r);if(!r.ok)throw new Error(d.detail||JSON.stringify(d));return d}
@@ -192,6 +192,94 @@ async function uploadAndAnalyzeCurrentReise(){
 }
 
 window.onload=async()=>{await health();await loadMitarbeiter();await loadReisen(false)};
+
+// ============================================================
+// Version 9.0b - entkoppelter Belegworkflow UI
+// ============================================================
+
+async function uploadAndAnalyzeCurrentReise(){
+  try{
+    const input = document.getElementById('reiseUploadFiles');
+    const files = Array.from(input.files || []);
+    if(!currentReiseId){ setStatus('Keine Reise geöffnet.','error'); return; }
+    if(files.length !== 1){ setStatus('Bitte genau 1 Beleg auswählen.','error'); return; }
+
+    const file = files[0];
+    const fd = new FormData();
+    fd.append('file', file);
+
+    document.getElementById('uploadProgress')?.classList.remove('hidden');
+    const pre = document.getElementById('uploadProgressPre');
+    if(pre) pre.textContent = `► ${file.name} wird hochgeladen: Original speichern...`;
+
+    const data = await requestJson(api()+`/reisen/${currentReiseId}/upload-original`, {method:'POST', body:fd});
+
+    if(pre) {
+      if(data.status === 'duplicate'){
+        pre.textContent += `\nDuplikat erkannt. Bestehender Beleg: ${data.existing_beleg_id}`;
+      } else {
+        pre.textContent += `\nOK: ${data.beleg_nr || data.beleg_id} ist gespeichert und sofort sichtbar.`;
+        pre.textContent += `\nNächster Schritt: In der Belegworkflow-Zeile "Anonymisieren" und danach "KI starten" klicken.`;
+      }
+    }
+    input.value = '';
+    await reloadCurrentReiseDetail();
+    setStatus('Originalbeleg gespeichert.','ok');
+  }catch(e){
+    setStatus(e.message,'error');
+  }
+}
+
+async function runBelegAnonymize(belegId){
+  try{
+    setStatus('Anonymisierung läuft für Beleg '+belegId+'...');
+    await requestJson(api()+`/belege/${belegId}/anonymize`, {method:'POST'});
+    await reloadCurrentReiseDetail();
+    setStatus('Anonymisierter Beleg erzeugt.','ok');
+  }catch(e){ setStatus(e.message,'error'); }
+}
+
+async function runBelegKi(belegId){
+  try{
+    setStatus('KI-Analyse läuft für Beleg '+belegId+'...');
+    await requestJson(api()+`/belege/${belegId}/run-ki`, {method:'POST'});
+    await reloadCurrentReiseDetail();
+    setStatus('KI-Antwort gespeichert.','ok');
+  }catch(e){ setStatus(e.message,'error'); }
+}
+
+async function runBelegFullWorkflow(belegId){
+  try{
+    setStatus('Anonymisierung + KI läuft für Beleg '+belegId+'...');
+    await requestJson(api()+`/belege/${belegId}/workflow-full`, {method:'POST'});
+    await reloadCurrentReiseDetail();
+    setStatus('Workflow abgeschlossen.','ok');
+  }catch(e){ setStatus(e.message,'error'); }
+}
+
+// Falls das vorhandene Dashboard die Belegworkflow-Tabelle rendert,
+// ergänzen wir nach jedem Reload die Aktionsbuttons in bekannten Tabellenzellen.
+function enhanceWorkflowButtons(){
+  document.querySelectorAll('[data-beleg-id]').forEach(node=>{
+    const id = node.getAttribute('data-beleg-id');
+    if(!id || node.dataset.enhanced90b) return;
+    node.dataset.enhanced90b = '1';
+  });
+}
+
 </script>
+
+<script>
+function belegWorkflowActions90b(belegId, hasOriginal=true, hasAnonymized=false, hasKi=false){
+  const id = belegId;
+  return `
+    <div class="actions">
+      ${hasOriginal ? `<button class="iconBtn" onclick="window.open(api()+'/belege/${id}/original','_blank')">📄 Original</button>` : ''}
+      ${hasAnonymized ? `<button class="iconBtn" onclick="window.open(api()+'/belege/${id}/anonymized','_blank')">🕶 Anonymisiert</button>` : `<button class="iconBtn" onclick="runBelegAnonymize(${id})">🕶 Anonymisieren</button>`}
+      ${hasKi ? `<button class="iconBtn" onclick="window.open(api()+'/belege/${id}/ki-response','_blank')">🤖 KI-Antwort</button>` : `<button class="iconBtn" onclick="runBelegKi(${id})">🤖 KI starten</button>`}
+    </div>`;
+}
+</script>
+
 </body>
 </html>

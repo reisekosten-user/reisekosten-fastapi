@@ -41,7 +41,7 @@ from database import (
     update_mitarbeiter,
 )
 
-APP_VERSION = "9.0a"
+APP_VERSION = "9.0b"
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -2340,3 +2340,452 @@ async def analyze_file(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
         ANALYSIS_LOCK.release()
+
+
+# ============================================================
+# VERSION 9.0b - ENTKOPPELTER BELEGWORKFLOW
+# ============================================================
+# Ziel:
+# - Upload speichert nur den Originalbeleg und legt sofort eine sichtbare Belegzeile an.
+# - Anonymisierung und KI-Analyse laufen je Beleg separat per Button.
+# - Dadurch hängt der Browser nicht mehr in einem langen Upload-Request.
+
+WORKFLOW_TEXT_LIMIT = int(os.getenv("WORKFLOW_TEXT_LIMIT", "60000"))
+WORKFLOW_PDF_MAX_PAGES = int(os.getenv("WORKFLOW_PDF_MAX_PAGES", "8"))
+WORKFLOW_MAX_UPLOAD_MB = int(os.getenv("WORKFLOW_MAX_UPLOAD_MB", "10"))
+
+
+def _v90b_column_exists(table: str, column: str) -> bool:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1
+                      FROM information_schema.columns
+                     WHERE table_name = %s
+                       AND column_name = %s
+                     LIMIT 1
+                    """,
+                    (table, column),
+                )
+                return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def ensure_db_extensions_v90b() -> None:
+    """Zusatzspalten für den neuen entkoppelten Workflow.
+    Keine Daten werden gelöscht.
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                additions = [
+                    ("belege", "workflow_status", "TEXT"),
+                    ("belege", "workflow_message", "TEXT"),
+                    ("belege", "anonymized_pdf_path", "TEXT"),
+                    ("belege", "ki_response_pdf_path", "TEXT"),
+                    ("belege", "beleg_nr", "TEXT"),
+                    ("belege", "belegdatum", "TEXT"),
+                    ("belege", "document_type", "TEXT"),
+                    ("belege", "provider_name", "TEXT"),
+                    ("belege", "dashboard_summary", "TEXT"),
+                    ("belege", "amount_original", "TEXT"),
+                    ("belege", "currency_original", "TEXT"),
+                    ("belege", "amount_eur", "TEXT"),
+                    ("belege", "review_required", "BOOLEAN DEFAULT FALSE"),
+                ]
+                for table, col, typ in additions:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_belege_workflow_status ON belege(workflow_status)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_belege_original_file_path ON belege(original_file_path)")
+            conn.commit()
+    except Exception:
+        pass
+
+
+def _v90b_beleg_nr(beleg_id: int) -> str:
+    return f"BE-{int(beleg_id):04d}"
+
+
+def _v90b_safe_text(value: Any, limit: int = 200000) -> str:
+    text = str(value or "")
+    if len(text) > limit:
+        return text[:limit] + "\n\n... gekürzt ..."
+    return text
+
+
+def _v90b_extract_text_from_file(path: str, filename: str = "") -> str:
+    """Speicherschonende Textextraktion mit Limits.
+    Original bleibt vollständig gespeichert; nur Analyse-Text wird begrenzt.
+    """
+    p = Path(path)
+    if not p.exists():
+        return ""
+    lower = (filename or p.name).lower()
+    if lower.endswith(".pdf"):
+        try:
+            reader = PdfReader(str(p))
+            texts = []
+            for idx, page in enumerate(reader.pages):
+                if idx >= WORKFLOW_PDF_MAX_PAGES:
+                    texts.append(f"\n[Hinweis: PDF nach {WORKFLOW_PDF_MAX_PAGES} Seiten für KI-Auszug gekürzt]\n")
+                    break
+                try:
+                    texts.append(page.extract_text() or "")
+                except Exception:
+                    texts.append("")
+                if sum(len(x) for x in texts) >= WORKFLOW_TEXT_LIMIT:
+                    texts.append("\n[Hinweis: Text für KI-Auszug gekürzt]\n")
+                    break
+            return "\n".join(texts)[:WORKFLOW_TEXT_LIMIT]
+        except Exception as exc:
+            return f"PDF konnte nicht gelesen werden: {exc}"
+    try:
+        return p.read_text(encoding="utf-8", errors="replace")[:WORKFLOW_TEXT_LIMIT]
+    except Exception:
+        try:
+            return p.read_bytes()[:WORKFLOW_TEXT_LIMIT].decode("utf-8", errors="replace")
+        except Exception as exc:
+            return f"Datei konnte nicht gelesen werden: {exc}"
+
+
+def _v90b_pdf_from_text(path: Path, title: str, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(make_simple_pdf_bytes(title, _v90b_safe_text(body, 120000)))
+
+
+def _v90b_update_beleg(beleg_id: int, values: Dict[str, Any]) -> None:
+    if not values:
+        return
+    keys = list(values.keys())
+    set_sql = ", ".join([f"{k} = %s" for k in keys])
+    params = [values[k] for k in keys] + [beleg_id]
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE belege SET {set_sql} WHERE id = %s", params)
+        conn.commit()
+
+
+def _v90b_get_beleg(beleg_id: int) -> Optional[Dict[str, Any]]:
+    return get_beleg_record(beleg_id)
+
+
+def _v90b_anonymize_beleg(beleg_id: int) -> Dict[str, Any]:
+    ensure_db_extensions_v90b()
+    rec = _v90b_get_beleg(beleg_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
+
+    original_path = rec.get("original_file_path")
+    original_filename = rec.get("original_filename") or rec.get("source_filename") or f"beleg_{beleg_id}.pdf"
+    if not original_path or not os.path.exists(original_path):
+        raise HTTPException(status_code=404, detail="Originalbeleg nicht gefunden")
+
+    original_text = _v90b_extract_text_from_file(original_path, original_filename)
+    anonymized_text = anonymize_document_text(original_text)
+
+    anonymized_path = Path(os.getenv("ANONYMIZED_PDF_DIR", "uploads/anonymized_belege")) / f"beleg_{beleg_id}_anonymisiert.pdf"
+    _v90b_pdf_from_text(
+        anonymized_path,
+        f"{_v90b_beleg_nr(beleg_id)} - anonymisierter Beleg",
+        "ANONYMISIERTER BELEG VOR KI-VERSAND\n"
+        "====================================\n\n"
+        f"Beleg: {_v90b_beleg_nr(beleg_id)}\n"
+        f"Originaldatei: {original_filename}\n"
+        f"Erzeugt: {datetime.utcnow().isoformat()} UTC\n\n"
+        "--- ANONYMISIERTER TEXT ---\n\n"
+        f"{anonymized_text}"
+    )
+
+    _v90b_update_beleg(beleg_id, {
+        "workflow_status": "anonymisiert",
+        "workflow_message": "Anonymisierter Beleg erzeugt. KI-Analyse kann gestartet werden.",
+        "original_text": original_text[:120000],
+        "anonymized_text": anonymized_text[:120000],
+        "anonymized_pdf_path": str(anonymized_path),
+        "beleg_nr": _v90b_beleg_nr(beleg_id),
+    })
+
+    return {
+        "status": "ok",
+        "beleg_id": beleg_id,
+        "beleg_nr": _v90b_beleg_nr(beleg_id),
+        "workflow_status": "anonymisiert",
+        "anonymized_pdf_path": str(anonymized_path),
+    }
+
+
+def _v90b_analyze_beleg(beleg_id: int, ai_model: Optional[str] = None) -> Dict[str, Any]:
+    ensure_db_extensions_v90b()
+    rec = _v90b_get_beleg(beleg_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
+
+    anonymized_text = rec.get("anonymized_text")
+    if not anonymized_text:
+        _v90b_anonymize_beleg(beleg_id)
+        rec = _v90b_get_beleg(beleg_id)
+        anonymized_text = rec.get("anonymized_text")
+
+    filename = rec.get("original_filename") or rec.get("source_filename") or f"beleg_{beleg_id}.pdf"
+
+    _v90b_update_beleg(beleg_id, {
+        "workflow_status": "ki_laeuft",
+        "workflow_message": "KI-Analyse läuft.",
+    })
+
+    try:
+        prompt = build_json_prompt((anonymized_text or "")[:WORKFLOW_TEXT_LIMIT], filename=filename)
+        raw = call_openai_json(prompt, ai_model)
+        if isinstance(raw, dict) and raw.get("status") == "error":
+            raise RuntimeError(raw.get("detail") or "OpenAI-Analysefehler")
+        data = ensure_defaults(raw)
+        data["status"] = "ok"
+        data["version"] = APP_VERSION
+        data["generated_at_utc"] = datetime.utcnow().isoformat()
+        data["beleg_id"] = beleg_id
+        data["beleg_nr"] = _v90b_beleg_nr(beleg_id)
+    except Exception as exc:
+        err_pdf = Path(os.getenv("KI_RESPONSE_PDF_DIR", "uploads/ki_response_pdfs")) / f"beleg_{beleg_id}_ki_fehler.pdf"
+        _v90b_pdf_from_text(
+            err_pdf,
+            f"{_v90b_beleg_nr(beleg_id)} - KI Fehler",
+            f"KI-Analyse fehlgeschlagen\n\nBeleg: {_v90b_beleg_nr(beleg_id)}\nFehler: {exc}"
+        )
+        _v90b_update_beleg(beleg_id, {
+            "workflow_status": "fehler",
+            "workflow_message": f"KI-Analyse fehlgeschlagen: {exc}",
+            "ki_response_pdf_path": str(err_pdf),
+            "review_required": True,
+        })
+        return {"status": "error", "beleg_id": beleg_id, "detail": str(exc), "ki_response_pdf_path": str(err_pdf)}
+
+    # Normalisierte Dashboard-Felder aus KI-Antwort.
+    belegdatum = data.get("belegdatum") or ""
+    art = data.get("art_des_dokuments") or "Unbekannt"
+    kosten = data.get("kosten_mit_steuern") or ""
+    waehrung = data.get("waehrung_der_kosten") or ""
+    segs = data.get("reisesegmente") or []
+
+    provider = ""
+    summary = art
+    if segs and isinstance(segs[0], dict):
+        provider = segs[0].get("transportunternehmen_und_nummer") or ""
+        start = segs[0].get("abreise_ort") or ""
+        ziel = segs[-1].get("ankunft_ort") or ""
+        if art == "Hotel":
+            summary = f"Hotel · {ziel or start or provider}".strip()
+        elif start or ziel:
+            summary = f"{art} · {start} → {ziel}".strip()
+        elif provider:
+            summary = f"{art} · {provider}"
+    elif data.get("buchungsnummer_code"):
+        summary = f"{art} · {data.get('buchungsnummer_code')}"
+
+    ki_path = Path(os.getenv("KI_RESPONSE_PDF_DIR", "uploads/ki_response_pdfs")) / f"beleg_{beleg_id}_ki_response.pdf"
+    dashboard_block = (
+        "FÜR DASHBOARD ÜBERNOMMENE FELDER\n"
+        "================================\n"
+        f"BelegNr.: {_v90b_beleg_nr(beleg_id)}\n"
+        f"Art: {art}\n"
+        f"Belegdatum: {belegdatum}\n"
+        f"Anbieter/Inhalt: {summary}\n"
+        f"Kosten: {kosten} {waehrung}\n"
+        f"Review nötig: {'ja' if data.get('warnungen') else 'nein'}\n\n"
+    )
+    _v90b_pdf_from_text(
+        ki_path,
+        f"{_v90b_beleg_nr(beleg_id)} - KI Antwort",
+        dashboard_block +
+        "KI-ANTWORT JSON\n"
+        "===============\n\n" +
+        json.dumps(data, ensure_ascii=False, indent=2)
+    )
+
+    _v90b_update_beleg(beleg_id, {
+        "workflow_status": "analysiert",
+        "workflow_message": "KI-Antwort gespeichert und Dashboard-Felder übernommen.",
+        "ki_response_pdf_path": str(ki_path),
+        "analysis_json": json.dumps(data, ensure_ascii=False)[:300000],
+        "belegdatum": belegdatum,
+        "document_type": art,
+        "provider_name": provider,
+        "dashboard_summary": summary,
+        "amount_original": str(kosten or ""),
+        "currency_original": str(waehrung or ""),
+        "amount_eur": str(kosten if str(waehrung).upper() == "EUR" else ""),
+        "review_required": bool(data.get("warnungen")),
+        "art": art,
+        "kosten": kosten,
+        "waehrung": waehrung,
+    })
+
+    # Event-Zuordnung erst nach Analyse.
+    try:
+        reise_id = rec.get("reise_id")
+        if reise_id:
+            # Fingerprint für alte Duplikat-/Matchinglogik ergänzen.
+            fp = rec.get("fingerprint") or build_beleg_fingerprint(filename, data, reise_id)
+            _v90b_update_beleg(beleg_id, {"fingerprint": fp})
+            data["fingerprint"] = fp
+            attach_or_create_event_for_analysis(int(reise_id), int(beleg_id), data)
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "beleg_id": beleg_id,
+        "beleg_nr": _v90b_beleg_nr(beleg_id),
+        "workflow_status": "analysiert",
+        "ki_response_pdf_path": str(ki_path),
+        "dashboard": {
+            "art": art,
+            "belegdatum": belegdatum,
+            "summary": summary,
+            "kosten": kosten,
+            "waehrung": waehrung,
+        },
+    }
+
+
+@app.get("/init90b")
+@app.post("/init90b")
+def init90b() -> Dict[str, Any]:
+    init_db()
+    ensure_db_extensions()
+    ensure_db_extensions_v90b()
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "message": "9.0b Workflow-Spalten initialisiert. Keine Daten wurden gelöscht.",
+    }
+
+
+@app.post("/reisen/{reise_id}/upload-original")
+async def upload_original_only(reise_id: int, file: UploadFile = File(...)) -> Dict[str, Any]:
+    """9.0b: Upload speichert nur Original und legt sofort Belegzeile an."""
+    ensure_db_extensions_v90b()
+    content = await file.read()
+    max_bytes = WORKFLOW_MAX_UPLOAD_MB * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"Datei zu groß. Maximal {WORKFLOW_MAX_UPLOAD_MB} MB erlaubt.")
+
+    filename = safe_filename(file.filename or "beleg.pdf")
+    original_info = save_original_file(filename, content, file.content_type)
+    fp = hashlib.sha256(content).hexdigest()
+
+    existing_id = find_beleg_by_fingerprint(fp)
+    if existing_id:
+        return {
+            "status": "duplicate",
+            "duplicate_detected": True,
+            "existing_beleg_id": existing_id,
+            "message": "Doppelter Beleg erkannt. Original wurde nicht erneut gespeichert.",
+        }
+
+    beleg_id = insert_beleg({
+        "belegdatum": None,
+        "art": "Unbekannt",
+        "kosten": None,
+        "waehrung": None,
+    })
+
+    _v90b_update_beleg(beleg_id, {
+        "beleg_nr": _v90b_beleg_nr(beleg_id),
+        "fingerprint": fp,
+        "source_filename": filename,
+        "original_file_path": original_info.get("original_file_path"),
+        "original_filename": original_info.get("original_filename"),
+        "original_content_type": original_info.get("original_content_type"),
+        "workflow_status": "eingegangen",
+        "workflow_message": "Original gespeichert. Bitte anonymisieren oder KI-Analyse starten.",
+        "document_type": "Unbekannt",
+        "dashboard_summary": "Noch nicht analysiert",
+        "review_required": True,
+    })
+
+    # Beleg wird der Reise zugeordnet, aber noch nicht als Event erzeugt.
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # Falls belege.reise_id existiert, direkt setzen; sonst ignorieren.
+                if _v90b_column_exists("belege", "reise_id"):
+                    cur.execute("UPDATE belege SET reise_id = %s WHERE id = %s", (reise_id, beleg_id))
+            conn.commit()
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "beleg_id": beleg_id,
+        "beleg_nr": _v90b_beleg_nr(beleg_id),
+        "workflow_status": "eingegangen",
+        "message": "Original gespeichert. Beleg ist sofort sichtbar.",
+    }
+
+
+@app.post("/belege/{beleg_id}/anonymize")
+def anonymize_beleg_route(beleg_id: int) -> Dict[str, Any]:
+    return _v90b_anonymize_beleg(beleg_id)
+
+
+@app.post("/belege/{beleg_id}/run-ki")
+def run_ki_beleg_route(beleg_id: int) -> Dict[str, Any]:
+    return _v90b_analyze_beleg(beleg_id)
+
+
+@app.post("/belege/{beleg_id}/workflow-full")
+def run_full_workflow_route(beleg_id: int) -> Dict[str, Any]:
+    _v90b_anonymize_beleg(beleg_id)
+    return _v90b_analyze_beleg(beleg_id)
+
+
+@app.get("/belege/{beleg_id}/workflow")
+def get_beleg_workflow_single(beleg_id: int) -> Dict[str, Any]:
+    ensure_db_extensions_v90b()
+    rec = _v90b_get_beleg(beleg_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
+    return {
+        "id": rec.get("id"),
+        "beleg_id": rec.get("id"),
+        "beleg_nr": rec.get("beleg_nr") or _v90b_beleg_nr(beleg_id),
+        "workflow_status": rec.get("workflow_status") or "altbestand",
+        "workflow_message": rec.get("workflow_message") or "",
+        "source_filename": rec.get("source_filename") or rec.get("original_filename") or "",
+        "document_type": rec.get("document_type") or rec.get("art") or "Unbekannt",
+        "belegdatum": rec.get("belegdatum") or "",
+        "dashboard_summary": rec.get("dashboard_summary") or "",
+        "amount_original": rec.get("amount_original") or rec.get("kosten") or "",
+        "currency_original": rec.get("currency_original") or rec.get("waehrung") or "",
+        "review_required": bool(rec.get("review_required")),
+        "has_original": bool(rec.get("original_file_path")),
+        "has_anonymized": bool(rec.get("anonymized_pdf_path")),
+        "has_ki_response": bool(rec.get("ki_response_pdf_path") or rec.get("generated_pdf_path")),
+    }
+
+
+@app.get("/belege/{beleg_id}/anonymized")
+def get_beleg_anonymized_v90b(beleg_id: int):
+    rec = _v90b_get_beleg(beleg_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
+    path = rec.get("anonymized_pdf_path")
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Anonymisierter Beleg noch nicht erzeugt")
+    return FileResponse(path, media_type="application/pdf", filename=f"{_v90b_beleg_nr(beleg_id)}_anonymisiert.pdf")
+
+
+@app.get("/belege/{beleg_id}/ki-response")
+def get_beleg_ki_response_v90b(beleg_id: int):
+    rec = _v90b_get_beleg(beleg_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
+    path = rec.get("ki_response_pdf_path") or rec.get("generated_pdf_path")
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="KI-Antwort-PDF noch nicht erzeugt")
+    return FileResponse(path, media_type="application/pdf", filename=f"{_v90b_beleg_nr(beleg_id)}_ki_response.pdf")
+
