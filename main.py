@@ -1,5 +1,5 @@
 """
-# v2.0-h – File/UploadFile Import Fix
+# v2.0-i – Import fixes (_io, _re2, _base64)
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -515,7 +515,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-h"
+APP_VERSION = "2.0-i"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -623,7 +623,7 @@ def text_zu_pdf(text: str, titel: str = "Dokument") -> bytes:
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.lib.units import mm
-    buf = _io.BytesIO()
+    buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
         leftMargin=25*mm, rightMargin=25*mm,
         topMargin=25*mm, bottomMargin=25*mm)
