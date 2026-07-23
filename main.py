@@ -241,19 +241,25 @@ def get_schema() -> list[str]:
                 erstellt    TIMESTAMP DEFAULT NOW()
             )""",
             """CREATE TABLE IF NOT EXISTS reise_mitarbeiter (
-                reise_code  TEXT REFERENCES reisen(code) ON DELETE CASCADE,
-                kuerzel     TEXT REFERENCES mitarbeiter(kuerzel) ON DELETE CASCADE,
-                PRIMARY KEY (reise_code, kuerzel)
+                reise_code  TEXT NOT NULL,
+                kuerzel     TEXT NOT NULL,
+                PRIMARY KEY (reise_code, kuerzel),
+                CONSTRAINT fk_rm_reise FOREIGN KEY (reise_code)
+                    REFERENCES reisen(code) ON DELETE CASCADE,
+                CONSTRAINT fk_rm_ma FOREIGN KEY (kuerzel)
+                    REFERENCES mitarbeiter(kuerzel) ON DELETE CASCADE
             )""",
             """CREATE TABLE IF NOT EXISTS reise_laender (
                 id          SERIAL PRIMARY KEY,
-                reise_code  TEXT REFERENCES reisen(code) ON DELETE CASCADE,
+                reise_code  TEXT NOT NULL,
                 datum_von   DATE NOT NULL,
                 datum_bis   DATE NOT NULL,
                 land_code   TEXT NOT NULL,
                 land_name   TEXT NOT NULL,
                 vma_voll    NUMERIC(6,2),
-                vma_halb    NUMERIC(6,2)
+                vma_halb    NUMERIC(6,2),
+                CONSTRAINT fk_rl_reise FOREIGN KEY (reise_code)
+                    REFERENCES reisen(code) ON DELETE CASCADE
             )""",
         ]
     else:
