@@ -1,5 +1,5 @@
 """
-# v2.0-d – OpenAI Test Route
+# v2.0-e – httpx hinzugefügt, OpenAI Test
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -483,7 +483,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-d"
+APP_VERSION = "2.0-e"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -545,7 +545,9 @@ async def test_openai():
                 return {"status": "fehler", "http": resp.status_code,
                         "detail": resp.text[:200]}
     except Exception as e:
-        return {"status": "fehler", "detail": str(e)}
+        import traceback
+        return {"status": "fehler", "detail": str(e),
+                "trace": traceback.format_exc()[:500]}
 
 
 @app.get("/init")
