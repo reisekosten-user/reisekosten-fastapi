@@ -1,5 +1,5 @@
 """
-# v2.0-g – Schritt b) Upload + Beleg-Verarbeitung + Detailseite
+# v2.0-h – File/UploadFile Import Fix
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 # ── Web-Framework ──────────────────────────────────────────────────────────────
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Request, Form, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -515,7 +515,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-g"
+APP_VERSION = "2.0-h"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
