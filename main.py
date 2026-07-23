@@ -1,5 +1,5 @@
 """
-# v2.0-f – OpenAI Config aus Environment Variables
+# v2.0-g – Schritt b) Upload + Beleg-Verarbeitung + Detailseite
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -21,6 +21,13 @@ DATABASE_URL  = os.getenv("DATABASE_URL", "")
 OPENAI_KEY    = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL  = os.getenv("OPENAI_MODEL", "gpt-4o")
 OPENAI_URL    = "https://api.openai.com/v1/chat/completions"
+S3_ENDPOINT   = os.getenv("S3_ENDPOINT", "")
+S3_BUCKET     = os.getenv("S3_BUCKET", "")
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "")
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "")
+IMAP_HOST     = os.getenv("IMAP_HOST", "")
+IMAP_USER     = os.getenv("IMAP_USER", "")
+IMAP_PASS     = os.getenv("IMAP_PASS", "")
 
 def get_db():
     """
@@ -265,6 +272,28 @@ def get_schema() -> list[str]:
                 CONSTRAINT fk_rl_reise FOREIGN KEY (reise_code)
                     REFERENCES reisen(code) ON DELETE CASCADE
             )""",
+            """CREATE TABLE IF NOT EXISTS belege (
+                id              SERIAL PRIMARY KEY,
+                reise_code      TEXT REFERENCES reisen(code) ON DELETE SET NULL,
+                typ             TEXT,
+                dateiname       TEXT,
+                s3_original     TEXT,
+                s3_anon         TEXT,
+                s3_analyse      TEXT,
+                rohtext         TEXT,
+                anon_text       TEXT,
+                ki_json         TEXT,
+                ki_zusammenfassung TEXT,
+                betrag          NUMERIC(10,2),
+                waehrung        TEXT DEFAULT 'EUR',
+                belegdatum      DATE,
+                vendor          TEXT,
+                reisender       TEXT,
+                buchungscode    TEXT,
+                status          TEXT DEFAULT 'neu',
+                fehler          TEXT,
+                erstellt        TIMESTAMP DEFAULT NOW()
+            )""",
         ]
     else:
         return [
@@ -486,7 +515,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-f"
+APP_VERSION = "2.0-g"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -506,6 +535,7 @@ def shell(title: str, content: str, page: str = "") -> str:
   {nav("start", "Dashboard", "/")}
   {nav("mitarbeiter", "Mitarbeiter", "/mitarbeiter")}
   {nav("reisen", "Reisen", "/reisen")}
+  {nav("belege", "Belege", "/belege")}
   {nav("vma", "VMA-Sätze", "/vma")}
   <div class="nav-right">v{APP_VERSION}</div>
 </nav>
@@ -523,6 +553,673 @@ if not os.path.exists("static"):
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ── System-Routen ──────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCHRITT B) – BELEGE VERARBEITEN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import io, base64, re as _re
+
+def get_s3():
+    """S3/Hetzner Object Storage Client."""
+    import boto3
+    return boto3.client("s3",
+        endpoint_url=S3_ENDPOINT,
+        aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY)
+
+def s3_upload(key: str, data: bytes, content_type: str = "application/pdf") -> str:
+    """Lädt Datei zu S3 hoch. Gibt Key zurück."""
+    s3 = get_s3()
+    s3.put_object(Bucket=S3_BUCKET, Key=key, Body=data, ContentType=content_type)
+    return key
+
+def s3_download(key: str) -> bytes:
+    """Lädt Datei von S3 herunter."""
+    s3 = get_s3()
+    obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
+    return obj["Body"].read()
+
+def bild_zu_pdf(bild_bytes: bytes, dateiname: str = "bild") -> bytes:
+    """Konvertiert JPG/PNG zu PDF mit Pillow + ReportLab."""
+    from PIL import Image
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Image as RLImage
+    img = Image.open(io.BytesIO(bild_bytes))
+    # EXIF-Rotation korrigieren
+    try:
+        from PIL import ImageOps
+        img = ImageOps.exif_transpose(img)
+    except: pass
+    # Zu RGB konvertieren falls nötig
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    # Bild als JPEG in Buffer speichern
+    img_buf = io.BytesIO()
+    img.save(img_buf, format="JPEG", quality=95)
+    img_buf.seek(0)
+    # PDF erstellen
+    pdf_buf = io.BytesIO()
+    from reportlab.lib.units import mm
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    w_pt, h_pt = A4
+    img_w, img_h = img.size
+    # Skalieren auf A4 mit Rand
+    rand = 20 * mm
+    max_w = w_pt - 2 * rand
+    max_h = h_pt - 2 * rand
+    scale = min(max_w / img_w, max_h / img_h)
+    draw_w = img_w * scale
+    draw_h = img_h * scale
+    x = (w_pt - draw_w) / 2
+    y = (h_pt - draw_h) / 2
+    c_pdf = canvas.Canvas(pdf_buf, pagesize=A4)
+    c_pdf.drawImage(RLImage(img_buf), x, y, draw_w, draw_h)
+    c_pdf.save()
+    return pdf_buf.getvalue()
+
+def text_zu_pdf(text: str, titel: str = "Dokument") -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import mm
+    buf = _io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+        leftMargin=25*mm, rightMargin=25*mm,
+        topMargin=25*mm, bottomMargin=25*mm)
+    styles = getSampleStyleSheet()
+    def esc(s): return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+    story = [Paragraph(esc(titel), styles["Heading1"]), Spacer(1, 6*mm)]
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            story.append(Paragraph(esc(line), styles["Normal"]))
+        else:
+            story.append(Spacer(1, 3*mm))
+    doc.build(story)
+    return buf.getvalue()
+
+def pdf_text_lesen(pdf_bytes: bytes) -> str:
+    """Liest Text aus PDF mit pypdf."""
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        return "\n".join(p.extract_text() or "" for p in reader.pages).strip()
+    except: return ""
+
+def anonymisieren(text: str, ma_namen: list, ma_mails: list) -> str:
+    """
+    Schwärzt personenbezogene Daten:
+    - Mitarbeiternamen → Max Mustermann
+    - E-Mail-Adressen → max.mustermann@beispiel.de
+    - Herrhammer (alle Varianten) → Musterfirma GmbH
+    - Telefonnummern die mit +49 beginnen oder 0xxx Muster → 000/000000
+    """
+    result = text
+
+    # 1. Mitarbeiternamen (Vor- und Nachname, case-insensitive)
+    for name in ma_namen:
+        if not name or len(name) < 3: continue
+        # Ganzen Namen
+        result = _re.sub(_re.escape(name), "Max Mustermann", result, flags=_re.IGNORECASE)
+        # Auch Teile (Nachname allein)
+        parts = name.split()
+        for part in parts:
+            if len(part) > 3:
+                result = _re.sub(r"\b" + _re.escape(part) + r"\b",
+                                 "Mustermann", result, flags=_re.IGNORECASE)
+
+    # 2. E-Mail-Adressen
+    result = _re.sub(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
+                     "max.mustermann@beispiel.de", result)
+
+    # 3. Herrhammer und Varianten
+    herrhammer_pattern = r"\b[Hh]err\s*[Hh]ammer\b|\bHERRHAMMER\b"
+    result = _re.sub(herrhammer_pattern, "Musterfirma", result)
+    result = _re.sub(r"Musterfirma\s+GmbH", "Musterfirma GmbH", result)
+    result = _re.sub(r"Musterfirma(?!\s+GmbH)", "Musterfirma GmbH", result)
+
+    # 4. Telefonnummern (deutsche Muster)
+    result = _re.sub(r"\+49[\s\-./]?[\d\s\-./]{7,15}", "000/000000", result)
+    result = _re.sub(r"\b0\d{3,5}[\s\-./]?\d{4,8}\b", "000/000000", result)
+
+    return result
+
+async def gpt_analyse(pdf_bytes: bytes, dateiname: str = "") -> dict:
+    """
+    Sendet PDF/Bild an GPT-4o zur Analyse.
+    Gibt strukturiertes JSON zurück.
+    """
+    if not OPENAI_KEY:
+        return {"fehler": "OPENAI_API_KEY nicht gesetzt"}
+
+    # PDF zu Base64
+    b64 = base64.b64encode(pdf_bytes).decode()
+
+    prompt = (
+        "Analysiere dieses Dokument (Reisebeleg) und antworte NUR mit einem JSON-Objekt.\n"
+        "Kein Text davor oder danach.\n\n"
+        "JSON-Format (fehlende Felder = null):\n"
+        "{\"belegdatum\": \"DD.MM.YYYY\"," 
+        "\"dokumenttyp\": \"Flug|Hotel|Bahn|Taxi|Mietwagen|Bewirtung|Tanken|Sonstiges\"," 
+        "\"buchungscode\": \"PNR oder Bestätigungsnummer\"," 
+        "\"reisender\": \"Name\"," 
+        "\"ticketnummer\": \"Ticketnummer\"," 
+        "\"vendor\": \"Anbieter\"," 
+        "\"betrag\": 123.45," 
+        "\"waehrung\": \"EUR\"," 
+        "\"hotel_checkin\": \"DD.MM.YYYY\"," 
+        "\"hotel_checkout\": \"DD.MM.YYYY\"," 
+        "\"hotel_naechte\": 2," 
+        "\"segmente\": [{"
+        "\"nr\": 1,"
+        "\"abreise_datum\": \"DD.MM.YYYY\"," 
+        "\"abreise_zeit\": \"HH:MM\"," 
+        "\"abreise_zeitzone\": \"MEZ\"," 
+        "\"ankunft_datum\": \"DD.MM.YYYY\"," 
+        "\"ankunft_zeit\": \"HH:MM\"," 
+        "\"ankunft_zeitzone\": \"MEZ\"," 
+        "\"von_ort\": \"Stadtname\"," 
+        "\"von_iata\": \"FRA\"," 
+        "\"nach_ort\": \"Stadtname\"," 
+        "\"nach_iata\": \"LYS\"," 
+        "\"transport_name\": \"Lufthansa\"," 
+        "\"transport_nummer\": \"LH3463\"," 
+        "\"klasse\": \"Economy\"," 
+        "\"hinweis\": \"operated by X\"}]}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                OPENAI_URL,
+                headers={"Authorization": f"Bearer {OPENAI_KEY}",
+                         "Content-Type": "application/json"},
+                json={"model": OPENAI_MODEL,
+                      "messages": [{
+                          "role": "user",
+                          "content": [
+                              {"type": "text", "text": prompt},
+                              {"type": "image_url",
+                               "image_url": {
+                                   "url": f"data:application/pdf;base64,{b64}",
+                                   "detail": "high"
+                               }}
+                          ]
+                      }],
+                      "max_tokens": 2000})
+
+            if resp.status_code != 200:
+                return {"fehler": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+            # JSON aus Antwort extrahieren
+            m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+            if m:
+                return json.loads(m.group(0))
+            return {"fehler": "Kein JSON in Antwort", "raw": raw[:200]}
+    except Exception as e:
+        import traceback
+        return {"fehler": str(e), "trace": traceback.format_exc()[:300]}
+
+def lade_ma_daten() -> tuple[list, list]:
+    """Lädt Mitarbeiternamen und E-Mails für Anonymisierung."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT klarname FROM mitarbeiter")
+        namen = [r[0] if isinstance(r, tuple) else r["klarname"] for r in cur.fetchall()]
+        cur.close(); db.close()
+        # E-Mails: aus IMAP_USER ableiten + typische Muster
+        mails = []
+        if IMAP_USER: mails.append(IMAP_USER)
+        return namen, mails
+    except: return [], []
+
+async def beleg_verarbeiten(
+    datei_bytes: bytes,
+    dateiname: str,
+    reise_code: str | None,
+    content_type: str = "application/pdf"
+) -> dict:
+    """
+    Komplette Beleg-Pipeline:
+    1. Zu PDF konvertieren
+    2. Anonymisieren
+    3. GPT-4o Analyse
+    4. S3 speichern
+    5. DB-Eintrag
+    Gibt beleg_id zurück.
+    """
+    import uuid
+    beleg_id_temp = str(uuid.uuid4())[:8]
+
+    # 1. Zu PDF konvertieren
+    if content_type in ("image/jpeg", "image/jpg", "image/png", "image/heic"):
+        original_pdf = bild_zu_pdf(datei_bytes, dateiname)
+    elif content_type == "application/pdf":
+        original_pdf = datei_bytes
+    else:
+        # Text/Mail → PDF
+        text = datei_bytes.decode(errors="ignore")
+        original_pdf = text_zu_pdf(text, dateiname)
+
+    # 2. Text aus PDF lesen
+    rohtext = pdf_text_lesen(original_pdf)
+
+    # 3. Anonymisieren
+    ma_namen, ma_mails = lade_ma_daten()
+    anon_text = anonymisieren(rohtext, ma_namen, ma_mails)
+    anon_pdf = text_zu_pdf(anon_text, f"Anonymisiert: {dateiname}")
+
+    # 4. GPT-4o Analyse
+    ki_result = await gpt_analyse(original_pdf, dateiname)
+    ki_json_str = json.dumps(ki_result, ensure_ascii=False)
+
+    # Zusammenfassung aus KI-Ergebnis
+    if "fehler" not in ki_result:
+        typ = ki_result.get("dokumenttyp", "Sonstiges")
+        vendor = ki_result.get("vendor", "")
+        betrag = ki_result.get("betrag")
+        waehrung = ki_result.get("waehrung", "EUR")
+        zusammenfassung = f"{typ}: {vendor} – {betrag} {waehrung}" if betrag else f"{typ}: {vendor}"
+    else:
+        zusammenfassung = f"Fehler: {ki_result.get('fehler','')}"
+
+    # Analyse-PDF erstellen
+    analyse_text = f"KI-Analyse: {dateiname}\n\n{zusammenfassung}\n\n" + ki_json_str
+    analyse_pdf = text_zu_pdf(analyse_text, f"Analyse: {dateiname}")
+
+    # 5. S3 Upload
+    prefix = f"belege/{reise_code or 'unzugeordnet'}/{beleg_id_temp}"
+    s3_original = s3_upload(f"{prefix}/original.pdf", original_pdf)
+    s3_anon     = s3_upload(f"{prefix}/anon.pdf", anon_pdf)
+    s3_analyse  = s3_upload(f"{prefix}/analyse.pdf", analyse_pdf)
+
+    # 6. DB-Eintrag
+    P = ph()
+    belegdatum = None
+    if ki_result.get("belegdatum"):
+        try:
+            from datetime import datetime
+            belegdatum = datetime.strptime(ki_result["belegdatum"], "%d.%m.%Y").date()
+        except: pass
+
+    betrag_db = None
+    try: betrag_db = float(ki_result.get("betrag") or 0) or None
+    except: pass
+
+    db = get_db(); cur = db.cursor()
+    cur.execute(f"""INSERT INTO belege
+        (reise_code, typ, dateiname, s3_original, s3_anon, s3_analyse,
+         rohtext, anon_text, ki_json, ki_zusammenfassung,
+         betrag, waehrung, belegdatum, vendor, reisender,
+         buchungscode, status)
+        VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})
+        RETURNING id""" if is_postgres() else f"""INSERT INTO belege
+        (reise_code, typ, dateiname, s3_original, s3_anon, s3_analyse,
+         rohtext, anon_text, ki_json, ki_zusammenfassung,
+         betrag, waehrung, belegdatum, vendor, reisender,
+         buchungscode, status)
+        VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})""",
+        (reise_code, ki_result.get("dokumenttyp","Sonstiges"),
+         dateiname, s3_original, s3_anon, s3_analyse,
+         rohtext[:50000] if rohtext else None,
+         anon_text[:50000] if anon_text else None,
+         ki_json_str, zusammenfassung,
+         betrag_db, ki_result.get("waehrung","EUR"),
+         belegdatum, ki_result.get("vendor"),
+         ki_result.get("reisender"), ki_result.get("buchungscode"),
+         "ok" if "fehler" not in ki_result else "fehler"))
+
+    if is_postgres():
+        beleg_id = cur.fetchone()[0]
+    else:
+        beleg_id = cur.lastrowid
+
+    db.commit(); cur.close(); db.close()
+    return {"beleg_id": beleg_id, "zusammenfassung": zusammenfassung,
+            "ki": ki_result, "s3_original": s3_original}
+
+
+
+# ── Beleg hochladen (Web) ──────────────────────────────────────────────────────
+@app.get("/beleg/upload", response_class=HTMLResponse)
+def beleg_upload_form():
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT code, titel, abreise FROM reisen ORDER BY abreise DESC")
+        reisen = cur.fetchall()
+        cur.close(); db.close()
+    except: reisen = []
+
+    def get(r,k,i): return r[k] if hasattr(r,'keys') else r[i]
+
+    opts = '<option value="">– Reise wählen (optional) –</option>'
+    for r in reisen:
+        code = get(r,"code",0); titel = get(r,"titel",1); ab = get(r,"abreise",2)
+        opts += f'<option value="{code}">{code} – {titel} ({fmt_date(ab)})</option>'
+
+    content = f"""
+    <h1 class="page-title">Beleg hochladen</h1>
+    <div class="card" style="max-width:560px">
+      <div class="card-body">
+        <div class="alert alert-warn" style="margin-bottom:20px">
+          Der Beleg wird automatisch:<br>
+          1. Zu PDF konvertiert (bei Foto/Bild)<br>
+          2. Anonymisiert (Namen, E-Mails, Herrhammer)<br>
+          3. Von GPT-4o analysiert (Typ, Betrag, Datum, Segmente)
+        </div>
+        <form method="post" action="/beleg/upload" enctype="multipart/form-data">
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Reise zuordnen</label>
+              <select name="reise_code" class="sel">{opts}</select>
+              <div class="form-hint">Oder leer lassen und später zuordnen</div>
+            </div>
+            <div class="form-group">
+              <label>Datei <span class="required">*</span></label>
+              <input type="file" name="datei" required
+                     accept=".pdf,.jpg,.jpeg,.png,.heic,.webp"
+                     style="width:100%;padding:8px;border:1px solid var(--border);
+                            border-radius:var(--radius-s);background:white">
+              <div class="form-hint">PDF, JPG, PNG, HEIC, WebP</div>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">
+              Hochladen & Analysieren
+            </button>
+            <a href="/belege" class="btn btn-secondary">Abbrechen</a>
+          </div>
+        </form>
+      </div>
+    </div>"""
+    return HTMLResponse(shell("Beleg hochladen", content))
+
+@app.post("/beleg/upload")
+async def beleg_upload(request: Request,
+                       datei: UploadFile = File(...),
+                       reise_code: str = Form("")):
+    try:
+        datei_bytes = await datei.read()
+        ct = datei.content_type or "application/octet-stream"
+        rc = reise_code.strip() or None
+
+        result = await beleg_verarbeiten(datei_bytes, datei.filename or "upload", rc, ct)
+        return RedirectResponse(f"/beleg/{result['beleg_id']}", status_code=303)
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err"><b>Fehler:</b> {e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:500]}</pre>'
+            '<a href="/beleg/upload" class="btn btn-secondary">Zurück</a>'))
+
+# ── Beleg Detailseite ──────────────────────────────────────────────────────────
+@app.get("/beleg/{bid}", response_class=HTMLResponse)
+def beleg_detail(bid: int):
+    try:
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(f"""SELECT id,reise_code,typ,dateiname,s3_original,s3_anon,s3_analyse,
+            rohtext,anon_text,ki_json,ki_zusammenfassung,betrag,waehrung,
+            belegdatum,vendor,reisender,buchungscode,status,fehler,erstellt
+            FROM belege WHERE id={P}""", (bid,))
+        r = cur.fetchone()
+        # Reisen für Zuordnung
+        cur.execute("SELECT code,titel FROM reisen ORDER BY abreise DESC")
+        reisen = cur.fetchall()
+        cur.close(); db.close()
+        if not r:
+            return HTMLResponse(shell("Fehler",'<div class="alert alert-err">Beleg nicht gefunden.</div>'))
+
+        def get(row,k,i): return row[k] if hasattr(row,'keys') else row[i]
+        bid2=get(r,"id",0); rcode=get(r,"reise_code",1); typ=get(r,"typ",2)
+        dateiname=get(r,"dateiname",3); s3o=get(r,"s3_original",4)
+        s3a=get(r,"s3_anon",5); s3an=get(r,"s3_analyse",6)
+        rohtext=get(r,"rohtext",7); anon_text=get(r,"anon_text",8)
+        ki_json_str=get(r,"ki_json",9); zusammenfassung=get(r,"ki_zusammenfassung",10)
+        betrag=get(r,"betrag",11); waehrung=get(r,"waehrung",12)
+        belegdatum=get(r,"belegdatum",13); vendor=get(r,"vendor",14)
+        reisender=get(r,"reisender",15); buchungscode=get(r,"buchungscode",16)
+        status=get(r,"status",17); fehler=get(r,"fehler",18)
+        erstellt=get(r,"erstellt",19)
+
+        # KI-JSON parsen
+        ki = {}
+        try: ki = json.loads(ki_json_str or "{}")
+        except: pass
+
+        segmente = ki.get("segmente") or []
+
+        # Typ-Badge
+        typ_farben = {
+            "Flug":"#dbeafe:#1e40af","Hotel":"#dcfce7:#166534",
+            "Bahn":"#e0e7ff:#3730a3","Taxi":"#fef3c7:#92400e",
+            "Mietwagen":"#fce7f3:#9d174d","Bewirtung":"#fff7ed:#9a3412",
+            "Tanken":"#f0fdf4:#14532d","Sonstiges":"#f1f5f9:#475569"
+        }
+        tc = typ_farben.get(typ or "Sonstiges","#f1f5f9:#475569").split(":")
+        typ_badge = (f'<span style="background:{tc[0]};color:{tc[1]};'
+                     f'padding:3px 10px;border-radius:4px;font-size:12px;'
+                     f'font-weight:700">{typ}</span>')
+
+        # Segmente Tabelle
+        seg_html = ""
+        if segmente:
+            rows = ""
+            for s in segmente:
+                ab_tz = s.get("abreise_zeitzone","") or ""
+                an_tz = s.get("ankunft_zeitzone","") or ""
+                rows += (f'<tr>'
+                    f'<td style="text-align:center;color:var(--muted)">{s.get("nr","")}</td>'
+                    f'<td style="font-weight:700;color:var(--blue);font-family:monospace">'
+                    f'{s.get("transport_name","")}&nbsp;{s.get("transport_nummer","")}</td>'
+                    f'<td><b>{s.get("von_iata","")}</b><br>'
+                    f'<span style="font-size:11px;color:var(--muted)">{s.get("von_ort","")}</span></td>'
+                    f'<td style="color:var(--muted)">→</td>'
+                    f'<td><b>{s.get("nach_iata","")}</b><br>'
+                    f'<span style="font-size:11px;color:var(--muted)">{s.get("nach_ort","")}</span></td>'
+                    f'<td style="font-family:monospace;white-space:nowrap">'
+                    f'{s.get("abreise_datum","")}<br>'
+                    f'<span style="color:var(--blue)">{s.get("abreise_zeit","")} {ab_tz}</span></td>'
+                    f'<td style="font-family:monospace;white-space:nowrap">'
+                    f'{s.get("ankunft_datum","") or s.get("abreise_datum","")}<br>'
+                    f'<span style="color:var(--green)">{s.get("ankunft_zeit","")} {an_tz}</span></td>'
+                    f'<td style="font-size:11px;color:var(--muted)">{s.get("klasse","")}</td>'
+                    f'<td style="font-size:11px;color:var(--light)">{s.get("hinweis","") or ""}</td>'
+                    f'</tr>')
+            seg_html = (f'<div class="card" style="margin-top:16px">'
+                f'<div class="card-header"><span class="card-title">'
+                f'✈ Reisesegmente ({len(segmente)})</span></div>'
+                f'<div class="table-wrap"><table>'
+                f'<thead><tr><th>#</th><th>Transport</th><th>Von</th><th></th><th>Nach</th>'
+                f'<th>Abflug</th><th>Ankunft</th><th>Klasse</th><th>Hinweis</th></tr></thead>'
+                f'<tbody>{rows}</tbody></table></div></div>')
+
+        # Reise-Dropdown
+        r_opts = '<option value="">– Keine –</option>'
+        for rv in reisen:
+            rc2 = rv[0] if isinstance(rv,tuple) else rv["code"]
+            rt2 = rv[1] if isinstance(rv,tuple) else rv["titel"]
+            sel = ' selected' if rc2==rcode else ""
+            r_opts += f'<option value="{rc2}"{sel}>{rc2} – {rt2}</option>'
+
+        status_badge = ('<span class="badge badge-green">OK</span>' if status=="ok"
+                        else '<span class="badge badge-red">Fehler</span>' if status=="fehler"
+                        else '<span class="badge badge-amber">Ausstehend</span>')
+
+        content = f"""
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
+          <a href="/belege" class="btn btn-secondary">← Belege</a>
+          <h1 class="page-title" style="margin:0">Beleg #{bid2}</h1>
+          {typ_badge}
+          {status_badge}
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div class="card">
+            <div class="card-header"><span class="card-title">📊 KI-Analyse</span></div>
+            <div class="card-body">
+              <dl style="display:grid;grid-template-columns:140px 1fr;gap:4px 12px">
+                <dt style="color:var(--muted);font-size:12px">Datei</dt>
+                <dd style="font-size:13px">{dateiname}</dd>
+                <dt style="color:var(--muted);font-size:12px">Typ</dt>
+                <dd>{typ_badge}</dd>
+                <dt style="color:var(--muted);font-size:12px">Anbieter</dt>
+                <dd style="font-weight:600">{vendor or "–"}</dd>
+                <dt style="color:var(--muted);font-size:12px">Reisender</dt>
+                <dd>{reisender or "–"}</dd>
+                <dt style="color:var(--muted);font-size:12px">Betrag</dt>
+                <dd style="font-weight:700;color:var(--green);font-size:15px">
+                  {f"{float(betrag):.2f}" if betrag else "–"} {waehrung if betrag else ""}</dd>
+                <dt style="color:var(--muted);font-size:12px">Belegdatum</dt>
+                <dd>{fmt_date(belegdatum)}</dd>
+                <dt style="color:var(--muted);font-size:12px">Buchungscode</dt>
+                <dd style="font-family:monospace">{buchungscode or "–"}</dd>
+                {'<dt style="color:var(--muted);font-size:12px">Hotel Check-in</dt><dd>' + str(ki.get("hotel_checkin","–")) + '</dd>' if ki.get("hotel_checkin") else ""}
+                {'<dt style="color:var(--muted);font-size:12px">Hotel Check-out</dt><dd>' + str(ki.get("hotel_checkout","–")) + '</dd>' if ki.get("hotel_checkout") else ""}
+                {'<dt style="color:var(--muted);font-size:12px">Nächte</dt><dd>' + str(ki.get("hotel_naechte","")) + '</dd>' if ki.get("hotel_naechte") else ""}
+              </dl>
+              {"<div class='alert alert-err' style='margin-top:12px'>" + str(fehler) + "</div>" if fehler else ""}
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header"><span class="card-title">📎 Dokumente</span></div>
+            <div class="card-body">
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <a href="/beleg/{bid2}/pdf/original" target="_blank"
+                   class="btn btn-secondary">📄 Original-PDF öffnen</a>
+                <a href="/beleg/{bid2}/pdf/anon" target="_blank"
+                   class="btn btn-secondary">🔒 Anonymisiert öffnen</a>
+                <a href="/beleg/{bid2}/pdf/analyse" target="_blank"
+                   class="btn btn-secondary">🔍 Analyse-PDF öffnen</a>
+              </div>
+              <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+              <form method="post" action="/beleg/{bid2}/zuordnen">
+                <div class="form-group">
+                  <label>Reise zuordnen</label>
+                  <select name="reise_code">{r_opts}</select>
+                </div>
+                <button type="submit" class="btn btn-primary" style="margin-top:8px;width:100%">
+                  Speichern
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+
+        {seg_html}
+
+        <div class="card" style="margin-top:16px">
+          <div class="card-header"><span class="card-title">📄 Rohtext (original)</span></div>
+          <div class="card-body">
+            <pre style="font-size:11px;white-space:pre-wrap;color:var(--muted);
+                        max-height:200px;overflow-y:auto;background:var(--bg);
+                        padding:12px;border-radius:var(--radius-s)">{(rohtext or "").replace("<","&lt;")[:3000]}</pre>
+          </div>
+        </div>"""
+        return HTMLResponse(shell(f"Beleg #{bid2}", content))
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:400]}</pre>'))
+
+@app.post("/beleg/{bid}/zuordnen")
+async def beleg_zuordnen(bid: int, request: Request):
+    form = await request.form()
+    rcode = (form.get("reise_code") or "").strip() or None
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"UPDATE belege SET reise_code={P} WHERE id={P}", (rcode, bid))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.get("/beleg/{bid}/pdf/{typ}")
+def beleg_pdf(bid: int, typ: str):
+    """Liefert Original-, Anon- oder Analyse-PDF aus S3."""
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT s3_original,s3_anon,s3_analyse FROM belege WHERE id={P}", (bid,))
+        r = cur.fetchone()
+        cur.close(); db.close()
+        if not r: return JSONResponse({"fehler": "Nicht gefunden"}, status_code=404)
+        def get(row,k,i): return row[k] if hasattr(row,'keys') else row[i]
+        keys = {"original": get(r,"s3_original",0),
+                "anon": get(r,"s3_anon",1),
+                "analyse": get(r,"s3_analyse",2)}
+        key = keys.get(typ)
+        if not key: return JSONResponse({"fehler": "Ungültiger Typ"}, status_code=400)
+        from fastapi.responses import Response
+        data = s3_download(key)
+        return Response(content=data, media_type="application/pdf",
+                        headers={"Content-Disposition": f"inline; filename=beleg_{bid}_{typ}.pdf"})
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
+@app.get("/belege", response_class=HTMLResponse)
+def belege_liste():
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("""SELECT b.id, b.reise_code, b.typ, b.vendor, b.betrag, b.waehrung,
+            b.belegdatum, b.status, b.dateiname, b.ki_zusammenfassung
+            FROM belege b ORDER BY b.erstellt DESC LIMIT 100""")
+        rows = cur.fetchall()
+        cur.close(); db.close()
+
+        def get(r,k,i): return r[k] if hasattr(r,'keys') else r[i]
+
+        typ_farben = {
+            "Flug":"badge-blue","Hotel":"badge-green","Bahn":"badge-blue",
+            "Taxi":"badge-amber","Mietwagen":"badge-red","Sonstiges":"badge-gray"
+        }
+        zeilen = ""
+        for r in rows:
+            bid=get(r,"id",0); rcode=get(r,"reise_code",1); typ=get(r,"typ",2)
+            vendor=get(r,"vendor",3); betrag=get(r,"betrag",4); waehrung=get(r,"waehrung",5)
+            bd=get(r,"belegdatum",6); status=get(r,"status",7)
+            datei=get(r,"dateiname",8); zusamm=get(r,"ki_zusammenfassung",9)
+            bc = typ_farben.get(typ or "","badge-gray")
+            bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
+            stat_b = ('<span class="badge badge-green">✓</span>' if status=="ok"
+                      else '<span class="badge badge-red">✗</span>' if status=="fehler"
+                      else '<span class="badge badge-amber">…</span>')
+            zeilen += (f'<tr>'
+                f'<td><a href="/beleg/{bid}" style="color:var(--blue);font-weight:600">#{bid}</a></td>'
+                f'<td><span class="badge {bc}">{typ or "?"}</span></td>'
+                f'<td style="font-weight:500">{vendor or datei[:30]}</td>'
+                f'<td style="font-weight:600;color:var(--green)">{bet_s}</td>'
+                f'<td>{fmt_date(bd)}</td>'
+                f'<td style="font-family:monospace;font-size:12px;color:var(--blue)">{rcode or "–"}</td>'
+                f'<td>{stat_b}</td>'
+                f'<td><a href="/beleg/{bid}" class="btn btn-secondary btn-sm">Detail</a></td>'
+                f'</tr>')
+
+        content = f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+          <h1 class="page-title" style="margin:0">Belege ({len(rows)})</h1>
+          <a href="/beleg/upload" class="btn btn-primary">+ Beleg hochladen</a>
+        </div>
+        <div class="card">
+          <div class="table-wrap"><table>
+            <thead><tr>
+              <th>#</th><th>Typ</th><th>Anbieter</th><th>Betrag</th>
+              <th>Datum</th><th>Reise</th><th>Status</th><th></th>
+            </tr></thead>
+            <tbody>
+              {zeilen or '<tr><td colspan="8"><div class="empty-state">Noch keine Belege – <a href="/beleg/upload">Ersten Beleg hochladen</a></div></td></tr>'}
+            </tbody>
+          </table></div>
+        </div>"""
+        return HTMLResponse(shell("Belege", content))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
 @app.get("/test-openai")
 async def test_openai():
     """Testet die OpenAI API-Verbindung."""
