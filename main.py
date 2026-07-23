@@ -482,7 +482,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-c"
+APP_VERSION = "2.0-d"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -519,6 +519,34 @@ if not os.path.exists("static"):
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ── System-Routen ──────────────────────────────────────────────────────────────
+@app.get("/test-openai")
+async def test_openai():
+    """Testet die OpenAI API-Verbindung."""
+    import httpx, os
+    key = os.getenv("OPENAI_API_KEY", "")
+    if not key:
+        return {"status": "fehler", "detail": "OPENAI_API_KEY nicht gesetzt"}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json"},
+                json={"model": "gpt-4o-mini",
+                      "messages": [{"role": "user",
+                                    "content": "Antworte nur mit: OK"}],
+                      "max_tokens": 5})
+            if resp.status_code == 200:
+                antwort = resp.json()["choices"][0]["message"]["content"]
+                return {"status": "ok", "antwort": antwort,
+                        "modell": "gpt-4o-mini"}
+            else:
+                return {"status": "fehler", "http": resp.status_code,
+                        "detail": resp.text[:200]}
+    except Exception as e:
+        return {"status": "fehler", "detail": str(e)}
+
+
 @app.get("/init")
 def init():
     """Legt Tabellen an. Bestehende Tabellen werden NICHT gelöscht."""
