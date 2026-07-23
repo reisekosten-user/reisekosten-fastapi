@@ -1,14 +1,11 @@
 services:
   - type: web
-    name: reisekosten-app
-    env: python
+    name: reisekosten-eu
+    runtime: python
     plan: free
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn main:app --host 0.0.0.0 --port 10000"
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: MISTRAL_API_KEY
-        sync: false
-      - key: MISTRAL_MODEL
-        value: mistral-large-latest
-      - key: REQUEST_TIMEOUT_SECONDS
-        value: "180"
+      - key: PYTHON_VERSION
+        value: 3.11.0

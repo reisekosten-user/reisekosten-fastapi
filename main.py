@@ -1,2791 +1,1589 @@
+"""
+Herrhammer Reisekosten – Schritt a)
+Mitarbeiter- und Reiseverwaltung
+
+Läuft auf Render (PostgreSQL) und lokal (SQLite).
+Datenbank wird automatisch erkannt via DATABASE_URL.
+"""
 from __future__ import annotations
+import os, re, json
+from datetime import date, datetime, timedelta
+from typing import Optional
 
-import email
-import hashlib
-import imaplib
-import json
-import mimetypes
-import os
-import re
-import uuid
-import threading
-from datetime import datetime, date, timedelta
-from io import BytesIO
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+# ── Web-Framework ──────────────────────────────────────────────────────────────
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from openai import OpenAI
-from pydantic import BaseModel
-from pypdf import PdfReader
 
-from database import (
-    attach_beleg_to_event,
-    create_event,
-    create_mitarbeiter,
-    create_reise,
-    db_ping,
-    get_conn,
-    get_event_detail,
-    get_next_reise_code,
-    get_reise_detail,
-    init_db,
-    insert_beleg,
-    list_belege,
-    list_mitarbeiter,
-    list_reisen,
-    search_mitarbeiter,
-    update_event_status,
-    update_mitarbeiter,
-)
+# ── Datenbank ──────────────────────────────────────────────────────────────────
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-APP_VERSION = "9.0b"
+def get_db():
+    """
+    Gibt eine DB-Verbindung zurück.
+    PostgreSQL wenn DATABASE_URL gesetzt, sonst SQLite lokal.
+    """
+    if DATABASE_URL:
+        import psycopg2
+        return psycopg2.connect(DATABASE_URL)
+    else:
+        import sqlite3
+        conn = sqlite3.connect("reisekosten.db", check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
 
-AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
+def is_postgres() -> bool:
+    return bool(DATABASE_URL)
 
-IMAP_HOST = os.getenv("IMAP_HOST")
-IMAP_USER = os.getenv("IMAP_USER")
-IMAP_PASS = os.getenv("IMAP_PASS")
+def ph() -> str:
+    """Placeholder: %s für PostgreSQL, ? für SQLite."""
+    return "%s" if is_postgres() else "?"
 
-ORIGINAL_UPLOAD_DIR = Path(os.getenv("ORIGINAL_UPLOAD_DIR", "uploads/original_belege"))
-ORIGINAL_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+# ── VMA-Tagessätze 2026 (§ 9 Abs. 4a EStG) ────────────────────────────────────
+# Quelle: BMF-Schreiben Auslandsreisekosten 2024 (gilt weiter für 2026)
+VMA_SAETZE: dict[str, dict] = {
+    "DE": {"name": "Deutschland",        "voll": 28.00,  "halb": 14.00},
+    "FR": {"name": "Frankreich",         "voll": 53.00,  "halb": 26.50},
+    "CH": {"name": "Schweiz",            "voll": 82.00,  "halb": 41.00},
+    "AT": {"name": "Österreich",         "voll": 50.00,  "halb": 25.00},
+    "GB": {"name": "Großbritannien",     "voll": 53.00,  "halb": 26.50},
+    "IT": {"name": "Italien",            "voll": 48.00,  "halb": 24.00},
+    "ES": {"name": "Spanien",            "voll": 45.00,  "halb": 22.50},
+    "NL": {"name": "Niederlande",        "voll": 48.00,  "halb": 24.00},
+    "BE": {"name": "Belgien",            "voll": 48.00,  "halb": 24.00},
+    "PL": {"name": "Polen",              "voll": 45.00,  "halb": 22.50},
+    "CZ": {"name": "Tschechien",         "voll": 45.00,  "halb": 22.50},
+    "SE": {"name": "Schweden",           "voll": 55.00,  "halb": 27.50},
+    "NO": {"name": "Norwegen",           "voll": 72.00,  "halb": 36.00},
+    "DK": {"name": "Dänemark",           "voll": 58.00,  "halb": 29.00},
+    "FI": {"name": "Finnland",           "voll": 53.00,  "halb": 26.50},
+    "PT": {"name": "Portugal",           "voll": 45.00,  "halb": 22.50},
+    "GR": {"name": "Griechenland",       "voll": 45.00,  "halb": 22.50},
+    "TR": {"name": "Türkei",             "voll": 45.00,  "halb": 22.50},
+    "US": {"name": "USA",                "voll": 59.00,  "halb": 29.50},
+    "CA": {"name": "Kanada",             "voll": 55.00,  "halb": 27.50},
+    "JP": {"name": "Japan",              "voll": 73.00,  "halb": 36.50},
+    "CN": {"name": "China",              "voll": 53.00,  "halb": 26.50},
+    "SG": {"name": "Singapur",           "voll": 60.00,  "halb": 30.00},
+    "IN": {"name": "Indien",             "voll": 40.00,  "halb": 20.00},
+    "AE": {"name": "VAE / Dubai",        "voll": 53.00,  "halb": 26.50},
+    "QA": {"name": "Katar",              "voll": 50.00,  "halb": 25.00},
+    "AU": {"name": "Australien",         "voll": 65.00,  "halb": 32.50},
+    "BR": {"name": "Brasilien",          "voll": 46.00,  "halb": 23.00},
+    "MX": {"name": "Mexiko",             "voll": 46.00,  "halb": 23.00},
+    "AR": {"name": "Argentinien",        "voll": 45.00,  "halb": 22.50},
+    "ZA": {"name": "Südafrika",          "voll": 40.00,  "halb": 20.00},
+    "CR": {"name": "Costa Rica",         "voll": 40.00,  "halb": 20.00},
+    "PA": {"name": "Panama",             "voll": 45.00,  "halb": 22.50},
+    "CO": {"name": "Kolumbien",          "voll": 40.00,  "halb": 20.00},
+    "CL": {"name": "Chile",              "voll": 45.00,  "halb": 22.50},
+    "KR": {"name": "Südkorea",           "voll": 55.00,  "halb": 27.50},
+    "TH": {"name": "Thailand",           "voll": 40.00,  "halb": 20.00},
+    "ID": {"name": "Indonesien",         "voll": 40.00,  "halb": 20.00},
+    "MY": {"name": "Malaysia",           "voll": 40.00,  "halb": 20.00},
+    "HK": {"name": "Hongkong",           "voll": 67.00,  "halb": 33.50},
+    "IL": {"name": "Israel",             "voll": 55.00,  "halb": 27.50},
+    "RU": {"name": "Russland",           "voll": 45.00,  "halb": 22.50},
+    "UA": {"name": "Ukraine",            "voll": 35.00,  "halb": 17.50},
+    "HU": {"name": "Ungarn",             "voll": 40.00,  "halb": 20.00},
+    "RO": {"name": "Rumänien",           "voll": 35.00,  "halb": 17.50},
+    "HR": {"name": "Kroatien",           "voll": 45.00,  "halb": 22.50},
+    "SK": {"name": "Slowakei",           "voll": 40.00,  "halb": 20.00},
+    "SI": {"name": "Slowenien",          "voll": 45.00,  "halb": 22.50},
+    "BG": {"name": "Bulgarien",          "voll": 35.00,  "halb": 17.50},
+    "RS": {"name": "Serbien",            "voll": 35.00,  "halb": 17.50},
+    "EG": {"name": "Ägypten",            "voll": 35.00,  "halb": 17.50},
+    "MA": {"name": "Marokko",            "voll": 35.00,  "halb": 17.50},
+    "NG": {"name": "Nigeria",            "voll": 40.00,  "halb": 20.00},
+    "KE": {"name": "Kenia",              "voll": 35.00,  "halb": 17.50},
+    "PH": {"name": "Philippinen",        "voll": 37.00,  "halb": 18.50},
+    "VN": {"name": "Vietnam",            "voll": 35.00,  "halb": 17.50},
+    "NZ": {"name": "Neuseeland",         "voll": 55.00,  "halb": 27.50},
+}
 
-GENERATED_PDF_DIR = Path(os.getenv("GENERATED_PDF_DIR", "uploads/generated_pdfs"))
-GENERATED_PDF_DIR.mkdir(parents=True, exist_ok=True)
+# IATA → ISO-Ländercode (wichtigste Flughäfen)
+IATA_TO_LAND: dict[str, str] = {
+    # Deutschland
+    "FRA":"DE","MUC":"DE","NUE":"DE","BER":"DE","HAM":"DE",
+    "STR":"DE","DUS":"DE","CGN":"DE","LEJ":"DE","HAJ":"DE",
+    # Europa
+    "LYS":"FR","CDG":"FR","ORY":"FR","NCE":"FR","MRS":"FR","BOD":"FR",
+    "LHR":"GB","LGW":"GB","MAN":"GB","EDI":"GB","BHX":"GB",
+    "ZRH":"CH","GVA":"CH","BSL":"CH",
+    "VIE":"AT","SZG":"AT","INN":"AT",
+    "FCO":"IT","MXP":"IT","LIN":"IT","VCE":"IT","NAP":"IT","PMO":"IT",
+    "MAD":"ES","BCN":"ES","AGP":"ES","PMI":"ES","VLC":"ES","SVQ":"ES",
+    "AMS":"NL","RTM":"NL","EIN":"NL",
+    "BRU":"BE","CRL":"BE",
+    "LIS":"PT","OPO":"PT","FAO":"PT",
+    "ATH":"GR","SKG":"GR","HER":"GR","RHO":"GR","CFU":"GR",
+    "OSL":"NO","BGO":"NO","TRD":"NO",
+    "ARN":"SE","GOT":"SE","MMX":"SE",
+    "CPH":"DK","AAL":"DK","BLL":"DK",
+    "HEL":"FI","TMP":"FI","TKU":"FI",
+    "WAW":"PL","KRK":"PL","WRO":"PL","GDN":"PL","KTW":"PL",
+    "PRG":"CZ","BRQ":"CZ",
+    "BUD":"HU","DEB":"HU",
+    "OTP":"RO","CLJ":"RO",
+    "SOF":"BG",
+    "ZAG":"HR","SPU":"HR","DBV":"HR",
+    "BEG":"RS",
+    "LJU":"SI",
+    "BTS":"SK","KSC":"SK",
+    "IST":"TR","SAW":"TR","AYT":"TR","ADB":"TR","ESB":"TR",
+    "DUB":"IE","SNN":"IE",
+    "KEF":"IS",
+    # Nordamerika
+    "JFK":"US","LGA":"US","EWR":"US","ORD":"US","MDW":"US",
+    "LAX":"US","SFO":"US","SJC":"US","OAK":"US","SEA":"US",
+    "MIA":"US","FLL":"US","MCO":"US","TPA":"US","ATL":"US",
+    "DFW":"US","IAH":"US","HOU":"US","DEN":"US","PHX":"US",
+    "LAS":"US","BOS":"US","IAD":"US","DCA":"US","BWI":"US",
+    "YYZ":"CA","YUL":"CA","YVR":"CA","YYC":"CA","YEG":"CA",
+    # Mittelamerika / Karibik
+    "SJO":"CR",  # San José Costa Rica
+    "PTY":"PA",  # Panama City
+    "GUA":"GT","SAL":"SV","TGU":"HN","MGA":"NI",
+    "CUN":"MX","MEX":"MX","GDL":"MX","MTY":"MX","TLC":"MX",
+    "HAV":"CU","MBJ":"JM","NAS":"BS","PUJ":"DO","SDQ":"DO",
+    # Südamerika
+    "GRU":"BR","GIG":"BR","BSB":"BR","SSA":"BR","REC":"BR","FOR":"BR",
+    "EZE":"AR","AEP":"AR","COR":"AR","MDZ":"AR",
+    "SCL":"CL","PMC":"CL",
+    "LIM":"PE","CUZ":"PE",
+    "BOG":"CO","MDE":"CO","CLO":"CO","CTG":"CO",
+    "UIO":"EC","GYE":"EC",
+    "CCS":"VE","MAR":"VE",
+    "ASU":"PY","MVD":"UY",
+    # Asien
+    "NRT":"JP","HND":"JP","KIX":"JP","NGO":"JP","CTS":"JP",
+    "PEK":"CN","PKX":"CN","PVG":"CN","SHA":"CN","CAN":"CN",
+    "HKG":"HK","MFM":"MO",
+    "ICN":"KR","GMP":"KR","PUS":"KR",
+    "TPE":"TW","KHH":"TW",
+    "SIN":"SG",
+    "KUL":"MY","PEN":"MY","BKI":"MY",
+    "BKK":"TH","HKT":"TH","CNX":"TH",
+    "CGK":"ID","DPS":"ID","SUB":"ID",
+    "MNL":"PH","CEB":"PH",
+    "SGN":"VN","HAN":"VN","DAD":"VN",
+    "DEL":"IN","BOM":"IN","MAA":"IN","BLR":"IN","CCU":"IN","HYD":"IN",
+    "DAC":"BD","CMB":"LK",
+    "KTM":"NP","RGN":"MM",
+    "DXB":"AE","AUH":"AE","SHJ":"AE","DWC":"AE",
+    "DOH":"QA","BAH":"BH","KWI":"KW","MCT":"OM","RUH":"SA","JED":"SA",
+    "TLV":"IL","AMM":"JO","BEY":"LB",
+    "IST":"TR","ESB":"TR",
+    # Afrika
+    "CAI":"EG","HRG":"EG","SSH":"EG","LXR":"EG",
+    "CMN":"MA","RAK":"MA","AGA":"MA","FEZ":"MA",
+    "TUN":"TN","DJE":"TN",
+    "ALG":"DZ",
+    "NBO":"KE","MBA":"KE",
+    "ADD":"ET",
+    "JNB":"ZA","CPT":"ZA","DUR":"ZA",
+    "LOS":"NG","ABV":"NG",
+    "ACC":"GH","ABJ":"CI","DKR":"SN",
+    "DAR":"TZ","ZNZ":"TZ",
+    # Ozeanien
+    "SYD":"AU","MEL":"AU","BNE":"AU","PER":"AU","ADL":"AU","CBR":"AU",
+    "AKL":"NZ","CHC":"NZ","WLG":"NZ","ZQN":"NZ",
+    "NAN":"FJ",
+    # Russland / Zentralasien
+    "SVO":"RU","DME":"RU","VKO":"RU","LED":"RU",
+    "IEV":"UA","KBP":"UA","ODS":"UA","LWO":"UA",
+    "GYD":"AZ","TBS":"GE","EVN":"AM",
+    "ALA":"KZ","TSE":"KZ",
+    "TAS":"UZ",
+}
 
-ANONYMIZED_PDF_DIR = Path(os.getenv("ANONYMIZED_PDF_DIR", "uploads/anonymized_belege"))
-ANONYMIZED_PDF_DIR.mkdir(parents=True, exist_ok=True)
+# Länder-Dropdown für Formular
+LAENDER_LISTE = [
+    ("DE","Deutschland"), ("FR","Frankreich"), ("CH","Schweiz"),
+    ("AT","Österreich"), ("GB","Großbritannien"), ("IT","Italien"),
+    ("ES","Spanien"), ("NL","Niederlande"), ("BE","Belgien"),
+    ("PL","Polen"), ("CZ","Tschechien"), ("SE","Schweden"),
+    ("NO","Norwegen"), ("DK","Dänemark"), ("FI","Finnland"),
+    ("PT","Portugal"), ("GR","Griechenland"), ("TR","Türkei"),
+    ("US","USA"), ("CA","Kanada"), ("JP","Japan"), ("CN","China"),
+    ("SG","Singapur"), ("IN","Indien"), ("AE","VAE / Dubai"),
+    ("QA","Katar"), ("AU","Australien"), ("BR","Brasilien"),
+    ("MX","Mexiko"), ("AR","Argentinien"), ("ZA","Südafrika"),
+    ("CR","Costa Rica"), ("PA","Panama"), ("CO","Kolumbien"),
+    ("CL","Chile"), ("KR","Südkorea"), ("TH","Thailand"),
+    ("ID","Indonesien"), ("MY","Malaysia"), ("HK","Hongkong"),
+    ("IL","Israel"), ("HU","Ungarn"), ("RO","Rumänien"),
+    ("HR","Kroatien"), ("BG","Bulgarien"), ("EG","Ägypten"),
+    ("MA","Marokko"), ("NG","Nigeria"), ("KE","Kenia"),
+    ("PH","Philippinen"), ("VN","Vietnam"), ("NZ","Neuseeland"),
+]
 
-KI_RESPONSE_PDF_DIR = Path(os.getenv("KI_RESPONSE_PDF_DIR", "uploads/ki_response_pdfs"))
-KI_RESPONSE_PDF_DIR.mkdir(parents=True, exist_ok=True)
- 
-# Version 8.2a: Render-Speicherschutz
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
-MAX_PDF_PAGES_FOR_TEXT = int(os.getenv("MAX_PDF_PAGES_FOR_TEXT", "8"))
-MAX_ANALYSIS_TEXT_CHARS = int(os.getenv("MAX_ANALYSIS_TEXT_CHARS", "60000"))
-MAX_DB_TEXT_CHARS = int(os.getenv("MAX_DB_TEXT_CHARS", "80000"))
-MAX_MAILS_PER_CHECK = int(os.getenv("MAX_MAILS_PER_CHECK", "5"))
-MAX_MAIL_ATTACHMENTS_PER_CHECK = int(os.getenv("MAX_MAIL_ATTACHMENTS_PER_CHECK", "5"))
-ANALYSIS_LOCK = threading.Lock()
+# ── Datenbank Schema ────────────────────────────────────────────────────────────
+def get_schema() -> list[str]:
+    """
+    Gibt SQL-Statements für Schema-Erstellung zurück.
+    Kompatibel mit PostgreSQL und SQLite.
+    """
+    if is_postgres():
+        return [
+            """CREATE TABLE IF NOT EXISTS mitarbeiter (
+                kuerzel     TEXT PRIMARY KEY,
+                klarname    TEXT NOT NULL,
+                aktiv       BOOLEAN DEFAULT TRUE,
+                erstellt    TIMESTAMP DEFAULT NOW()
+            )""",
+            """CREATE TABLE IF NOT EXISTS reisen (
+                code        TEXT PRIMARY KEY,
+                titel       TEXT NOT NULL,
+                abreise     DATE NOT NULL,
+                rueckkehr   DATE NOT NULL,
+                notiz       TEXT,
+                erstellt    TIMESTAMP DEFAULT NOW()
+            )""",
+            """CREATE TABLE IF NOT EXISTS reise_mitarbeiter (
+                reise_code  TEXT REFERENCES reisen(code) ON DELETE CASCADE,
+                kuerzel     TEXT REFERENCES mitarbeiter(kuerzel) ON DELETE CASCADE,
+                PRIMARY KEY (reise_code, kuerzel)
+            )""",
+            """CREATE TABLE IF NOT EXISTS reise_laender (
+                id          SERIAL PRIMARY KEY,
+                reise_code  TEXT REFERENCES reisen(code) ON DELETE CASCADE,
+                datum_von   DATE NOT NULL,
+                datum_bis   DATE NOT NULL,
+                land_code   TEXT NOT NULL,
+                land_name   TEXT NOT NULL,
+                vma_voll    NUMERIC(6,2),
+                vma_halb    NUMERIC(6,2)
+            )""",
+        ]
+    else:
+        return [
+            """CREATE TABLE IF NOT EXISTS mitarbeiter (
+                kuerzel     TEXT PRIMARY KEY,
+                klarname    TEXT NOT NULL,
+                aktiv       INTEGER DEFAULT 1,
+                erstellt    TEXT DEFAULT (datetime('now'))
+            )""",
+            """CREATE TABLE IF NOT EXISTS reisen (
+                code        TEXT PRIMARY KEY,
+                titel       TEXT NOT NULL,
+                abreise     TEXT NOT NULL,
+                rueckkehr   TEXT NOT NULL,
+                notiz       TEXT,
+                erstellt    TEXT DEFAULT (datetime('now'))
+            )""",
+            """CREATE TABLE IF NOT EXISTS reise_mitarbeiter (
+                reise_code  TEXT REFERENCES reisen(code) ON DELETE CASCADE,
+                kuerzel     TEXT REFERENCES mitarbeiter(kuerzel) ON DELETE CASCADE,
+                PRIMARY KEY (reise_code, kuerzel)
+            )""",
+            """CREATE TABLE IF NOT EXISTS reise_laender (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                reise_code  TEXT REFERENCES reisen(code) ON DELETE CASCADE,
+                datum_von   TEXT NOT NULL,
+                datum_bis   TEXT NOT NULL,
+                land_code   TEXT NOT NULL,
+                land_name   TEXT NOT NULL,
+                vma_voll    REAL,
+                vma_halb    REAL
+            )""",
+        ]
 
-app = FastAPI(title="Reisekosten API", version=APP_VERSION)
+# ── Hilfsfunktionen ────────────────────────────────────────────────────────────
+def fmt_date(d) -> str:
+    if not d: return "–"
+    if isinstance(d, date): return d.strftime("%d.%m.%Y")
+    s = str(d)[:10]
+    try:
+        return date.fromisoformat(s).strftime("%d.%m.%Y")
+    except:
+        return s
+
+def next_reise_code(cur) -> str:
+    """Generiert nächsten Reisecode YY-NNN."""
+    year = str(date.today().year)[-2:]
+    if is_postgres():
+        cur.execute("SELECT code FROM reisen WHERE code LIKE %s ORDER BY code DESC LIMIT 1",
+                    (f"{year}-%",))
+    else:
+        cur.execute("SELECT code FROM reisen WHERE code LIKE ? ORDER BY code DESC LIMIT 1",
+                    (f"{year}-%",))
+    row = cur.fetchone()
+    if row:
+        last = row[0] if isinstance(row, tuple) else row["code"]
+        m = re.match(r"\d{2}-(\d{3})", last)
+        num = int(m.group(1)) + 1 if m else 1
+    else:
+        num = 1
+    return f"{year}-{num:03d}"
+
+def vma_fuer_land(land_code: str) -> tuple[float, float]:
+    """Gibt (voll, halb) VMA-Satz für Ländercode zurück."""
+    s = VMA_SAETZE.get(land_code.upper(), {"voll": 28.00, "halb": 14.00})
+    return s["voll"], s["halb"]
+
+# ── CSS + HTML Shell ───────────────────────────────────────────────────────────
+CSS = """
+:root {
+    --bg: #f8fafc; --white: #ffffff; --border: #e2e8f0;
+    --text: #0f172a; --muted: #64748b; --light: #94a3b8;
+    --blue: #2563eb; --blue-d: #1d4ed8; --blue-l: #eff6ff;
+    --green: #059669; --green-l: #ecfdf5;
+    --amber: #d97706; --amber-l: #fffbeb;
+    --red: #dc2626; --red-l: #fef2f2;
+    --radius: 8px; --radius-s: 6px;
+    --shadow: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.04);
+    --shadow-md: 0 4px 6px rgba(0,0,0,.07), 0 2px 4px rgba(0,0,0,.04);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+       background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+
+/* Navigation */
+nav {
+    background: #1e293b; padding: 0 24px;
+    display: flex; align-items: center; gap: 0;
+    position: sticky; top: 0; z-index: 100;
+    box-shadow: 0 2px 8px rgba(0,0,0,.2);
+    height: 52px;
+}
+.nav-brand {
+    color: #f1f5f9; font-weight: 700; font-size: 15px;
+    margin-right: 24px; white-space: nowrap;
+    text-decoration: none;
+}
+.nav-link {
+    color: #94a3b8; text-decoration: none; font-size: 13px; font-weight: 500;
+    padding: 16px 12px; border-bottom: 2px solid transparent;
+    transition: color .15s, border-color .15s; white-space: nowrap;
+}
+.nav-link:hover { color: #f1f5f9; }
+.nav-link.active { color: #f1f5f9; border-bottom-color: #3b82f6; }
+.nav-right { margin-left: auto; font-size: 11px; color: #475569; }
+
+/* Layout */
+main { padding: 28px 24px; max-width: 1100px; margin: 0 auto; }
+.page-title { font-size: 22px; font-weight: 700; color: var(--text); margin-bottom: 20px; }
+
+/* Karten */
+.card {
+    background: var(--white); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    margin-bottom: 16px;
+}
+.card-header {
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+}
+.card-title { font-size: 15px; font-weight: 600; }
+.card-body { padding: 20px; }
+
+/* Buttons */
+.btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 16px; border-radius: var(--radius-s);
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    text-decoration: none; border: none; transition: all .15s;
+    white-space: nowrap;
+}
+.btn-primary { background: var(--blue); color: white; }
+.btn-primary:hover { background: var(--blue-d); }
+.btn-success { background: var(--green); color: white; }
+.btn-success:hover { background: #047857; }
+.btn-secondary {
+    background: white; color: #374151;
+    border: 1px solid var(--border);
+}
+.btn-secondary:hover { background: #f9fafb; border-color: #9ca3af; }
+.btn-danger { background: var(--red); color: white; }
+.btn-danger:hover { background: #b91c1c; }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+
+/* Formulare */
+.form-grid { display: grid; gap: 16px; }
+.form-grid-2 { grid-template-columns: 1fr 1fr; }
+.form-grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+.form-group { display: flex; flex-direction: column; gap: 4px; }
+.form-group.full { grid-column: 1 / -1; }
+label { font-size: 12px; font-weight: 600; color: #374151; }
+.required { color: var(--red); margin-left: 2px; }
+input[type="text"], input[type="date"], input[type="email"],
+input[type="number"], select, textarea {
+    width: 100%; padding: 8px 12px;
+    border: 1px solid var(--border); border-radius: var(--radius-s);
+    font-size: 13px; background: white; color: var(--text);
+    transition: border-color .15s, box-shadow .15s;
+}
+input:focus, select:focus, textarea:focus {
+    outline: none; border-color: var(--blue);
+    box-shadow: 0 0 0 3px rgba(37,99,235,.1);
+}
+.form-hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.form-actions {
+    display: flex; gap: 8px; padding-top: 16px;
+    border-top: 1px solid var(--border); margin-top: 20px;
+}
+
+/* Tabellen */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th {
+    text-align: left; padding: 10px 14px;
+    font-size: 11px; font-weight: 700; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .05em;
+    border-bottom: 1px solid var(--border);
+    background: #f8fafc; white-space: nowrap;
+}
+td {
+    padding: 11px 14px; font-size: 13px;
+    border-bottom: 1px solid #f1f5f9; vertical-align: middle;
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: #fafafa; }
+.td-mono { font-family: "SF Mono", "Fira Code", monospace; font-size: 12px; }
+
+/* Badges */
+.badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 700;
+}
+.badge-blue { background: var(--blue-l); color: var(--blue); }
+.badge-green { background: var(--green-l); color: var(--green); }
+.badge-amber { background: var(--amber-l); color: var(--amber); }
+.badge-red { background: var(--red-l); color: var(--red); }
+.badge-gray { background: #f1f5f9; color: var(--muted); }
+
+/* Alerts */
+.alert { padding: 12px 16px; border-radius: var(--radius); font-size: 13px; margin-bottom: 16px; }
+.alert-ok { background: var(--green-l); border: 1px solid #6ee7b7; color: #065f46; }
+.alert-warn { background: var(--amber-l); border: 1px solid #fcd34d; color: #92400e; }
+.alert-err { background: var(--red-l); border: 1px solid #fca5a5; color: #991b1b; }
+
+/* Leerer Zustand */
+.empty-state {
+    text-align: center; padding: 48px 20px; color: var(--light);
+}
+.empty-state p { margin-top: 8px; font-size: 13px; }
+
+/* VMA-Tabelle Farben */
+.vma-row-de { background: #f0fdf4; }
+.vma-row-eu { background: #eff6ff; }
+.vma-row-int { background: #fafafa; }
+
+@media (max-width: 640px) {
+    .form-grid-2, .form-grid-3 { grid-template-columns: 1fr; }
+    main { padding: 16px; }
+}
+"""
+
+APP_VERSION = "2.0-a"
+
+def shell(title: str, content: str, page: str = "") -> str:
+    def nav(p, label, url):
+        cls = "nav-link active" if page == p else "nav-link"
+        return f'<a href="{url}" class="{cls}">{label}</a>'
+    return f"""<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title} – Herrhammer Reisekosten</title>
+<style>{CSS}</style>
+</head>
+<body>
+<nav>
+  <a href="/" class="nav-brand">✈ Reisekosten</a>
+  {nav("start", "Dashboard", "/")}
+  {nav("mitarbeiter", "Mitarbeiter", "/mitarbeiter")}
+  {nav("reisen", "Reisen", "/reisen")}
+  {nav("vma", "VMA-Sätze", "/vma")}
+  <div class="nav-right">v{APP_VERSION}</div>
+</nav>
+<main>
+{content}
+</main>
+</body>
+</html>"""
+
+# ── FastAPI App ────────────────────────────────────────────────────────────────
+app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
+
+if not os.path.exists("static"):
+    os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-
-@app.on_event("startup")
-def startup() -> None:
-    init_db()
-    ensure_db_extensions()
-
-
-class AnalyzeTextRequest(BaseModel):
-    text: str
-    filename: Optional[str] = None
-    reise_id: Optional[int] = None
-    event_id: Optional[int] = None
-    ai_provider: Optional[str] = None
-    ai_model: Optional[str] = None
-
-
-class MitarbeiterCreateRequest(BaseModel):
-    kuerzel: str
-    vorname: str
-    nachname: str
-    geburtsdatum: Optional[str] = None
-    email: Optional[str] = None
-    aktiv: bool = True
-
-
-class ReiseCreateRequest(BaseModel):
-    reise_jahr: int
-    reise_name: str
-    startdatum: Optional[str] = None
-    enddatum: Optional[str] = None
-    anzahl_reisende: int = 1
-    mitarbeiter_ids: List[int] = []
-
-
-class EventCreateRequest(BaseModel):
-    reise_id: int
-    typ: str
-    titel: str
-    status: str = "planung"
-
-
-class EventStatusRequest(BaseModel):
-    status: str
-
-
-# ============================================================
-# DB EXTENSIONS
-# ============================================================
-
-def ensure_db_extensions() -> None:
-    """Erweitert bestehende Tabellen ohne Reset.
-    Wichtig: Kein DROP, damit Testdaten erhalten bleiben.
-    """
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS fingerprint TEXT")
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS source_filename TEXT")
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS original_text TEXT")
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS anonymized_text TEXT")
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS analysis_json TEXT")
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS original_file_path TEXT")
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS original_filename TEXT")
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS original_content_type TEXT")
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS generated_pdf_path TEXT")
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS anonymized_pdf_path TEXT")
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS ki_response_pdf_path TEXT")
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS workflow_status TEXT")
-                cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS normalized_summary_json TEXT")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_belege_fingerprint ON belege(fingerprint)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_event_belege_event_id ON event_belege(event_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_event_belege_beleg_id ON event_belege(beleg_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_events_reise_id ON events(reise_id)")
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS mail_import_log (
-                        id SERIAL PRIMARY KEY,
-                        mail_key TEXT UNIQUE,
-                        subject TEXT,
-                        imported_at TEXT,
-                        status TEXT,
-                        detail TEXT
-                    )
-                """)
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS vma_tage (
-                        id SERIAL PRIMARY KEY,
-                        reise_id INTEGER NOT NULL,
-                        tag DATE NOT NULL,
-                        land TEXT DEFAULT 'Deutschland',
-                        ort TEXT DEFAULT '',
-                        fruehstueck BOOLEAN DEFAULT FALSE,
-                        mittag BOOLEAN DEFAULT FALSE,
-                        abend BOOLEAN DEFAULT FALSE,
-                        betrag NUMERIC DEFAULT 0,
-                        notiz TEXT DEFAULT '',
-                        updated_at TEXT,
-                        UNIQUE(reise_id, tag)
-                    )
-                """)
-            conn.commit()
-    except Exception:
-        # App soll auch starten, wenn DB noch nicht bereit ist.
-        pass
-
-
-# ============================================================
-# FILE / TEXT HELPERS
-# ============================================================
-
-def safe_filename(filename: str) -> str:
-    name = filename or "beleg"
-    name = name.replace("\\", "_").replace("/", "_").replace(":", "_")
-    name = re.sub(r"[^A-Za-z0-9ÄÖÜäöüß._ -]", "_", name)
-    return name[:160] or "beleg"
-
-
-def save_original_file(filename: str, content: bytes, content_type: Optional[str] = None) -> Dict[str, str]:
-    safe = safe_filename(filename)
-    stored_name = f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:12]}_{safe}"
-    path = ORIGINAL_UPLOAD_DIR / stored_name
-    path.write_bytes(content or b"")
-    return {
-        "original_file_path": str(path),
-        "original_filename": safe,
-        "original_content_type": content_type or mimetypes.guess_type(safe)[0] or "application/octet-stream",
-    }
-
-
-def save_original_text_as_file(filename: str, text: str, content_type: str = "text/plain") -> Dict[str, str]:
-    return save_original_file(filename, (text or "").encode("utf-8", errors="replace"), content_type)
-
-
-def extract_text_from_pdf(pdf_bytes: bytes) -> str:
-    """Speicherschonende PDF-Textextraktion für Render.
-    Original-PDF bleibt vollständig gespeichert; für KI werden nur erste Seiten/Textlimit genutzt.
-    """
-    try:
-        reader = PdfReader(BytesIO(pdf_bytes))
-        parts: List[str] = []
-        total = 0
-        for page in list(reader.pages)[:MAX_PDF_PAGES_FOR_TEXT]:
-            txt = page.extract_text() or ""
-            parts.append(txt)
-            total += len(txt)
-            if total >= MAX_ANALYSIS_TEXT_CHARS:
-                break
-        return "\n".join(parts).strip()[:MAX_ANALYSIS_TEXT_CHARS]
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"PDF konnte nicht gelesen werden: {exc}") from exc
-
-
-def extract_text_from_upload(filename: str, content: bytes) -> str:
-    lower = (filename or "").lower()
-    if lower.endswith(".pdf"):
-        return extract_text_from_pdf(content)
-    return (content or b"").decode("utf-8", errors="replace")[:MAX_ANALYSIS_TEXT_CHARS]
-
-
-async def read_upload_limited(file: UploadFile) -> bytes:
-    content = await file.read(MAX_UPLOAD_BYTES + 1)
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail=f"Datei zu groß. Limit: {MAX_UPLOAD_BYTES // (1024*1024)} MB pro Beleg.")
-    return content
-
-
-# ============================================================
-# DATE NORMALIZATION / SORT SUPPORT
-# ============================================================
-
-def normalize_analysis_date(value: Any) -> Any:
-    """Normalisiert typische Beleg-Datumswerte auf ISO YYYY-MM-DD.
-    Wichtig fuer richtige chronologische Sortierung im Dashboard.
-    Beispiele:
-    - 20-04-26 -> 2026-04-20
-    - 21.04.2026 -> 2026-04-21
-    - 25MAY2026 06:35 -> 2026-05-25 06:35
-    - 25 Mai 2026 06:35 -> 2026-05-25 06:35
-    """
-    if value is None:
-        return value
-    text = str(value).strip()
-    if not text or text.lower() == "nicht vorhanden":
-        return value
-
-    # Already ISO date at beginning.
-    m = re.search(r"\b(20\d{2})-(\d{2})-(\d{2})(.*)$", text)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}{m.group(4)}"
-
-    # DD-MM-YY / DD.MM.YYYY / DD/MM/YY
-    m = re.search(r"\b(\d{1,2})[-./](\d{1,2})[-./](\d{2}|\d{4})(.*)$", text)
-    if m:
-        day = int(m.group(1))
-        month = int(m.group(2))
-        year = int(m.group(3))
-        if year < 100:
-            year += 2000
-        rest = m.group(4) or ""
-        return f"{year:04d}-{month:02d}-{day:02d}{rest}"
-
-    months = {
-        "JAN": "01", "FEB": "02", "MAR": "03", "MÄR": "03", "MAER": "03", "APR": "04",
-        "MAY": "05", "MAI": "05", "JUN": "06", "JUL": "07", "AUG": "08", "SEP": "09",
-        "OCT": "10", "OKT": "10", "NOV": "11", "DEC": "12", "DEZ": "12",
-        "JANUAR": "01", "FEBRUAR": "02", "MÄRZ": "03", "MAERZ": "03", "APRIL": "04",
-        "JUNI": "06", "JULI": "07", "AUGUST": "08", "SEPTEMBER": "09", "OKTOBER": "10",
-        "NOVEMBER": "11", "DEZEMBER": "12",
-    }
-
-    # 25MAY2026 06:35
-    m = re.search(r"\b(\d{1,2})([A-Za-zÄÖÜäöü]{3,9})(20\d{2})(.*)$", text)
-    if m:
-        mon = months.get(m.group(2).upper())
-        if mon:
-            return f"{int(m.group(3)):04d}-{mon}-{int(m.group(1)):02d}{m.group(4) or ''}"
-
-    # 25 Mai 2026 06:35 / 25 May 2026
-    m = re.search(r"\b(\d{1,2})\s+([A-Za-zÄÖÜäöü]{3,9})\s+(20\d{2})(.*)$", text)
-    if m:
-        mon = months.get(m.group(2).upper())
-        if mon:
-            return f"{int(m.group(3)):04d}-{mon}-{int(m.group(1)):02d}{m.group(4) or ''}"
-
-    return value
-
-
-def normalize_analysis_dates(data: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(data, dict):
-        return data
-    data["belegdatum"] = normalize_analysis_date(data.get("belegdatum"))
-    for segment in data.get("reisesegmente") or []:
-        if isinstance(segment, dict):
-            segment["abreise_datum_und_zeit"] = normalize_analysis_date(segment.get("abreise_datum_und_zeit"))
-            segment["ankunft_datum_und_zeit"] = normalize_analysis_date(segment.get("ankunft_datum_und_zeit"))
-    return data
-
-
-def _month_to_number(mon: str) -> Optional[str]:
-    months = {
-        "JAN": "01", "JANUAR": "01", "FEB": "02", "FEBRUAR": "02", "MAR": "03", "MÄR": "03", "MÄRZ": "03", "MAER": "03", "MAERZ": "03",
-        "APR": "04", "APRIL": "04", "MAY": "05", "MAI": "05", "JUN": "06", "JUNI": "06", "JUL": "07", "JULI": "07",
-        "AUG": "08", "AUGUST": "08", "SEP": "09", "SEPTEMBER": "09", "OCT": "10", "OKT": "10", "OKTOBER": "10",
-        "NOV": "11", "NOVEMBER": "11", "DEC": "12", "DEZ": "12", "DEZEMBER": "12",
-    }
-    return months.get((mon or "").strip().upper())
-
-
-def parse_hotel_date_to_iso(value: Any, default_time: str) -> Optional[str]:
-    """Parst typische Hotel-Check-in/Check-out-Daten robust nach YYYY-MM-DD HH:MM."""
-    if not value:
-        return None
-    text = str(value).strip()
-    if not text or text.lower() == "nicht vorhanden":
-        return None
-
-    m = re.search(r"\b(20\d{2})-(\d{2})-(\d{2})(?:[ T]+(\d{1,2}:\d{2}))?", text)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)} {m.group(4) or default_time}"
-
-    m = re.search(r"\b(\d{1,2})[-./](\d{1,2})[-./](\d{2}|\d{4})(?:\D+(\d{1,2}:\d{2}))?", text)
-    if m:
-        y = int(m.group(3))
-        if y < 100:
-            y += 2000
-        return f"{y:04d}-{int(m.group(2)):02d}-{int(m.group(1)):02d} {m.group(4) or default_time}"
-
-    m = re.search(r"\b(\d{1,2})\s*([A-Za-zÄÖÜäöü]{3,9})\s*,?\s*(20\d{2})(?:\D+(\d{1,2}:\d{2}))?", text)
-    if m:
-        mon = _month_to_number(m.group(2))
-        if mon:
-            return f"{int(m.group(3)):04d}-{mon}-{int(m.group(1)):02d} {m.group(4) or default_time}"
-
-    m = re.search(r"\b([A-Za-zÄÖÜäöü]{3,9})\s+(\d{1,2}),?\s*(20\d{2})(?:\D+(\d{1,2}:\d{2}))?", text)
-    if m:
-        mon = _month_to_number(m.group(1))
-        if mon:
-            return f"{int(m.group(3)):04d}-{mon}-{int(m.group(2)):02d} {m.group(4) or default_time}"
-
-    m = re.search(r"\b(\d{1,2})([A-Za-z]{3})(20\d{2})(?:\D+(\d{1,2}:\d{2}))?", text)
-    if m:
-        mon = _month_to_number(m.group(2))
-        if mon:
-            return f"{int(m.group(3)):04d}-{mon}-{int(m.group(1)):02d} {m.group(4) or default_time}"
-
-    return None
-
-
-def _find_date_after_keywords(text: str, keywords: List[str], default_time: str) -> Optional[str]:
-    if not text:
-        return None
-    date_pattern = r"((?:20\d{2}-\d{2}-\d{2})|(?:\d{1,2}[-./]\d{1,2}[-./](?:\d{2}|\d{4}))|(?:\d{1,2}\s*[A-Za-zÄÖÜäöü]{3,9}\s*,?\s*20\d{2})|(?:[A-Za-zÄÖÜäöü]{3,9}\s+\d{1,2},?\s*20\d{2})|(?:\d{1,2}[A-Za-z]{3}20\d{2}))"
-    for kw in keywords:
-        pattern = rf"(?is){kw}[^\n\r]{{0,90}}?{date_pattern}[^\n\r]{{0,30}}?(\d{{1,2}}:\d{{2}})?"
-        m = re.search(pattern, text)
-        if m:
-            candidate = m.group(1)
-            if m.lastindex and m.group(m.lastindex) and ':' in m.group(m.lastindex):
-                candidate += " " + m.group(m.lastindex)
-            parsed = parse_hotel_date_to_iso(candidate, default_time)
-            if parsed:
-                return parsed
-    return None
-
-
-def extract_hotel_dates_from_text(text: str) -> Tuple[Optional[str], Optional[str]]:
-    """Sucht Hotel-Aufenthaltsdaten im Originaltext robuster als die KI-Ausgabe.
-    Unterstützt u. a. Check-in/out, Arrival/Departure, Stay Dates, From/To und Nights.
-    """
-    text = text or ""
-    checkin = _find_date_after_keywords(
-        text,
-        [r"check\s*[- ]?in", r"arrival", r"ankunft", r"anreise", r"stay\s*from", r"from", r"von"],
-        "23:59",
-    )
-    checkout = _find_date_after_keywords(
-        text,
-        [r"check\s*[- ]?out", r"departure", r"abreise", r"stay\s*to", r"to", r"bis"],
-        "00:00",
-    )
-
-    # Muster: 20.04.2026 - 21.04.2026 / Apr 20, 2026 - Apr 21, 2026
-    date_pat = r"(20\d{2}-\d{2}-\d{2}|\d{1,2}[-./]\d{1,2}[-./](?:\d{2}|\d{4})|\d{1,2}\s*[A-Za-zÄÖÜäöü]{3,9}\s*,?\s*20\d{2}|[A-Za-zÄÖÜäöü]{3,9}\s+\d{1,2},?\s*20\d{2}|\d{1,2}[A-Za-z]{3}20\d{2})"
-    if not (checkin and checkout):
-        for m in re.finditer(rf"(?is)(stay|aufenthalt|nights?|übernachtungen?|dates?).{{0,80}}?{date_pat}.{{0,40}}?(?:-|–|to|bis).{{0,40}}?{date_pat}", text):
-            a = parse_hotel_date_to_iso(m.group(2), "23:59")
-            b = parse_hotel_date_to_iso(m.group(3), "00:00")
-            if a and b:
-                checkin = checkin or a
-                checkout = checkout or b
-                break
-
-    # Falls nur Check-in + Anzahl Nächte gefunden wurde.
-    if checkin and not checkout:
-        m = re.search(r"(?is)\b(\d{1,2})\s*(?:night|nights|nacht|nächte|uebernachtungen|übernachtungen)\b", text)
-        if m:
-            try:
-                n = int(m.group(1))
-                d0 = datetime.fromisoformat(checkin[:10]).date()
-                checkout = (d0 + timedelta(days=n)).isoformat() + " 00:00"
-            except Exception:
-                pass
-
-    return checkin, checkout
-
-
-def enhance_hotel_analysis(data: Dict[str, Any], original_text: str) -> Dict[str, Any]:
-    """Korrigiert Hotelbelege: Check-in/Check-out statt Rechnungsdatum für die Timeline verwenden."""
-    if not isinstance(data, dict):
-        return data
-    art = str(data.get("art_des_dokuments") or "").strip().lower()
-    hotel_signals = re.search(r"(?is)\b(check\s*[- ]?in|check\s*[- ]?out|arrival|departure|hotel|room|nights?|übernachtung|nacht)\b", original_text or "")
-    if art != "hotel" and hotel_signals:
-        data["art_des_dokuments"] = "Hotel"
-        art = "hotel"
-        data.setdefault("warnungen", []).append("Dokument wurde durch lokale Nachprüfung als Hotel erkannt")
-    if art != "hotel":
-        return data
-
-    segs = data.get("reisesegmente") or []
-    first = segs[0] if segs and isinstance(segs[0], dict) else {}
-
-    checkin = (
-        parse_hotel_date_to_iso(first.get("abreise_datum_und_zeit"), "23:59")
-        or parse_hotel_date_to_iso(data.get("check_in"), "23:59")
-        or parse_hotel_date_to_iso(data.get("checkin"), "23:59")
-        or parse_hotel_date_to_iso(data.get("check-in"), "23:59")
-    )
-    checkout = (
-        parse_hotel_date_to_iso(first.get("ankunft_datum_und_zeit"), "00:00")
-        or parse_hotel_date_to_iso(data.get("check_out"), "00:00")
-        or parse_hotel_date_to_iso(data.get("checkout"), "00:00")
-        or parse_hotel_date_to_iso(data.get("check-out"), "00:00")
-    )
-
-    text_checkin, text_checkout = extract_hotel_dates_from_text(original_text or "")
-    checkin = text_checkin or checkin
-    checkout = text_checkout or checkout
-
-    if not checkin and not checkout:
-        checkin = parse_hotel_date_to_iso(data.get("belegdatum"), "23:59")
-        checkout = checkin
-
-    hotel_name = first.get("ankunft_ort") or data.get("hotel") or data.get("anbieter") or data.get("buchungsnummer_code") or "Hotel"
-    data["check_in"] = checkin or "nicht vorhanden"
-    data["check_out"] = checkout or "nicht vorhanden"
-    data["reisesegmente"] = [{
-        "index": 1,
-        "abreise_datum_und_zeit": checkin or "nicht vorhanden",
-        "ankunft_datum_und_zeit": checkout or "nicht vorhanden",
-        "abreise_ort": hotel_name,
-        "ankunft_ort": hotel_name,
-        "transportunternehmen_und_nummer": "Hotelaufenthalt",
-    }]
-    data["wie_viele_reisesegmente"] = 1
-    if not (checkin and checkout):
-        data.setdefault("warnungen", []).append("Hotel Check-in/Check-out bitte prüfen")
-    return data
-
-
-# ============================================================
-# ANONYMIZATION
-# ============================================================
-
-def normalize_variants(value: str) -> List[str]:
-    if not value:
-        return []
-    base = value.strip().lower()
-    return list(
-        {
-            base,
-            base.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss"),
-            base.replace("ä", "a").replace("ö", "o").replace("ü", "u").replace("ß", "ss"),
-        }
-    )
-
-
-def anonymize_emails(text: str) -> str:
-    return re.sub(
-        r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b",
-        "abc@123.com",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-
-def anonymize_employee_names(text: str) -> str:
-    anonymized = text
-    try:
-        mitarbeiter = list_mitarbeiter(limit=5000)
-    except TypeError:
-        mitarbeiter = list_mitarbeiter()
-    except Exception:
-        mitarbeiter = []
-
-    for m in mitarbeiter:
-        vorname = (m.get("vorname") or "").strip()
-        nachname = (m.get("nachname") or "").strip()
-        if not vorname or not nachname:
-            continue
-
-        for vv in normalize_variants(vorname):
-            for nv in normalize_variants(nachname):
-                # Titel + Vorname + optional Mittelname + Nachname
-                anonymized = re.sub(
-                    rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}",
-                    lambda match: f"{match.group(1)} Max Mustermann",
-                    anonymized,
-                )
-                # Vorname + optional Mittelname + Nachname
-                anonymized = re.sub(
-                    rf"(?i)\b{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*\s+{re.escape(nv)}",
-                    "Max Mustermann",
-                    anonymized,
-                )
-                # Nachname, Vorname
-                anonymized = re.sub(
-                    rf"(?i)\b{re.escape(nv)}\s*,\s*{re.escape(vv)}(?:\s+[A-Za-zÄÖÜäöüß.\-]+)*",
-                    "Max Mustermann",
-                    anonymized,
-                )
-        for nv in normalize_variants(nachname):
-            anonymized = re.sub(
-                rf"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+{re.escape(nv)}\b",
-                lambda match: f"{match.group(1)} Max Mustermann",
-                anonymized,
-            )
-
-    # Häufige Hotel-/Mail-Formulierungen
-    anonymized = re.sub(r"(?i)(Guest\s*name\s*:\s*)[^\r\n]+", r"\1Max Mustermann", anonymized)
-    anonymized = re.sub(r"(?i)(Name\s*:\s*)[^\r\n]+", r"\1Max Mustermann", anonymized)
-    anonymized = re.sub(r"(?i)(This Marriott\.com reservation email has been forwarded to you by\s+)[^\r\n]+", r"\1Max Mustermann", anonymized)
-    anonymized = re.sub(r"(?i)(An\s*:\s*)[^<\r\n]+", r"\1Max Mustermann ", anonymized)
-    anonymized = re.sub(r"(?i)(Betreff\s*:\s*)Max Mustermann\s*\([^\)]*\)", r"\1Max Mustermann", anonymized)
-    anonymized = re.sub(r"(?i)\bMax Mustermann(?:\s+Max Mustermann)+", "Max Mustermann", anonymized)
-    anonymized = re.sub(r"(?i)\b(Mr|Mrs|Ms|Herr|Frau)\s+Max Mustermann(?:\s+Max Mustermann)+", r"\1 Max Mustermann", anonymized)
-    return anonymized
-
-
-def anonymize_document_text(text: str) -> str:
-    return anonymize_emails(anonymize_employee_names(text or ""))
-
-
-# ============================================================
-# AI ANALYSIS
-# ============================================================
-
-def build_json_prompt(document_text: str, filename: str = "nicht vorhanden") -> str:
-    schema = {
-        "belegdatum": "",
-        "art_des_dokuments": "",
-        "buchungsnummer_code": "",
-        "name_des_reisenden": "",
-        "wie_viele_reisesegmente": 0,
-        "reisesegmente": [
-            {
-                "index": 1,
-                "abreise_datum_und_zeit": "",
-                "ankunft_datum_und_zeit": "",
-                "abreise_ort": "",
-                "ankunft_ort": "",
-                "transportunternehmen_und_nummer": "",
-            }
-        ],
-        "ticketnummer": "",
-        "kosten_mit_steuern": "",
-        "kosten_ohne_steuern": "",
-        "waehrung_der_kosten": "",
-        "hotel_name": "",
-        "check_in": "",
-        "check_out": "",
-        "confidence": 0.0,
-        "review_required": False,
-        "manual_category_needed": False,
-        "manual_reason": "",
-        "warnungen": [],
-    }
-    return f"""
-Bitte analysiere mir das folgende PDF/EMAIL/BELEG.
-
-Gib AUSSCHLIESSLICH gültiges JSON zurück.
-Keine Erklärung. Kein Markdown. Kein Zusatztext.
-
-Nutze genau diese Felder:
-{json.dumps(schema, ensure_ascii=False, indent=2)}
-
-Regeln:
-- "art_des_dokuments" nur: "Zug", "Flug", "Hotel", "Taxi", "Bewirtung", "Parken", "Mietwagen", "Kraftstoff", "Unbekannt"
-- Wenn ein Feld nicht vorhanden ist: "nicht vorhanden"
-- Wenn der Beleg nicht sicher erkannt wird: art_des_dokuments="Unbekannt", review_required=true, manual_category_needed=true und manual_reason ausfüllen.
-- "confidence" immer als Zahl 0.0 bis 1.0 ausgeben.
-- "wie_viele_reisesegmente" ist eine Zahl.
-- Für jedes Reisesegment einen Eintrag in "reisesegmente".
-- Für Flüge/Züge/Taxi: jedes echte Teilsegment separat ausgeben.
-- IATA-Codes immer im Ortstext mitführen, wenn vorhanden, z. B. "Frankfurt (FRA)".
-- Für Hotel: IMMER genau ein Segment ausgeben:
-  * abreise_datum_und_zeit = Check-in-Datum/Uhrzeit
-  * ankunft_datum_und_zeit = Check-out-Datum/Uhrzeit
-  * hotel_name = Name des Hotels
-  * check_in = Check-in
-  * check_out = Check-out
-  * ankunft_ort = Hotelname + Ort
-- Bei Hotel hat Check-in/Check-out Priorität. Rechnungsdatum, Buchungsdatum oder Druckdatum dürfen NICHT als Aufenthaltsdatum verwendet werden, wenn Check-in/Check-out/Arrival/Departure/Stay Dates/Nights im Dokument stehen.
-- Falls Hotel nur "Nights" enthält: Check-out = Check-in + Nights.
-- Datumswerte bevorzugt als YYYY-MM-DD HH:MM ausgeben. Wenn im Dokument nur TT-MM-JJ steht, korrekt als 20JJ-MM-TT interpretieren.
-- "kosten_mit_steuern" und "kosten_ohne_steuern" getrennt angeben.
-- Währung separat angeben.
-- Wenn Ticketnummer und Rechnungsnummer vorhanden sind: Ticketnummer in ticketnummer; Rechnungsnummer/Bestätigung in buchungsnummer_code.
-
-Dateiname: {filename}
-
-TEXT:
-{document_text[:MAX_ANALYSIS_TEXT_CHARS]}
-""".strip()
-
-
-def call_openai_json(prompt: str, model: Optional[str] = None) -> dict:
-    if not OPENAI_API_KEY:
-        return {"status": "error", "detail": "OPENAI_API_KEY ist nicht gesetzt"}
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    use_model = model or OPENAI_MODEL
-    response = client.chat.completions.create(
-        model=use_model,
-        messages=[
-            {"role": "system", "content": "Gib ausschließlich valides JSON zurück."},
-            {"role": "user", "content": prompt},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0,
-    )
-    return json.loads(response.choices[0].message.content or "{}")
-
-
-def ensure_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
-    base = {
-        "belegdatum": "nicht vorhanden",
-        "art_des_dokuments": "Unbekannt",
-        "buchungsnummer_code": "nicht vorhanden",
-        "name_des_reisenden": "nicht vorhanden",
-        "wie_viele_reisesegmente": 0,
-        "reisesegmente": [],
-        "ticketnummer": "nicht vorhanden",
-        "kosten_mit_steuern": "nicht vorhanden",
-        "kosten_ohne_steuern": "nicht vorhanden",
-        "waehrung_der_kosten": "nicht vorhanden",
-        "hotel_name": "nicht vorhanden",
-        "check_in": "nicht vorhanden",
-        "check_out": "nicht vorhanden",
-        "confidence": 0.0,
-        "review_required": False,
-        "manual_category_needed": False,
-        "manual_reason": "",
-        "warnungen": [],
-    }
-    if isinstance(data, dict):
-        base.update(data)
-    if not isinstance(base.get("reisesegmente"), list):
-        base["reisesegmente"] = []
-    if not isinstance(base.get("warnungen"), list):
-        base["warnungen"] = []
-    return normalize_analysis_dates(base)
-
-
-# ============================================================
-# BELEG STORAGE / DUPLICATES
-# ============================================================
-
-def normalize_for_fingerprint(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().lower())
-
-
-def build_beleg_fingerprint(filename: str, data: Dict[str, Any], reise_id: Optional[int]) -> str:
-    parts = [
-        normalize_for_fingerprint(reise_id or "no-reise"),
-        normalize_for_fingerprint(data.get("art_des_dokuments")),
-        normalize_for_fingerprint(data.get("belegdatum")),
-        normalize_for_fingerprint(data.get("buchungsnummer_code")),
-        normalize_for_fingerprint(data.get("ticketnummer")),
-        normalize_for_fingerprint(data.get("kosten_mit_steuern")),
-        normalize_for_fingerprint(data.get("waehrung_der_kosten")),
-    ]
-    # filename bewusst nur schwach: gleicher Beleg als Mail/PDF soll eher als Duplikat erkannt werden.
-    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
-
-
-def find_beleg_by_fingerprint(fingerprint: str) -> Optional[int]:
-    if not fingerprint:
-        return None
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM belege WHERE fingerprint = %s ORDER BY id DESC LIMIT 1", (fingerprint,))
-                row = cur.fetchone()
-                return int(row[0]) if row else None
-    except Exception:
-        return None
-
-
-def update_beleg_extra_data(
-    beleg_id: int,
-    fingerprint: str,
-    filename: str,
-    original_text: str,
-    anonymized_text: str,
-    analysis_data: Dict[str, Any],
-    original_file_path: Optional[str] = None,
-    original_filename: Optional[str] = None,
-    original_content_type: Optional[str] = None,
-    generated_pdf_path: Optional[str] = None,
-    anonymized_pdf_path: Optional[str] = None,
-    ki_response_pdf_path: Optional[str] = None,
-    workflow_status: Optional[str] = None,
-    normalized_summary_json: Optional[str] = None,
-) -> None:
-    if not beleg_id:
-        return
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE belege
-                       SET fingerprint = %s,
-                           source_filename = %s,
-                           original_text = %s,
-                           anonymized_text = %s,
-                           analysis_json = %s,
-                           original_file_path = COALESCE(%s, original_file_path),
-                           original_filename = COALESCE(%s, original_filename),
-                           original_content_type = COALESCE(%s, original_content_type),
-                           generated_pdf_path = COALESCE(%s, generated_pdf_path),
-                           anonymized_pdf_path = COALESCE(%s, anonymized_pdf_path),
-                           ki_response_pdf_path = COALESCE(%s, ki_response_pdf_path),
-                           workflow_status = COALESCE(%s, workflow_status),
-                           normalized_summary_json = COALESCE(%s, normalized_summary_json)
-                     WHERE id = %s
-                    """,
-                    (
-                        fingerprint,
-                        filename,
-                        original_text[:MAX_DB_TEXT_CHARS],
-                        anonymized_text[:MAX_DB_TEXT_CHARS],
-                        json.dumps(analysis_data, ensure_ascii=False)[:MAX_DB_TEXT_CHARS],
-                        original_file_path,
-                        original_filename,
-                        original_content_type,
-                        generated_pdf_path,
-                        anonymized_pdf_path,
-                        ki_response_pdf_path,
-                        workflow_status,
-                        normalized_summary_json,
-                        beleg_id,
-                    ),
-                )
-            conn.commit()
-    except Exception:
-        pass
-
-
-def update_beleg_generated_pdf_path(beleg_id: int, generated_pdf_path: str) -> None:
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE belege SET generated_pdf_path = %s WHERE id = %s", (generated_pdf_path, beleg_id))
-            conn.commit()
-    except Exception:
-        pass
-
-
-def safe_update_beleg_paths(
-    beleg_id: int,
-    anonymized_pdf_path: Optional[str] = None,
-    ki_response_pdf_path: Optional[str] = None,
-    workflow_status: Optional[str] = None,
-    normalized_summary_json: Optional[str] = None,
-) -> None:
-    if not beleg_id:
-        return
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE belege
-                       SET anonymized_pdf_path = COALESCE(%s, anonymized_pdf_path),
-                           ki_response_pdf_path = COALESCE(%s, ki_response_pdf_path),
-                           workflow_status = COALESCE(%s, workflow_status),
-                           normalized_summary_json = COALESCE(%s, normalized_summary_json)
-                     WHERE id = %s
-                    """,
-                    (anonymized_pdf_path, ki_response_pdf_path, workflow_status, normalized_summary_json, beleg_id),
-                )
-            conn.commit()
-    except Exception:
-        pass
-
-
-def dashboard_summary_from_analysis(data: Dict[str, Any]) -> Dict[str, Any]:
-    segs = data.get("reisesegmente") or []
-    first_seg = segs[0] if segs and isinstance(segs[0], dict) else {}
-    return {
-        "dashboard_fields": {
-            "art": data.get("art_des_dokuments") or "Unbekannt",
-            "belegdatum": data.get("belegdatum") or "nicht vorhanden",
-            "anbieter_event": make_event_title(data),
-            "betrag": data.get("kosten_mit_steuern") or "nicht vorhanden",
-            "waehrung": data.get("waehrung_der_kosten") or "nicht vorhanden",
-            "check_in": data.get("check_in") or first_seg.get("abreise_datum_und_zeit") or "nicht vorhanden",
-            "check_out": data.get("check_out") or first_seg.get("ankunft_datum_und_zeit") or "nicht vorhanden",
-            "segmente": len(segs),
-        },
-        "review_required": bool(data.get("review_required") or data.get("manual_category_needed")),
-        "confidence": data.get("confidence"),
-    }
-
-
-def write_anonymized_pdf_file(filename: str, anonymized_text: str) -> str:
-    safe = safe_filename(filename or "beleg")
-    stem = Path(safe).stem[:80] or "beleg"
-    path = ANONYMIZED_PDF_DIR / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:12]}_{stem}_anonymisiert.pdf"
-    body = "\n".join([
-        "ANONYMISIERTER BELEG - Versandinhalt an KI",
-        f"Quelldatei: {safe}",
-        f"Erzeugt: {datetime.utcnow().isoformat()} UTC",
-        "",
-        "Hinweis: Dieses PDF dokumentiert den anonymisierten Text/Extrakt, der für die KI-Analyse verwendet wird.",
-        "",
-        "--- Anonymisierter Inhalt ---",
-        (anonymized_text or "")[:MAX_ANALYSIS_TEXT_CHARS],
-    ])
-    path.write_bytes(make_simple_pdf_bytes("Anonymisierter Beleg", body))
-    return str(path)
-
-
-def write_ki_response_pdf_file(beleg_id: int, data: Dict[str, Any], raw_response: Any = None) -> str:
-    path = KI_RESPONSE_PDF_DIR / f"BE-{beleg_id:04d}_ki_response.pdf"
-    summary = dashboard_summary_from_analysis(data)
-    fields = summary.get("dashboard_fields", {})
-    body_lines = [
-        f"KI-ANTWORT / ANALYSE - BE-{beleg_id:04d}",
-        f"Erzeugt: {datetime.utcnow().isoformat()} UTC",
-        f"KI-Anbieter: {data.get('ai_provider') or 'openai'}",
-        f"Modell: {data.get('ai_model') or OPENAI_MODEL}",
-        "",
-        "=== FÜR DASHBOARD ÜBERNOMMENE FELDER ===",
-    ]
-    for k, v in fields.items():
-        body_lines.append(f"[DASHBOARD] {k}: {v}")
-    body_lines += [
-        "",
-        "=== PRÜFSTATUS ===",
-        f"Confidence: {data.get('confidence')}",
-        f"Manuelle Prüfung nötig: {bool(data.get('review_required') or data.get('manual_category_needed'))}",
-        f"Warnungen: {', '.join(map(str, data.get('warnungen') or []))}",
-        "",
-        "=== NORMALISIERTES JSON ===",
-        json.dumps(data, ensure_ascii=False, indent=2)[:MAX_DB_TEXT_CHARS],
-    ]
-    if raw_response is not None:
-        body_lines += ["", "=== ROHE KI-ANTWORT ===", json.dumps(raw_response, ensure_ascii=False, indent=2)[:MAX_DB_TEXT_CHARS]]
-    path.write_bytes(make_simple_pdf_bytes(f"KI-Antwort BE-{beleg_id:04d}", "\n".join(body_lines)))
-    return str(path)
-
-
-def workflow_status_for_analysis(data: Dict[str, Any]) -> str:
-    if data.get("duplicate_detected"):
-        return "duplikat"
-    if data.get("manual_category_needed") or str(data.get("art_des_dokuments") or "").lower() in {"unbekannt", "unknown"}:
-        return "prüfen"
-    if data.get("review_required"):
-        return "prüfen"
-    return "abgeschlossen"
-
-
-def get_beleg_record(beleg_id: int) -> Optional[Dict[str, Any]]:
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM belege WHERE id = %s", (beleg_id,))
-                row = cur.fetchone()
-                if not row:
-                    return None
-                cols = [d[0] for d in cur.description]
-                return dict(zip(cols, row))
-    except Exception:
-        return None
-
-
-def list_belege_for_event(event_id: int) -> List[Dict[str, Any]]:
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT DISTINCT b.*
-                    FROM belege b
-                    JOIN event_belege eb ON eb.beleg_id = b.id
-                    WHERE eb.event_id = %s
-                    ORDER BY b.id DESC
-                    """,
-                    (event_id,),
-                )
-                rows = cur.fetchall()
-                cols = [d[0] for d in cur.description]
-                return [dict(zip(cols, r)) for r in rows]
-    except Exception:
-        return []
-
-
-def safe_attach_beleg_to_event(event_id: int, beleg_id: int) -> None:
-    """Verknüpft Beleg und Event nur einmal.
-    Wichtig für Version 8.0: erkannte Duplikate dürfen nicht mehrfach in der Reiseseite erscheinen.
-    """
-    if not event_id or not beleg_id:
-        return
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT 1 FROM event_belege WHERE event_id = %s AND beleg_id = %s LIMIT 1",
-                    (event_id, beleg_id),
-                )
-                if cur.fetchone():
-                    return
-        safe_attach_beleg_to_event(event_id, beleg_id)
-    except Exception:
-        # Fallback: bestehende Datenbankfunktion verwenden, falls die Prüfung wegen alter Struktur scheitert.
-        try:
-            safe_attach_beleg_to_event(event_id, beleg_id)
-        except Exception:
-            pass
-
-
-def cleanup_unused_original_file(original_file_info: Optional[Dict[str, str]]) -> None:
-    """Löscht frisch gespeicherte Originaldateien, wenn nach der Analyse ein Duplikat erkannt wurde.
-    Der zuerst gespeicherte Originalbeleg bleibt erhalten.
-    """
-    try:
-        path = (original_file_info or {}).get("original_file_path")
-        if path and os.path.exists(path):
-            os.remove(path)
-    except Exception:
-        pass
-
-
-# ============================================================
-# EVENT MATCHING: mehrere Belege pro Event
-# ============================================================
-
-def event_key_from_analysis(data: Dict[str, Any]) -> str:
-    art = normalize_for_fingerprint(data.get("art_des_dokuments"))
-    code = normalize_for_fingerprint(data.get("buchungsnummer_code"))
-    ticket = normalize_for_fingerprint(data.get("ticketnummer"))
-    segs = data.get("reisesegmente") or []
-    start = ""
-    end = ""
-    place = ""
-    if segs and isinstance(segs[0], dict):
-        start = normalize_for_fingerprint(segs[0].get("abreise_datum_und_zeit"))
-        end = normalize_for_fingerprint(segs[-1].get("ankunft_datum_und_zeit"))
-        place = normalize_for_fingerprint(segs[0].get("ankunft_ort") or segs[0].get("abreise_ort"))
-    return "|".join([art, code, ticket, start, end, place])
-
-
-def find_matching_event_for_reise(reise_id: int, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Sucht vorhandenes Event zur Reise.
-    7.27: nicht mehr nur nach Typ, sondern nach Analyse-Key. Dadurch können mehrere Hotels/Flüge in einer Reise sauber getrennt werden,
-    aber derselbe Belegtyp mit gleichem Code landet wieder beim vorhandenen Event.
-    """
-    art = data.get("art_des_dokuments") or "Unbekannt"
-    wanted_key = event_key_from_analysis(data)
-    try:
-        detail = get_reise_detail(reise_id)
-        for ev in detail.get("events", []):
-            if (ev.get("typ") or "").lower() != art.lower():
-                continue
-            belege = list_belege_for_event(ev.get("id"))
-            for b in belege:
-                raw = b.get("analysis_json")
-                if not raw:
-                    continue
-                try:
-                    old_data = json.loads(raw) if isinstance(raw, str) else raw
-                except Exception:
-                    continue
-                if event_key_from_analysis(old_data) == wanted_key:
-                    return ev
-    except Exception:
-        return None
-    return None
-
-
-def make_event_title(data: Dict[str, Any]) -> str:
-    art = data.get("art_des_dokuments") or "Beleg"
-    code = data.get("buchungsnummer_code")
-    segs = data.get("reisesegmente") or []
-    if art == "Hotel" and segs and isinstance(segs[0], dict):
-        hotel = segs[0].get("ankunft_ort") or "Hotel"
-        return f"Hotel · {hotel[:90]}"
-    if art in {"Flug", "Zug", "Taxi"} and segs:
-        first = segs[0] if isinstance(segs[0], dict) else {}
-        carrier = first.get("transportunternehmen_und_nummer") or code or art
-        return f"{art} · {carrier[:90]}"
-    return f"{art} · {code}" if code and code != "nicht vorhanden" else art
-
-
-def attach_or_create_event_for_analysis(reise_id: int, beleg_id: int, data: dict) -> Dict[str, Any]:
-    existing_event = find_matching_event_for_reise(reise_id, data)
-    if existing_event:
-        safe_attach_beleg_to_event(existing_event["id"], beleg_id)
-        update_event_status(existing_event["id"], "abgeschlossen")
-        return {
-            "matched_event_id": existing_event["id"],
-            "matched_event_typ": existing_event.get("typ"),
-            "matched_existing_event": True,
-        }
-
-    art = data.get("art_des_dokuments", "Unbekannt")
-    titel = make_event_title(data)
-    new_event_id = create_event({"reise_id": reise_id, "typ": art, "titel": titel, "status": "abgeschlossen"})
-    safe_attach_beleg_to_event(new_event_id, beleg_id)
-    return {"created_event_id": new_event_id, "matched_event_typ": art, "matched_existing_event": False}
-
-
-# ============================================================
-# PDF FALLBACK GENERATION
-# ============================================================
-
-def pdf_escape(value: str) -> str:
-    value = (value or "").replace("\r", "")
-    value = value.encode("latin-1", errors="replace").decode("latin-1")
-    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-
-
-def wrap_text(text: str, width: int = 92, max_lines: int = 300) -> List[str]:
-    lines: List[str] = []
-    for raw in (text or "").split("\n"):
-        raw = raw.rstrip()
-        if not raw:
-            lines.append("")
-            continue
-        while len(raw) > width:
-            lines.append(raw[:width])
-            raw = raw[width:]
-            if len(lines) >= max_lines:
-                return lines + ["... gekuerzt ..."]
-        lines.append(raw)
-        if len(lines) >= max_lines:
-            return lines + ["... gekuerzt ..."]
-    return lines
-
-
-def make_simple_pdf_bytes(title: str, body: str) -> bytes:
-    lines = [title, "", f"Erzeugt: {datetime.utcnow().isoformat()} UTC", ""] + wrap_text(body)
-    page_size = 52
-    pages = [lines[i : i + page_size] for i in range(0, len(lines), page_size)] or [[title]]
-    objects: List[bytes] = []
-    page_refs: List[int] = []
-
-    def add_obj(content: bytes) -> int:
-        objects.append(content)
-        return len(objects)
-
-    catalog_id = add_obj(b"<< /Type /Catalog /Pages 2 0 R >>")
-    pages_id = add_obj(b"PLACEHOLDER")
-    font_id = add_obj(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-
-    for page_lines in pages:
-        content_parts = ["BT", "/F1 10 Tf", "50 800 Td", "14 TL"]
-        for line in page_lines:
-            content_parts.append(f"({pdf_escape(line)}) Tj")
-            content_parts.append("T*")
-        content_parts.append("ET")
-        stream = "\n".join(content_parts).encode("latin-1", errors="replace")
-        stream_id = add_obj(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
-        page_id = add_obj(
-            f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {stream_id} 0 R >>".encode()
-        )
-        page_refs.append(page_id)
-
-    kids = " ".join(f"{pid} 0 R" for pid in page_refs)
-    objects[pages_id - 1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_refs)} >>".encode()
-
-    out = BytesIO()
-    out.write(b"%PDF-1.4\n")
-    offsets = [0]
-    for idx, obj in enumerate(objects, start=1):
-        offsets.append(out.tell())
-        out.write(f"{idx} 0 obj\n".encode())
-        out.write(obj)
-        out.write(b"\nendobj\n")
-    xref_pos = out.tell()
-    out.write(f"xref\n0 {len(objects) + 1}\n".encode())
-    out.write(b"0000000000 65535 f \n")
-    for off in offsets[1:]:
-        out.write(f"{off:010d} 00000 n \n".encode())
-    out.write(f"trailer\n<< /Size {len(objects) + 1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode())
-    return out.getvalue()
-
-
-def generate_beleg_pdf_file(beleg_id: int, rec: Dict[str, Any]) -> Path:
-    cached = rec.get("generated_pdf_path")
-    if cached and os.path.exists(cached):
-        return Path(cached)
-
-    pdf_path = GENERATED_PDF_DIR / f"beleg_{beleg_id}.pdf"
-    title = f"Reisekosten Beleg BE-{beleg_id:04d}"
-    body_parts = [
-        f"Beleg-ID: BE-{beleg_id:04d}",
-        f"Datei/Quelle: {rec.get('source_filename') or rec.get('original_filename') or 'nicht gespeichert'}",
-        f"Belegdatum: {rec.get('belegdatum') or 'nicht vorhanden'}",
-        f"Art: {rec.get('art') or 'nicht vorhanden'}",
-        f"Kosten: {rec.get('kosten') or 'nicht vorhanden'} {rec.get('waehrung') or ''}",
-        f"Fingerprint: {rec.get('fingerprint') or 'nicht vorhanden'}",
-        "",
-        "--- Original / Mail-Text / OCR-Text ---",
-        rec.get("original_text") or "Für diesen Beleg wurde kein Originaltext gespeichert. Bitte Beleg erneut einlesen.",
-    ]
-    pdf_path.write_bytes(make_simple_pdf_bytes(title, "\n".join(body_parts)))
-    update_beleg_generated_pdf_path(beleg_id, str(pdf_path))
-    return pdf_path
-
-
-# ============================================================
-# REISE STATUS
-# ============================================================
-
-def compute_reise_status(detail: dict) -> dict:
-    events = detail.get("events", [])
-    reisende = detail.get("reisende", [])
-    typen = [e.get("typ") for e in events]
-    warnungen = []
-    status = "ok"
-    if len(reisende) == 0:
-        warnungen.append("Keine Reisenden zugeordnet")
-        status = "fehler"
-    if "Hotel" not in typen:
-        warnungen.append("Hotel fehlt")
-        if status != "fehler":
-            status = "pruefen"
-    if len(events) == 0:
-        warnungen.append("Keine Events vorhanden")
-        status = "fehler"
-    return {"status": status, "warnungen": warnungen, "flug": "Flug" in typen, "hotel": "Hotel" in typen, "taxi": "Taxi" in typen}
-
-
-# ============================================================
-# MAIN ANALYZE PIPELINE
-# ============================================================
-
-def analyze_text_internal(
-    text: str,
-    filename: str = "nicht vorhanden",
-    reise_id: Optional[int] = None,
-    event_id: Optional[int] = None,
-    ai_provider_override: Optional[str] = None,
-    ai_model_override: Optional[str] = None,
-    original_file_info: Optional[Dict[str, str]] = None,
-) -> dict:
-    """Version 9.0 Belegworkflow:
-    1) Original speichern (passiert vor Aufruf dieser Funktion)
-    2) anonymisierten Beleg als PDF speichern, bevor der Inhalt an die KI geht
-    3) KI-Antwort als eigenes PDF speichern
-    4) normalisierte Dashboard-Felder speichern
-    """
-    anonymized_text = anonymize_document_text(text)
-    anonymized_pdf_path = write_anonymized_pdf_file(filename, anonymized_text)
-    prompt = build_json_prompt(anonymized_text, filename=filename)
-
-    raw = call_openai_json(prompt, ai_model_override)
-    if isinstance(raw, dict) and raw.get("status") == "error":
-        try:
-            err_pdf = write_ki_response_pdf_file(0, {"status": "error", "detail": raw.get("detail"), "ai_model": ai_model_override or OPENAI_MODEL}, raw)
-        except Exception:
-            err_pdf = None
-        return {
-            "status": "error",
-            "detail": raw.get("detail", "Analysefehler"),
-            "version": APP_VERSION,
-            "ai_provider": "openai",
-            "ai_model": ai_model_override or OPENAI_MODEL,
-            "anonymized_pdf_path": anonymized_pdf_path,
-            "ki_response_pdf_path": err_pdf,
-            "anonymized_preview": anonymized_text[:2000],
-        }
-
-    data = ensure_defaults(raw)
-    data = enhance_hotel_analysis(data, text)
-    data["status"] = "ok"
-    data["version"] = APP_VERSION
-    data["generated_at_utc"] = datetime.utcnow().isoformat()
-    data["ai_provider"] = "openai"
-    data["ai_model"] = ai_model_override or OPENAI_MODEL
-    data["anonymized_preview"] = anonymized_text[:2000]
-
-    fingerprint = build_beleg_fingerprint(filename, data, reise_id)
-    existing_beleg_id = find_beleg_by_fingerprint(fingerprint)
-    data["fingerprint"] = fingerprint
-    data["duplicate_detected"] = bool(existing_beleg_id)
-    original_file_info = original_file_info or {}
-
-    if existing_beleg_id:
-        data["existing_beleg_id"] = existing_beleg_id
-        data["beleg_id"] = existing_beleg_id
-        data["duplicate_action"] = "skipped_insert_existing_beleg_used"
-        cleanup_unused_original_file(original_file_info)
-        # Für Duplikate werden keine neuen Dateien sichtbar gemacht; der vorhandene Beleg bleibt Referenz.
-        try:
-            if anonymized_pdf_path and os.path.exists(anonymized_pdf_path):
-                os.remove(anonymized_pdf_path)
-        except Exception:
-            pass
-        update_beleg_extra_data(
-            existing_beleg_id,
-            fingerprint,
-            filename,
-            text,
-            anonymized_text,
-            data,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "duplikat",
-            json.dumps(dashboard_summary_from_analysis(data), ensure_ascii=False),
-        )
-        if event_id:
-            safe_attach_beleg_to_event(event_id, existing_beleg_id)
-            update_event_status(event_id, "abgeschlossen")
-            data["attached_event_id"] = event_id
-        elif reise_id:
-            data.update(attach_or_create_event_for_analysis(reise_id, existing_beleg_id, data))
-        return data
-
-    beleg_id = insert_beleg(
-        {
-            "belegdatum": data.get("belegdatum"),
-            "art": data.get("art_des_dokuments"),
-            "kosten": data.get("kosten_mit_steuern"),
-            "waehrung": data.get("waehrung_der_kosten"),
-        }
-    )
-    ki_response_pdf_path = write_ki_response_pdf_file(beleg_id, data, raw)
-    workflow_status = workflow_status_for_analysis(data)
-    normalized_summary_json = json.dumps(dashboard_summary_from_analysis(data), ensure_ascii=False)
-
-    update_beleg_extra_data(
-        beleg_id,
-        fingerprint,
-        filename,
-        text,
-        anonymized_text,
-        data,
-        original_file_info.get("original_file_path"),
-        original_file_info.get("original_filename"),
-        original_file_info.get("original_content_type"),
-        None,
-        anonymized_pdf_path,
-        ki_response_pdf_path,
-        workflow_status,
-        normalized_summary_json,
-    )
-
-    data["beleg_id"] = beleg_id
-    data["existing_beleg_id"] = None
-    data["duplicate_action"] = "inserted_new_beleg"
-    data["anonymized_pdf_url"] = f"/belege/{beleg_id}/anonymized"
-    data["ki_response_pdf_url"] = f"/belege/{beleg_id}/ki-response"
-    data["workflow_status"] = workflow_status
-
-    if event_id:
-        safe_attach_beleg_to_event(event_id, beleg_id)
-        update_event_status(event_id, "abgeschlossen")
-        data["attached_event_id"] = event_id
-    elif reise_id:
-        data.update(attach_or_create_event_for_analysis(reise_id, beleg_id, data))
-
-    return data
-
-# ============================================================
-# MAIL
-# ============================================================
-
-def extract_plain_text_from_email_message(msg) -> str:
-    bodies: List[str] = []
-    if msg.is_multipart():
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            disposition = str(part.get("Content-Disposition") or "")
-            if "attachment" in disposition.lower():
-                continue
-            payload = part.get_payload(decode=True)
-            if not payload:
-                continue
-            decoded = payload.decode(errors="ignore")
-            if content_type == "text/plain":
-                bodies.append(decoded)
-            elif content_type == "text/html" and not bodies:
-                text = re.sub(r"<br\s*/?>", "\n", decoded, flags=re.IGNORECASE)
-                text = re.sub(r"</p\s*>", "\n", text, flags=re.IGNORECASE)
-                text = re.sub(r"<[^>]+>", " ", text)
-                bodies.append(text)
-    else:
-        payload = msg.get_payload(decode=True)
-        if payload:
-            bodies.append(payload.decode(errors="ignore"))
-    return "\n\n".join([b for b in bodies if b]).strip()
-
-
-def read_latest_mails(limit: int = 3, subject_contains: Optional[str] = None) -> List[Dict[str, str]]:
-    if not IMAP_HOST or not IMAP_USER or not IMAP_PASS:
-        raise RuntimeError("IMAP config fehlt")
-    mail = imaplib.IMAP4_SSL(IMAP_HOST)
-    mail.login(IMAP_USER, IMAP_PASS)
-    mail.select("inbox")
-    result, data = mail.search(None, "ALL")
-    if result != "OK":
-        raise RuntimeError("IMAP Suche fehlgeschlagen")
-    ids = data[0].split()
-    mails: List[Dict[str, str]] = []
-    for msg_id in reversed(ids):
-        res, msg_data = mail.fetch(msg_id, "(RFC822)")
-        if res != "OK":
-            continue
-        raw_email_bytes = msg_data[0][1]
-        msg = email.message_from_bytes(raw_email_bytes)
-        subject_raw = email.header.decode_header(msg.get("Subject", ""))[0][0]
-        subject = subject_raw.decode(errors="ignore") if isinstance(subject_raw, bytes) else str(subject_raw)
-        body = extract_plain_text_from_email_message(msg)
-        attachments: List[Dict[str, Any]] = []
-        try:
-            for part in msg.walk() if msg.is_multipart() else []:
-                disposition = str(part.get("Content-Disposition") or "").lower()
-                filename = part.get_filename()
-                if not filename and "attachment" not in disposition:
-                    continue
-                payload = part.get_payload(decode=True)
-                if not payload:
-                    continue
-                if filename:
-                    decoded_name = email.header.decode_header(filename)[0][0]
-                    filename = decoded_name.decode(errors="ignore") if isinstance(decoded_name, bytes) else str(decoded_name)
-                else:
-                    filename = "mail_anhang"
-                attachments.append({
-                    "filename": safe_filename(filename),
-                    "content": payload,
-                    "content_type": part.get_content_type() or mimetypes.guess_type(filename)[0] or "application/octet-stream",
-                })
-        except Exception:
-            attachments = []
-        if subject_contains and subject_contains.lower() not in subject.lower():
-            continue
-        mails.append(
-            {
-                "imap_id": msg_id.decode("ascii", errors="ignore") if isinstance(msg_id, bytes) else str(msg_id),
-                "message_id": str(msg.get("Message-ID") or ""),
-                "date": str(msg.get("Date") or ""),
-                "from": str(msg.get("From") or ""),
-                "subject": subject,
-                "body": body,
-                "preview": body[:500],
-                "raw_email": raw_email_bytes.decode("utf-8", errors="replace"),
-                "attachments": attachments,
-            }
-        )
-        if len(mails) >= limit:
-            break
-    try:
-        mail.logout()
-    except Exception:
-        pass
-    return mails
-
-
-def extract_reise_code_from_text(text: str) -> Optional[str]:
-    match = re.search(r"\b(\d{2}-\d{3})\b", text or "")
-    return match.group(1) if match else None
-
-
-def find_reise_by_code(reise_code: str) -> Optional[Dict[str, Any]]:
-    if not reise_code:
-        return None
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id, reise_code, reise_name
-                    FROM reisen
-                    WHERE reise_code = %s
-                    ORDER BY id DESC
-                    LIMIT 1
-                    """,
-                    (reise_code,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    return None
-                return {"id": row[0], "reise_code": row[1], "reise_name": row[2]}
-    except Exception:
-        return None
-
-
-# ============================================================
-# DELETE / UPDATE HELPERS
-# ============================================================
-
-def delete_mitarbeiter_by_id(mitarbeiter_id: int) -> None:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM reise_reisende WHERE mitarbeiter_id = %s", (mitarbeiter_id,))
-            cur.execute("DELETE FROM mitarbeiter WHERE id = %s", (mitarbeiter_id,))
-        conn.commit()
-
-
-def delete_reise_by_id(reise_id: int) -> None:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM event_belege WHERE event_id IN (SELECT id FROM events WHERE reise_id = %s)", (reise_id,))
-            cur.execute("DELETE FROM events WHERE reise_id = %s", (reise_id,))
-            cur.execute("DELETE FROM reise_reisende WHERE reise_id = %s", (reise_id,))
-            cur.execute("DELETE FROM reisen WHERE id = %s", (reise_id,))
-        conn.commit()
-
-
-def delete_event_by_id(event_id: int) -> None:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM event_belege WHERE event_id = %s", (event_id,))
-            cur.execute("DELETE FROM events WHERE id = %s", (event_id,))
-        conn.commit()
-
-
-def update_reise_basic(reise_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE reisen
-                   SET reise_name = %s,
-                       startdatum = %s,
-                       enddatum = %s,
-                       anzahl_reisende = %s
-                 WHERE id = %s
-                """,
-                (
-                    payload.get("reise_name"),
-                    payload.get("startdatum"),
-                    payload.get("enddatum"),
-                    payload.get("anzahl_reisende") or 1,
-                    reise_id,
-                ),
-            )
-            cur.execute("DELETE FROM reise_reisende WHERE reise_id = %s", (reise_id,))
-            for mitarbeiter_id in payload.get("mitarbeiter_ids") or []:
-                cur.execute(
-                    "INSERT INTO reise_reisende (reise_id, mitarbeiter_id, alias_name) VALUES (%s, %s, %s)",
-                    (reise_id, mitarbeiter_id, f"REISENDER_{mitarbeiter_id}"),
-                )
-        conn.commit()
-    return {"reise_id": reise_id}
-
-
-
-# ============================================================
-# MAIL CHECK + VMA HELPERS 8.1
-# ============================================================
-
-def mail_key_for_message(m: Dict[str, str]) -> str:
-    base = m.get("message_id") or "|".join([m.get("subject", ""), m.get("date", ""), m.get("from", "")])
-    return hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
-
-
-def mail_already_imported(mail_key: str) -> bool:
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM mail_import_log WHERE mail_key = %s LIMIT 1", (mail_key,))
-                return cur.fetchone() is not None
-    except Exception:
-        return False
-
-
-def mark_mail_imported(mail_key: str, subject: str, status: str, detail: str = "") -> None:
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO mail_import_log (mail_key, subject, imported_at, status, detail)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (mail_key) DO NOTHING
-                    """,
-                    (mail_key, subject[:500], datetime.utcnow().isoformat(), status, detail[:2000]),
-                )
-            conn.commit()
-    except Exception:
-        pass
-
-
-def check_and_import_mails(limit: int = 5, only_new: bool = True, subject_contains: Optional[str] = None) -> Dict[str, Any]:
-    ensure_db_extensions()
-    if not ANALYSIS_LOCK.acquire(blocking=False):
-        return {"status": "busy", "detail": "Eine Analyse oder Mailprüfung läuft bereits. Bitte kurz warten.", "version": APP_VERSION}
-    try:
-        limit = max(1, min(int(limit or 5), MAX_MAILS_PER_CHECK))
-        mails = read_latest_mails(limit=limit, subject_contains=subject_contains)
-        results = []
-        skipped_known = 0
-        duplicates = 0
-        imported = 0
-        errors = 0
-        attachments_processed_total = 0
-        for m in mails:
-            key = mail_key_for_message(m)
-            if only_new and mail_already_imported(key):
-                skipped_known += 1
-                continue
-            try:
-                detected_reise_code = extract_reise_code_from_text(m.get("subject") or "")
-                detected_reise = find_reise_by_code(detected_reise_code) if detected_reise_code else None
-                detected_reise_id = detected_reise["id"] if detected_reise else None
-                mail_results = []
-                attachments = m.get("attachments") or []
-                if attachments:
-                    for att in attachments:
-                        if attachments_processed_total >= MAX_MAIL_ATTACHMENTS_PER_CHECK:
-                            break
-                        fname = att.get("filename") or "mail_anhang"
-                        ctype = att.get("content_type") or ""
-                        content = att.get("content") or b""
-                        if len(content) > MAX_UPLOAD_BYTES:
-                            mail_results.append({"status": "skipped", "reason": "Anhang zu groß", "filename": fname})
-                            continue
-                        if ctype.startswith("image/") and not fname.lower().endswith((".pdf", ".txt", ".eml")):
-                            mail_results.append({"status": "skipped", "reason": "Bildanalyse in 8.2a manuell", "filename": fname})
-                            continue
-                        original_info = save_original_file(fname, content, ctype)
-                        text = extract_text_from_upload(fname, content)
-                        result = analyze_text_internal(text, filename=f"mail:{m.get('subject') or ''}:{fname}", reise_id=detected_reise_id, event_id=None, ai_provider_override="openai", ai_model_override=None, original_file_info=original_info)
-                        attachments_processed_total += 1
-                        mail_results.append(result)
-                        if result.get("duplicate_detected"): duplicates += 1
-                        elif result.get("status") == "ok": imported += 1
-                else:
-                    body = (m.get("body") or "")[:MAX_ANALYSIS_TEXT_CHARS]
-                    original_info = save_original_text_as_file(f"mail_{safe_filename(m.get('subject') or 'ohne_betreff')}.eml", (m.get("raw_email") or body)[:MAX_DB_TEXT_CHARS], "message/rfc822")
-                    result = analyze_text_internal(body, filename=f"mail:{m.get('subject') or ''}", reise_id=detected_reise_id, event_id=None, ai_provider_override="openai", ai_model_override=None, original_file_info=original_info)
-                    mail_results.append(result)
-                    if result.get("duplicate_detected"): duplicates += 1
-                    elif result.get("status") == "ok": imported += 1
-                mark_mail_imported(key, m.get("subject") or "", "ok", json.dumps({"reise_code": detected_reise_code, "results": len(mail_results)}, ensure_ascii=False))
-                results.append({"subject": m.get("subject"), "detected_reise_code": detected_reise_code, "assigned_reise_id": detected_reise_id, "attachments": len(attachments), "items": [{"status": r.get("status"), "duplicate_detected": bool(r.get("duplicate_detected")), "beleg_id": r.get("beleg_id"), "existing_beleg_id": r.get("existing_beleg_id"), "reason": r.get("reason")} for r in mail_results]})
-            except Exception as exc:
-                errors += 1
-                mark_mail_imported(key, m.get("subject") or "", "error", str(exc))
-                results.append({"subject": m.get("subject"), "status": "error", "detail": str(exc)})
-        return {"status": "ok", "version": APP_VERSION, "checked": len(mails), "imported": imported, "duplicates": duplicates, "skipped_known": skipped_known, "errors": errors, "results": results}
-    finally:
-        ANALYSIS_LOCK.release()
-
-
-def vma_amount_for_day(tag: date, start: Optional[date], end: Optional[date], fruehstueck: bool, mittag: bool, abend: bool) -> float:
-    base = 28.0
-    if start and end and (tag == start or tag == end):
-        base = 14.0
-    deduction = 0.0
-    if fruehstueck:
-        deduction += 28.0 * 0.20
-    if mittag:
-        deduction += 28.0 * 0.40
-    if abend:
-        deduction += 28.0 * 0.40
-    return max(0.0, round(base - deduction, 2))
-
-
-def ensure_vma_days(reise_id: int) -> None:
-    detail = get_reise_detail(reise_id)
-    r = detail.get("reise") or {}
-    if not r.get("startdatum") or not r.get("enddatum"):
-        return
-    try:
-        start = datetime.fromisoformat(str(r["startdatum"])).date()
-        end = datetime.fromisoformat(str(r["enddatum"])).date()
-    except Exception:
-        return
-    if end < start:
-        return
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                current = start
-                while current <= end:
-                    betrag = vma_amount_for_day(current, start, end, False, False, False)
-                    cur.execute(
-                        """
-                        INSERT INTO vma_tage (reise_id, tag, land, ort, fruehstueck, mittag, abend, betrag, notiz, updated_at)
-                        VALUES (%s, %s, 'Deutschland', '', FALSE, FALSE, FALSE, %s, '', %s)
-                        ON CONFLICT (reise_id, tag) DO NOTHING
-                        """,
-                        (reise_id, current.isoformat(), betrag, datetime.utcnow().isoformat()),
-                    )
-                    current += timedelta(days=1)
-            conn.commit()
-    except Exception:
-        pass
-
-
-def list_vma_days(reise_id: int) -> List[Dict[str, Any]]:
-    ensure_vma_days(reise_id)
-    detail = get_reise_detail(reise_id)
-    r = detail.get("reise") or {}
-    try:
-        start = datetime.fromisoformat(str(r.get("startdatum"))).date() if r.get("startdatum") else None
-        end = datetime.fromisoformat(str(r.get("enddatum"))).date() if r.get("enddatum") else None
-    except Exception:
-        start = end = None
-    rows: List[Dict[str, Any]] = []
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id, reise_id, tag, land, ort, fruehstueck, mittag, abend, betrag, notiz FROM vma_tage WHERE reise_id = %s ORDER BY tag", (reise_id,))
-                dbrows = cur.fetchall()
-                cols = [d[0] for d in cur.description]
-        for raw in dbrows:
-            row = dict(zip(cols, raw))
-            tag = row.get("tag")
-            if not isinstance(tag, date):
-                try:
-                    tag = datetime.fromisoformat(str(tag)).date()
-                except Exception:
-                    tag = None
-            amount = vma_amount_for_day(tag, start, end, bool(row.get("fruehstueck")), bool(row.get("mittag")), bool(row.get("abend"))) if tag else float(row.get("betrag") or 0)
-            row["betrag"] = amount
-            row["tag"] = tag.isoformat() if tag else str(row.get("tag") or "")
-            row["tag_display"] = tag.strftime("%d.%m.%Y") if tag else str(row.get("tag") or "")
-            rows.append(row)
-    except Exception:
-        return []
-    return rows
-
-
-# ============================================================
-# ROUTES
-# ============================================================
-
-@app.get("/")
-def root():
-    return {"status": "ok", "version": APP_VERSION}
-
-
-
-
+# ── System-Routen ──────────────────────────────────────────────────────────────
 @app.get("/init")
-@app.post("/init")
-def init_route():
-    """Initialisiert/erweitert die Datenbank ohne Daten zu löschen.
-    Wichtig für Render nach Deploy: /init muss JSON zurückgeben und darf keine HTML-Fehlerseite erzeugen.
-    """
+def init():
+    """Legt Tabellen an (PostgreSQL + SQLite kompatibel)."""
     try:
-        init_db()
-        ensure_db_extensions()
+        db = get_db(); cur = db.cursor()
+        for sql in get_schema():
+            cur.execute(sql)
+        db.commit(); cur.close(); db.close()
+        return {"status": "ok", "version": APP_VERSION,
+                "db": "postgresql" if is_postgres() else "sqlite"}
+    except Exception as e:
+        return {"status": "fehler", "detail": str(e)}
 
-        # Kurzer DB-Selbsttest: diese Tabellen brauchen wir mindestens.
-        checks = {}
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                for table in ["mitarbeiter", "reisen", "events", "belege", "event_belege", "reise_reisende", "vma_tage", "mail_import_log"]:
-                    try:
-                        cur.execute(f"SELECT COUNT(*) FROM {table}")
-                        row = cur.fetchone()
-                        checks[table] = int(row[0]) if row else 0
-                    except Exception as table_exc:
-                        checks[table] = f"ERROR: {table_exc}"
+@app.get("/version")
+def version():
+    return {"version": APP_VERSION,
+            "db": "postgresql" if is_postgres() else "sqlite"}
 
-        return {
-            "status": "ok",
-            "version": APP_VERSION,
-            "message": "Datenbank initialisiert/erweitert. Keine Daten wurden gelöscht.",
-            "tables": checks,
-            "paths": {
-                "original_upload_dir": str(ORIGINAL_UPLOAD_DIR),
-                "generated_pdf_dir": str(GENERATED_PDF_DIR),
-                "anonymized_pdf_dir": str(ANONYMIZED_PDF_DIR),
-                "ki_response_pdf_dir": str(KI_RESPONSE_PDF_DIR),
-            },
-        }
-    except Exception as exc:
-        return {
-            "status": "error",
-            "version": APP_VERSION,
-            "detail": str(exc),
-            "hint": "Bitte Render-Logs prüfen. Häufige Ursache: Datenbankverbindung oder fehlende Basistabellen aus database.py.",
-        }
-
-
-@app.get("/api/init")
-@app.post("/api/init")
-def api_init_route():
-    return init_route()
-
-
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "version": APP_VERSION,
-        "ai_provider": AI_PROVIDER,
-        "openai_configured": bool(OPENAI_API_KEY),
-        "openai_model": OPENAI_MODEL,
-        "imap_host_configured": bool(IMAP_HOST),
-        "imap_user_configured": bool(IMAP_USER),
-        "imap_pass_configured": bool(IMAP_PASS),
-        "original_upload_dir": str(ORIGINAL_UPLOAD_DIR),
-        "generated_pdf_dir": str(GENERATED_PDF_DIR),
-        "anonymized_pdf_dir": str(ANONYMIZED_PDF_DIR),
-        "ki_response_pdf_dir": str(KI_RESPONSE_PDF_DIR),
-        "duplicate_detection": "active",
-    }
-
-
-@app.get("/dashboard")
+# ── Dashboard ──────────────────────────────────────────────────────────────────
+@app.get("/", response_class=HTMLResponse)
 def dashboard():
-    return FileResponse("templates/dashboard.html")
-
-
-@app.get("/ai/test")
-def ai_test(ai_model: Optional[str] = Query(default=None)):
-    prompt = build_json_prompt("Testbeleg: Hotel in Berlin, Check-in 01.05.2026, Check-out 03.05.2026, Total 300 EUR.")
-    raw = call_openai_json(prompt, ai_model)
-    return {
-        "status": "ok" if not (isinstance(raw, dict) and raw.get("status") == "error") else "error",
-        "ai_provider": "openai",
-        "ai_model": ai_model or OPENAI_MODEL,
-        "result": raw,
-    }
-
-
-
-@app.get("/mail/check")
-def mail_check_get(limit: int = Query(default=5, ge=1, le=10), only_new: bool = Query(default=True), subject_contains: Optional[str] = Query(default=None)):
     try:
-        return check_and_import_mails(limit=limit, only_new=only_new, subject_contains=subject_contains)
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc), "version": APP_VERSION}
+        db = get_db(); cur = db.cursor()
+        P = ph()
 
+        cur.execute("SELECT COUNT(*) FROM mitarbeiter WHERE aktiv = TRUE" if is_postgres()
+                    else "SELECT COUNT(*) FROM mitarbeiter WHERE aktiv = 1")
+        ma_count = cur.fetchone()[0]
 
-@app.post("/mail/check")
-def mail_check_post(limit: int = Query(default=5, ge=1, le=10), only_new: bool = Query(default=True), subject_contains: Optional[str] = Query(default=None)):
+        cur.execute("SELECT COUNT(*) FROM reisen")
+        r_count = cur.fetchone()[0]
+
+        today = date.today()
+        if is_postgres():
+            cur.execute("SELECT COUNT(*) FROM reisen WHERE abreise <= %s AND rueckkehr >= %s",
+                        (today, today))
+        else:
+            cur.execute("SELECT COUNT(*) FROM reisen WHERE abreise <= ? AND rueckkehr >= ?",
+                        (str(today), str(today)))
+        aktiv_count = cur.fetchone()[0]
+
+        # Aktuelle und kommende Reisen
+        if is_postgres():
+            cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
+                           STRING_AGG(rm.kuerzel, ', ' ORDER BY rm.kuerzel) as ma
+                           FROM reisen r
+                           LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
+                           WHERE r.rueckkehr >= %s
+                           GROUP BY r.code, r.titel, r.abreise, r.rueckkehr
+                           ORDER BY r.abreise
+                           LIMIT 10""", (today,))
+        else:
+            cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
+                           GROUP_CONCAT(rm.kuerzel, ', ') as ma
+                           FROM reisen r
+                           LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
+                           WHERE r.rueckkehr >= ?
+                           GROUP BY r.code, r.titel, r.abreise, r.rueckkehr
+                           ORDER BY r.abreise
+                           LIMIT 10""", (str(today),))
+        rows = cur.fetchall()
+        cur.close(); db.close()
+
+        def status_badge(ab, zu):
+            if isinstance(ab, str): ab = date.fromisoformat(ab)
+            if isinstance(zu, str): zu = date.fromisoformat(zu)
+            if today < ab:
+                tage = (ab - today).days
+                return f'<span class="badge badge-blue">In {tage} Tag{"en" if tage!=1 else ""}</span>'
+            elif today <= zu:
+                return '<span class="badge badge-green">● Aktiv</span>'
+            else:
+                return '<span class="badge badge-gray">Fertig</span>'
+
+        reise_rows = ""
+        for r in rows:
+            code, titel, ab, zu, ma = (r if isinstance(r, tuple)
+                                        else (r["code"],r["titel"],r["abreise"],r["rueckkehr"],r["ma"]))
+            reise_rows += f"""<tr>
+                <td><a href="/reise/{code}" class="td-mono" style="color:var(--blue)">{code}</a></td>
+                <td style="font-weight:500"><a href="/reise/{code}" style="color:inherit;text-decoration:none">{titel}</a></td>
+                <td>{fmt_date(ab)}</td>
+                <td>{fmt_date(zu)}</td>
+                <td style="color:var(--muted)">{ma or "–"}</td>
+                <td>{status_badge(ab, zu)}</td>
+            </tr>"""
+
+        content = f"""
+        <h1 class="page-title">Dashboard</h1>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px">
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:36px;font-weight:700;color:var(--blue)">{ma_count}</div>
+            <div style="color:var(--muted);font-size:12px;margin-top:4px">Aktive Mitarbeiter</div>
+          </div></div>
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:36px;font-weight:700;color:var(--green)">{aktiv_count}</div>
+            <div style="color:var(--muted);font-size:12px;margin-top:4px">Laufende Reisen</div>
+          </div></div>
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:36px;font-weight:700;color:var(--text)">{r_count}</div>
+            <div style="color:var(--muted);font-size:12px;margin-top:4px">Reisen gesamt</div>
+          </div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Aktuelle & kommende Reisen</span>
+            <a href="/reisen/neu" class="btn btn-primary btn-sm">+ Neue Reise</a>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th>Code</th><th>Titel</th><th>Abreise</th>
+                <th>Rückkehr</th><th>Mitarbeiter</th><th>Status</th>
+              </tr></thead>
+              <tbody>
+                {reise_rows or '<tr><td colspan="6"><div class="empty-state">Keine Reisen – <a href="/reisen/neu">Erste Reise anlegen</a></div></td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>"""
+        return HTMLResponse(shell("Dashboard", content, "start"))
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler", f"""
+        <div class="alert alert-warn">
+            <b>Datenbank nicht initialisiert?</b><br>
+            Bitte <a href="/init">/init aufrufen</a> um Tabellen anzulegen.<br>
+            Fehler: {e}
+        </div>
+        <pre style="font-size:11px;color:var(--muted)">{traceback.format_exc()[:500]}</pre>
+        """))
+
+# ── Mitarbeiter ────────────────────────────────────────────────────────────────
+@app.get("/mitarbeiter", response_class=HTMLResponse)
+def mitarbeiter_liste():
     try:
-        return check_and_import_mails(limit=limit, only_new=only_new, subject_contains=subject_contains)
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc), "version": APP_VERSION}
+        db = get_db(); cur = db.cursor()
+        cur.execute("""SELECT m.kuerzel, m.klarname, m.aktiv,
+                       COUNT(rm.reise_code) as reise_count
+                       FROM mitarbeiter m
+                       LEFT JOIN reise_mitarbeiter rm ON rm.kuerzel = m.kuerzel
+                       GROUP BY m.kuerzel, m.klarname, m.aktiv
+                       ORDER BY m.klarname""")
+        rows = cur.fetchall()
+        cur.close(); db.close()
 
+        def get(r, key, idx):
+            return r[key] if hasattr(r, 'keys') else r[idx]
 
-@app.post("/mail/fetch")
-def mail_fetch_alias(limit: int = Query(default=5, ge=1, le=10)):
-    return mail_check_post(limit=limit, only_new=True)
+        zeilen = ""
+        for r in rows:
+            kuerzel = get(r,"kuerzel",0)
+            klarname = get(r,"klarname",1)
+            aktiv = get(r,"aktiv",2)
+            rcnt = get(r,"reise_count",3)
+            badge = ('<span class="badge badge-green">Aktiv</span>' if aktiv
+                     else '<span class="badge badge-gray">Inaktiv</span>')
+            zeilen += f"""<tr>
+                <td class="td-mono" style="font-weight:700">{kuerzel}</td>
+                <td style="font-weight:500">{klarname}</td>
+                <td>{badge}</td>
+                <td style="color:var(--muted)">{rcnt}</td>
+                <td>
+                  <a href="/mitarbeiter/{kuerzel}/bearbeiten"
+                     class="btn btn-secondary btn-sm">✏ Bearbeiten</a>
+                </td>
+            </tr>"""
 
+        content = f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+          <h1 class="page-title" style="margin:0">Mitarbeiter</h1>
+          <a href="/mitarbeiter/neu" class="btn btn-primary">+ Neu anlegen</a>
+        </div>
+        <div class="card">
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th>Kürzel</th><th>Name</th><th>Status</th><th>Reisen</th><th></th>
+              </tr></thead>
+              <tbody>
+                {zeilen or '<tr><td colspan="5"><div class="empty-state">Noch keine Mitarbeiter – <a href="/mitarbeiter/neu">Jetzt anlegen</a></div></td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>"""
+        return HTMLResponse(shell("Mitarbeiter", content, "mitarbeiter"))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
-@app.get("/mail/test")
-def mail_test(limit: int = Query(default=3, ge=1, le=20), subject_contains: Optional[str] = Query(default=None)):
+@app.get("/mitarbeiter/neu", response_class=HTMLResponse)
+def mitarbeiter_neu_form():
+    content = """
+    <h1 class="page-title">Mitarbeiter anlegen</h1>
+    <div class="card" style="max-width:480px">
+      <div class="card-body">
+        <form method="post" action="/mitarbeiter/neu">
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Kürzel <span class="required">*</span></label>
+              <input type="text" name="kuerzel" maxlength="5" required
+                     placeholder="z.B. RD" style="text-transform:uppercase"
+                     autofocus>
+              <div class="form-hint">2–5 Buchstaben, eindeutig pro Mitarbeiter</div>
+            </div>
+            <div class="form-group">
+              <label>Klarname <span class="required">*</span></label>
+              <input type="text" name="klarname" required
+                     placeholder="z.B. Ralf Diesslin">
+            </div>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Anlegen</button>
+            <a href="/mitarbeiter" class="btn btn-secondary">Abbrechen</a>
+          </div>
+        </form>
+      </div>
+    </div>"""
+    return HTMLResponse(shell("Mitarbeiter anlegen", content, "mitarbeiter"))
+
+@app.post("/mitarbeiter/neu")
+async def mitarbeiter_neu(request: Request):
+    form = await request.form()
+    kuerzel = (form.get("kuerzel") or "").strip().upper()
+    klarname = (form.get("klarname") or "").strip()
+    if not kuerzel or not klarname:
+        return HTMLResponse(shell("Fehler",
+            '<div class="alert alert-err">Kürzel und Name sind Pflichtfelder.</div>'
+            '<a href="/mitarbeiter/neu" class="btn btn-secondary">Zurück</a>'))
+    if not re.match(r'^[A-Z]{1,5}$', kuerzel):
+        return HTMLResponse(shell("Fehler",
+            '<div class="alert alert-err">Kürzel: nur Buchstaben, 1–5 Zeichen.</div>'
+            '<a href="/mitarbeiter/neu" class="btn btn-secondary">Zurück</a>'))
     try:
-        mails = read_latest_mails(limit=limit, subject_contains=subject_contains)
-        return {"status": "ok", "count": len(mails), "subject_filter": subject_contains, "mails": [{"subject": m["subject"], "preview": m["preview"]} for m in mails]}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(f"INSERT INTO mitarbeiter (kuerzel, klarname) VALUES ({P},{P})",
+                    (kuerzel, klarname))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse("/mitarbeiter", status_code=303)
+    except Exception as e:
+        err = str(e)
+        if "unique" in err.lower() or "duplicate" in err.lower():
+            msg = f'Kürzel "{kuerzel}" existiert bereits.'
+        else:
+            msg = err
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{msg}</div>'
+            '<a href="/mitarbeiter/neu" class="btn btn-secondary">Zurück</a>'))
 
-
-@app.get("/mail/analyze-latest")
-def mail_analyze_latest(limit: int = Query(default=3, ge=1, le=10), subject_contains: Optional[str] = Query(default=None)):
+@app.get("/mitarbeiter/{kuerzel}/bearbeiten", response_class=HTMLResponse)
+def mitarbeiter_bearbeiten_form(kuerzel: str):
     try:
-        mails = read_latest_mails(limit=limit, subject_contains=subject_contains)
-        analyzed = []
-        for m in mails:
-            detected_reise_code = extract_reise_code_from_text(m["subject"])
-            detected_reise = find_reise_by_code(detected_reise_code) if detected_reise_code else None
-            detected_reise_id = detected_reise["id"] if detected_reise else None
-            original_info = save_original_text_as_file(f"mail_{safe_filename(m['subject'])}.eml", m.get("raw_email") or m.get("body") or "", "message/rfc822")
-            result = analyze_text_internal(
-                m["body"],
-                filename=f"mail:{m['subject']}",
-                reise_id=detected_reise_id,
-                event_id=None,
-                ai_provider_override="openai",
-                ai_model_override=None,
-                original_file_info=original_info,
-            )
-            analyzed.append(
-                {
-                    "subject": m["subject"],
-                    "preview": m["preview"],
-                    "detected_reise_code": detected_reise_code,
-                    "assigned_reise_id": detected_reise_id,
-                    "assigned_reise_name": detected_reise["reise_name"] if detected_reise else None,
-                    "analysis": result,
-                }
-            )
-        return {"status": "ok", "count": len(analyzed), "subject_filter": subject_contains, "results": analyzed}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(f"SELECT kuerzel, klarname, aktiv FROM mitarbeiter WHERE kuerzel={P}",
+                    (kuerzel.upper(),))
+        r = cur.fetchone()
+        cur.close(); db.close()
+        if not r:
+            return HTMLResponse(shell("Fehler",
+                '<div class="alert alert-err">Mitarbeiter nicht gefunden.</div>'))
+        k = r[0] if isinstance(r, tuple) else r["kuerzel"]
+        n = r[1] if isinstance(r, tuple) else r["klarname"]
+        a = r[2] if isinstance(r, tuple) else r["aktiv"]
+        aktiv_check = "checked" if a else ""
+        content = f"""
+        <h1 class="page-title">Mitarbeiter bearbeiten</h1>
+        <div class="card" style="max-width:480px">
+          <div class="card-body">
+            <form method="post" action="/mitarbeiter/{k}/bearbeiten">
+              <div class="form-grid">
+                <div class="form-group">
+                  <label>Kürzel</label>
+                  <input type="text" value="{k}" disabled
+                         style="background:#f8fafc;color:var(--muted)">
+                </div>
+                <div class="form-group">
+                  <label>Klarname <span class="required">*</span></label>
+                  <input type="text" name="klarname" value="{n}" required autofocus>
+                </div>
+                <div class="form-group full">
+                  <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                    <input type="checkbox" name="aktiv" value="1" {aktiv_check}
+                           style="width:auto;margin:0">
+                    Mitarbeiter aktiv
+                  </label>
+                </div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Speichern</button>
+                <a href="/mitarbeiter" class="btn btn-secondary">Abbrechen</a>
+              </div>
+            </form>
+          </div>
+        </div>"""
+        return HTMLResponse(shell(f"MA {k} bearbeiten", content, "mitarbeiter"))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
-
-@app.post("/admin/reset-db")
-def reset_db():
+@app.post("/mitarbeiter/{kuerzel}/bearbeiten")
+async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
+    form = await request.form()
+    klarname = (form.get("klarname") or "").strip()
+    aktiv = bool(form.get("aktiv"))
+    if not klarname:
+        return HTMLResponse(shell("Fehler",
+            '<div class="alert alert-err">Name darf nicht leer sein.</div>'))
     try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DROP TABLE IF EXISTS event_belege CASCADE")
-                cur.execute("DROP TABLE IF EXISTS events CASCADE")
-                cur.execute("DROP TABLE IF EXISTS reise_reisende CASCADE")
-                cur.execute("DROP TABLE IF EXISTS belege CASCADE")
-                cur.execute("DROP TABLE IF EXISTS mitarbeiter CASCADE")
-                cur.execute("DROP TABLE IF EXISTS reisen CASCADE")
-            conn.commit()
-        init_db()
-        ensure_db_extensions()
-        return {"status": "ok", "message": "DB reset done"}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        aktiv_val = True if is_postgres() else 1
+        inaktiv_val = False if is_postgres() else 0
+        cur.execute(f"UPDATE mitarbeiter SET klarname={P}, aktiv={P} WHERE kuerzel={P}",
+                    (klarname, aktiv_val if aktiv else inaktiv_val, kuerzel.upper()))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse("/mitarbeiter", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
-
-@app.get("/db-test")
-def db_test():
+# ── Reisen ─────────────────────────────────────────────────────────────────────
+@app.get("/reisen", response_class=HTMLResponse)
+def reisen_liste():
     try:
-        return db_ping()
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
+        db = get_db(); cur = db.cursor()
+        today = date.today()
+        if is_postgres():
+            cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
+                           STRING_AGG(rm.kuerzel, ', ' ORDER BY rm.kuerzel) as ma,
+                           COUNT(DISTINCT rl.id) as laender_count
+                           FROM reisen r
+                           LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
+                           LEFT JOIN reise_laender rl ON rl.reise_code = r.code
+                           GROUP BY r.code, r.titel, r.abreise, r.rueckkehr
+                           ORDER BY r.abreise DESC""")
+        else:
+            cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
+                           GROUP_CONCAT(rm.kuerzel, ', ') as ma,
+                           COUNT(DISTINCT rl.id) as laender_count
+                           FROM reisen r
+                           LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
+                           LEFT JOIN reise_laender rl ON rl.reise_code = r.code
+                           GROUP BY r.code, r.titel, r.abreise, r.rueckkehr
+                           ORDER BY r.abreise DESC""")
+        rows = cur.fetchall()
+        cur.close(); db.close()
 
+        def get(r,k,i): return r[k] if hasattr(r,'keys') else r[i]
 
-@app.get("/belege")
-def belege():
+        def status(ab, zu):
+            if isinstance(ab, str): ab = date.fromisoformat(ab)
+            if isinstance(zu, str): zu = date.fromisoformat(zu)
+            if today < ab: return f'<span class="badge badge-blue">Geplant</span>'
+            elif today <= zu: return '<span class="badge badge-green">● Aktiv</span>'
+            else: return '<span class="badge badge-gray">Abgeschlossen</span>'
+
+        zeilen = ""
+        for r in rows:
+            code = get(r,"code",0); titel = get(r,"titel",1)
+            ab = get(r,"abreise",2); zu = get(r,"rueckkehr",3)
+            ma = get(r,"ma",4); lc = get(r,"laender_count",5)
+            vma_ok = "✓" if lc and lc > 0 else '<span style="color:var(--amber)">–</span>'
+            zeilen += f"""<tr>
+                <td class="td-mono" style="font-weight:700">
+                  <a href="/reise/{code}" style="color:var(--blue)">{code}</a></td>
+                <td style="font-weight:500">
+                  <a href="/reise/{code}" style="color:inherit;text-decoration:none">{titel}</a></td>
+                <td>{fmt_date(ab)}</td><td>{fmt_date(zu)}</td>
+                <td style="color:var(--muted)">{ma or "–"}</td>
+                <td style="text-align:center">{vma_ok}</td>
+                <td>{status(ab,zu)}</td>
+                <td>
+                  <a href="/reise/{code}" class="btn btn-secondary btn-sm">Detail</a>
+                </td>
+            </tr>"""
+
+        content = f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+          <h1 class="page-title" style="margin:0">Reisen</h1>
+          <a href="/reisen/neu" class="btn btn-primary">+ Neue Reise</a>
+        </div>
+        <div class="card">
+          <div class="table-wrap"><table>
+            <thead><tr>
+              <th>Code</th><th>Titel</th><th>Abreise</th><th>Rückkehr</th>
+              <th>Mitarbeiter</th><th>VMA</th><th>Status</th><th></th>
+            </tr></thead>
+            <tbody>
+              {zeilen or '<tr><td colspan="8"><div class="empty-state">Keine Reisen – <a href="/reisen/neu">Erste Reise anlegen</a></div></td></tr>'}
+            </tbody>
+          </table></div>
+        </div>"""
+        return HTMLResponse(shell("Reisen", content, "reisen"))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.get("/reisen/neu", response_class=HTMLResponse)
+def reise_neu_form():
     try:
-        items = list_belege()
-        return {"count": len(items), "belege": items}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT kuerzel, klarname FROM mitarbeiter WHERE aktiv = TRUE"
+                    if is_postgres()
+                    else "SELECT kuerzel, klarname FROM mitarbeiter WHERE aktiv = 1"
+                    " ORDER BY klarname")
+        ma_rows = cur.fetchall()
+        cur.close(); db.close()
+    except: ma_rows = []
 
+    def get(r,k,i): return r[k] if hasattr(r,'keys') else r[i]
 
-@app.get("/belege/{beleg_id}")
-def beleg_detail(beleg_id: int):
-    rec = get_beleg_record(beleg_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
-    return {"status": "ok", "beleg": rec, "pdf_url": f"/belege/{beleg_id}/pdf", "original_url": f"/belege/{beleg_id}/original", "anonymized_url": f"/belege/{beleg_id}/anonymized", "ki_response_url": f"/belege/{beleg_id}/ki-response"}
+    ma_opts = "".join(
+        f'<option value="{get(r,"kuerzel",0)}">'
+        f'{get(r,"kuerzel",0)} – {get(r,"klarname",1)}</option>'
+        for r in ma_rows)
 
+    land_opts = "".join(
+        f'<option value="{code}">{name} ({code})</option>'
+        for code, name in LAENDER_LISTE)
 
-@app.get("/belege/{beleg_id}/original")
-def beleg_original(beleg_id: int):
-    rec = get_beleg_record(beleg_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
-    path = rec.get("original_file_path")
-    if not path or not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Originaldatei wurde für diesen Beleg noch nicht gespeichert. Bitte Beleg erneut einlesen.")
-    filename = rec.get("original_filename") or rec.get("source_filename") or f"beleg_{beleg_id}"
-    media_type = rec.get("original_content_type") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    return FileResponse(path, media_type=media_type, filename=filename)
-
-
-@app.get("/belege/{beleg_id}/anonymized")
-def beleg_anonymized(beleg_id: int):
-    rec = get_beleg_record(beleg_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
-    path = rec.get("anonymized_pdf_path")
-    if not path or not os.path.exists(path):
-        # Fallback für Altbelege: anonymisiertes PDF aus gespeicherten anonymisierten Texten erzeugen.
-        text = rec.get("anonymized_text") or "Für diesen Beleg wurde noch kein anonymisierter Inhalt gespeichert. Bitte Beleg neu analysieren."
-        path = write_anonymized_pdf_file(rec.get("source_filename") or rec.get("original_filename") or f"beleg_{beleg_id}", text)
-        safe_update_beleg_paths(beleg_id, anonymized_pdf_path=path, workflow_status=rec.get("workflow_status") or "anonymisiert")
-    return FileResponse(path, media_type="application/pdf", filename=f"BE-{beleg_id:04d}_anonymisiert.pdf")
-
-
-@app.get("/belege/{beleg_id}/ki-response")
-def beleg_ki_response(beleg_id: int):
-    rec = get_beleg_record(beleg_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
-    path = rec.get("ki_response_pdf_path")
-    if not path or not os.path.exists(path):
-        data = json.loads(rec.get("analysis_json") or "{}") if rec.get("analysis_json") else {"status": "fehlt", "warnungen": ["Keine Analyse gespeichert"]}
-        path = write_ki_response_pdf_file(beleg_id, data, data)
-        safe_update_beleg_paths(beleg_id, ki_response_pdf_path=path, workflow_status=rec.get("workflow_status") or "ki_pdf_erzeugt")
-    return FileResponse(path, media_type="application/pdf", filename=f"BE-{beleg_id:04d}_ki_response.pdf")
-
-
-@app.get("/belege/{beleg_id}/pdf")
-def beleg_pdf(beleg_id: int):
-    rec = get_beleg_record(beleg_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
-
-    path = rec.get("original_file_path")
-    filename = rec.get("original_filename") or rec.get("source_filename") or f"beleg_{beleg_id}"
-    content_type = rec.get("original_content_type") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-
-    if path and os.path.exists(path):
-        lower = filename.lower()
-        if lower.endswith(".pdf") or content_type == "application/pdf":
-            return FileResponse(path, media_type="application/pdf", filename=filename)
-        if lower.endswith((".jpg", ".jpeg", ".png", ".webp")) or content_type.startswith("image/"):
-            return FileResponse(path, media_type=content_type, filename=filename)
-
-    pdf_path = generate_beleg_pdf_file(beleg_id, rec)
-    return FileResponse(str(pdf_path), media_type="application/pdf", filename=f"beleg_{beleg_id}.pdf")
-
-
-@app.get("/mitarbeiter")
-def mitarbeiter_list():
+    # Vorschau-Code
     try:
-        items = list_mitarbeiter()
-        return {"count": len(items), "mitarbeiter": items}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
+        db = get_db(); cur = db.cursor()
+        code_vorschau = next_reise_code(cur)
+        cur.close(); db.close()
+    except: code_vorschau = "–"
 
+    content = f"""
+    <h1 class="page-title">Neue Reise anlegen</h1>
+    <div class="card" style="max-width:800px">
+      <div class="card-body">
+        <form method="post" action="/reisen/neu">
 
-@app.get("/mitarbeiter/suche")
-def mitarbeiter_suche(q: str = Query(default="")):
+          <div style="background:var(--blue-l);border:1px solid #bfdbfe;border-radius:var(--radius);
+                      padding:12px 16px;margin-bottom:20px;display:flex;align-items:center;gap:12px">
+            <span style="font-size:22px;font-family:monospace;font-weight:700;color:var(--blue)">{code_vorschau}</span>
+            <span style="font-size:12px;color:#3b82f6">Reisecode (wird automatisch vergeben)</span>
+          </div>
+
+          <div class="form-grid form-grid-2">
+            <div class="form-group full">
+              <label>Titel / Beschreibung <span class="required">*</span></label>
+              <input type="text" name="titel" required autofocus
+                     placeholder="z.B. ECMA Lyon oder Costa Rica Kundenbesuch">
+            </div>
+            <div class="form-group">
+              <label>Abreise <span class="required">*</span></label>
+              <input type="date" name="abreise" required
+                     onchange="updateRueckkehr(this.value)">
+            </div>
+            <div class="form-group">
+              <label>Rückkehr <span class="required">*</span></label>
+              <input type="date" name="rueckkehr" required id="inp-rueckkehr">
+            </div>
+            <div class="form-group full">
+              <label>Mitarbeiter <span class="required">*</span></label>
+              <select name="mitarbeiter" multiple required size="4"
+                      style="height:auto">
+                {ma_opts or '<option disabled>Erst Mitarbeiter anlegen</option>'}
+              </select>
+              <div class="form-hint">Mehrfachauswahl: Strg+Klick (Windows) oder Cmd+Klick (Mac)</div>
+            </div>
+            <div class="form-group full">
+              <label>Notiz (optional)</label>
+              <textarea name="notiz" rows="2"
+                        placeholder="z.B. Kundenprojekt, Messe, internes Meeting"></textarea>
+            </div>
+          </div>
+
+          <hr style="border:none;border-top:1px solid var(--border);margin:24px 0">
+
+          <h2 style="font-size:15px;font-weight:600;margin-bottom:16px">
+            🌍 Länder & VMA-Sätze
+          </h2>
+          <div class="alert alert-warn" style="margin-bottom:16px">
+            Die Länder-Timeline wird für die automatische VMA-Berechnung genutzt.
+            Trage alle Länder mit den jeweiligen Aufenthalts-Zeiträumen ein.
+          </div>
+
+          <div id="laender-container">
+            <div class="laender-zeile" style="display:grid;grid-template-columns:1fr 1fr 1fr auto;
+                 gap:8px;margin-bottom:8px;align-items:end">
+              <div class="form-group" style="margin:0">
+                <label>Land</label>
+                <select name="land_code[]" onchange="updateVMA(this)">
+                  {land_opts}
+                </select>
+              </div>
+              <div class="form-group" style="margin:0">
+                <label>Von (Datum)</label>
+                <input type="date" name="land_von[]">
+              </div>
+              <div class="form-group" style="margin:0">
+                <label>Bis (Datum)</label>
+                <input type="date" name="land_bis[]">
+              </div>
+              <div style="padding-bottom:1px">
+                <button type="button" onclick="removeLand(this)"
+                        class="btn btn-secondary btn-sm">✕</button>
+              </div>
+            </div>
+          </div>
+
+          <button type="button" onclick="addLand()" class="btn btn-secondary btn-sm"
+                  style="margin-bottom:20px">+ Land hinzufügen</button>
+
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Reise anlegen</button>
+            <a href="/reisen" class="btn btn-secondary">Abbrechen</a>
+          </div>
+
+        </form>
+      </div>
+    </div>
+
+    <script>
+    const VMA = {json.dumps({k: v for k, v in VMA_SAETZE.items()})};
+    const LAND_OPTS = `{land_opts}`;
+
+    function updateRueckkehr(v) {{
+        if (!v) return;
+        const r = document.getElementById('inp-rueckkehr');
+        if (r && !r.value) {{
+            const d = new Date(v);
+            d.setDate(d.getDate() + 3);
+            r.value = d.toISOString().split('T')[0];
+        }}
+    }}
+
+    function updateVMA(sel) {{
+        const code = sel.value;
+        const info = VMA[code];
+        if (info) {{
+            const row = sel.closest('.laender-zeile');
+            let hint = row.querySelector('.vma-hint');
+            if (!hint) {{
+                hint = document.createElement('div');
+                hint.className = 'vma-hint';
+                hint.style.cssText = 'grid-column:1/-1;font-size:11px;color:#059669;margin-top:-4px;margin-bottom:4px';
+                row.after(hint);
+            }}
+            hint.textContent = info.name + ': ' + info.voll + ' EUR/Tag (voll) · ' + info.halb + ' EUR/Tag (halber Satz)';
+        }}
+    }}
+
+    function addLand() {{
+        const container = document.getElementById('laender-container');
+        const div = document.createElement('div');
+        div.className = 'laender-zeile';
+        div.style.cssText = 'display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;margin-bottom:8px;align-items:end';
+        div.innerHTML = `
+          <div class="form-group" style="margin:0">
+            <label>Land</label>
+            <select name="land_code[]" onchange="updateVMA(this)">${{LAND_OPTS}}</select>
+          </div>
+          <div class="form-group" style="margin:0">
+            <label>Von (Datum)</label>
+            <input type="date" name="land_von[]">
+          </div>
+          <div class="form-group" style="margin:0">
+            <label>Bis (Datum)</label>
+            <input type="date" name="land_bis[]">
+          </div>
+          <div style="padding-bottom:1px">
+            <button type="button" onclick="removeLand(this)" class="btn btn-secondary btn-sm">✕</button>
+          </div>`;
+        container.appendChild(div);
+    }}
+
+    function removeLand(btn) {{
+        const row = btn.closest('.laender-zeile');
+        const hint = row.nextElementSibling;
+        if (hint && hint.classList.contains('vma-hint')) hint.remove();
+        row.remove();
+    }}
+
+    // Erste Zeile: VMA-Info anzeigen
+    document.querySelectorAll('select[name="land_code[]"]').forEach(updateVMA);
+    </script>
+    """
+    return HTMLResponse(shell("Neue Reise", content, "reisen"))
+
+@app.post("/reisen/neu")
+async def reise_neu(request: Request):
+    form = await request.form()
+    titel = (form.get("titel") or "").strip()
+    abreise = (form.get("abreise") or "").strip()
+    rueckkehr = (form.get("rueckkehr") or "").strip()
+    notiz = (form.get("notiz") or "").strip()
+    mitarbeiter = form.getlist("mitarbeiter")
+    land_codes = form.getlist("land_code[]")
+    land_vons = form.getlist("land_von[]")
+    land_bis_list = form.getlist("land_bis[]")
+
+    if not all([titel, abreise, rueckkehr, mitarbeiter]):
+        return HTMLResponse(shell("Fehler",
+            '<div class="alert alert-err">Titel, Zeitraum und mindestens ein Mitarbeiter sind Pflicht.</div>'
+            '<a href="/reisen/neu" class="btn btn-secondary">Zurück</a>'))
     try:
-        items = search_mitarbeiter(q)
-        return {"count": len(items), "mitarbeiter": items}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        code = next_reise_code(cur)
 
+        cur.execute(
+            f"INSERT INTO reisen (code,titel,abreise,rueckkehr,notiz) VALUES ({P},{P},{P},{P},{P})",
+            (code, titel, abreise, rueckkehr, notiz or None))
 
-@app.post("/mitarbeiter")
-def mitarbeiter_create(payload: MitarbeiterCreateRequest):
+        for ma in mitarbeiter:
+            cur.execute(f"INSERT INTO reise_mitarbeiter (reise_code,kuerzel) VALUES ({P},{P})",
+                        (code, ma))
+
+        # Länder
+        for i, lcode in enumerate(land_codes):
+            if not lcode: continue
+            lvon = land_vons[i] if i < len(land_vons) else ""
+            lbis = land_bis_list[i] if i < len(land_bis_list) else ""
+            if not lvon or not lbis: continue
+            lname = VMA_SAETZE.get(lcode, {}).get("name", lcode)
+            vvoll, vhalb = vma_fuer_land(lcode)
+            cur.execute(
+                f"INSERT INTO reise_laender (reise_code,datum_von,datum_bis,land_code,land_name,vma_voll,vma_halb) "
+                f"VALUES ({P},{P},{P},{P},{P},{P},{P})",
+                (code, lvon, lbis, lcode, lname, vvoll, vhalb))
+
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/reise/{code}", status_code=303)
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:400]}</pre>'
+            '<a href="/reisen/neu" class="btn btn-secondary">Zurück</a>'))
+
+# ── Reise Detail ───────────────────────────────────────────────────────────────
+@app.get("/reise/{code}", response_class=HTMLResponse)
+def reise_detail(code: str):
     try:
-        new_id = create_mitarbeiter(payload.model_dump())
-        return {"status": "ok", "id": new_id}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(f"SELECT code,titel,abreise,rueckkehr,notiz FROM reisen WHERE code={P}",
+                    (code.upper(),))
+        r = cur.fetchone()
+        if not r:
+            cur.close(); db.close()
+            return HTMLResponse(shell("Nicht gefunden",
+                '<div class="alert alert-err">Reise nicht gefunden.</div>'))
 
+        def get(row, k, i): return row[k] if hasattr(row,'keys') else row[i]
+        rcode = get(r,"code",0); titel = get(r,"titel",1)
+        ab = get(r,"abreise",2); zu = get(r,"rueckkehr",3); notiz = get(r,"notiz",4)
 
-@app.put("/mitarbeiter/{mitarbeiter_id}")
-def mitarbeiter_update(mitarbeiter_id: int, payload: MitarbeiterCreateRequest):
-    try:
-        update_mitarbeiter(mitarbeiter_id, payload.model_dump())
-        return {"status": "ok", "id": mitarbeiter_id}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        # Mitarbeiter
+        cur.execute(f"""SELECT m.kuerzel, m.klarname FROM mitarbeiter m
+                        JOIN reise_mitarbeiter rm ON rm.kuerzel = m.kuerzel
+                        WHERE rm.reise_code = {P} ORDER BY m.klarname""", (rcode,))
+        ma_rows = cur.fetchall()
 
+        # Länder / VMA
+        cur.execute(f"""SELECT id, datum_von, datum_bis, land_code, land_name,
+                        vma_voll, vma_halb FROM reise_laender
+                        WHERE reise_code = {P} ORDER BY datum_von""", (rcode,))
+        land_rows = cur.fetchall()
+        cur.close(); db.close()
 
-@app.delete("/mitarbeiter/{mitarbeiter_id}")
-def mitarbeiter_delete(mitarbeiter_id: int):
-    try:
-        delete_mitarbeiter_by_id(mitarbeiter_id)
-        return {"status": "ok", "deleted_mitarbeiter_id": mitarbeiter_id}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        today = date.today()
+        ab_d = date.fromisoformat(str(ab)[:10]) if ab else None
+        zu_d = date.fromisoformat(str(zu)[:10]) if zu else None
 
+        if not ab_d: status_html = '<span class="badge badge-gray">Kein Datum</span>'
+        elif today < ab_d:
+            tage = (ab_d - today).days
+            status_html = f'<span class="badge badge-blue">In {tage} Tag{"en" if tage!=1 else ""}</span>'
+        elif zu_d and today <= zu_d:
+            status_html = '<span class="badge badge-green">● Aktiv</span>'
+        else:
+            status_html = '<span class="badge badge-gray">Abgeschlossen</span>'
 
-@app.get("/reisen")
-def reisen_list():
-    try:
-        items = list_reisen()
-        return {"count": len(items), "reisen": items}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
+        # VMA-Berechnung Übersicht
+        vma_total = 0.0
+        vma_zeilen = ""
+        if land_rows:
+            for lr in land_rows:
+                lid = get(lr,"id",0)
+                lvon = get(lr,"datum_von",1)
+                lbis = get(lr,"datum_bis",2)
+                lcode_l = get(lr,"land_code",3)
+                lname_l = get(lr,"land_name",4)
+                vvoll = get(lr,"vma_voll",5) or 0
+                vhalb = get(lr,"vma_halb",6) or 0
 
-
-@app.get("/reisen/overview")
-def reisen_overview():
-    try:
-        items = list_reisen()
-        enriched = []
-        for r in items:
-            detail = get_reise_detail(r["id"])
-            reisende = detail.get("reisende") or []
-            enriched.append({
-                **r,
-                **compute_reise_status(detail),
-                "reisende": reisende,
-                "reisende_kuerzel": ", ".join([str(x.get("kuerzel") or "") for x in reisende if x.get("kuerzel")]),
-                "event_count": len(detail.get("events") or []),
-            })
-        return {"count": len(enriched), "reisen": enriched}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
-
-
-@app.get("/reisen/next-code")
-def reisen_next_code(jahr: int = Query(...)):
-    try:
-        return get_next_reise_code(jahr)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/reisen")
-def reisen_create(payload: ReiseCreateRequest):
-    try:
-        result = create_reise(payload.model_dump())
-        return {"status": "ok", **result}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.put("/reisen/{reise_id}")
-def reisen_update(reise_id: int, payload: ReiseCreateRequest):
-    try:
-        result = update_reise_basic(reise_id, payload.model_dump())
-        return {"status": "ok", **result}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.delete("/reisen/{reise_id}")
-def reisen_delete(reise_id: int):
-    try:
-        delete_reise_by_id(reise_id)
-        return {"status": "ok", "deleted_reise_id": reise_id}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/reisen/{reise_id}")
-def reisen_detail(reise_id: int):
-    try:
-        detail = get_reise_detail(reise_id)
-        return {**detail, **compute_reise_status(detail)}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
-
-
-
-@app.get("/reisen/{reise_id}/vma")
-def reisen_vma(reise_id: int):
-    try:
-        return {"status": "ok", "reise_id": reise_id, "tage": list_vma_days(reise_id)}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
-
-
-@app.post("/reisen/{reise_id}/vma/{vma_id}")
-def reisen_vma_update(reise_id: int, vma_id: int, payload: Dict[str, Any]):
-    try:
-        fr = bool(payload.get("fruehstueck"))
-        mi = bool(payload.get("mittag"))
-        ab = bool(payload.get("abend"))
-        land = str(payload.get("land") or "Deutschland")
-        ort = str(payload.get("ort") or "")
-        notiz = str(payload.get("notiz") or "")
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT tag FROM vma_tage WHERE id = %s AND reise_id = %s", (vma_id, reise_id))
-                row = cur.fetchone()
-                if not row:
-                    raise HTTPException(status_code=404, detail="VMA-Tag nicht gefunden")
-                cur.execute(
-                    """
-                    UPDATE vma_tage
-                       SET land=%s, ort=%s, fruehstueck=%s, mittag=%s, abend=%s, notiz=%s, updated_at=%s
-                     WHERE id=%s AND reise_id=%s
-                    """,
-                    (land, ort, fr, mi, ab, notiz, datetime.utcnow().isoformat(), vma_id, reise_id),
-                )
-            conn.commit()
-        return {"status": "ok", "tage": list_vma_days(reise_id)}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-
-
-@app.get("/api/reisen/{reise_id}/vma")
-def reisen_vma_api_alias(reise_id: int):
-    return reisen_vma(reise_id)
-
-@app.post("/api/reisen/{reise_id}/vma/{vma_id}")
-def reisen_vma_update_api_alias(reise_id: int, vma_id: int, payload: Dict[str, Any]):
-    return reisen_vma_update(reise_id, vma_id, payload)
-
-def workflow_row_for_beleg(beleg: Dict[str, Any], event: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    data = json.loads(beleg.get("analysis_json") or "{}") if beleg.get("analysis_json") else {}
-    summary = json.loads(beleg.get("normalized_summary_json") or "{}") if beleg.get("normalized_summary_json") else dashboard_summary_from_analysis(data)
-    fields = summary.get("dashboard_fields", {}) if isinstance(summary, dict) else {}
-    beleg_id = int(beleg.get("id"))
-    art = fields.get("art") or beleg.get("art") or data.get("art_des_dokuments") or "Unbekannt"
-    belegdatum = fields.get("belegdatum") or beleg.get("belegdatum") or data.get("belegdatum") or "nicht vorhanden"
-    betrag = fields.get("betrag") or beleg.get("kosten") or data.get("kosten_mit_steuern") or "nicht vorhanden"
-    waehrung = fields.get("waehrung") or beleg.get("waehrung") or data.get("waehrung_der_kosten") or ""
-    event_text = fields.get("anbieter_event") or (event or {}).get("titel") or make_event_title(data) if data else (event or {}).get("titel") or "Keine Analyse"
-    return {
-        "beleg_id": beleg_id,
-        "beleg_nr": f"BE-{beleg_id:04d}",
-        "quelle": beleg.get("quelle") or beleg.get("source") or "Upload/Mail",
-        "eingang": beleg.get("created_at") or beleg.get("belegdatum") or "",
-        "workflow_status": beleg.get("workflow_status") or ("prüfen" if str(art).lower() in {"unbekannt", "unknown"} else "analysiert"),
-        "art": art,
-        "belegdatum": belegdatum,
-        "event": event_text,
-        "kosten": (f"{betrag} {waehrung}".strip() if betrag and str(betrag).lower() != "nicht vorhanden" else "—"),
-        "original_url": f"/belege/{beleg_id}/original",
-        "anonymized_url": f"/belege/{beleg_id}/anonymized",
-        "ki_response_url": f"/belege/{beleg_id}/ki-response",
-        "pdf_url": f"/belege/{beleg_id}/pdf",
-        "hat_original": bool(beleg.get("original_file_path")),
-        "hat_anonymisiert": bool(beleg.get("anonymized_pdf_path") or beleg.get("anonymized_text")),
-        "hat_ki_response": bool(beleg.get("ki_response_pdf_path") or beleg.get("analysis_json")),
-        "review_required": bool(data.get("review_required") or data.get("manual_category_needed") or str(art).lower() in {"unbekannt", "unknown"}),
-    }
-
-
-@app.get("/reisen/{reise_id}/beleg-workflow")
-def reisen_beleg_workflow(reise_id: int):
-    try:
-        detail = get_reise_detail(reise_id)
-        rows: List[Dict[str, Any]] = []
-        seen: set[int] = set()
-        for ev in detail.get("events", []) or []:
-            for b in list_belege_for_event(ev.get("id")):
-                bid = int(b.get("id"))
-                if bid in seen:
-                    continue
-                seen.add(bid)
-                rows.append(workflow_row_for_beleg(b, ev))
-        rows.sort(key=lambda r: (str(r.get("eingang") or ""), int(r.get("beleg_id") or 0)))
-        return {"status": "ok", "version": APP_VERSION, "reise_id": reise_id, "rows": rows, "count": len(rows)}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc), "rows": []}
-
-
-@app.get("/reisen/{reise_id}/unbekannte-belege")
-def reisen_unbekannte_belege(reise_id: int):
-    """Liefert Belege/Events, die manuell kategorisiert werden sollten."""
-    try:
-        detail = get_reise_detail(reise_id)
-        items: List[Dict[str, Any]] = []
-        for ev in detail.get("events", []) or []:
-            belege = list_belege_for_event(ev.get("id"))
-            if not belege and str(ev.get("typ") or "").lower() in {"unbekannt", "unknown"}:
-                items.append({"event": ev, "beleg": None, "analysis": {}, "reason": "Event ohne Analyse"})
-            for b in belege:
-                raw = b.get("analysis_json")
+                # Tage berechnen
                 try:
-                    a = json.loads(raw) if raw else {}
-                except Exception:
-                    a = {}
-                art = str(a.get("art_des_dokuments") or b.get("art") or ev.get("typ") or "").strip().lower()
-                needs_manual = art in {"", "unbekannt", "unknown"} or bool(a.get("manual_category_needed")) or bool(a.get("review_required") and float(a.get("confidence") or 0) < 0.70)
-                if needs_manual:
-                    items.append({
-                        "event": ev,
-                        "beleg": {k: v for k, v in b.items() if k not in {"original_text", "anonymized_text"}},
-                        "analysis": a,
-                        "reason": a.get("manual_reason") or "Beleg nicht sicher erkannt",
-                    })
-        return {"status": "ok", "reise_id": reise_id, "items": items}
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc), "items": []}
+                    d_von = date.fromisoformat(str(lvon)[:10])
+                    d_bis = date.fromisoformat(str(lbis)[:10])
+                    tage = (d_bis - d_von).days + 1
+                    # Erster und letzter Tag: halber Satz
+                    if tage == 1:
+                        betrag = vhalb
+                    elif tage == 2:
+                        betrag = vhalb + vhalb
+                    else:
+                        betrag = vhalb + (vvoll * (tage - 2)) + vhalb
+                    vma_total += betrag
+                    tage_txt = f"{tage} Tag{'e' if tage!=1 else ''}"
+                    betrag_txt = f"{betrag:.2f} EUR"
+                except:
+                    tage_txt = "–"; betrag_txt = "–"
 
+                vma_zeilen += f"""<tr>
+                    <td><span class="badge badge-blue">{lcode_l}</span> {lname_l}</td>
+                    <td>{fmt_date(lvon)}</td><td>{fmt_date(lbis)}</td>
+                    <td style="text-align:right">{vvoll:.2f} EUR</td>
+                    <td style="text-align:right">{vhalb:.2f} EUR</td>
+                    <td>{tage_txt}</td>
+                    <td style="font-weight:600;text-align:right">{betrag_txt}</td>
+                    <td>
+                      <a href="/reise/{rcode}/land/{lid}/bearbeiten"
+                         class="btn btn-secondary btn-sm">✏</a>
+                    </td>
+                </tr>"""
 
-@app.post("/belege/{beleg_id}/manual-analysis")
-def beleg_manual_analysis(beleg_id: int, payload: Dict[str, Any]):
-    """Manuelle Korrektur für nicht erkannte Belege.
-    Erwartete Felder: reise_id, art_des_dokuments, belegdatum, kosten_mit_steuern, waehrung_der_kosten,
-    hotel_name/check_in/check_out oder reisesegmente.
-    """
+        ma_html = " ".join(
+            f'<span class="badge badge-green">{get(m,"kuerzel",0)} – {get(m,"klarname",1)}</span>'
+            for m in ma_rows) or "–"
+
+        content = f"""
+        <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:20px;flex-wrap:wrap">
+          <div style="flex:1">
+            <div style="font-family:monospace;font-size:13px;color:var(--muted);margin-bottom:4px">{rcode}</div>
+            <h1 class="page-title" style="margin:0">{titel}</h1>
+            <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              {status_html}
+              <span style="color:var(--muted);font-size:13px">
+                📅 {fmt_date(ab)} – {fmt_date(zu)}
+              </span>
+              <span style="color:var(--muted);font-size:13px">👤 {ma_html}</span>
+            </div>
+            {f'<div style="margin-top:8px;font-size:13px;color:var(--muted)">{notiz}</div>' if notiz else ''}
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <a href="/reise/{rcode}/bearbeiten" class="btn btn-secondary">✏ Bearbeiten</a>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">🌍 Länder & VMA-Sätze</span>
+            <a href="/reise/{rcode}/land/neu" class="btn btn-secondary btn-sm">+ Land hinzufügen</a>
+          </div>
+          {'<div class="table-wrap"><table><thead><tr><th>Land</th><th>Von</th><th>Bis</th><th style="text-align:right">VMA Voll</th><th style="text-align:right">VMA Halb</th><th>Tage</th><th style="text-align:right">Gesamt</th><th></th></tr></thead><tbody>' + vma_zeilen + f'</tbody><tfoot><tr><td colspan="6" style="text-align:right;font-weight:600;padding:10px 14px;border-top:2px solid var(--border)">VMA Gesamt:</td><td style="font-weight:700;font-size:15px;color:var(--green);text-align:right;padding:10px 14px;border-top:2px solid var(--border)">{vma_total:.2f} EUR</td><td style="border-top:2px solid var(--border)"></td></tr></tfoot></table></div>' if land_rows else '<div class="card-body"><div class="empty-state"><b>Noch keine Länder hinterlegt</b><p>Füge Länder hinzu für die automatische VMA-Berechnung</p><a href="/reise/{rcode}/land/neu" class="btn btn-primary" style="margin-top:12px">+ Land hinzufügen</a></div></div>'}
+        </div>
+
+        <div style="margin-top:12px">
+          <a href="/reisen" class="btn btn-secondary">← Zurück</a>
+        </div>"""
+        return HTMLResponse(shell(f"Reise {rcode}", content, "reisen"))
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:400]}</pre>'))
+
+@app.get("/reise/{code}/bearbeiten", response_class=HTMLResponse)
+def reise_bearbeiten_form(code: str):
     try:
-        rec = get_beleg_record(beleg_id)
-        if not rec:
-            raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(f"SELECT code,titel,abreise,rueckkehr,notiz FROM reisen WHERE code={P}",
+                    (code.upper(),))
+        r = cur.fetchone()
+        if not r:
+            return HTMLResponse(shell("Fehler",'<div class="alert alert-err">Nicht gefunden.</div>'))
+        def get(row,k,i): return row[k] if hasattr(row,'keys') else row[i]
+        rcode = get(r,"code",0); titel = get(r,"titel",1)
+        ab = get(r,"abreise",2); zu = get(r,"rueckkehr",3); notiz = get(r,"notiz",4)
 
-        old = {}
-        try:
-            old = json.loads(rec.get("analysis_json") or "{}")
-        except Exception:
-            old = {}
+        cur.execute("SELECT kuerzel, klarname FROM mitarbeiter WHERE aktiv = TRUE"
+                    if is_postgres()
+                    else "SELECT kuerzel, klarname FROM mitarbeiter WHERE aktiv = 1"
+                    " ORDER BY klarname")
+        all_ma = cur.fetchall()
+        cur.execute(f"SELECT kuerzel FROM reise_mitarbeiter WHERE reise_code={P}", (rcode,))
+        assigned = {get(x,"kuerzel",0) for x in cur.fetchall()}
+        cur.close(); db.close()
 
-        data = ensure_defaults({**old, **payload})
-        original_text = rec.get("original_text") or ""
-        data = enhance_hotel_analysis(data, original_text)
-        data["manual_category_needed"] = False
-        data["review_required"] = False
-        data["manual_corrected_at_utc"] = datetime.utcnow().isoformat()
-        data["status"] = "ok"
+        ma_opts = "".join(
+            f'<option value="{get(m,"kuerzel",0)}"'
+            f'{" selected" if get(m,"kuerzel",0) in assigned else ""}>'
+            f'{get(m,"kuerzel",0)} – {get(m,"klarname",1)}</option>'
+            for m in all_ma)
 
-        fingerprint = rec.get("fingerprint") or build_beleg_fingerprint(rec.get("source_filename") or rec.get("original_filename") or "", data, payload.get("reise_id"))
-        update_beleg_extra_data(
-            beleg_id,
-            fingerprint,
-            rec.get("source_filename") or rec.get("original_filename") or "manual",
-            original_text,
-            rec.get("anonymized_text") or anonymize_document_text(original_text),
-            data,
-            rec.get("original_file_path"),
-            rec.get("original_filename"),
-            rec.get("original_content_type"),
-            rec.get("generated_pdf_path"),
-        )
+        ab_s = str(ab)[:10] if ab else ""; zu_s = str(zu)[:10] if zu else ""
+        content = f"""
+        <h1 class="page-title">Reise {rcode} bearbeiten</h1>
+        <div class="card" style="max-width:600px">
+          <div class="card-body">
+            <form method="post" action="/reise/{rcode}/bearbeiten">
+              <div class="form-grid form-grid-2">
+                <div class="form-group full">
+                  <label>Titel <span class="required">*</span></label>
+                  <input type="text" name="titel" value="{titel}" required>
+                </div>
+                <div class="form-group">
+                  <label>Abreise <span class="required">*</span></label>
+                  <input type="date" name="abreise" value="{ab_s}" required>
+                </div>
+                <div class="form-group">
+                  <label>Rückkehr <span class="required">*</span></label>
+                  <input type="date" name="rueckkehr" value="{zu_s}" required>
+                </div>
+                <div class="form-group full">
+                  <label>Mitarbeiter</label>
+                  <select name="mitarbeiter" multiple size="4">{ma_opts}</select>
+                  <div class="form-hint">Strg+Klick für Mehrfachauswahl</div>
+                </div>
+                <div class="form-group full">
+                  <label>Notiz</label>
+                  <textarea name="notiz" rows="2">{notiz or ''}</textarea>
+                </div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Speichern</button>
+                <a href="/reise/{rcode}" class="btn btn-secondary">Abbrechen</a>
+              </div>
+            </form>
+          </div>
+        </div>"""
+        return HTMLResponse(shell(f"Reise {rcode} bearbeiten", content, "reisen"))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
-        try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE belege SET belegdatum=%s, art=%s, kosten=%s, waehrung=%s WHERE id=%s",
-                        (
-                            data.get("belegdatum"),
-                            data.get("art_des_dokuments"),
-                            data.get("kosten_mit_steuern"),
-                            data.get("waehrung_der_kosten"),
-                            beleg_id,
-                        ),
-                    )
-                conn.commit()
-        except Exception:
-            pass
-
-        reise_id = payload.get("reise_id")
-        if reise_id:
-            data.update(attach_or_create_event_for_analysis(int(reise_id), beleg_id, data))
-
-        return {"status": "ok", "beleg_id": beleg_id, "analysis": data}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-
-@app.post("/events")
-def events_create(payload: EventCreateRequest):
+@app.post("/reise/{code}/bearbeiten")
+async def reise_bearbeiten(code: str, request: Request):
+    form = await request.form()
+    titel = (form.get("titel") or "").strip()
+    abreise = (form.get("abreise") or "").strip()
+    rueckkehr = (form.get("rueckkehr") or "").strip()
+    notiz = (form.get("notiz") or "").strip()
+    mitarbeiter = form.getlist("mitarbeiter")
+    rcode = code.upper()
     try:
-        event_id = create_event(payload.model_dump())
-        return {"status": "ok", "event_id": event_id}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(
+            f"UPDATE reisen SET titel={P},abreise={P},rueckkehr={P},notiz={P} WHERE code={P}",
+            (titel, abreise, rueckkehr, notiz or None, rcode))
+        cur.execute(f"DELETE FROM reise_mitarbeiter WHERE reise_code={P}", (rcode,))
+        for ma in mitarbeiter:
+            cur.execute(f"INSERT INTO reise_mitarbeiter (reise_code,kuerzel) VALUES ({P},{P})",
+                        (rcode, ma))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/reise/{rcode}", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
+# ── Land hinzufügen ────────────────────────────────────────────────────────────
+@app.get("/reise/{code}/land/neu", response_class=HTMLResponse)
+def land_neu_form(code: str):
+    rcode = code.upper()
+    land_opts = "".join(
+        f'<option value="{lc}">{name} ({lc})</option>'
+        for lc, name in LAENDER_LISTE)
+    content = f"""
+    <h1 class="page-title">Land hinzufügen – {rcode}</h1>
+    <div class="card" style="max-width:500px">
+      <div class="card-body">
+        <form method="post" action="/reise/{rcode}/land/neu">
+          <div class="form-grid form-grid-2">
+            <div class="form-group full">
+              <label>Land <span class="required">*</span></label>
+              <select name="land_code" required onchange="showVMA(this.value)">
+                {land_opts}
+              </select>
+              <div id="vma-info" class="form-hint" style="color:var(--green)"></div>
+            </div>
+            <div class="form-group">
+              <label>Von (Datum) <span class="required">*</span></label>
+              <input type="date" name="datum_von" required>
+            </div>
+            <div class="form-group">
+              <label>Bis (Datum) <span class="required">*</span></label>
+              <input type="date" name="datum_bis" required>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Hinzufügen</button>
+            <a href="/reise/{rcode}" class="btn btn-secondary">Abbrechen</a>
+          </div>
+        </form>
+      </div>
+    </div>
+    <script>
+    const VMA = {json.dumps(VMA_SAETZE)};
+    function showVMA(code) {{
+        const info = VMA[code];
+        const el = document.getElementById('vma-info');
+        if (info) el.textContent = info.name + ': ' + info.voll + ' EUR/Tag · ' + info.halb + ' EUR halber Satz';
+    }}
+    showVMA(document.querySelector('select[name="land_code"]').value);
+    </script>"""
+    return HTMLResponse(shell(f"Land – {rcode}", content, "reisen"))
 
-@app.get("/events/{event_id}")
-def events_detail(event_id: int):
+@app.post("/reise/{code}/land/neu")
+async def land_neu(code: str, request: Request):
+    rcode = code.upper()
+    form = await request.form()
+    land_code = (form.get("land_code") or "").strip().upper()
+    datum_von = (form.get("datum_von") or "").strip()
+    datum_bis = (form.get("datum_bis") or "").strip()
+    if not all([land_code, datum_von, datum_bis]):
+        return HTMLResponse(shell("Fehler",
+            '<div class="alert alert-err">Alle Felder sind Pflicht.</div>'
+            f'<a href="/reise/{rcode}/land/neu" class="btn btn-secondary">Zurück</a>'))
     try:
-        detail = get_event_detail(event_id)
-        belege_items = list_belege_for_event(event_id)
-        return {
-            **detail,
-            "belege": belege_items,
-            "beleg_pdf_urls": [
-                {"beleg_id": b.get("id"), "pdf_url": f"/belege/{b.get('id')}/pdf", "original_url": f"/belege/{b.get('id')}/original"}
-                for b in belege_items
-                if b.get("id")
-            ],
-        }
-    except Exception as exc:
-        return {"status": "error", "detail": str(exc)}
+        P = ph()
+        land_name = VMA_SAETZE.get(land_code, {}).get("name", land_code)
+        vvoll, vhalb = vma_fuer_land(land_code)
+        db = get_db(); cur = db.cursor()
+        cur.execute(
+            f"INSERT INTO reise_laender (reise_code,datum_von,datum_bis,land_code,land_name,vma_voll,vma_halb) "
+            f"VALUES ({P},{P},{P},{P},{P},{P},{P})",
+            (rcode, datum_von, datum_bis, land_code, land_name, vvoll, vhalb))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/reise/{rcode}", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
-
-@app.delete("/events/{event_id}")
-def events_delete(event_id: int):
+@app.get("/reise/{code}/land/{lid}/bearbeiten", response_class=HTMLResponse)
+def land_bearbeiten_form(code: str, lid: int):
+    rcode = code.upper()
     try:
-        delete_event_by_id(event_id)
-        return {"status": "ok", "deleted_event_id": event_id}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(
+            f"SELECT id,datum_von,datum_bis,land_code,vma_voll,vma_halb FROM reise_laender WHERE id={P}",
+            (lid,))
+        r = cur.fetchone()
+        cur.close(); db.close()
+        if not r: return HTMLResponse(shell("Fehler",'<div class="alert alert-err">Nicht gefunden.</div>'))
+        def get(row,k,i): return row[k] if hasattr(row,'keys') else row[i]
+        dvon = str(get(r,"datum_von",1))[:10]; dbis = str(get(r,"datum_bis",2))[:10]
+        lcode = get(r,"land_code",3)
+        vvoll = get(r,"vma_voll",4) or 0; vhalb = get(r,"vma_halb",5) or 0
 
+        land_opts = "".join(
+            f'<option value="{lc}"{" selected" if lc==lcode else ""}>{name} ({lc})</option>'
+            for lc, name in LAENDER_LISTE)
 
-@app.put("/events/{event_id}/status")
-def events_update_status(event_id: int, payload: EventStatusRequest):
+        content = f"""
+        <h1 class="page-title">Land bearbeiten – {rcode}</h1>
+        <div class="card" style="max-width:500px">
+          <div class="card-body">
+            <form method="post" action="/reise/{rcode}/land/{lid}/bearbeiten">
+              <div class="form-grid form-grid-2">
+                <div class="form-group full">
+                  <label>Land</label>
+                  <select name="land_code" onchange="showVMA(this.value)">{land_opts}</select>
+                </div>
+                <div class="form-group">
+                  <label>Von</label>
+                  <input type="date" name="datum_von" value="{dvon}" required>
+                </div>
+                <div class="form-group">
+                  <label>Bis</label>
+                  <input type="date" name="datum_bis" value="{dbis}" required>
+                </div>
+                <div class="form-group">
+                  <label>VMA Voll (EUR/Tag)</label>
+                  <input type="number" step="0.01" name="vma_voll" value="{vvoll}">
+                </div>
+                <div class="form-group">
+                  <label>VMA Halb (EUR/Tag)</label>
+                  <input type="number" step="0.01" name="vma_halb" value="{vhalb}">
+                </div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Speichern</button>
+                <a href="/reise/{rcode}/land/{lid}/loeschen"
+                   onclick="return confirm('Land löschen?')"
+                   class="btn btn-danger">Löschen</a>
+                <a href="/reise/{rcode}" class="btn btn-secondary">Abbrechen</a>
+              </div>
+            </form>
+          </div>
+        </div>
+        <script>
+        const VMA = {json.dumps(VMA_SAETZE)};
+        function showVMA(code) {{
+            const info = VMA[code];
+            if (info) {{
+                document.querySelector('input[name="vma_voll"]').value = info.voll;
+                document.querySelector('input[name="vma_halb"]').value = info.halb;
+            }}
+        }}
+        </script>"""
+        return HTMLResponse(shell(f"Land bearbeiten", content, "reisen"))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.post("/reise/{code}/land/{lid}/bearbeiten")
+async def land_bearbeiten(code: str, lid: int, request: Request):
+    rcode = code.upper()
+    form = await request.form()
+    lcode = (form.get("land_code") or "").strip().upper()
+    dvon = (form.get("datum_von") or "").strip()
+    dbis = (form.get("datum_bis") or "").strip()
+    vvoll = float(form.get("vma_voll") or 0)
+    vhalb = float(form.get("vma_halb") or 0)
+    lname = VMA_SAETZE.get(lcode, {}).get("name", lcode)
     try:
-        update_event_status(event_id, payload.status)
-        return {"status": "ok", "event_id": event_id, "new_status": payload.status}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(
+            f"UPDATE reise_laender SET land_code={P},land_name={P},datum_von={P},"
+            f"datum_bis={P},vma_voll={P},vma_halb={P} WHERE id={P}",
+            (lcode, lname, dvon, dbis, vvoll, vhalb, lid))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/reise/{rcode}", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
-
-@app.post("/anonymize/text")
-def anonymize_text(payload: AnalyzeTextRequest):
+@app.get("/reise/{code}/land/{lid}/loeschen")
+def land_loeschen(code: str, lid: int):
+    rcode = code.upper()
     try:
-        return {"status": "ok", "filename": payload.filename or "text-input.txt", "anonymized_text": anonymize_document_text(payload.text)}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/anonymize/file")
-async def anonymize_file(file: UploadFile = File(...)):
-    try:
-        content = await read_upload_limited(file)
-        text = extract_text_from_upload(file.filename or "upload", content)
-        return {"status": "ok", "filename": file.filename or "upload", "anonymized_text": anonymize_document_text(text)}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/analyze/text")
-def analyze_text(payload: AnalyzeTextRequest):
-    try:
-        original_info = save_original_text_as_file(payload.filename or "text-input.txt", payload.text, "text/plain")
-        return analyze_text_internal(
-            payload.text,
-            payload.filename or "text-input.txt",
-            payload.reise_id,
-            payload.event_id,
-            payload.ai_provider,
-            payload.ai_model,
-            original_file_info=original_info,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/analyze/file")
-async def analyze_file(
-    file: UploadFile = File(...),
-    reise_id: Optional[int] = Query(default=None),
-    event_id: Optional[int] = Query(default=None),
-    ai_provider: Optional[str] = Query(default=None),
-    ai_model: Optional[str] = Query(default=None),
-):
-    if not ANALYSIS_LOCK.acquire(blocking=False):
-        return {"status": "busy", "detail": "Eine Analyse läuft bereits. Bitte kurz warten.", "version": APP_VERSION}
-    try:
-        content = await read_upload_limited(file)
-        original_info = save_original_file(file.filename or "upload", content, file.content_type)
-        text = extract_text_from_upload(file.filename or "upload", content)
-        return analyze_text_internal(text, file.filename or "upload", reise_id, event_id, ai_provider, ai_model, original_file_info=original_info)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    finally:
-        ANALYSIS_LOCK.release()
-
-
-# ============================================================
-# VERSION 9.0b - ENTKOPPELTER BELEGWORKFLOW
-# ============================================================
-# Ziel:
-# - Upload speichert nur den Originalbeleg und legt sofort eine sichtbare Belegzeile an.
-# - Anonymisierung und KI-Analyse laufen je Beleg separat per Button.
-# - Dadurch hängt der Browser nicht mehr in einem langen Upload-Request.
-
-WORKFLOW_TEXT_LIMIT = int(os.getenv("WORKFLOW_TEXT_LIMIT", "60000"))
-WORKFLOW_PDF_MAX_PAGES = int(os.getenv("WORKFLOW_PDF_MAX_PAGES", "8"))
-WORKFLOW_MAX_UPLOAD_MB = int(os.getenv("WORKFLOW_MAX_UPLOAD_MB", "10"))
-
-
-def _v90b_column_exists(table: str, column: str) -> bool:
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT 1
-                      FROM information_schema.columns
-                     WHERE table_name = %s
-                       AND column_name = %s
-                     LIMIT 1
-                    """,
-                    (table, column),
-                )
-                return cur.fetchone() is not None
-    except Exception:
-        return False
-
-
-def ensure_db_extensions_v90b() -> None:
-    """Zusatzspalten für den neuen entkoppelten Workflow.
-    Keine Daten werden gelöscht.
-    """
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                additions = [
-                    ("belege", "workflow_status", "TEXT"),
-                    ("belege", "workflow_message", "TEXT"),
-                    ("belege", "anonymized_pdf_path", "TEXT"),
-                    ("belege", "ki_response_pdf_path", "TEXT"),
-                    ("belege", "beleg_nr", "TEXT"),
-                    ("belege", "belegdatum", "TEXT"),
-                    ("belege", "document_type", "TEXT"),
-                    ("belege", "provider_name", "TEXT"),
-                    ("belege", "dashboard_summary", "TEXT"),
-                    ("belege", "amount_original", "TEXT"),
-                    ("belege", "currency_original", "TEXT"),
-                    ("belege", "amount_eur", "TEXT"),
-                    ("belege", "review_required", "BOOLEAN DEFAULT FALSE"),
-                ]
-                for table, col, typ in additions:
-                    cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_belege_workflow_status ON belege(workflow_status)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_belege_original_file_path ON belege(original_file_path)")
-            conn.commit()
-    except Exception:
-        pass
-
-
-def _v90b_beleg_nr(beleg_id: int) -> str:
-    return f"BE-{int(beleg_id):04d}"
-
-
-def _v90b_safe_text(value: Any, limit: int = 200000) -> str:
-    text = str(value or "")
-    if len(text) > limit:
-        return text[:limit] + "\n\n... gekürzt ..."
-    return text
-
-
-def _v90b_extract_text_from_file(path: str, filename: str = "") -> str:
-    """Speicherschonende Textextraktion mit Limits.
-    Original bleibt vollständig gespeichert; nur Analyse-Text wird begrenzt.
-    """
-    p = Path(path)
-    if not p.exists():
-        return ""
-    lower = (filename or p.name).lower()
-    if lower.endswith(".pdf"):
-        try:
-            reader = PdfReader(str(p))
-            texts = []
-            for idx, page in enumerate(reader.pages):
-                if idx >= WORKFLOW_PDF_MAX_PAGES:
-                    texts.append(f"\n[Hinweis: PDF nach {WORKFLOW_PDF_MAX_PAGES} Seiten für KI-Auszug gekürzt]\n")
-                    break
-                try:
-                    texts.append(page.extract_text() or "")
-                except Exception:
-                    texts.append("")
-                if sum(len(x) for x in texts) >= WORKFLOW_TEXT_LIMIT:
-                    texts.append("\n[Hinweis: Text für KI-Auszug gekürzt]\n")
-                    break
-            return "\n".join(texts)[:WORKFLOW_TEXT_LIMIT]
-        except Exception as exc:
-            return f"PDF konnte nicht gelesen werden: {exc}"
-    try:
-        return p.read_text(encoding="utf-8", errors="replace")[:WORKFLOW_TEXT_LIMIT]
-    except Exception:
-        try:
-            return p.read_bytes()[:WORKFLOW_TEXT_LIMIT].decode("utf-8", errors="replace")
-        except Exception as exc:
-            return f"Datei konnte nicht gelesen werden: {exc}"
-
-
-def _v90b_pdf_from_text(path: Path, title: str, body: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(make_simple_pdf_bytes(title, _v90b_safe_text(body, 120000)))
-
-
-def _v90b_update_beleg(beleg_id: int, values: Dict[str, Any]) -> None:
-    if not values:
-        return
-    keys = list(values.keys())
-    set_sql = ", ".join([f"{k} = %s" for k in keys])
-    params = [values[k] for k in keys] + [beleg_id]
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(f"UPDATE belege SET {set_sql} WHERE id = %s", params)
-        conn.commit()
-
-
-def _v90b_get_beleg(beleg_id: int) -> Optional[Dict[str, Any]]:
-    return get_beleg_record(beleg_id)
-
-
-def _v90b_anonymize_beleg(beleg_id: int) -> Dict[str, Any]:
-    ensure_db_extensions_v90b()
-    rec = _v90b_get_beleg(beleg_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
-
-    original_path = rec.get("original_file_path")
-    original_filename = rec.get("original_filename") or rec.get("source_filename") or f"beleg_{beleg_id}.pdf"
-    if not original_path or not os.path.exists(original_path):
-        raise HTTPException(status_code=404, detail="Originalbeleg nicht gefunden")
-
-    original_text = _v90b_extract_text_from_file(original_path, original_filename)
-    anonymized_text = anonymize_document_text(original_text)
-
-    anonymized_path = Path(os.getenv("ANONYMIZED_PDF_DIR", "uploads/anonymized_belege")) / f"beleg_{beleg_id}_anonymisiert.pdf"
-    _v90b_pdf_from_text(
-        anonymized_path,
-        f"{_v90b_beleg_nr(beleg_id)} - anonymisierter Beleg",
-        "ANONYMISIERTER BELEG VOR KI-VERSAND\n"
-        "====================================\n\n"
-        f"Beleg: {_v90b_beleg_nr(beleg_id)}\n"
-        f"Originaldatei: {original_filename}\n"
-        f"Erzeugt: {datetime.utcnow().isoformat()} UTC\n\n"
-        "--- ANONYMISIERTER TEXT ---\n\n"
-        f"{anonymized_text}"
-    )
-
-    _v90b_update_beleg(beleg_id, {
-        "workflow_status": "anonymisiert",
-        "workflow_message": "Anonymisierter Beleg erzeugt. KI-Analyse kann gestartet werden.",
-        "original_text": original_text[:120000],
-        "anonymized_text": anonymized_text[:120000],
-        "anonymized_pdf_path": str(anonymized_path),
-        "beleg_nr": _v90b_beleg_nr(beleg_id),
-    })
-
-    return {
-        "status": "ok",
-        "beleg_id": beleg_id,
-        "beleg_nr": _v90b_beleg_nr(beleg_id),
-        "workflow_status": "anonymisiert",
-        "anonymized_pdf_path": str(anonymized_path),
-    }
-
-
-def _v90b_analyze_beleg(beleg_id: int, ai_model: Optional[str] = None) -> Dict[str, Any]:
-    ensure_db_extensions_v90b()
-    rec = _v90b_get_beleg(beleg_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
-
-    anonymized_text = rec.get("anonymized_text")
-    if not anonymized_text:
-        _v90b_anonymize_beleg(beleg_id)
-        rec = _v90b_get_beleg(beleg_id)
-        anonymized_text = rec.get("anonymized_text")
-
-    filename = rec.get("original_filename") or rec.get("source_filename") or f"beleg_{beleg_id}.pdf"
-
-    _v90b_update_beleg(beleg_id, {
-        "workflow_status": "ki_laeuft",
-        "workflow_message": "KI-Analyse läuft.",
-    })
-
-    try:
-        prompt = build_json_prompt((anonymized_text or "")[:WORKFLOW_TEXT_LIMIT], filename=filename)
-        raw = call_openai_json(prompt, ai_model)
-        if isinstance(raw, dict) and raw.get("status") == "error":
-            raise RuntimeError(raw.get("detail") or "OpenAI-Analysefehler")
-        data = ensure_defaults(raw)
-        data["status"] = "ok"
-        data["version"] = APP_VERSION
-        data["generated_at_utc"] = datetime.utcnow().isoformat()
-        data["beleg_id"] = beleg_id
-        data["beleg_nr"] = _v90b_beleg_nr(beleg_id)
-    except Exception as exc:
-        err_pdf = Path(os.getenv("KI_RESPONSE_PDF_DIR", "uploads/ki_response_pdfs")) / f"beleg_{beleg_id}_ki_fehler.pdf"
-        _v90b_pdf_from_text(
-            err_pdf,
-            f"{_v90b_beleg_nr(beleg_id)} - KI Fehler",
-            f"KI-Analyse fehlgeschlagen\n\nBeleg: {_v90b_beleg_nr(beleg_id)}\nFehler: {exc}"
-        )
-        _v90b_update_beleg(beleg_id, {
-            "workflow_status": "fehler",
-            "workflow_message": f"KI-Analyse fehlgeschlagen: {exc}",
-            "ki_response_pdf_path": str(err_pdf),
-            "review_required": True,
-        })
-        return {"status": "error", "beleg_id": beleg_id, "detail": str(exc), "ki_response_pdf_path": str(err_pdf)}
-
-    # Normalisierte Dashboard-Felder aus KI-Antwort.
-    belegdatum = data.get("belegdatum") or ""
-    art = data.get("art_des_dokuments") or "Unbekannt"
-    kosten = data.get("kosten_mit_steuern") or ""
-    waehrung = data.get("waehrung_der_kosten") or ""
-    segs = data.get("reisesegmente") or []
-
-    provider = ""
-    summary = art
-    if segs and isinstance(segs[0], dict):
-        provider = segs[0].get("transportunternehmen_und_nummer") or ""
-        start = segs[0].get("abreise_ort") or ""
-        ziel = segs[-1].get("ankunft_ort") or ""
-        if art == "Hotel":
-            summary = f"Hotel · {ziel or start or provider}".strip()
-        elif start or ziel:
-            summary = f"{art} · {start} → {ziel}".strip()
-        elif provider:
-            summary = f"{art} · {provider}"
-    elif data.get("buchungsnummer_code"):
-        summary = f"{art} · {data.get('buchungsnummer_code')}"
-
-    ki_path = Path(os.getenv("KI_RESPONSE_PDF_DIR", "uploads/ki_response_pdfs")) / f"beleg_{beleg_id}_ki_response.pdf"
-    dashboard_block = (
-        "FÜR DASHBOARD ÜBERNOMMENE FELDER\n"
-        "================================\n"
-        f"BelegNr.: {_v90b_beleg_nr(beleg_id)}\n"
-        f"Art: {art}\n"
-        f"Belegdatum: {belegdatum}\n"
-        f"Anbieter/Inhalt: {summary}\n"
-        f"Kosten: {kosten} {waehrung}\n"
-        f"Review nötig: {'ja' if data.get('warnungen') else 'nein'}\n\n"
-    )
-    _v90b_pdf_from_text(
-        ki_path,
-        f"{_v90b_beleg_nr(beleg_id)} - KI Antwort",
-        dashboard_block +
-        "KI-ANTWORT JSON\n"
-        "===============\n\n" +
-        json.dumps(data, ensure_ascii=False, indent=2)
-    )
-
-    _v90b_update_beleg(beleg_id, {
-        "workflow_status": "analysiert",
-        "workflow_message": "KI-Antwort gespeichert und Dashboard-Felder übernommen.",
-        "ki_response_pdf_path": str(ki_path),
-        "analysis_json": json.dumps(data, ensure_ascii=False)[:300000],
-        "belegdatum": belegdatum,
-        "document_type": art,
-        "provider_name": provider,
-        "dashboard_summary": summary,
-        "amount_original": str(kosten or ""),
-        "currency_original": str(waehrung or ""),
-        "amount_eur": str(kosten if str(waehrung).upper() == "EUR" else ""),
-        "review_required": bool(data.get("warnungen")),
-        "art": art,
-        "kosten": kosten,
-        "waehrung": waehrung,
-    })
-
-    # Event-Zuordnung erst nach Analyse.
-    try:
-        reise_id = rec.get("reise_id")
-        if reise_id:
-            # Fingerprint für alte Duplikat-/Matchinglogik ergänzen.
-            fp = rec.get("fingerprint") or build_beleg_fingerprint(filename, data, reise_id)
-            _v90b_update_beleg(beleg_id, {"fingerprint": fp})
-            data["fingerprint"] = fp
-            attach_or_create_event_for_analysis(int(reise_id), int(beleg_id), data)
-    except Exception:
-        pass
-
-    return {
-        "status": "ok",
-        "beleg_id": beleg_id,
-        "beleg_nr": _v90b_beleg_nr(beleg_id),
-        "workflow_status": "analysiert",
-        "ki_response_pdf_path": str(ki_path),
-        "dashboard": {
-            "art": art,
-            "belegdatum": belegdatum,
-            "summary": summary,
-            "kosten": kosten,
-            "waehrung": waehrung,
-        },
-    }
-
-
-@app.get("/init90b")
-@app.post("/init90b")
-def init90b() -> Dict[str, Any]:
-    init_db()
-    ensure_db_extensions()
-    ensure_db_extensions_v90b()
-    return {
-        "status": "ok",
-        "version": APP_VERSION,
-        "message": "9.0b Workflow-Spalten initialisiert. Keine Daten wurden gelöscht.",
-    }
-
-
-@app.post("/reisen/{reise_id}/upload-original")
-async def upload_original_only(reise_id: int, file: UploadFile = File(...)) -> Dict[str, Any]:
-    """9.0b: Upload speichert nur Original und legt sofort Belegzeile an."""
-    ensure_db_extensions_v90b()
-    content = await file.read()
-    max_bytes = WORKFLOW_MAX_UPLOAD_MB * 1024 * 1024
-    if len(content) > max_bytes:
-        raise HTTPException(status_code=413, detail=f"Datei zu groß. Maximal {WORKFLOW_MAX_UPLOAD_MB} MB erlaubt.")
-
-    filename = safe_filename(file.filename or "beleg.pdf")
-    original_info = save_original_file(filename, content, file.content_type)
-    fp = hashlib.sha256(content).hexdigest()
-
-    existing_id = find_beleg_by_fingerprint(fp)
-    if existing_id:
-        return {
-            "status": "duplicate",
-            "duplicate_detected": True,
-            "existing_beleg_id": existing_id,
-            "message": "Doppelter Beleg erkannt. Original wurde nicht erneut gespeichert.",
-        }
-
-    beleg_id = insert_beleg({
-        "belegdatum": None,
-        "art": "Unbekannt",
-        "kosten": None,
-        "waehrung": None,
-    })
-
-    _v90b_update_beleg(beleg_id, {
-        "beleg_nr": _v90b_beleg_nr(beleg_id),
-        "fingerprint": fp,
-        "source_filename": filename,
-        "original_file_path": original_info.get("original_file_path"),
-        "original_filename": original_info.get("original_filename"),
-        "original_content_type": original_info.get("original_content_type"),
-        "workflow_status": "eingegangen",
-        "workflow_message": "Original gespeichert. Bitte anonymisieren oder KI-Analyse starten.",
-        "document_type": "Unbekannt",
-        "dashboard_summary": "Noch nicht analysiert",
-        "review_required": True,
-    })
-
-    # Beleg wird der Reise zugeordnet, aber noch nicht als Event erzeugt.
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                # Falls belege.reise_id existiert, direkt setzen; sonst ignorieren.
-                if _v90b_column_exists("belege", "reise_id"):
-                    cur.execute("UPDATE belege SET reise_id = %s WHERE id = %s", (reise_id, beleg_id))
-            conn.commit()
-    except Exception:
-        pass
-
-    return {
-        "status": "ok",
-        "version": APP_VERSION,
-        "beleg_id": beleg_id,
-        "beleg_nr": _v90b_beleg_nr(beleg_id),
-        "workflow_status": "eingegangen",
-        "message": "Original gespeichert. Beleg ist sofort sichtbar.",
-    }
-
-
-@app.post("/belege/{beleg_id}/anonymize")
-def anonymize_beleg_route(beleg_id: int) -> Dict[str, Any]:
-    return _v90b_anonymize_beleg(beleg_id)
-
-
-@app.post("/belege/{beleg_id}/run-ki")
-def run_ki_beleg_route(beleg_id: int) -> Dict[str, Any]:
-    return _v90b_analyze_beleg(beleg_id)
-
-
-@app.post("/belege/{beleg_id}/workflow-full")
-def run_full_workflow_route(beleg_id: int) -> Dict[str, Any]:
-    _v90b_anonymize_beleg(beleg_id)
-    return _v90b_analyze_beleg(beleg_id)
-
-
-@app.get("/belege/{beleg_id}/workflow")
-def get_beleg_workflow_single(beleg_id: int) -> Dict[str, Any]:
-    ensure_db_extensions_v90b()
-    rec = _v90b_get_beleg(beleg_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
-    return {
-        "id": rec.get("id"),
-        "beleg_id": rec.get("id"),
-        "beleg_nr": rec.get("beleg_nr") or _v90b_beleg_nr(beleg_id),
-        "workflow_status": rec.get("workflow_status") or "altbestand",
-        "workflow_message": rec.get("workflow_message") or "",
-        "source_filename": rec.get("source_filename") or rec.get("original_filename") or "",
-        "document_type": rec.get("document_type") or rec.get("art") or "Unbekannt",
-        "belegdatum": rec.get("belegdatum") or "",
-        "dashboard_summary": rec.get("dashboard_summary") or "",
-        "amount_original": rec.get("amount_original") or rec.get("kosten") or "",
-        "currency_original": rec.get("currency_original") or rec.get("waehrung") or "",
-        "review_required": bool(rec.get("review_required")),
-        "has_original": bool(rec.get("original_file_path")),
-        "has_anonymized": bool(rec.get("anonymized_pdf_path")),
-        "has_ki_response": bool(rec.get("ki_response_pdf_path") or rec.get("generated_pdf_path")),
-    }
-
-
-@app.get("/belege/{beleg_id}/anonymized")
-def get_beleg_anonymized_v90b(beleg_id: int):
-    rec = _v90b_get_beleg(beleg_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
-    path = rec.get("anonymized_pdf_path")
-    if not path or not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Anonymisierter Beleg noch nicht erzeugt")
-    return FileResponse(path, media_type="application/pdf", filename=f"{_v90b_beleg_nr(beleg_id)}_anonymisiert.pdf")
-
-
-@app.get("/belege/{beleg_id}/ki-response")
-def get_beleg_ki_response_v90b(beleg_id: int):
-    rec = _v90b_get_beleg(beleg_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="Beleg nicht gefunden")
-    path = rec.get("ki_response_pdf_path") or rec.get("generated_pdf_path")
-    if not path or not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="KI-Antwort-PDF noch nicht erzeugt")
-    return FileResponse(path, media_type="application/pdf", filename=f"{_v90b_beleg_nr(beleg_id)}_ki_response.pdf")
-
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"DELETE FROM reise_laender WHERE id={P}", (lid,))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/reise/{rcode}", status_code=303)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+# ── VMA-Tabelle Übersicht ──────────────────────────────────────────────────────
+@app.get("/vma", response_class=HTMLResponse)
+def vma_uebersicht():
+    zeilen = ""
+    for code, info in sorted(VMA_SAETZE.items(), key=lambda x: x[1]["name"]):
+        region = ("🇩🇪" if code == "DE"
+                  else "🇪🇺" if code in ("FR","CH","AT","GB","IT","ES","NL","BE","PL",
+                                          "CZ","SE","NO","DK","FI","PT","GR","TR","HU",
+                                          "RO","HR","BG","SK","SI","RS")
+                  else "🌍")
+        zeilen += f"""<tr>
+            <td class="td-mono">{code}</td>
+            <td>{region} {info["name"]}</td>
+            <td style="text-align:right;font-weight:600">{info["voll"]:.2f} EUR</td>
+            <td style="text-align:right">{info["halb"]:.2f} EUR</td>
+        </tr>"""
+
+    content = f"""
+    <h1 class="page-title">VMA-Tagessätze 2026</h1>
+    <div class="alert alert-warn" style="margin-bottom:20px">
+      Quelle: BMF-Schreiben Auslandsreisekosten 2024 (§ 9 Abs. 4a EStG).
+      Stand: Januar 2026. Bei Änderungen bitte Buchhalter kontaktieren.
+    </div>
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>ISO</th><th>Land</th>
+            <th style="text-align:right">Voller Satz/Tag</th>
+            <th style="text-align:right">Halber Satz/Tag</th>
+          </tr></thead>
+          <tbody>{zeilen}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="alert alert-ok" style="margin-top:16px">
+      <b>Regel:</b> Erster und letzter Reisetag → halber Satz. Volle Tage dazwischen → voller Satz.
+      Bei Aufenthalt in mehreren Ländern gilt der Satz des Landes, in dem der Reisende
+      um 24:00 Uhr Ortszeit war.
+    </div>"""
+    return HTMLResponse(shell("VMA-Sätze 2026", content, "vma"))
