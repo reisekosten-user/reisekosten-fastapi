@@ -482,7 +482,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-a"
+APP_VERSION = "2.0-c"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -1237,21 +1237,28 @@ def reise_detail(code: str):
 
                 # Tage berechnen
                 try:
-                    d_von = date.fromisoformat(str(lvon)[:10])
-                    d_bis = date.fromisoformat(str(lbis)[:10])
+                    # Datum aus PostgreSQL (date-Objekt) oder String
+                    def to_date(v):
+                        if isinstance(v, date): return v
+                        return date.fromisoformat(str(v)[:10])
+                    d_von = to_date(lvon)
+                    d_bis = to_date(lbis)
                     tage = (d_bis - d_von).days + 1
-                    # Erster und letzter Tag: halber Satz
-                    if tage == 1:
-                        betrag = vhalb
+                    # Steuerrecht: Erster + letzter Tag = halber Satz
+                    # Bei 1 Tag (Hin- und Rückreise selber Tag) = halber Satz
+                    if tage <= 0:
+                        betrag = 0.0
+                    elif tage == 1:
+                        betrag = float(vhalb)
                     elif tage == 2:
-                        betrag = vhalb + vhalb
+                        betrag = float(vhalb) * 2
                     else:
-                        betrag = vhalb + (vvoll * (tage - 2)) + vhalb
+                        betrag = float(vhalb) + (float(vvoll) * (tage - 2)) + float(vhalb)
                     vma_total += betrag
                     tage_txt = f"{tage} Tag{'e' if tage!=1 else ''}"
                     betrag_txt = f"{betrag:.2f} EUR"
-                except:
-                    tage_txt = "–"; betrag_txt = "–"
+                except Exception as ve:
+                    tage_txt = f"Fehler: {ve}"; betrag_txt = "–"
 
                 vma_zeilen += f"""<tr>
                     <td><span class="badge badge-blue">{lcode_l}</span> {lname_l}</td>
