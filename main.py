@@ -521,13 +521,39 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # ── System-Routen ──────────────────────────────────────────────────────────────
 @app.get("/init")
 def init():
-    """Legt Tabellen an (PostgreSQL + SQLite kompatibel)."""
+    """Legt Tabellen an. Bestehende Tabellen werden NICHT gelöscht."""
     try:
         db = get_db(); cur = db.cursor()
         for sql in get_schema():
             cur.execute(sql)
         db.commit(); cur.close(); db.close()
         return {"status": "ok", "version": APP_VERSION,
+                "db": "postgresql" if is_postgres() else "sqlite"}
+    except Exception as e:
+        return {"status": "fehler", "detail": str(e)}
+
+@app.get("/init-reset")
+def init_reset(confirm: str = ""):
+    """
+    Löscht ALLE Tabellen und legt sie neu an.
+    Nur aufrufen mit ?confirm=ja
+    """
+    if confirm != "ja":
+        return {"status": "warten",
+                "hinweis": "Aufruf mit ?confirm=ja um alle Daten zu löschen und neu anzulegen"}
+    try:
+        db = get_db(); cur = db.cursor()
+        # Tabellen in richtiger Reihenfolge löschen (Foreign Keys beachten)
+        for tbl in ["reise_laender", "reise_mitarbeiter", "reisen", "mitarbeiter"]:
+            try:
+                cur.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE")
+            except: pass
+        db.commit()
+        # Neu anlegen
+        for sql in get_schema():
+            cur.execute(sql)
+        db.commit(); cur.close(); db.close()
+        return {"status": "ok", "aktion": "reset+init", "version": APP_VERSION,
                 "db": "postgresql" if is_postgres() else "sqlite"}
     except Exception as e:
         return {"status": "fehler", "detail": str(e)}
