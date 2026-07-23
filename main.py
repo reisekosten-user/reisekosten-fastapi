@@ -1,5 +1,5 @@
 """
-# v2.0-e – httpx hinzugefügt, OpenAI Test
+# v2.0-f – OpenAI Config aus Environment Variables
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -17,7 +17,10 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 # ── Datenbank ──────────────────────────────────────────────────────────────────
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL  = os.getenv("DATABASE_URL", "")
+OPENAI_KEY    = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL  = os.getenv("OPENAI_MODEL", "gpt-4o")
+OPENAI_URL    = "https://api.openai.com/v1/chat/completions"
 
 def get_db():
     """
@@ -483,7 +486,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-e"
+APP_VERSION = "2.0-f"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -524,23 +527,21 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def test_openai():
     """Testet die OpenAI API-Verbindung."""
     import httpx, os
-    key = os.getenv("OPENAI_API_KEY", "")
-    if not key:
+    if not OPENAI_KEY:
         return {"status": "fehler", "detail": "OPENAI_API_KEY nicht gesetzt"}
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {key}",
+                OPENAI_URL,
+                headers={"Authorization": f"Bearer {OPENAI_KEY}",
                          "Content-Type": "application/json"},
-                json={"model": "gpt-4o-mini",
+                json={"model": OPENAI_MODEL,
                       "messages": [{"role": "user",
                                     "content": "Antworte nur mit: OK"}],
                       "max_tokens": 5})
             if resp.status_code == 200:
                 antwort = resp.json()["choices"][0]["message"]["content"]
-                return {"status": "ok", "antwort": antwort,
-                        "modell": "gpt-4o-mini"}
+                return {"status": "ok", "antwort": antwort, "modell": OPENAI_MODEL}
             else:
                 return {"status": "fehler", "http": resp.status_code,
                         "detail": resp.text[:200]}
