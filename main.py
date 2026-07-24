@@ -1,5 +1,5 @@
 """
-# v2.1-a – Konsolidiert + MwSt/VAT Label
+# v2.1-b – Segment-Feldnamen vereinheitlicht (Prompt = Anzeige)
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -539,7 +539,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-a"
+APP_VERSION = "2.1-b"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -815,18 +815,18 @@ JSON-Format:
   "segmente": [
     {
       "nr": 1,
-      "datum_abflug": "DD.MM.YYYY",
-      "zeit_abflug": "HH:MM",
-      "zeitzone_abflug": "MEZ|UTC|EST",
-      "datum_ankunft": "DD.MM.YYYY",
-      "zeit_ankunft": "HH:MM",
-      "zeitzone_ankunft": "MEZ|UTC|EST",
-      "ort_von": "Stadtname",
-      "iata_von": "FRA",
-      "ort_nach": "Stadtname",
-      "iata_nach": "LYS",
-      "anbieter_segment": "Lufthansa|Swiss|DB",
-      "nummer": "LH3463|ICE123",
+      "abreise_datum": "DD.MM.YYYY",
+      "abreise_zeit": "HH:MM",
+      "abreise_zeitzone": "MEZ|UTC|EST|CR|GMT",
+      "ankunft_datum": "DD.MM.YYYY",
+      "ankunft_zeit": "HH:MM",
+      "ankunft_zeitzone": "MEZ|UTC|EST|CR|GMT",
+      "von_ort": "Stadtname z.B. Frankfurt",
+      "von_iata": "FRA",
+      "nach_ort": "Stadtname z.B. Lyon",
+      "nach_iata": "LYS",
+      "transport_name": "Lufthansa|Swiss|ITA Airways|DB",
+      "transport_nummer": "LH3463|AZ123|ICE123",
       "klasse": "Economy|Business|1.Klasse",
       "hinweis": "z.B. operated by Edelweiss"
     }
@@ -1179,23 +1179,36 @@ def beleg_detail(bid: int):
             for s in segmente:
                 ab_tz = s.get("abreise_zeitzone","") or ""
                 an_tz = s.get("ankunft_zeitzone","") or ""
+                von_iata = s.get("von_iata","") or ""
+                von_ort  = s.get("von_ort","") or ""
+                nach_iata= s.get("nach_iata","") or ""
+                nach_ort = s.get("nach_ort","") or ""
+                t_name   = s.get("transport_name","") or ""
+                t_nr     = s.get("transport_nummer","") or ""
+                ab_dat   = s.get("abreise_datum","") or ""
+                ab_zeit  = s.get("abreise_zeit","") or ""
+                an_dat   = s.get("ankunft_datum","") or ab_dat
+                an_zeit  = s.get("ankunft_zeit","") or ""
+                klasse   = s.get("klasse","") or ""
+                hinweis  = s.get("hinweis","") or ""
                 rows += (f'<tr>'
-                    f'<td style="text-align:center;color:var(--muted)">{s.get("nr","")}</td>'
-                    f'<td style="font-weight:700;color:var(--blue);font-family:monospace">'
-                    f'{s.get("transport_name","")}&nbsp;{s.get("transport_nummer","")}</td>'
-                    f'<td><b>{s.get("von_iata","")}</b><br>'
-                    f'<span style="font-size:11px;color:var(--muted)">{s.get("von_ort","")}</span></td>'
+                    f'<td style="text-align:center;color:var(--muted);font-size:12px">{s.get("nr","")}</td>'
+                    f'<td style="font-weight:700;color:var(--blue);font-family:monospace;white-space:nowrap">'
+                    f'{t_name} {t_nr}</td>'
+                    f'<td><b>{von_iata}</b>'
+                    f'<div style="font-size:11px;color:var(--muted)">{von_ort}</div></td>'
                     f'<td style="color:var(--muted)">→</td>'
-                    f'<td><b>{s.get("nach_iata","")}</b><br>'
-                    f'<span style="font-size:11px;color:var(--muted)">{s.get("nach_ort","")}</span></td>'
-                    f'<td style="font-family:monospace;white-space:nowrap">'
-                    f'{s.get("abreise_datum","")}<br>'
-                    f'<span style="color:var(--blue)">{s.get("abreise_zeit","")} {ab_tz}</span></td>'
-                    f'<td style="font-family:monospace;white-space:nowrap">'
-                    f'{s.get("ankunft_datum","") or s.get("abreise_datum","")}<br>'
-                    f'<span style="color:var(--green)">{s.get("ankunft_zeit","")} {an_tz}</span></td>'
-                    f'<td style="font-size:11px;color:var(--muted)">{s.get("klasse","")}</td>'
-                    f'<td style="font-size:11px;color:var(--light)">{s.get("hinweis","") or ""}</td>'
+                    f'<td><b>{nach_iata}</b>'
+                    f'<div style="font-size:11px;color:var(--muted)">{nach_ort}</div></td>'
+                    f'<td style="font-family:monospace;font-size:12px;white-space:nowrap">'
+                    f'<b>{ab_dat}</b><br>'
+                    f'<span style="color:var(--blue)">{ab_zeit} {ab_tz}</span></td>'
+                    f'<td style="font-family:monospace;font-size:12px;white-space:nowrap">'
+                    f'<b>{an_dat}</b><br>'
+                    f'<span style="color:var(--green)">{an_zeit} {an_tz}</span></td>'
+                    f'<td style="font-size:11px;color:var(--muted)">{klasse}</td>'
+                    f'<td style="font-size:11px;color:var(--muted);max-width:120px">'
+                    f'{hinweis}</td>'
                     f'</tr>')
             seg_html = (f'<div class="card" style="margin-top:16px">'
                 f'<div class="card-header"><span class="card-title">'
