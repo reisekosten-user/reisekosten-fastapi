@@ -1,5 +1,5 @@
 """
-# v2.0-t – Alle DB-Queries auf neue Spalten umgestellt
+# v2.0-u – lade_ma_daten wiederhergestellt
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -538,7 +538,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-t"
+APP_VERSION = "2.0-u"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -878,6 +878,18 @@ Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfe
         import traceback
         return {"fehler": str(e), "trace": traceback.format_exc()[:300],
                 "pflichtfelder_ok": False, "fehlende_pflichtfelder": ["Exception"]}
+
+
+def lade_ma_daten() -> tuple:
+    """Lädt Mitarbeiternamen aus DB für Anonymisierung."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT klarname FROM mitarbeiter")
+        namen = [r[0] if isinstance(r, tuple) else r["klarname"] for r in cur.fetchall()]
+        cur.close(); db.close()
+        mails = [IMAP_USER] if IMAP_USER else []
+        return namen, mails
+    except: return [], []
 
 
 async def beleg_verarbeiten(
