@@ -1,5 +1,5 @@
 """
-# v2.0-x – GPT bekommt Rohtext statt PDF (einfach + zuverlaessig)
+# v2.0-y – lade_ma_daten fix (permanent)
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -538,7 +538,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-x"
+APP_VERSION = "2.0-y"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -875,6 +875,18 @@ JSON-Format:
                 "trace": traceback.format_exc()[:500],
                 "pflichtfelder_ok": False,
                 "fehlende_pflichtfelder": ["Exception: " + str(e)[:100]]}
+
+
+def lade_ma_daten() -> tuple:
+    """Lädt Mitarbeiternamen aus DB für Anonymisierung."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT klarname FROM mitarbeiter")
+        namen = [r[0] if isinstance(r, tuple) else r["klarname"] for r in cur.fetchall()]
+        cur.close(); db.close()
+        mails = [IMAP_USER] if IMAP_USER else []
+        return namen, mails
+    except: return [], []
 
 
 async def beleg_verarbeiten(
