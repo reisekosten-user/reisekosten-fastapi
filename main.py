@@ -1,5 +1,5 @@
 """
-# v2.0-m – Anonymisierung fix: re.IGNORECASE
+# v2.0-n – Debug Anonymisierung
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -515,7 +515,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-m"
+APP_VERSION = "2.0-n"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -1353,6 +1353,15 @@ def belege_liste():
         return HTMLResponse(shell("Belege", content))
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.get("/debug-anon")
+def debug_anon():
+    """Zeigt welche Namen für Anonymisierung geladen werden."""
+    namen, mails = lade_ma_daten()
+    return {"namen": namen, "mails": mails,
+            "anzahl": len(namen),
+            "hinweis": "Wenn leer: Mitarbeiter neu anlegen unter /mitarbeiter/neu"}
+
 
 @app.get("/test-openai")
 async def test_openai():
