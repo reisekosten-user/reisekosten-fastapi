@@ -1,5 +1,5 @@
 """
-# v2.1-g – Anonymisierung: E-Mail zuerst + Betreff anonymisieren
+# v2.1-h – JPG/PNG: GPT-4o Vision OCR bei Fotos ohne Text
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -539,7 +539,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-g"
+APP_VERSION = "2.1-h"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -763,6 +763,96 @@ def anonymisieren(text: str, ma_namen: list, ma_mails: list) -> str:
     varianten.add(name_ascii.upper())
 
     return [v for v in varianten if len(v) > 2]
+
+
+async def gpt_analyse_bild(bild_bytes: bytes, content_type: str,
+                            dateiname: str = "") -> dict:
+    """
+    Schickt ein Bild direkt an GPT-4o Vision für OCR + Analyse.
+    Für Fotos von Belegen (Tankquittungen, Kassenzettel etc.)
+    """
+    if not OPENAI_KEY:
+        return {"fehler": "OPENAI_API_KEY nicht gesetzt",
+                "pflichtfelder_ok": False,
+                "fehlende_pflichtfelder": ["OPENAI_API_KEY fehlt"]}
+
+    b64 = base64.b64encode(bild_bytes).decode()
+    # HEIC nicht direkt unterstützt → als JPEG behandeln
+    if content_type in ("image/heic", "image/heif"):
+        content_type = "image/jpeg"
+
+    prompt = """Analysiere dieses Foto eines Reisebelegs und fülle ALLE erkennbaren Felder aus.
+Antworte NUR mit einem validen JSON-Objekt – kein Text davor oder danach.
+Nicht erkennbare Felder = null.
+
+Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
+Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
+
+{
+  "belegdatum": "DD.MM.YYYY",
+  "belegart": "Rechnung|Quittung|Sonstiges",
+  "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Sonstiges",
+  "transportart_freitext": "nur wenn Sonstiges",
+  "anbieter": "Name des Anbieters",
+  "rechnungsnummer": "Belegnummer",
+  "buchungscode": null,
+  "reisender": null,
+  "land_beleg": "DE|FR|US|...",
+  "betrag_brutto": 45.30,
+  "betrag_netto": null,
+  "betrag_mwst": null,
+  "waehrung": "EUR",
+  "event_datum_von": "DD.MM.YYYY",
+  "event_datum_bis": "DD.MM.YYYY",
+  "event_ort_von": "Ort",
+  "event_ort_bis": null,
+  "tanken_kraftstoff": "Benzin|Diesel|AdBlue|Super|SuperPlus|Elektro",
+  "tanken_menge": 45.3,
+  "tanken_einheit": "Liter|kWh",
+  "tanken_preis_pro_einheit": 1.789,
+  "tanken_tankstelle": "Name und Ort",
+  "tanken_kennzeichen": "Kennzeichen falls sichtbar",
+  "pflichtfelder_ok": true,
+  "fehlende_pflichtfelder": []
+}"""
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                OPENAI_URL,
+                headers={"Authorization": f"Bearer {OPENAI_KEY}",
+                         "Content-Type": "application/json"},
+                json={"model": OPENAI_MODEL,
+                      "messages": [{"role": "user", "content": [
+                          {"type": "text", "text": prompt},
+                          {"type": "image_url", "image_url": {
+                              "url": f"data:{content_type};base64,{b64}",
+                              "detail": "high"}}
+                      ]}],
+                      "max_tokens": 1500,
+                      "temperature": 0.0})
+
+            if resp.status_code != 200:
+                return {"fehler": f"HTTP {resp.status_code}: {resp.text[:200]}",
+                        "pflichtfelder_ok": False,
+                        "fehlende_pflichtfelder": ["API-Fehler"]}
+
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+            m = re.search(r'\{.*\}', raw, re.DOTALL)
+            if m:
+                result = json.loads(m.group(0))
+                pflicht = ["belegdatum","transportart","anbieter",
+                           "betrag_brutto","waehrung","event_datum_von"]
+                fehlend = [f for f in pflicht if not result.get(f)]
+                result["pflichtfelder_ok"] = len(fehlend) == 0
+                result["fehlende_pflichtfelder"] = fehlend
+                return result
+            return {"fehler": "Kein JSON", "pflichtfelder_ok": False,
+                    "fehlende_pflichtfelder": ["Kein JSON"]}
+    except Exception as e:
+        import traceback
+        return {"fehler": str(e), "pflichtfelder_ok": False,
+                "fehlende_pflichtfelder": ["Exception: " + str(e)[:80]]}
 
 
 async def gpt_analyse(rohtext: str, dateiname: str = "") -> dict:
