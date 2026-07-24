@@ -1,5 +1,5 @@
 """
-# v2.0-y – lade_ma_daten fix (permanent)
+# v2.0-z – httpx + io + base64 imports fix
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -7,7 +7,8 @@ Läuft auf Render (PostgreSQL) und lokal (SQLite).
 Datenbank wird automatisch erkannt via DATABASE_URL.
 """
 from __future__ import annotations
-import os, re, json
+import os, re, json, io, base64
+import httpx
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -538,7 +539,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-y"
+APP_VERSION = "2.0-z"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -580,7 +581,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # SCHRITT B) – BELEGE VERARBEITEN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-import io, base64, re as _re
 
 def get_s3():
     """S3/Hetzner Object Storage Client."""
