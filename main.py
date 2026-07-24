@@ -1,5 +1,5 @@
 """
-# v2.1-d – Mails nach Import löschen
+# v2.1-e – Mail: nur PDF/JPG/PNG Anhänge, ImageReader fix
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -539,7 +539,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-d"
+APP_VERSION = "2.1-e"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -626,6 +626,7 @@ def bild_zu_pdf(bild_bytes: bytes, dateiname: str = "bild") -> bytes:
     from reportlab.lib.units import mm
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas
+    from reportlab.lib.utils import ImageReader
     w_pt, h_pt = A4
     img_w, img_h = img.size
     # Skalieren auf A4 mit Rand
@@ -638,7 +639,7 @@ def bild_zu_pdf(bild_bytes: bytes, dateiname: str = "bild") -> bytes:
     x = (w_pt - draw_w) / 2
     y = (h_pt - draw_h) / 2
     c_pdf = canvas.Canvas(pdf_buf, pagesize=A4)
-    c_pdf.drawImage(RLImage(img_buf), x, y, draw_w, draw_h)
+    c_pdf.drawImage(ImageReader(img_buf), x, y, draw_w, draw_h)
     c_pdf.save()
     return pdf_buf.getvalue()
 
@@ -1584,8 +1585,12 @@ def mail_body_text(msg) -> tuple:
 
             if fn:
                 fn = decode_mime_header(fn)
-                # Inline-Bilder und Calendar-Dateien überspringen
-                if fn.lower().endswith((".ics",".vcf")): continue
+                fn_lower = fn.lower()
+                # Nicht-Beleg-Dateien überspringen
+                if fn_lower.endswith((".ics",".vcf",".emz",".wmz",".gif")): continue
+                # Nur echte Beleg-Dateien
+                if not fn_lower.endswith((".pdf",".jpg",".jpeg",".png",".heic",".webp")):
+                    continue
                 attachments.append((fn, payload, ct))
             elif ct == "text/plain" and not body:
                 body = payload.decode(errors="ignore")
