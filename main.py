@@ -1,5 +1,5 @@
 """
-# v2.1-e – Mail: nur PDF/JPG/PNG Anhänge, ImageReader fix
+# v2.1-g – Anonymisierung: E-Mail zuerst + Betreff anonymisieren
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -539,7 +539,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-e"
+APP_VERSION = "2.1-g"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -674,22 +674,35 @@ def pdf_text_lesen(pdf_bytes: bytes) -> str:
 
 def anonymisieren(text: str, ma_namen: list, ma_mails: list) -> str:
     """
-    Suchen & Ersetzen – case-insensitive via regex.
-    Jeder Vor- und Nachname aus der DB wird ersetzt.
+    Suchen & Ersetzen – Reihenfolge wichtig:
+    1. E-Mails zuerst (bevor Domain durch Herrhammer-Ersatz zerstört wird)
+    2. Herrhammer
+    3. Mitarbeiternamen
+    4. Telefon
     """
     result = text
 
-    # 1. Mitarbeiternamen – jedes Wort einzeln, case-insensitive
+    # 1. E-Mail-Adressen ZUERST ersetzen (vor allen anderen Ersetzungen)
+    result = re.sub(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
+                    'max.mustermann@beispiel.de', result)
+
+    # 2. Herrhammer (alle Varianten)
+    result = re.sub(r'HERRHAMMER\s+GMBH\s+\w*', 'Musterfirma GmbH', result, flags=re.IGNORECASE)
+    result = re.sub(r'HERRHAMMER\s+GMBH', 'Musterfirma GmbH', result, flags=re.IGNORECASE)
+    result = re.sub(r'HERRHAMMER', 'Musterfirma GmbH', result, flags=re.IGNORECASE)
+    # Firmenadresse
+    result = re.sub(r'Rudolf\s*-?\s*Diesel\s*-?\s*Str[a-z]*\.?\s*\d*',
+                    'Musterstrasse 1', result, flags=re.IGNORECASE)
+    result = re.sub(r'97199\s+Ochsenfurt', '00000 Musterstadt', result, flags=re.IGNORECASE)
+
+    # 3. Mitarbeiternamen – jedes Wort, case-insensitive
     woerter = set()
     for name in ma_namen:
         if not name: continue
-        # Vollständiger Name
         woerter.add(name.strip())
-        # Jedes Wort einzeln (Vorname, Nachname)
         for teil in name.strip().split():
             if len(teil) > 1:
                 woerter.add(teil)
-        # Umlaut-Varianten
         umlaut = [("ä","ae"),("ö","oe"),("ü","ue"),("ß","ss"),
                   ("Ä","Ae"),("Ö","Oe"),("Ü","Ue")]
         for wort in list(woerter):
@@ -699,18 +712,9 @@ def anonymisieren(text: str, ma_namen: list, ma_mails: list) -> str:
             if w2 != wort:
                 woerter.add(w2)
 
-    # Längste zuerst ersetzen
     for wort in sorted(woerter, key=len, reverse=True):
         if len(wort) < 2: continue
         result = re.sub(re.escape(wort), "Mustermann", result, flags=re.IGNORECASE)
-
-    # 2. Herrhammer
-    result = re.sub(r'HERRHAMMER\s+GMBH\s*\w*', 'Musterfirma GmbH', result, flags=re.IGNORECASE)
-    result = re.sub(r'HERRHAMMER', 'Musterfirma GmbH', result, flags=re.IGNORECASE)
-
-    # 3. E-Mail
-    result = re.sub(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
-                    'max.mustermann@beispiel.de', result)
 
     # 4. Telefon
     result = re.sub(r'\+49[\s\-./]?[\d\s\-./]{7,15}', '000/000000', result)
@@ -1680,29 +1684,34 @@ async def fetch_mails() -> dict:
                     reise_code = None
                 cur.close(); db.close()
 
-            # Mail-Body als Beleg
-            if body and len(body.strip()) > 50:
-                result = await beleg_verarbeiten(
-                    full_text.encode("utf-8"),
-                    f"Mail: {betreff[:60]}",
-                    reise_code,
-                    "text/plain")
-                belege_erstellt += 1
-                # Message-ID als buchungscode-Referenz speichern
-                if msg_id and result.get("beleg_id"):
-                    db = get_db(); cur = db.cursor()
-                    P = ph()
-                    cur.execute(f"UPDATE belege SET buchungscode={P} WHERE id={P}",
-                                (f"MAIL:{msg_id[:80]}", result["beleg_id"]))
-                    db.commit(); cur.close(); db.close()
+            # Regel: PDF/Bild-Anhänge vorhanden → nur Anhänge verarbeiten
+            # Kein Anhang → Mail-Body als Beleg
+            echte_anhaenge = [(fn, payload, ct) for fn, payload, ct in attachments
+                              if fn.lower().endswith((".pdf",".jpg",".jpeg",".png",".heic",".webp"))]
 
-            # Anhänge als separate Belege
-            for fn, payload, ct in attachments:
-                fn_lower = fn.lower()
-                if not fn_lower.endswith((".pdf",".jpg",".jpeg",".png",".heic",".webp")):
-                    continue
-                result = await beleg_verarbeiten(payload, fn, reise_code, ct)
-                belege_erstellt += 1
+            if echte_anhaenge:
+                # Nur Anhänge verarbeiten – Body ist nur Benachrichtigung
+                for fn, payload, ct in echte_anhaenge:
+                    result = await beleg_verarbeiten(payload, fn, reise_code, ct)
+                    belege_erstellt += 1
+            else:
+                # Kein Anhang – Mail-Body selbst ist der Beleg
+                if body and len(body.strip()) > 50:
+                    # Betreff anonymisieren für Dateinamen
+                    ma_namen_tmp, ma_mails_tmp = lade_ma_daten()
+                    betreff_anon = anonymisieren(betreff, ma_namen_tmp, ma_mails_tmp)
+                    result = await beleg_verarbeiten(
+                        full_text.encode("utf-8"),
+                        f"Mail: {betreff_anon[:60]}",
+                        reise_code,
+                        "text/plain")
+                    belege_erstellt += 1
+                    if msg_id and result.get("beleg_id"):
+                        db = get_db(); cur = db.cursor()
+                        P = ph()
+                        cur.execute(f"UPDATE belege SET buchungscode={P} WHERE id={P}",
+                                    (f"MAIL:{msg_id[:80]}", result["beleg_id"]))
+                        db.commit(); cur.close(); db.close()
 
             # Mail löschen (nach erfolgreicher Verarbeitung)
             mail.store(mid, "+FLAGS", "\\Deleted")
