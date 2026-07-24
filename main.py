@@ -1,5 +1,5 @@
 """
-# v2.0-l – Anonymisierung: einfaches Suchen+Ersetzen
+# v2.0-m – Anonymisierung fix: re.IGNORECASE
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -515,7 +515,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-l"
+APP_VERSION = "2.0-m"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -649,59 +649,45 @@ def pdf_text_lesen(pdf_bytes: bytes) -> str:
 
 def anonymisieren(text: str, ma_namen: list, ma_mails: list) -> str:
     """
-    Einfaches Suchen & Ersetzen:
-    - Jeden Vor- und Nachnamen aus der Mitarbeiterdatenbank → Mustermann
-    - Herrhammer (alle Schreibweisen) → Musterfirma GmbH
-    - E-Mail-Adressen → max.mustermann@beispiel.de
-    - Telefonnummern → 000/000000
+    Suchen & Ersetzen – case-insensitive via regex.
+    Jeder Vor- und Nachname aus der DB wird ersetzt.
     """
     result = text
 
-    # Alle Wörter die ersetzt werden sollen
+    # 1. Mitarbeiternamen – jedes Wort einzeln, case-insensitive
     woerter = set()
-
     for name in ma_namen:
         if not name: continue
-        # Vollständigen Namen hinzufügen
+        # Vollständiger Name
         woerter.add(name.strip())
-        # Jeden Teil (Vorname, Nachname) einzeln
+        # Jedes Wort einzeln (Vorname, Nachname)
         for teil in name.strip().split():
             if len(teil) > 1:
                 woerter.add(teil)
+        # Umlaut-Varianten
+        umlaut = [("ä","ae"),("ö","oe"),("ü","ue"),("ß","ss"),
+                  ("Ä","Ae"),("Ö","Oe"),("Ü","Ue")]
+        for wort in list(woerter):
+            w2 = wort
+            for von, nach in umlaut:
+                w2 = w2.replace(von, nach)
+            if w2 != wort:
+                woerter.add(w2)
 
-    # Für jedes Wort: alle Schreibvarianten erzeugen und ersetzen
-    umlaut = [("ä","ae"),("ö","oe"),("ü","ue"),("ß","ss"),
-              ("Ä","Ae"),("Ö","Oe"),("Ü","Ue")]
+    # Längste zuerst ersetzen
+    for wort in sorted(woerter, key=len, reverse=True):
+        if len(wort) < 2: continue
+        result = re.sub(re.escape(wort), "Mustermann", result, flags=re.IGNORECASE)
 
-    alle_varianten = set()
-    for wort in woerter:
-        alle_varianten.add(wort)
-        alle_varianten.add(wort.upper())
-        alle_varianten.add(wort.lower())
-        alle_varianten.add(wort.capitalize())
-        # Umlaut-Variante
-        wort_ascii = wort
-        for von, nach in umlaut:
-            wort_ascii = wort_ascii.replace(von, nach)
-        alle_varianten.add(wort_ascii)
-        alle_varianten.add(wort_ascii.upper())
-        alle_varianten.add(wort_ascii.lower())
+    # 2. Herrhammer
+    result = re.sub(r'HERRHAMMER\s+GMBH\s*\w*', 'Musterfirma GmbH', result, flags=re.IGNORECASE)
+    result = re.sub(r'HERRHAMMER', 'Musterfirma GmbH', result, flags=re.IGNORECASE)
 
-    # Nach Länge sortieren (längste zuerst) damit "Ralf Diesslin" vor "Diesslin" ersetzt wird
-    for variante in sorted(alle_varianten, key=len, reverse=True):
-        if len(variante) < 2: continue
-        result = result.replace(variante, "Mustermann")
-
-    # Herrhammer – alle Varianten
-    for schreibweise in ["HERRHAMMER GMBH", "Herrhammer GmbH", "herrhammer gmbh",
-                         "HERRHAMMER", "Herrhammer", "herrhammer"]:
-        result = result.replace(schreibweise, "Musterfirma GmbH")
-
-    # E-Mail-Adressen
+    # 3. E-Mail
     result = re.sub(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
                     'max.mustermann@beispiel.de', result)
 
-    # Telefonnummern
+    # 4. Telefon
     result = re.sub(r'\+49[\s\-./]?[\d\s\-./]{7,15}', '000/000000', result)
     result = re.sub(r'\b0\d{3,5}[\s\-./]?\d{4,8}\b', '000/000000', result)
 
