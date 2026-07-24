@@ -1,5 +1,5 @@
 """
-# v2.0-s – Neuer GPT-Prompt + alle Felder + Tanken + Fehlerliste
+# v2.0-t – Alle DB-Queries auf neue Spalten umgestellt
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -538,7 +538,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-s"
+APP_VERSION = "2.0-t"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -1098,9 +1098,18 @@ def beleg_detail(bid: int):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
-        cur.execute(f"""SELECT id,reise_code,typ,dateiname,s3_original,s3_anon,s3_analyse,
-            rohtext,anon_text,ki_json,ki_zusammenfassung,betrag,waehrung,
-            belegdatum,vendor,reisender,buchungscode,status,fehler,erstellt
+        cur.execute(f"""SELECT id, reise_code, transportart, dateiname,
+            s3_original, s3_anon, s3_analyse, rohtext, anon_text, ki_json,
+            pflichtfelder_ok, fehlende_felder,
+            belegdatum, belegart, anbieter, rechnungsnummer, buchungscode,
+            reisender, land_beleg,
+            betrag_brutto, betrag_netto, betrag_mwst, waehrung,
+            event_datum_von, event_datum_bis, event_ort_von, event_ort_bis,
+            hotel_name, hotel_checkin_datum, hotel_checkin_zeit,
+            hotel_checkout_datum, hotel_checkout_zeit, hotel_naechte,
+            tanken_kraftstoff, tanken_menge, tanken_einheit,
+            tanken_preis_einheit, tanken_tankstelle, tanken_kennzeichen,
+            status, fehler, erstellt
             FROM belege WHERE id={P}""", (bid,))
         r = cur.fetchone()
         # Reisen für Zuordnung
@@ -1111,16 +1120,29 @@ def beleg_detail(bid: int):
             return HTMLResponse(shell("Fehler",'<div class="alert alert-err">Beleg nicht gefunden.</div>'))
 
         def get(row,k,i): return row[k] if hasattr(row,'keys') else row[i]
-        bid2=get(r,"id",0); rcode=get(r,"reise_code",1); typ=get(r,"typ",2)
+        bid2=get(r,"id",0); rcode=get(r,"reise_code",1); typ=get(r,"transportart",2)
         dateiname=get(r,"dateiname",3); s3o=get(r,"s3_original",4)
         s3a=get(r,"s3_anon",5); s3an=get(r,"s3_analyse",6)
         rohtext=get(r,"rohtext",7); anon_text=get(r,"anon_text",8)
-        ki_json_str=get(r,"ki_json",9); zusammenfassung=get(r,"ki_zusammenfassung",10)
-        betrag=get(r,"betrag",11); waehrung=get(r,"waehrung",12)
-        belegdatum=get(r,"belegdatum",13); vendor=get(r,"vendor",14)
-        reisender=get(r,"reisender",15); buchungscode=get(r,"buchungscode",16)
-        status=get(r,"status",17); fehler=get(r,"fehler",18)
-        erstellt=get(r,"erstellt",19)
+        ki_json_str=get(r,"ki_json",9)
+        pf_ok=get(r,"pflichtfelder_ok",10); fehlend=get(r,"fehlende_felder",11)
+        belegdatum=get(r,"belegdatum",12); belegart=get(r,"belegart",13)
+        vendor=get(r,"anbieter",14); rechnr=get(r,"rechnungsnummer",15)
+        buchungscode=get(r,"buchungscode",16); reisender=get(r,"reisender",17)
+        land=get(r,"land_beleg",18)
+        betrag_brutto=get(r,"betrag_brutto",19); betrag_netto=get(r,"betrag_netto",20)
+        betrag_mwst=get(r,"betrag_mwst",21); waehrung=get(r,"waehrung",22)
+        ev_von=get(r,"event_datum_von",23); ev_bis=get(r,"event_datum_bis",24)
+        ev_ort_von=get(r,"event_ort_von",25); ev_ort_bis=get(r,"event_ort_bis",26)
+        hotel_name=get(r,"hotel_name",27)
+        hotel_ci_dat=get(r,"hotel_checkin_datum",28); hotel_ci_zeit=get(r,"hotel_checkin_zeit",29)
+        hotel_co_dat=get(r,"hotel_checkout_datum",30); hotel_co_zeit=get(r,"hotel_checkout_zeit",31)
+        hotel_naechte=get(r,"hotel_naechte",32)
+        tank_kraft=get(r,"tanken_kraftstoff",33); tank_menge=get(r,"tanken_menge",34)
+        tank_einh=get(r,"tanken_einheit",35); tank_preis=get(r,"tanken_preis_einheit",36)
+        tank_stelle=get(r,"tanken_tankstelle",37); tank_kfz=get(r,"tanken_kennzeichen",38)
+        status=get(r,"status",39); fehler=get(r,"fehler",40); erstellt=get(r,"erstellt",41)
+        zusammenfassung = f"{typ}: {vendor} – {betrag_brutto} {waehrung}" if vendor else ""
 
         # KI-JSON parsen
         ki = {}
@@ -1198,27 +1220,46 @@ def beleg_detail(bid: int):
           <div class="card">
             <div class="card-header"><span class="card-title">📊 KI-Analyse</span></div>
             <div class="card-body">
-              <dl style="display:grid;grid-template-columns:140px 1fr;gap:4px 12px">
+              <dl style="display:grid;grid-template-columns:160px 1fr;gap:4px 12px">
                 <dt style="color:var(--muted);font-size:12px">Datei</dt>
-                <dd style="font-size:13px">{dateiname}</dd>
-                <dt style="color:var(--muted);font-size:12px">Typ</dt>
+                <dd style="font-size:12px;color:var(--muted)">{dateiname}</dd>
+                <dt style="color:var(--muted);font-size:12px">Transportart</dt>
                 <dd>{typ_badge}</dd>
+                <dt style="color:var(--muted);font-size:12px">Belegart</dt>
+                <dd>{belegart or "–"}</dd>
                 <dt style="color:var(--muted);font-size:12px">Anbieter</dt>
                 <dd style="font-weight:600">{vendor or "–"}</dd>
                 <dt style="color:var(--muted);font-size:12px">Reisender</dt>
                 <dd>{reisender or "–"}</dd>
-                <dt style="color:var(--muted);font-size:12px">Betrag</dt>
+                <dt style="color:var(--muted);font-size:12px">Land</dt>
+                <dd>{land or "–"}</dd>
+                <dt style="color:var(--muted);font-size:12px">Betrag brutto</dt>
                 <dd style="font-weight:700;color:var(--green);font-size:15px">
-                  {f"{float(betrag):.2f}" if betrag else "–"} {waehrung if betrag else ""}</dd>
+                  {f"{float(betrag_brutto):.2f}" if betrag_brutto else "–"} {waehrung}</dd>
+                {f'<dt style="color:var(--muted);font-size:12px">Netto</dt><dd>{float(betrag_netto):.2f} {waehrung}</dd>' if betrag_netto else ""}
+                {f'<dt style="color:var(--muted);font-size:12px">MwSt.</dt><dd>{float(betrag_mwst):.2f} {waehrung}</dd>' if betrag_mwst else ""}
                 <dt style="color:var(--muted);font-size:12px">Belegdatum</dt>
                 <dd>{fmt_date(belegdatum)}</dd>
+                <dt style="color:var(--muted);font-size:12px">Event</dt>
+                <dd>{fmt_date(ev_von)}{f" – {fmt_date(ev_bis)}" if ev_bis else ""}</dd>
+                <dt style="color:var(--muted);font-size:12px">Strecke</dt>
+                <dd>{ev_ort_von or "–"}{f" → {ev_ort_bis}" if ev_ort_bis else ""}</dd>
                 <dt style="color:var(--muted);font-size:12px">Buchungscode</dt>
                 <dd style="font-family:monospace">{buchungscode or "–"}</dd>
-                {'<dt style="color:var(--muted);font-size:12px">Hotel Check-in</dt><dd>' + str(ki.get("hotel_checkin","–")) + '</dd>' if ki.get("hotel_checkin") else ""}
-                {'<dt style="color:var(--muted);font-size:12px">Hotel Check-out</dt><dd>' + str(ki.get("hotel_checkout","–")) + '</dd>' if ki.get("hotel_checkout") else ""}
-                {'<dt style="color:var(--muted);font-size:12px">Nächte</dt><dd>' + str(ki.get("hotel_naechte","")) + '</dd>' if ki.get("hotel_naechte") else ""}
+                <dt style="color:var(--muted);font-size:12px">Rechnungsnr.</dt>
+                <dd style="font-family:monospace">{rechnr or "–"}</dd>
+                {f'<dt style="color:var(--muted);font-size:12px">Hotel</dt><dd style="font-weight:600">{hotel_name}</dd>' if hotel_name else ""}
+                {f'<dt style="color:var(--muted);font-size:12px">Check-in</dt><dd>{fmt_date(hotel_ci_dat)} {hotel_ci_zeit or ""}</dd>' if hotel_ci_dat else ""}
+                {f'<dt style="color:var(--muted);font-size:12px">Check-out</dt><dd>{fmt_date(hotel_co_dat)} {hotel_co_zeit or ""}</dd>' if hotel_co_dat else ""}
+                {f'<dt style="color:var(--muted);font-size:12px">Nächte</dt><dd>{hotel_naechte}</dd>' if hotel_naechte else ""}
+                {f'<dt style="color:var(--muted);font-size:12px">Kraftstoff</dt><dd>{tank_kraft}</dd>' if tank_kraft else ""}
+                {f'<dt style="color:var(--muted);font-size:12px">Menge</dt><dd>{tank_menge} {tank_einh or ""}</dd>' if tank_menge else ""}
+                {f'<dt style="color:var(--muted);font-size:12px">Preis/Einheit</dt><dd>{tank_preis} {waehrung}</dd>' if tank_preis else ""}
+                {f'<dt style="color:var(--muted);font-size:12px">Tankstelle</dt><dd>{tank_stelle}</dd>' if tank_stelle else ""}
+                {f'<dt style="color:var(--muted);font-size:12px">Kennzeichen</dt><dd style="font-family:monospace">{tank_kfz}</dd>' if tank_kfz else ""}
               </dl>
-              {"<div class='alert alert-err' style='margin-top:12px'>" + str(fehler) + "</div>" if fehler else ""}
+              {f'<div class="alert alert-err" style="margin-top:12px"><b>Fehlende Pflichtfelder:</b> {fehlend}</div>' if not pf_ok else ""}
+              {f'<div class="alert alert-err" style="margin-top:8px">{fehler}</div>' if fehler else ""}
             </div>
           </div>
 
@@ -1413,8 +1454,9 @@ def belege_unzugeordnet():
 def belege_liste():
     try:
         db = get_db(); cur = db.cursor()
-        cur.execute("""SELECT b.id, b.reise_code, b.typ, b.vendor, b.betrag, b.waehrung,
-            b.belegdatum, b.status, b.dateiname, b.ki_zusammenfassung
+        cur.execute("""SELECT b.id, b.reise_code, b.transportart, b.anbieter,
+            b.betrag_brutto, b.waehrung, b.belegdatum, b.status,
+            b.dateiname, b.pflichtfelder_ok, b.fehlende_felder
             FROM belege b ORDER BY b.erstellt DESC LIMIT 100""")
         rows = cur.fetchall()
         cur.close(); db.close()
@@ -1423,14 +1465,16 @@ def belege_liste():
 
         typ_farben = {
             "Flug":"badge-blue","Hotel":"badge-green","Bahn":"badge-blue",
-            "Taxi":"badge-amber","Mietwagen":"badge-red","Sonstiges":"badge-gray"
+            "Taxi":"badge-amber","Mietwagen":"badge-red","Tanken":"badge-green",
+            "Verpflegung":"badge-amber","Bewirtung":"badge-amber","Sonstiges":"badge-gray"
         }
         zeilen = ""
         for r in rows:
-            bid=get(r,"id",0); rcode=get(r,"reise_code",1); typ=get(r,"typ",2)
-            vendor=get(r,"vendor",3); betrag=get(r,"betrag",4); waehrung=get(r,"waehrung",5)
-            bd=get(r,"belegdatum",6); status=get(r,"status",7)
-            datei=get(r,"dateiname",8); zusamm=get(r,"ki_zusammenfassung",9)
+            bid=get(r,"id",0); rcode=get(r,"reise_code",1); typ=get(r,"transportart",2)
+            vendor=get(r,"anbieter",3); betrag=get(r,"betrag_brutto",4)
+            waehrung=get(r,"waehrung",5); bd=get(r,"belegdatum",6)
+            status=get(r,"status",7); datei=get(r,"dateiname",8)
+            pf_ok=get(r,"pflichtfelder_ok",9)
             bc = typ_farben.get(typ or "","badge-gray")
             bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
             stat_b = ('<span class="badge badge-green">✓</span>' if status=="ok"
