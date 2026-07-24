@@ -1,5 +1,5 @@
 """
-# v2.0-o – Doppelte anonymisieren Funktion entfernt
+# v2.0-p – Fehlerliste unzugeordnete Belege + Dashboard Badge
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -515,7 +515,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-o"
+APP_VERSION = "2.0-p"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -940,6 +940,8 @@ def beleg_upload_form():
         db = get_db(); cur = db.cursor()
         cur.execute("SELECT code, titel, abreise FROM reisen ORDER BY abreise DESC")
         reisen = cur.fetchall()
+        cur.execute("SELECT COUNT(*) FROM belege WHERE reise_code IS NULL")
+        unzugeordnet = cur.fetchone()[0]
         cur.close(); db.close()
     except: reisen = []
 
@@ -1213,6 +1215,115 @@ def beleg_pdf(bid: int, typ: str):
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
 
+@app.get("/belege/unzugeordnet", response_class=HTMLResponse)
+def belege_unzugeordnet():
+    """Alle Belege ohne Reisezuordnung – müssen zugeordnet werden."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("""SELECT id, typ, dateiname, vendor, betrag, waehrung,
+            belegdatum, ki_zusammenfassung, erstellt
+            FROM belege WHERE reise_code IS NULL
+            ORDER BY erstellt DESC""")
+        rows = cur.fetchall()
+        cur.execute("SELECT code, titel, abreise FROM reisen ORDER BY abreise DESC")
+        reisen = cur.fetchall()
+        cur.close(); db.close()
+
+        def get(r,k,i): return r[k] if hasattr(r,'keys') else r[i]
+
+        if not rows:
+            return HTMLResponse(shell("Alle Belege zugeordnet", """
+            <div style="text-align:center;padding:60px 20px">
+              <div style="font-size:48px;margin-bottom:16px">✅</div>
+              <h1 style="font-size:20px;font-weight:700;margin-bottom:8px">
+                Alle Belege zugeordnet</h1>
+              <p style="color:#64748b;margin-bottom:20px">
+                Es gibt keine offenen Belege.</p>
+              <a href="/" class="btn btn-secondary">← Dashboard</a>
+            </div>"""))
+
+        # Reisen-Optionen für Dropdown
+        r_opts = '<option value="">– Reise wählen –</option>'
+        for rv in reisen:
+            rc = get(rv,"code",0); rt = get(rv,"titel",1); ab = get(rv,"abreise",2)
+            r_opts += f'<option value="{rc}">{rc} – {rt} ({fmt_date(ab)})</option>'
+
+        typ_farben = {
+            "Flug":"#dbeafe:#1e40af","Hotel":"#dcfce7:#166534",
+            "Bahn":"#e0e7ff:#3730a3","Taxi":"#fef3c7:#92400e",
+            "Mietwagen":"#fce7f3:#9d174d","Bewirtung":"#fff7ed:#9a3412",
+            "Tanken":"#f0fdf4:#14532d","Sonstiges":"#f1f5f9:#475569"
+        }
+
+        karten = ""
+        for r in rows:
+            bid=get(r,"id",0); typ=get(r,"typ",1); datei=get(r,"dateiname",2)
+            vendor=get(r,"vendor",3); betrag=get(r,"betrag",4)
+            waehrung=get(r,"waehrung",5); bd=get(r,"belegdatum",6)
+            zusamm=get(r,"ki_zusammenfassung",7)
+
+            tc = typ_farben.get(typ or "Sonstiges","#f1f5f9:#475569").split(":")
+            typ_badge = (f'<span style="background:{tc[0]};color:{tc[1]};'
+                        f'padding:2px 8px;border-radius:4px;font-size:11px;'
+                        f'font-weight:700">{typ or "?"}</span>')
+            bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
+
+            karten += f"""
+            <div class="card" style="border-left:4px solid #ef4444">
+              <div class="card-body">
+                <div style="display:flex;justify-content:space-between;
+                            align-items:flex-start;gap:16px;flex-wrap:wrap">
+                  <div style="flex:1;min-width:200px">
+                    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+                      {typ_badge}
+                      <span style="font-size:12px;color:#64748b">{datei[:40]}</span>
+                    </div>
+                    <div style="font-weight:700;font-size:15px;margin-bottom:4px">
+                      {vendor or "Unbekannter Anbieter"}</div>
+                    <div style="display:flex;gap:16px;flex-wrap:wrap">
+                      <span style="font-weight:700;color:#059669">{bet_s}</span>
+                      <span style="color:#64748b">{fmt_date(bd)}</span>
+                    </div>
+                    {f'<div style="font-size:12px;color:#94a3b8;margin-top:4px">{zusamm}</div>' if zusamm else ''}
+                  </div>
+                  <div style="display:flex;flex-direction:column;gap:8px;min-width:280px">
+                    <form method="post" action="/beleg/{bid}/zuordnen"
+                          style="display:flex;gap:8px">
+                      <select name="reise_code" style="flex:1;padding:7px 10px;
+                              border:1px solid #d1d5db;border-radius:6px;font-size:13px">
+                        {r_opts}
+                      </select>
+                      <button type="submit" class="btn btn-success btn-sm"
+                              style="white-space:nowrap">✓ Zuordnen</button>
+                    </form>
+                    <a href="/beleg/{bid}" class="btn btn-secondary btn-sm"
+                       style="text-align:center">Detail ansehen</a>
+                  </div>
+                </div>
+              </div>
+            </div>"""
+
+        content = f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    margin-bottom:20px">
+          <div>
+            <h1 class="page-title" style="margin:0">⚠ Unzugeordnete Belege</h1>
+            <p style="color:#64748b;margin-top:4px;font-size:13px">
+              {len(rows)} Beleg{"e" if len(rows)!=1 else ""} ohne Reisezuordnung.
+              Bitte jeden Beleg einer Reise zuordnen.
+            </p>
+          </div>
+          <a href="/" class="btn btn-secondary">← Dashboard</a>
+        </div>
+        {karten}"""
+        return HTMLResponse(shell("Unzugeordnete Belege", content))
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:400]}</pre>'))
+
+
 @app.get("/belege", response_class=HTMLResponse)
 def belege_liste():
     try:
@@ -1423,6 +1534,12 @@ def dashboard():
 
         content = f"""
         <h1 class="page-title">Dashboard</h1>
+        {f'<a href="/belege/unzugeordnet" style="display:inline-flex;align-items:center;gap:8px;'
+          f'background:#fef2f2;border:1px solid #fca5a5;color:#991b1b;'
+          f'padding:10px 16px;border-radius:8px;text-decoration:none;font-weight:600;'
+          f'margin-bottom:20px;font-size:13px">'
+          f'⚠ {unzugeordnet} Beleg{"e" if unzugeordnet!=1 else ""} ohne Reisezuordnung → Jetzt zuordnen'
+          f'</a>' if unzugeordnet > 0 else ''}
 
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px">
           <div class="card"><div class="card-body" style="text-align:center">
