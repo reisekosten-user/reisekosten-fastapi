@@ -1,5 +1,5 @@
 """
-# v2.0-z – httpx + io + base64 imports fix
+# v2.1-a – Konsolidiert + MwSt/VAT Label
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -539,7 +539,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-z"
+APP_VERSION = "2.1-a"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -1246,7 +1246,7 @@ def beleg_detail(bid: int):
                 <dd style="font-weight:700;color:var(--green);font-size:15px">
                   {f"{float(betrag_brutto):.2f}" if betrag_brutto else "–"} {waehrung}</dd>
                 {f'<dt style="color:var(--muted);font-size:12px">Netto</dt><dd>{float(betrag_netto):.2f} {waehrung}</dd>' if betrag_netto else ""}
-                {f'<dt style="color:var(--muted);font-size:12px">MwSt.</dt><dd>{float(betrag_mwst):.2f} {waehrung}</dd>' if betrag_mwst else ""}
+                {f'<dt style="color:var(--muted);font-size:12px">{"MwSt." if land == "DE" else "VAT"}</dt><dd>{float(betrag_mwst):.2f} {waehrung}</dd>' if betrag_mwst else ""}
                 <dt style="color:var(--muted);font-size:12px">Belegdatum</dt>
                 <dd>{fmt_date(belegdatum)}</dd>
                 <dt style="color:var(--muted);font-size:12px">Event</dt>
