@@ -1,5 +1,5 @@
 """
-# v2.0-q – unzugeordnet im Dashboard fix
+# v2.0-r – Route /unzugeordnet fix (Konflikt mit /beleg/{bid})
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -515,7 +515,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-q"
+APP_VERSION = "2.0-r"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -1215,7 +1215,7 @@ def beleg_pdf(bid: int, typ: str):
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
 
-@app.get("/belege/unzugeordnet", response_class=HTMLResponse)
+@app.get("/unzugeordnet", response_class=HTMLResponse)
 def belege_unzugeordnet():
     """Alle Belege ohne Reisezuordnung – müssen zugeordnet werden."""
     try:
@@ -1540,7 +1540,7 @@ def dashboard():
 
         content = f"""
         <h1 class="page-title">Dashboard</h1>
-        {f'<a href="/belege/unzugeordnet" style="display:inline-flex;align-items:center;gap:8px;'
+        {f'<a href="/unzugeordnet" style="display:inline-flex;align-items:center;gap:8px;'
           f'background:#fef2f2;border:1px solid #fca5a5;color:#991b1b;'
           f'padding:10px 16px;border-radius:8px;text-decoration:none;font-weight:600;'
           f'margin-bottom:20px;font-size:13px">'
