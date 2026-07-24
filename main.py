@@ -1,5 +1,5 @@
 """
-# v2.0-v – s3 Variablennamen fix
+# v2.0-w – GPT: PDF als Text, Bilder als image_url
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -538,7 +538,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-v"
+APP_VERSION = "2.0-w"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -759,16 +759,18 @@ def anonymisieren(text: str, ma_namen: list, ma_mails: list) -> str:
     return [v for v in varianten if len(v) > 2]
 
 
-async def gpt_analyse(pdf_bytes: bytes, dateiname: str = "") -> dict:
+async def gpt_analyse(pdf_bytes: bytes, dateiname: str = "",
+                      original_bytes: bytes = None,
+                      original_content_type: str = "application/pdf") -> dict:
     """
-    Sendet Beleg an GPT-4o zur strukturierten Analyse.
-    Alle Pflichtfelder werden geprüft – fehlende landen in fehlende_pflichtfelder.
+    Sendet Beleg an GPT-4o.
+    - Bilder (JPG/PNG): direkt als image_url
+    - PDFs: Text extrahieren + als Text senden
     """
     if not OPENAI_KEY:
-        return {"fehler": "OPENAI_API_KEY nicht gesetzt", "pflichtfelder_ok": False,
+        return {"fehler": "OPENAI_API_KEY nicht gesetzt",
+                "pflichtfelder_ok": False,
                 "fehlende_pflichtfelder": ["OPENAI_API_KEY fehlt"]}
-
-    b64 = base64.b64encode(pdf_bytes).decode()
 
     prompt = """Analysiere diesen Reisebeleg sorgfältig und fülle ALLE erkennbaren Felder aus.
 Antworte NUR mit einem validen JSON-Objekt – kein Text davor oder danach.
@@ -787,31 +789,26 @@ Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfe
   "buchungscode": "PNR oder Bestätigungsnummer",
   "reisender": "Vollständiger Name des Reisenden",
   "land_beleg": "ISO-Ländercode z.B. DE, FR, US",
-
   "betrag_brutto": 107.20,
   "betrag_netto": 89.33,
   "betrag_mwst": 17.87,
   "waehrung": "EUR",
-
   "event_datum_von": "DD.MM.YYYY",
   "event_datum_bis": "DD.MM.YYYY",
   "event_ort_von": "Stadtname",
   "event_ort_bis": "Stadtname",
-
   "hotel_name": "nur bei Hotel",
   "hotel_checkin_datum": "DD.MM.YYYY",
   "hotel_checkin_zeit": "HH:MM",
   "hotel_checkout_datum": "DD.MM.YYYY",
   "hotel_checkout_zeit": "HH:MM",
   "hotel_naechte": 2,
-
   "tanken_kraftstoff": "Benzin|Diesel|AdBlue|Elektro|Super|SuperPlus",
   "tanken_menge": 45.3,
   "tanken_einheit": "Liter|kWh",
   "tanken_preis_pro_einheit": 1.789,
   "tanken_tankstelle": "Name und Ort der Tankstelle",
   "tanken_kennzeichen": "Fahrzeugkennzeichen",
-
   "segmente": [
     {
       "nr": 1,
@@ -831,29 +828,51 @@ Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfe
       "hinweis": "z.B. operated by Edelweiss"
     }
   ],
-
   "pflichtfelder_ok": true,
   "fehlende_pflichtfelder": []
 }"""
 
     try:
+        # Bestimme ob wir Bild oder Text senden
+        is_image = (original_content_type or "").startswith("image/")
+
+        if is_image and original_bytes:
+            # Originalbild direkt senden (JPG/PNG)
+            b64 = base64.b64encode(original_bytes).decode()
+            ct = original_content_type
+            content = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:{ct};base64,{b64}",
+                    "detail": "high"}}
+            ]
+        else:
+            # PDF: Text extrahieren und als Text senden
+            rohtext = pdf_text_lesen(pdf_bytes)
+            if not rohtext or len(rohtext.strip()) < 20:
+                # PDF hat keinen extrahierbaren Text (gescannt) → als Bild senden
+                # PDF erste Seite als Bild rendern wäre ideal, aber ohne poppler
+                # Fallback: leeren Text melden
+                return {"fehler": "PDF hat keinen lesbaren Text – bitte als JPG/PNG hochladen",
+                        "pflichtfelder_ok": False,
+                        "fehlende_pflichtfelder": ["Kein Text im PDF"]}
+            content = [
+                {"type": "text",
+                 "text": prompt + f"\n\n--- BELEGTEXT ---\n{rohtext[:8000]}"}
+            ]
+
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 OPENAI_URL,
                 headers={"Authorization": f"Bearer {OPENAI_KEY}",
                          "Content-Type": "application/json"},
                 json={"model": OPENAI_MODEL,
-                      "messages": [{"role": "user", "content": [
-                          {"type": "text", "text": prompt},
-                          {"type": "image_url", "image_url": {
-                              "url": f"data:application/pdf;base64,{b64}",
-                              "detail": "high"}}
-                      ]}],
+                      "messages": [{"role": "user", "content": content}],
                       "max_tokens": 2000,
                       "temperature": 0.0})
 
             if resp.status_code != 200:
-                return {"fehler": f"HTTP {resp.status_code}: {resp.text[:200]}",
+                return {"fehler": f"HTTP {resp.status_code}: {resp.text[:300]}",
                         "pflichtfelder_ok": False,
                         "fehlende_pflichtfelder": ["API-Fehler"]}
 
@@ -861,35 +880,22 @@ Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfe
             m = re.search(r'\{.*\}', raw, re.DOTALL)
             if m:
                 result = json.loads(m.group(0))
-                # Sicherheitsnetz: pflichtfelder_ok prüfen
-                pflicht = ["belegdatum","transportart","anbieter","betrag_brutto",
-                           "waehrung","event_datum_von"]
+                pflicht = ["belegdatum","transportart","anbieter",
+                           "betrag_brutto","waehrung","event_datum_von"]
                 fehlend = [f for f in pflicht if not result.get(f)]
-                if fehlend:
-                    result["pflichtfelder_ok"] = False
-                    result["fehlende_pflichtfelder"] = fehlend
-                else:
-                    result["pflichtfelder_ok"] = True
-                    result["fehlende_pflichtfelder"] = []
+                result["pflichtfelder_ok"] = len(fehlend) == 0
+                result["fehlende_pflichtfelder"] = fehlend
                 return result
             return {"fehler": "Kein JSON in Antwort", "raw": raw[:300],
-                    "pflichtfelder_ok": False, "fehlende_pflichtfelder": ["Kein JSON"]}
+                    "pflichtfelder_ok": False,
+                    "fehlende_pflichtfelder": ["Kein JSON"]}
+
     except Exception as e:
         import traceback
-        return {"fehler": str(e), "trace": traceback.format_exc()[:300],
-                "pflichtfelder_ok": False, "fehlende_pflichtfelder": ["Exception"]}
-
-
-def lade_ma_daten() -> tuple:
-    """Lädt Mitarbeiternamen aus DB für Anonymisierung."""
-    try:
-        db = get_db(); cur = db.cursor()
-        cur.execute("SELECT klarname FROM mitarbeiter")
-        namen = [r[0] if isinstance(r, tuple) else r["klarname"] for r in cur.fetchall()]
-        cur.close(); db.close()
-        mails = [IMAP_USER] if IMAP_USER else []
-        return namen, mails
-    except: return [], []
+        return {"fehler": str(e),
+                "trace": traceback.format_exc()[:500],
+                "pflichtfelder_ok": False,
+                "fehlende_pflichtfelder": ["Exception: " + str(e)[:100]]}
 
 
 async def beleg_verarbeiten(
@@ -929,7 +935,7 @@ async def beleg_verarbeiten(
     anon_pdf = text_zu_pdf(anon_text, f"Anonymisiert: {dateiname}")
 
     # 4. GPT-4o Analyse
-    ki_result = await gpt_analyse(original_pdf, dateiname)
+    ki_result = await gpt_analyse(original_pdf, dateiname, datei_bytes, content_type)
     ki_json_str = json.dumps(ki_result, ensure_ascii=False)
 
     # Zusammenfassung aus KI-Ergebnis
