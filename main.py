@@ -1,5 +1,5 @@
 """
-# v2.0-j – belege in DROP-Liste ergänzt
+# v2.0-k – Anonymisierung: Umlaute, Komma-Format, Firmennamen
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -515,7 +515,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-j"
+APP_VERSION = "2.0-k"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -647,41 +647,131 @@ def pdf_text_lesen(pdf_bytes: bytes) -> str:
         return "\n".join(p.extract_text() or "" for p in reader.pages).strip()
     except: return ""
 
+def name_varianten(name: str) -> list:
+    """
+    Erstellt alle Schreibvarianten eines Namens für die Anonymisierung.
+    Behandelt: Groß/Klein, Umlaute, Komma-Format, Initialen.
+    """
+    if not name or len(name) < 2:
+        return []
+
+    varianten = set()
+    varianten.add(name)
+
+    # Umlaut-Ersetzungen (beide Richtungen)
+    umlaut_map = {"ä":"ae","ö":"oe","ü":"ue","ß":"ss",
+                  "Ä":"Ae","Ö":"Oe","Ü":"Ue",
+                  "ae":"ä","oe":"ö","ue":"ü"}
+    name_ascii = name
+    for k, v in umlaut_map.items():
+        name_ascii = name_ascii.replace(k, v)
+    varianten.add(name_ascii)
+
+    # Teile (Vorname, Nachname einzeln)
+    parts = name.split()
+    for part in parts:
+        if len(part) > 2:
+            varianten.add(part)
+            # Umlaut-Variante des Teils
+            p_ascii = part
+            for k, v in umlaut_map.items():
+                p_ascii = p_ascii.replace(k, v)
+            varianten.add(p_ascii)
+
+    # Komma-Format: "NACHNAME,VORNAME" oder "Nachname, Vorname"
+    if len(parts) >= 2:
+        varianten.add(f"{parts[-1]},{parts[0]}")
+        varianten.add(f"{parts[-1]}, {parts[0]}")
+        varianten.add(f"{parts[-1].upper()},{parts[0].upper()}")
+        varianten.add(f"{parts[-1].upper()}, {parts[0].upper()}")
+
+    # Alles Großbuchstaben
+    varianten.add(name.upper())
+    varianten.add(name_ascii.upper())
+
+    return [v for v in varianten if len(v) > 2]
+
+
 def anonymisieren(text: str, ma_namen: list, ma_mails: list) -> str:
     """
     Schwärzt personenbezogene Daten:
-    - Mitarbeiternamen → Max Mustermann
+    - Mitarbeiternamen (alle Varianten) → Max Mustermann
     - E-Mail-Adressen → max.mustermann@beispiel.de
-    - Herrhammer (alle Varianten) → Musterfirma GmbH
-    - Telefonnummern die mit +49 beginnen oder 0xxx Muster → 000/000000
+    - Herrhammer GmbH (alle Varianten) → Musterfirma GmbH
+    - Telefonnummern → 000/000000
+    - Straße + Ort der Firma → geschwärzt
     """
     result = text
 
-    # 1. Mitarbeiternamen (Vor- und Nachname, case-insensitive)
+    # 1. Herrhammer – zuerst wegen GMBH SPEZIALMASCHI etc.
+    # Ganzen Firmennamen-Block ersetzen (mit GmbH, AG, etc. und allem danach bis Zeilenende)
+    result = re.sub(
+        r'HERRHAMMER\s+GMBH\s+[A-Z0-9\s]{0,30}',
+        'Musterfirma GmbH ',
+        result, flags=re.IGNORECASE)
+    result = re.sub(
+        r'\b[Hh]err\s*[Hh]ammer\b',
+        'Musterfirma',
+        result)
+    result = re.sub(
+        r'\bHERRHAMMER\b',
+        'Musterfirma',
+        result)
+    # Sicherstellen dass "Musterfirma" immer "Musterfirma GmbH" wird
+    result = re.sub(r'Musterfirma(?!\s+GmbH)', 'Musterfirma GmbH', result)
+
+    # 2. Mitarbeiternamen – alle Varianten
     for name in ma_namen:
-        if not name or len(name) < 3: continue
-        # Ganzen Namen
-        result = _re.sub(_re.escape(name), "Max Mustermann", result, flags=_re.IGNORECASE)
-        # Auch Teile (Nachname allein)
+        if not name or len(name) < 2:
+            continue
+        for variante in name_varianten(name):
+            if len(variante) < 2:
+                continue
+            # Exakten Match ersetzen (case-insensitive)
+            try:
+                result = re.sub(
+                    re.escape(variante),
+                    'Max Mustermann',
+                    result,
+                    flags=re.IGNORECASE)
+            except re.error:
+                pass
+        # Zusätzlich: Nachname allein (letztes Wort)
         parts = name.split()
-        for part in parts:
-            if len(part) > 3:
-                result = _re.sub(r"\b" + _re.escape(part) + r"\b",
-                                 "Mustermann", result, flags=_re.IGNORECASE)
+        if parts:
+            nachname = parts[-1]
+            if len(nachname) > 2:
+                # Auch Umlaut-Varianten des Nachnamens
+                for variante in name_varianten(nachname):
+                    try:
+                        result = re.sub(
+                            r'\b' + re.escape(variante) + r'\b',
+                            'Mustermann',
+                            result,
+                            flags=re.IGNORECASE)
+                    except re.error:
+                        pass
 
-    # 2. E-Mail-Adressen
-    result = _re.sub(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
-                     "max.mustermann@beispiel.de", result)
+    # 3. Firmenadresse schwärzen (Rudolf-Diesel-Strasse etc.)
+    # Straßen mit PLZ und Ort
+    result = re.sub(
+        r'\b\d{5}\s+[A-ZÄÖÜ][A-ZÄÖÜa-zäöü\-]+\b',
+        '00000 Musterstadt',
+        result)
+    result = re.sub(
+        r'\b[A-ZÄÖÜ][A-ZÄÖÜa-zäöü\-]+(?:STRASSE|STRASZE|STR\.|STRABE|GASSE|WEG|ALLEE|PLATZ)\s*\d+',
+        'Musterstrasse 1',
+        result, flags=re.IGNORECASE)
 
-    # 3. Herrhammer und Varianten
-    herrhammer_pattern = r"\b[Hh]err\s*[Hh]ammer\b|\bHERRHAMMER\b"
-    result = _re.sub(herrhammer_pattern, "Musterfirma", result)
-    result = _re.sub(r"Musterfirma\s+GmbH", "Musterfirma GmbH", result)
-    result = _re.sub(r"Musterfirma(?!\s+GmbH)", "Musterfirma GmbH", result)
+    # 4. E-Mail-Adressen
+    result = re.sub(
+        r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
+        'max.mustermann@beispiel.de',
+        result)
 
-    # 4. Telefonnummern (deutsche Muster)
-    result = _re.sub(r"\+49[\s\-./]?[\d\s\-./]{7,15}", "000/000000", result)
-    result = _re.sub(r"\b0\d{3,5}[\s\-./]?\d{4,8}\b", "000/000000", result)
+    # 5. Telefonnummern
+    result = re.sub(r'\+49[\s\-./]?[\d\s\-./]{7,15}', '000/000000', result)
+    result = re.sub(r'\b0\d{3,5}[\s\-./]?\d{4,8}\b', '000/000000', result)
 
     return result
 
