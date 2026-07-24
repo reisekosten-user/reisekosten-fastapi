@@ -1,5 +1,5 @@
 """
-# v2.0-n – Debug Anonymisierung
+# v2.0-o – Doppelte anonymisieren Funktion entfernt
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -515,7 +515,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-n"
+APP_VERSION = "2.0-o"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -735,89 +735,6 @@ def anonymisieren(text: str, ma_namen: list, ma_mails: list) -> str:
 
     return [v for v in varianten if len(v) > 2]
 
-
-def anonymisieren(text: str, ma_namen: list, ma_mails: list) -> str:
-    """
-    Schwärzt personenbezogene Daten:
-    - Mitarbeiternamen (alle Varianten) → Max Mustermann
-    - E-Mail-Adressen → max.mustermann@beispiel.de
-    - Herrhammer GmbH (alle Varianten) → Musterfirma GmbH
-    - Telefonnummern → 000/000000
-    - Straße + Ort der Firma → geschwärzt
-    """
-    result = text
-
-    # 1. Herrhammer – zuerst wegen GMBH SPEZIALMASCHI etc.
-    # Ganzen Firmennamen-Block ersetzen (mit GmbH, AG, etc. und allem danach bis Zeilenende)
-    result = re.sub(
-        r'HERRHAMMER\s+GMBH\s+[A-Z0-9\s]{0,30}',
-        'Musterfirma GmbH ',
-        result, flags=re.IGNORECASE)
-    result = re.sub(
-        r'\b[Hh]err\s*[Hh]ammer\b',
-        'Musterfirma',
-        result)
-    result = re.sub(
-        r'\bHERRHAMMER\b',
-        'Musterfirma',
-        result)
-    # Sicherstellen dass "Musterfirma" immer "Musterfirma GmbH" wird
-    result = re.sub(r'Musterfirma(?!\s+GmbH)', 'Musterfirma GmbH', result)
-
-    # 2. Mitarbeiternamen – alle Varianten
-    for name in ma_namen:
-        if not name or len(name) < 2:
-            continue
-        for variante in name_varianten(name):
-            if len(variante) < 2:
-                continue
-            # Exakten Match ersetzen (case-insensitive)
-            try:
-                result = re.sub(
-                    re.escape(variante),
-                    'Max Mustermann',
-                    result,
-                    flags=re.IGNORECASE)
-            except re.error:
-                pass
-        # Zusätzlich: Nachname allein (letztes Wort)
-        parts = name.split()
-        if parts:
-            nachname = parts[-1]
-            if len(nachname) > 2:
-                # Auch Umlaut-Varianten des Nachnamens
-                for variante in name_varianten(nachname):
-                    try:
-                        result = re.sub(
-                            r'\b' + re.escape(variante) + r'\b',
-                            'Mustermann',
-                            result,
-                            flags=re.IGNORECASE)
-                    except re.error:
-                        pass
-
-    # 3. Firmenadresse schwärzen (Rudolf-Diesel-Strasse etc.)
-    # Straßen mit PLZ und Ort
-    result = re.sub(
-        r'\b\d{5}\s+[A-ZÄÖÜ][A-ZÄÖÜa-zäöü\-]+\b',
-        '00000 Musterstadt',
-        result)
-    result = re.sub(
-        r'\b[A-ZÄÖÜ][A-ZÄÖÜa-zäöü\-]+(?:STRASSE|STRASZE|STR\.|STRABE|GASSE|WEG|ALLEE|PLATZ)\s*\d+',
-        'Musterstrasse 1',
-        result, flags=re.IGNORECASE)
-
-    # 4. E-Mail-Adressen
-    result = re.sub(
-        r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
-        'max.mustermann@beispiel.de',
-        result)
-
-    # 5. Telefonnummern
-    result = re.sub(r'\+49[\s\-./]?[\d\s\-./]{7,15}', '000/000000', result)
-    result = re.sub(r'\b0\d{3,5}[\s\-./]?\d{4,8}\b', '000/000000', result)
-
-    return result
 
 async def gpt_analyse(pdf_bytes: bytes, dateiname: str = "") -> dict:
     """
