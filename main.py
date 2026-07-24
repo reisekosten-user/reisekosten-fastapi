@@ -1,5 +1,5 @@
 """
-# v2.0-w – GPT: PDF als Text, Bilder als image_url
+# v2.0-x – GPT bekommt Rohtext statt PDF (einfach + zuverlaessig)
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -538,7 +538,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-w"
+APP_VERSION = "2.0-x"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -759,36 +759,39 @@ def anonymisieren(text: str, ma_namen: list, ma_mails: list) -> str:
     return [v for v in varianten if len(v) > 2]
 
 
-async def gpt_analyse(pdf_bytes: bytes, dateiname: str = "",
-                      original_bytes: bytes = None,
-                      original_content_type: str = "application/pdf") -> dict:
+async def gpt_analyse(rohtext: str, dateiname: str = "") -> dict:
     """
-    Sendet Beleg an GPT-4o.
-    - Bilder (JPG/PNG): direkt als image_url
-    - PDFs: Text extrahieren + als Text senden
+    Sendet den extrahierten Text an GPT-4o zur Analyse.
+    Kein PDF, kein Base64 – einfach Text. Schnell und zuverlässig.
     """
     if not OPENAI_KEY:
         return {"fehler": "OPENAI_API_KEY nicht gesetzt",
                 "pflichtfelder_ok": False,
                 "fehlende_pflichtfelder": ["OPENAI_API_KEY fehlt"]}
 
-    prompt = """Analysiere diesen Reisebeleg sorgfältig und fülle ALLE erkennbaren Felder aus.
+    if not rohtext or len(rohtext.strip()) < 10:
+        return {"fehler": "Kein Text vorhanden",
+                "pflichtfelder_ok": False,
+                "fehlende_pflichtfelder": ["Kein Text"]}
+
+    prompt = """Analysiere diesen Reisebeleg und fülle ALLE erkennbaren Felder aus.
 Antworte NUR mit einem validen JSON-Objekt – kein Text davor oder danach.
 Nicht erkennbare Felder = null.
 
 Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
 Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfeld null ist.
 
+JSON-Format:
 {
   "belegdatum": "DD.MM.YYYY",
   "belegart": "Rechnung|Buchungsbestaetigung|Quittung|Sonstiges",
   "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Sonstiges",
-  "transportart_freitext": "nur ausfüllen wenn Sonstiges",
+  "transportart_freitext": "nur wenn Sonstiges",
   "anbieter": "Name des Anbieters",
   "rechnungsnummer": "Rechnungs- oder Belegnummer",
-  "buchungscode": "PNR oder Bestätigungsnummer",
-  "reisender": "Vollständiger Name des Reisenden",
-  "land_beleg": "ISO-Ländercode z.B. DE, FR, US",
+  "buchungscode": "PNR oder Bestaetigungsnummer",
+  "reisender": "Vollstaendiger Name des Reisenden",
+  "land_beleg": "ISO-Laendercode z.B. DE, FR, US",
   "betrag_brutto": 107.20,
   "betrag_netto": 89.33,
   "betrag_mwst": 17.87,
@@ -797,7 +800,7 @@ Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfe
   "event_datum_bis": "DD.MM.YYYY",
   "event_ort_von": "Stadtname",
   "event_ort_bis": "Stadtname",
-  "hotel_name": "nur bei Hotel",
+  "hotel_name": "Hotelname",
   "hotel_checkin_datum": "DD.MM.YYYY",
   "hotel_checkin_zeit": "HH:MM",
   "hotel_checkout_datum": "DD.MM.YYYY",
@@ -830,44 +833,20 @@ Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfe
   ],
   "pflichtfelder_ok": true,
   "fehlende_pflichtfelder": []
-}"""
+}
+
+--- BELEGTEXT ---
+""" + rohtext[:8000]
 
     try:
-        # Bestimme ob wir Bild oder Text senden
-        is_image = (original_content_type or "").startswith("image/")
-
-        if is_image and original_bytes:
-            # Originalbild direkt senden (JPG/PNG)
-            b64 = base64.b64encode(original_bytes).decode()
-            ct = original_content_type
-            content = [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {
-                    "url": f"data:{ct};base64,{b64}",
-                    "detail": "high"}}
-            ]
-        else:
-            # PDF: Text extrahieren und als Text senden
-            rohtext = pdf_text_lesen(pdf_bytes)
-            if not rohtext or len(rohtext.strip()) < 20:
-                # PDF hat keinen extrahierbaren Text (gescannt) → als Bild senden
-                # PDF erste Seite als Bild rendern wäre ideal, aber ohne poppler
-                # Fallback: leeren Text melden
-                return {"fehler": "PDF hat keinen lesbaren Text – bitte als JPG/PNG hochladen",
-                        "pflichtfelder_ok": False,
-                        "fehlende_pflichtfelder": ["Kein Text im PDF"]}
-            content = [
-                {"type": "text",
-                 "text": prompt + f"\n\n--- BELEGTEXT ---\n{rohtext[:8000]}"}
-            ]
-
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 OPENAI_URL,
                 headers={"Authorization": f"Bearer {OPENAI_KEY}",
                          "Content-Type": "application/json"},
                 json={"model": OPENAI_MODEL,
-                      "messages": [{"role": "user", "content": content}],
+                      "messages": [{"role": "user",
+                                    "content": prompt}],
                       "max_tokens": 2000,
                       "temperature": 0.0})
 
@@ -935,7 +914,7 @@ async def beleg_verarbeiten(
     anon_pdf = text_zu_pdf(anon_text, f"Anonymisiert: {dateiname}")
 
     # 4. GPT-4o Analyse
-    ki_result = await gpt_analyse(original_pdf, dateiname, datei_bytes, content_type)
+    ki_result = await gpt_analyse(rohtext, dateiname)
     ki_json_str = json.dumps(ki_result, ensure_ascii=False)
 
     # Zusammenfassung aus KI-Ergebnis
