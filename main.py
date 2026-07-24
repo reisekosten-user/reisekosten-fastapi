@@ -1,5 +1,5 @@
 """
-# v2.0-i – Import fixes (_io, _re2, _base64)
+# v2.0-j – belege in DROP-Liste ergänzt
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -515,7 +515,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-i"
+APP_VERSION = "2.0-j"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -1273,7 +1273,7 @@ def init_reset(confirm: str = ""):
     try:
         db = get_db(); cur = db.cursor()
         # Tabellen in richtiger Reihenfolge löschen (Foreign Keys beachten)
-        for tbl in ["reise_laender", "reise_mitarbeiter", "reisen", "mitarbeiter"]:
+        for tbl in ["belege", "reise_laender", "reise_mitarbeiter", "reisen", "mitarbeiter"]:
             try:
                 cur.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE")
             except: pass
