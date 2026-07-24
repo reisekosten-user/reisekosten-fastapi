@@ -1,5 +1,5 @@
 """
-# v2.1-b – Segment-Feldnamen vereinheitlicht (Prompt = Anzeige)
+# v2.1-d – Mails nach Import löschen
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -539,7 +539,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-b"
+APP_VERSION = "2.1-d"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -560,6 +560,7 @@ def shell(title: str, content: str, page: str = "") -> str:
   {nav("mitarbeiter", "Mitarbeiter", "/mitarbeiter")}
   {nav("reisen", "Reisen", "/reisen")}
   {nav("belege", "Belege", "/belege")}
+  {nav("mails", "📬 Mails", "/mails-abrufen")}
   {nav("vma", "VMA-Sätze", "/vma")}
   <div class="nav-right">v{APP_VERSION}</div>
 </nav>
@@ -1516,7 +1517,10 @@ def belege_liste():
         content = f"""
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
           <h1 class="page-title" style="margin:0">Belege ({len(rows)})</h1>
-          <a href="/beleg/upload" class="btn btn-primary">+ Beleg hochladen</a>
+          <div style="display:flex;gap:8px">
+            <a href="/mails-abrufen" class="btn btn-success">📬 Mails abrufen</a>
+            <a href="/beleg/upload" class="btn btn-primary">+ Beleg hochladen</a>
+          </div>
         </div>
         <div class="card">
           <div class="table-wrap"><table>
@@ -1540,6 +1544,217 @@ def debug_anon():
     return {"namen": namen, "mails": mails,
             "anzahl": len(namen),
             "hinweis": "Wenn leer: Mitarbeiter neu anlegen unter /mitarbeiter/neu"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIL-IMPORT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import imaplib, email as _email_mod
+from email.header import decode_header as _decode_header
+
+def decode_mime_header(val: str) -> str:
+    """Dekodiert MIME-kodierten Mail-Header."""
+    if not val: return ""
+    parts = _decode_header(val)
+    result = []
+    for part, enc in parts:
+        if isinstance(part, bytes):
+            result.append(part.decode(enc or "utf-8", errors="ignore"))
+        else:
+            result.append(str(part))
+    return "".join(result)
+
+def mail_body_text(msg) -> tuple:
+    """
+    Extrahiert Text-Body und Anhänge aus einer Mail.
+    Gibt (body_text, [(filename, bytes, content_type)]) zurück.
+    """
+    body = ""
+    html_body = ""
+    attachments = []
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct = part.get_content_type()
+            cd = str(part.get("Content-Disposition") or "")
+            fn = part.get_filename()
+            payload = part.get_payload(decode=True)
+            if not payload: continue
+
+            if fn:
+                fn = decode_mime_header(fn)
+                # Inline-Bilder und Calendar-Dateien überspringen
+                if fn.lower().endswith((".ics",".vcf")): continue
+                attachments.append((fn, payload, ct))
+            elif ct == "text/plain" and not body:
+                body = payload.decode(errors="ignore")
+            elif ct == "text/html" and not html_body:
+                html_body = payload.decode(errors="ignore")
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            ct = msg.get_content_type()
+            if ct == "text/html":
+                html_body = payload.decode(errors="ignore")
+            else:
+                body = payload.decode(errors="ignore")
+
+    # HTML zu Text wenn kein Plain-Text vorhanden
+    if not body and html_body:
+        import html as _html
+        t = _html.unescape(html_body)
+        t = re.sub(r"<style[^>]*>.*?</style>", " ", t, flags=re.DOTALL|re.IGNORECASE)
+        t = re.sub(r"<br\s*/?>", "\n", t, flags=re.IGNORECASE)
+        t = re.sub(r"<[^>]+>", " ", t)
+        t = re.sub(r"[ \t]+", " ", t)
+        t = re.sub(r"\n{3,}", "\n\n", t)
+        body = t.strip()
+
+    return body[:50000], attachments
+
+async def fetch_mails() -> dict:
+    """
+    Holt alle Mails aus dem IMAP-Postfach und verarbeitet sie als Belege.
+    Mails werden nach Verarbeitung als gelesen markiert (nicht gelöscht).
+    """
+    if not all([IMAP_HOST, IMAP_USER, IMAP_PASS]):
+        return {"fehler": "IMAP nicht konfiguriert (IMAP_HOST/USER/PASS fehlen)"}
+
+    importiert = 0
+    belege_erstellt = 0
+    fehler_liste = []
+    duplikate = 0
+
+    try:
+        mail = imaplib.IMAP4_SSL(IMAP_HOST)
+        mail.login(IMAP_USER, IMAP_PASS)
+        mail.select("INBOX")
+        # Nur ungelesene Mails
+        _, data = mail.search(None, "UNSEEN")
+        ids = data[0].split() if data and data[0] else []
+    except Exception as e:
+        return {"fehler": f"IMAP-Verbindung fehlgeschlagen: {e}"}
+
+    for mid in ids:
+        try:
+            _, msg_data = mail.fetch(mid, "(RFC822)")
+            if not msg_data or not msg_data[0]: continue
+            msg = _email_mod.message_from_bytes(msg_data[0][1])
+
+            betreff = decode_mime_header(msg.get("Subject", ""))
+            absender = decode_mime_header(msg.get("From", ""))
+            msg_id = (msg.get("Message-ID") or "").strip()
+
+            # Duplikat-Check via Message-ID
+            if msg_id:
+                db = get_db(); cur = db.cursor()
+                P = ph()
+                cur.execute(f"SELECT id FROM belege WHERE buchungscode={P}",
+                            (f"MAIL:{msg_id[:80]}",))
+                if cur.fetchone():
+                    cur.close(); db.close()
+                    duplikate += 1
+                    mail.store(mid, "+FLAGS", "\\Seen")
+                    continue
+                cur.close(); db.close()
+
+            body, attachments = mail_body_text(msg)
+            full_text = f"Von: {absender}\nBetreff: {betreff}\n\n{body}"
+
+            # Reisecode aus Betreff (z.B. 26-001)
+            rc_match = re.search(r"\b(\d{2}-\d{3})\b", betreff + " " + body)
+            reise_code = rc_match.group(1) if rc_match else None
+
+            # Reise-Code prüfen ob sie existiert
+            if reise_code:
+                db = get_db(); cur = db.cursor()
+                P = ph()
+                cur.execute(f"SELECT code FROM reisen WHERE code={P}", (reise_code,))
+                if not cur.fetchone():
+                    reise_code = None
+                cur.close(); db.close()
+
+            # Mail-Body als Beleg
+            if body and len(body.strip()) > 50:
+                result = await beleg_verarbeiten(
+                    full_text.encode("utf-8"),
+                    f"Mail: {betreff[:60]}",
+                    reise_code,
+                    "text/plain")
+                belege_erstellt += 1
+                # Message-ID als buchungscode-Referenz speichern
+                if msg_id and result.get("beleg_id"):
+                    db = get_db(); cur = db.cursor()
+                    P = ph()
+                    cur.execute(f"UPDATE belege SET buchungscode={P} WHERE id={P}",
+                                (f"MAIL:{msg_id[:80]}", result["beleg_id"]))
+                    db.commit(); cur.close(); db.close()
+
+            # Anhänge als separate Belege
+            for fn, payload, ct in attachments:
+                fn_lower = fn.lower()
+                if not fn_lower.endswith((".pdf",".jpg",".jpeg",".png",".heic",".webp")):
+                    continue
+                result = await beleg_verarbeiten(payload, fn, reise_code, ct)
+                belege_erstellt += 1
+
+            # Mail löschen (nach erfolgreicher Verarbeitung)
+            mail.store(mid, "+FLAGS", "\\Deleted")
+            importiert += 1
+
+        except Exception as e:
+            import traceback
+            fehler_liste.append(f"{e}")
+            print(f"[Mail-Import Fehler] {e}\n{traceback.format_exc()[:200]}")
+
+    try:
+        mail.expunge()  # Endgültig löschen
+        mail.logout()
+    except: pass
+
+    return {
+        "importiert": importiert,
+        "belege_erstellt": belege_erstellt,
+        "duplikate": duplikate,
+        "fehler": len(fehler_liste),
+        "fehler_details": fehler_liste
+    }
+
+
+@app.get("/mails-abrufen", response_class=HTMLResponse)
+async def mails_abrufen():
+    """Holt ungelesene Mails und verarbeitet sie als Belege."""
+    result = await fetch_mails()
+
+    if "fehler" in result and "importiert" not in result:
+        body = f'''
+        <div class="alert alert-err">
+          <b>Fehler:</b> {result["fehler"]}
+        </div>
+        <a href="/belege" class="btn btn-secondary">← Zurück</a>'''
+    else:
+        fehler_html = ""
+        if result.get("fehler_details"):
+            items = "".join(f"<li>{d}</li>" for d in result["fehler_details"])
+            fehler_html = f'<div class="alert alert-warn" style="margin-top:12px"><b>Fehlerdetails:</b><ul>{items}</ul></div>'
+
+        body = f'''
+        <h1 class="page-title">📬 Mails abgerufen</h1>
+        <div class="alert alert-ok" style="margin-bottom:16px">
+          ✓ {result.get("importiert",0)} Mails verarbeitet &nbsp;·&nbsp;
+          {result.get("belege_erstellt",0)} Belege erstellt &nbsp;·&nbsp;
+          {result.get("duplikate",0)} Duplikate &nbsp;·&nbsp;
+          {result.get("fehler",0)} Fehler
+        </div>
+        {fehler_html}
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <a href="/belege" class="btn btn-primary">📋 Belege ansehen</a>
+          <a href="/unzugeordnet" class="btn btn-secondary">📬 Posteingang</a>
+          <a href="/" class="btn btn-secondary">← Dashboard</a>
+        </div>'''
+
+    return HTMLResponse(shell("Mails abrufen", body))
 
 
 @app.get("/test-openai")
