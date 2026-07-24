@@ -1,5 +1,5 @@
 """
-# v2.0-u – lade_ma_daten wiederhergestellt
+# v2.0-v – s3 Variablennamen fix
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -538,7 +538,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-u"
+APP_VERSION = "2.0-v"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -996,7 +996,7 @@ async def beleg_verarbeiten(
                 {P},{P},{P},{P},{P},{P},{P})"""
 
     vals = (
-        reise_code, dateiname, s3_orig, s3_anon, s3_anal,
+        reise_code, dateiname, s3_original, s3_anon, s3_analyse,
         rohtext[:50000] or None, anon_text[:50000] or None,
         ki_json_str, pflicht_ok, fehlend_str,
         pd("belegdatum"), ki_result.get("belegart"),
