@@ -1,5 +1,5 @@
 """
-# v2.0-p – Fehlerliste unzugeordnete Belege + Dashboard Badge
+# v2.0-q – unzugeordnet im Dashboard fix
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -515,7 +515,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-p"
+APP_VERSION = "2.0-q"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -1506,6 +1506,12 @@ def dashboard():
                            ORDER BY r.abreise
                            LIMIT 10""", (str(today),))
         rows = cur.fetchall()
+        # Unzugeordnete Belege zaehlen
+        try:
+            cur.execute("SELECT COUNT(*) FROM belege WHERE reise_code IS NULL")
+            unzugeordnet = cur.fetchone()[0]
+        except:
+            unzugeordnet = 0
         cur.close(); db.close()
 
         def status_badge(ab, zu):
