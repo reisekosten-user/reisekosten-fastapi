@@ -1,5 +1,5 @@
 """
-# v2.0-r – Route /unzugeordnet fix (Konflikt mit /beleg/{bid})
+# v2.0-s – Neuer GPT-Prompt + alle Felder + Tanken + Fehlerliste
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -273,26 +273,49 @@ def get_schema() -> list[str]:
                     REFERENCES reisen(code) ON DELETE CASCADE
             )""",
             """CREATE TABLE IF NOT EXISTS belege (
-                id              SERIAL PRIMARY KEY,
-                reise_code      TEXT REFERENCES reisen(code) ON DELETE SET NULL,
-                typ             TEXT,
-                dateiname       TEXT,
-                s3_original     TEXT,
-                s3_anon         TEXT,
-                s3_analyse      TEXT,
-                rohtext         TEXT,
-                anon_text       TEXT,
-                ki_json         TEXT,
-                ki_zusammenfassung TEXT,
-                betrag          NUMERIC(10,2),
-                waehrung        TEXT DEFAULT 'EUR',
-                belegdatum      DATE,
-                vendor          TEXT,
-                reisender       TEXT,
-                buchungscode    TEXT,
-                status          TEXT DEFAULT 'neu',
-                fehler          TEXT,
-                erstellt        TIMESTAMP DEFAULT NOW()
+                id                    SERIAL PRIMARY KEY,
+                reise_code            TEXT REFERENCES reisen(code) ON DELETE SET NULL,
+                dateiname             TEXT,
+                s3_original           TEXT,
+                s3_anon               TEXT,
+                s3_analyse            TEXT,
+                rohtext               TEXT,
+                anon_text             TEXT,
+                ki_json               TEXT,
+                pflichtfelder_ok      BOOLEAN DEFAULT FALSE,
+                fehlende_felder       TEXT,
+                belegdatum            DATE,
+                belegart              TEXT,
+                transportart          TEXT,
+                transportart_freitext TEXT,
+                anbieter              TEXT,
+                rechnungsnummer       TEXT,
+                buchungscode          TEXT,
+                reisender             TEXT,
+                land_beleg            TEXT,
+                betrag_brutto         NUMERIC(10,2),
+                betrag_netto          NUMERIC(10,2),
+                betrag_mwst           NUMERIC(10,2),
+                waehrung              TEXT DEFAULT 'EUR',
+                event_datum_von       DATE,
+                event_datum_bis       DATE,
+                event_ort_von         TEXT,
+                event_ort_bis         TEXT,
+                hotel_name            TEXT,
+                hotel_checkin_datum   DATE,
+                hotel_checkin_zeit    TEXT,
+                hotel_checkout_datum  DATE,
+                hotel_checkout_zeit   TEXT,
+                hotel_naechte         INTEGER,
+                tanken_kraftstoff     TEXT,
+                tanken_menge          NUMERIC(8,3),
+                tanken_einheit        TEXT,
+                tanken_preis_einheit  NUMERIC(8,3),
+                tanken_tankstelle     TEXT,
+                tanken_kennzeichen    TEXT,
+                status                TEXT DEFAULT 'neu',
+                fehler                TEXT,
+                erstellt              TIMESTAMP DEFAULT NOW()
             )""",
         ]
     else:
@@ -515,7 +538,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.0-r"
+APP_VERSION = "2.0-s"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -738,47 +761,80 @@ def anonymisieren(text: str, ma_namen: list, ma_mails: list) -> str:
 
 async def gpt_analyse(pdf_bytes: bytes, dateiname: str = "") -> dict:
     """
-    Sendet PDF/Bild an GPT-4o zur Analyse.
-    Gibt strukturiertes JSON zurück.
+    Sendet Beleg an GPT-4o zur strukturierten Analyse.
+    Alle Pflichtfelder werden geprüft – fehlende landen in fehlende_pflichtfelder.
     """
     if not OPENAI_KEY:
-        return {"fehler": "OPENAI_API_KEY nicht gesetzt"}
+        return {"fehler": "OPENAI_API_KEY nicht gesetzt", "pflichtfelder_ok": False,
+                "fehlende_pflichtfelder": ["OPENAI_API_KEY fehlt"]}
 
-    # PDF zu Base64
     b64 = base64.b64encode(pdf_bytes).decode()
 
-    prompt = (
-        "Analysiere dieses Dokument (Reisebeleg) und antworte NUR mit einem JSON-Objekt.\n"
-        "Kein Text davor oder danach.\n\n"
-        "JSON-Format (fehlende Felder = null):\n"
-        "{\"belegdatum\": \"DD.MM.YYYY\"," 
-        "\"dokumenttyp\": \"Flug|Hotel|Bahn|Taxi|Mietwagen|Bewirtung|Tanken|Sonstiges\"," 
-        "\"buchungscode\": \"PNR oder Bestätigungsnummer\"," 
-        "\"reisender\": \"Name\"," 
-        "\"ticketnummer\": \"Ticketnummer\"," 
-        "\"vendor\": \"Anbieter\"," 
-        "\"betrag\": 123.45," 
-        "\"waehrung\": \"EUR\"," 
-        "\"hotel_checkin\": \"DD.MM.YYYY\"," 
-        "\"hotel_checkout\": \"DD.MM.YYYY\"," 
-        "\"hotel_naechte\": 2," 
-        "\"segmente\": [{"
-        "\"nr\": 1,"
-        "\"abreise_datum\": \"DD.MM.YYYY\"," 
-        "\"abreise_zeit\": \"HH:MM\"," 
-        "\"abreise_zeitzone\": \"MEZ\"," 
-        "\"ankunft_datum\": \"DD.MM.YYYY\"," 
-        "\"ankunft_zeit\": \"HH:MM\"," 
-        "\"ankunft_zeitzone\": \"MEZ\"," 
-        "\"von_ort\": \"Stadtname\"," 
-        "\"von_iata\": \"FRA\"," 
-        "\"nach_ort\": \"Stadtname\"," 
-        "\"nach_iata\": \"LYS\"," 
-        "\"transport_name\": \"Lufthansa\"," 
-        "\"transport_nummer\": \"LH3463\"," 
-        "\"klasse\": \"Economy\"," 
-        "\"hinweis\": \"operated by X\"}]}"
-    )
+    prompt = """Analysiere diesen Reisebeleg sorgfältig und fülle ALLE erkennbaren Felder aus.
+Antworte NUR mit einem validen JSON-Objekt – kein Text davor oder danach.
+Nicht erkennbare Felder = null.
+
+Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
+Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfeld null ist.
+
+{
+  "belegdatum": "DD.MM.YYYY",
+  "belegart": "Rechnung|Buchungsbestaetigung|Quittung|Sonstiges",
+  "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Sonstiges",
+  "transportart_freitext": "nur ausfüllen wenn Sonstiges",
+  "anbieter": "Name des Anbieters",
+  "rechnungsnummer": "Rechnungs- oder Belegnummer",
+  "buchungscode": "PNR oder Bestätigungsnummer",
+  "reisender": "Vollständiger Name des Reisenden",
+  "land_beleg": "ISO-Ländercode z.B. DE, FR, US",
+
+  "betrag_brutto": 107.20,
+  "betrag_netto": 89.33,
+  "betrag_mwst": 17.87,
+  "waehrung": "EUR",
+
+  "event_datum_von": "DD.MM.YYYY",
+  "event_datum_bis": "DD.MM.YYYY",
+  "event_ort_von": "Stadtname",
+  "event_ort_bis": "Stadtname",
+
+  "hotel_name": "nur bei Hotel",
+  "hotel_checkin_datum": "DD.MM.YYYY",
+  "hotel_checkin_zeit": "HH:MM",
+  "hotel_checkout_datum": "DD.MM.YYYY",
+  "hotel_checkout_zeit": "HH:MM",
+  "hotel_naechte": 2,
+
+  "tanken_kraftstoff": "Benzin|Diesel|AdBlue|Elektro|Super|SuperPlus",
+  "tanken_menge": 45.3,
+  "tanken_einheit": "Liter|kWh",
+  "tanken_preis_pro_einheit": 1.789,
+  "tanken_tankstelle": "Name und Ort der Tankstelle",
+  "tanken_kennzeichen": "Fahrzeugkennzeichen",
+
+  "segmente": [
+    {
+      "nr": 1,
+      "datum_abflug": "DD.MM.YYYY",
+      "zeit_abflug": "HH:MM",
+      "zeitzone_abflug": "MEZ|UTC|EST",
+      "datum_ankunft": "DD.MM.YYYY",
+      "zeit_ankunft": "HH:MM",
+      "zeitzone_ankunft": "MEZ|UTC|EST",
+      "ort_von": "Stadtname",
+      "iata_von": "FRA",
+      "ort_nach": "Stadtname",
+      "iata_nach": "LYS",
+      "anbieter_segment": "Lufthansa|Swiss|DB",
+      "nummer": "LH3463|ICE123",
+      "klasse": "Economy|Business|1.Klasse",
+      "hinweis": "z.B. operated by Edelweiss"
+    }
+  ],
+
+  "pflichtfelder_ok": true,
+  "fehlende_pflichtfelder": []
+}"""
 
     try:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -787,44 +843,42 @@ async def gpt_analyse(pdf_bytes: bytes, dateiname: str = "") -> dict:
                 headers={"Authorization": f"Bearer {OPENAI_KEY}",
                          "Content-Type": "application/json"},
                 json={"model": OPENAI_MODEL,
-                      "messages": [{
-                          "role": "user",
-                          "content": [
-                              {"type": "text", "text": prompt},
-                              {"type": "image_url",
-                               "image_url": {
-                                   "url": f"data:application/pdf;base64,{b64}",
-                                   "detail": "high"
-                               }}
-                          ]
-                      }],
-                      "max_tokens": 2000})
+                      "messages": [{"role": "user", "content": [
+                          {"type": "text", "text": prompt},
+                          {"type": "image_url", "image_url": {
+                              "url": f"data:application/pdf;base64,{b64}",
+                              "detail": "high"}}
+                      ]}],
+                      "max_tokens": 2000,
+                      "temperature": 0.0})
 
             if resp.status_code != 200:
-                return {"fehler": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+                return {"fehler": f"HTTP {resp.status_code}: {resp.text[:200]}",
+                        "pflichtfelder_ok": False,
+                        "fehlende_pflichtfelder": ["API-Fehler"]}
 
             raw = resp.json()["choices"][0]["message"]["content"].strip()
-            # JSON aus Antwort extrahieren
-            m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+            m = re.search(r'\{.*\}', raw, re.DOTALL)
             if m:
-                return json.loads(m.group(0))
-            return {"fehler": "Kein JSON in Antwort", "raw": raw[:200]}
+                result = json.loads(m.group(0))
+                # Sicherheitsnetz: pflichtfelder_ok prüfen
+                pflicht = ["belegdatum","transportart","anbieter","betrag_brutto",
+                           "waehrung","event_datum_von"]
+                fehlend = [f for f in pflicht if not result.get(f)]
+                if fehlend:
+                    result["pflichtfelder_ok"] = False
+                    result["fehlende_pflichtfelder"] = fehlend
+                else:
+                    result["pflichtfelder_ok"] = True
+                    result["fehlende_pflichtfelder"] = []
+                return result
+            return {"fehler": "Kein JSON in Antwort", "raw": raw[:300],
+                    "pflichtfelder_ok": False, "fehlende_pflichtfelder": ["Kein JSON"]}
     except Exception as e:
         import traceback
-        return {"fehler": str(e), "trace": traceback.format_exc()[:300]}
+        return {"fehler": str(e), "trace": traceback.format_exc()[:300],
+                "pflichtfelder_ok": False, "fehlende_pflichtfelder": ["Exception"]}
 
-def lade_ma_daten() -> tuple[list, list]:
-    """Lädt Mitarbeiternamen und E-Mails für Anonymisierung."""
-    try:
-        db = get_db(); cur = db.cursor()
-        cur.execute("SELECT klarname FROM mitarbeiter")
-        namen = [r[0] if isinstance(r, tuple) else r["klarname"] for r in cur.fetchall()]
-        cur.close(); db.close()
-        # E-Mails: aus IMAP_USER ableiten + typische Muster
-        mails = []
-        if IMAP_USER: mails.append(IMAP_USER)
-        return namen, mails
-    except: return [], []
 
 async def beleg_verarbeiten(
     datei_bytes: bytes,
@@ -887,49 +941,80 @@ async def beleg_verarbeiten(
     s3_analyse  = s3_upload(f"{prefix}/analyse.pdf", analyse_pdf)
 
     # 6. DB-Eintrag
-    P = ph()
-    belegdatum = None
-    if ki_result.get("belegdatum"):
+    def pd(key):
+        v = ki_result.get(key)
+        if not v: return None
         try:
-            from datetime import datetime
-            belegdatum = datetime.strptime(ki_result["belegdatum"], "%d.%m.%Y").date()
-        except: pass
+            from datetime import datetime as _dtt
+            return _dtt.strptime(str(v).strip(), "%d.%m.%Y").date()
+        except: return None
 
-    betrag_db = None
-    try: betrag_db = float(ki_result.get("betrag") or 0) or None
-    except: pass
+    def pn(key):
+        v = ki_result.get(key)
+        try: return float(v) if v is not None else None
+        except: return None
 
+    pflicht_ok = bool(ki_result.get("pflichtfelder_ok", False))
+    fehlend_str = json.dumps(ki_result.get("fehlende_pflichtfelder", []), ensure_ascii=False)
+    status = "ok" if pflicht_ok else "fehlerhaft"
+    zusammenfassung = (f"{ki_result.get('transportart','?')}: "
+                       f"{ki_result.get('anbieter','?')} – "
+                       f"{ki_result.get('betrag_brutto','?')} "
+                       f"{ki_result.get('waehrung','EUR')}")
+
+    P = ph()
     db = get_db(); cur = db.cursor()
-    cur.execute(f"""INSERT INTO belege
-        (reise_code, typ, dateiname, s3_original, s3_anon, s3_analyse,
-         rohtext, anon_text, ki_json, ki_zusammenfassung,
-         betrag, waehrung, belegdatum, vendor, reisender,
-         buchungscode, status)
-        VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})
-        RETURNING id""" if is_postgres() else f"""INSERT INTO belege
-        (reise_code, typ, dateiname, s3_original, s3_anon, s3_analyse,
-         rohtext, anon_text, ki_json, ki_zusammenfassung,
-         betrag, waehrung, belegdatum, vendor, reisender,
-         buchungscode, status)
-        VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})""",
-        (reise_code, ki_result.get("dokumenttyp","Sonstiges"),
-         dateiname, s3_original, s3_anon, s3_analyse,
-         rohtext[:50000] if rohtext else None,
-         anon_text[:50000] if anon_text else None,
-         ki_json_str, zusammenfassung,
-         betrag_db, ki_result.get("waehrung","EUR"),
-         belegdatum, ki_result.get("vendor"),
-         ki_result.get("reisender"), ki_result.get("buchungscode"),
-         "ok" if "fehler" not in ki_result else "fehler"))
+    sql = f"""INSERT INTO belege
+        (reise_code, dateiname, s3_original, s3_anon, s3_analyse,
+         rohtext, anon_text, ki_json,
+         pflichtfelder_ok, fehlende_felder,
+         belegdatum, belegart, transportart, transportart_freitext,
+         anbieter, rechnungsnummer, buchungscode, reisender, land_beleg,
+         betrag_brutto, betrag_netto, betrag_mwst, waehrung,
+         event_datum_von, event_datum_bis, event_ort_von, event_ort_bis,
+         hotel_name, hotel_checkin_datum, hotel_checkin_zeit,
+         hotel_checkout_datum, hotel_checkout_zeit, hotel_naechte,
+         tanken_kraftstoff, tanken_menge, tanken_einheit,
+         tanken_preis_einheit, tanken_tankstelle, tanken_kennzeichen,
+         status)
+        VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},
+                {P},{P},{P},{P},{P},{P},{P},{P},{P},
+                {P},{P},{P},{P},{P},{P},{P},{P},
+                {P},{P},{P},{P},{P},{P},
+                {P},{P},{P},{P},{P},{P},{P})"""
+
+    vals = (
+        reise_code, dateiname, s3_orig, s3_anon, s3_anal,
+        rohtext[:50000] or None, anon_text[:50000] or None,
+        ki_json_str, pflicht_ok, fehlend_str,
+        pd("belegdatum"), ki_result.get("belegart"),
+        ki_result.get("transportart"), ki_result.get("transportart_freitext"),
+        ki_result.get("anbieter"), ki_result.get("rechnungsnummer"),
+        ki_result.get("buchungscode"), ki_result.get("reisender"),
+        ki_result.get("land_beleg"),
+        pn("betrag_brutto"), pn("betrag_netto"), pn("betrag_mwst"),
+        ki_result.get("waehrung","EUR"),
+        pd("event_datum_von"), pd("event_datum_bis"),
+        ki_result.get("event_ort_von"), ki_result.get("event_ort_bis"),
+        ki_result.get("hotel_name"), pd("hotel_checkin_datum"),
+        ki_result.get("hotel_checkin_zeit"), pd("hotel_checkout_datum"),
+        ki_result.get("hotel_checkout_zeit"),
+        ki_result.get("hotel_naechte"),
+        ki_result.get("tanken_kraftstoff"), pn("tanken_menge"),
+        ki_result.get("tanken_einheit"), pn("tanken_preis_pro_einheit"),
+        ki_result.get("tanken_tankstelle"), ki_result.get("tanken_kennzeichen"),
+        status)
 
     if is_postgres():
+        cur.execute(sql + " RETURNING id", vals)
         beleg_id = cur.fetchone()[0]
     else:
+        cur.execute(sql, vals)
         beleg_id = cur.lastrowid
 
     db.commit(); cur.close(); db.close()
     return {"beleg_id": beleg_id, "zusammenfassung": zusammenfassung,
-            "ki": ki_result, "s3_original": s3_original}
+            "ki": ki_result, "pflichtfelder_ok": pflicht_ok}
 
 
 
