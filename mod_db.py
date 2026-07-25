@@ -284,3 +284,34 @@ def get_migrations() -> list[str]:
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS notiz TEXT",
         "ALTER TABLE vma_tage ALTER COLUMN reise_id DROP NOT NULL",
     ]
+
+def repair_legacy_columns():
+    """
+    Entfernt NOT-NULL-Zwang von alten Spalten in vma_tage, die aus
+    früheren App-Versionen stammen und vom aktuellen Code nicht mehr
+    befüllt werden (z.B. 'reise_id', 'tag'). Ohne dies schlagen neue
+    Einträge mit "null value in column ... violates not-null constraint" fehl.
+    Bei SQLite passiert nichts (dort gibt es das Problem nicht).
+    """
+    if not is_postgres():
+        return
+    aktuelle_spalten = {
+        "id", "reise_code", "datum", "land_code", "land_name",
+        "vma_satz_voll", "vma_satz_halb", "ist_halber_satz",
+        "fruehstueck", "mittagessen", "abendessen",
+        "vma_brutto", "vma_netto", "quelle", "notiz",
+    }
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name='vma_tage' AND is_nullable='NO' AND column_default IS NULL
+    """)
+    alte_spalten = [row[0] for row in cur.fetchall() if row[0] not in aktuelle_spalten]
+    for col in alte_spalten:
+        try:
+            cur.execute(f'ALTER TABLE vma_tage ALTER COLUMN "{col}" DROP NOT NULL')
+            conn.commit()
+        except Exception:
+            conn.rollback()
+    cur.close(); conn.close()

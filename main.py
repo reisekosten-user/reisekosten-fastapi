@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 # ── Module importieren ────────────────────────────────────────────────────────
-from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schema, get_migrations
+from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schema, get_migrations, repair_legacy_columns
 from mod_vma import VMA_SAETZE, IATA_TO_LAND, LAENDER_LISTE, vma_fuer_land
 from mod_anon import anonymisieren
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
@@ -31,7 +31,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.2-i"
+APP_VERSION  = "2.2-j"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -582,7 +582,19 @@ def beleg_detail(bid: int):
                 <dt style="color:var(--muted);font-size:12px">Transportart</dt>
                 <dd>{typ_badge}{f' – {ki.get("transportart_freitext")}' if ki.get("transportart_freitext") else ""}</dd>
                 <dt style="color:var(--muted);font-size:12px">Belegart</dt>
-                <dd>{belegart or "–"}</dd>
+                <dd>
+                  <form method="post" action="/beleg/{bid2}/belegart" style="display:inline-block">
+                    <select name="belegart" onchange="this.form.submit()"
+                            style="padding:4px 8px;font-size:12px;border:1px solid var(--border);
+                                   border-radius:6px;background:white">
+                      <option value=""{' selected' if not belegart else ''}>– wählen –</option>
+                      <option value="Rechnung"{' selected' if belegart=='Rechnung' else ''}>Rechnung</option>
+                      <option value="Quittung"{' selected' if belegart=='Quittung' else ''}>Quittung</option>
+                      <option value="Buchungsbestaetigung"{' selected' if belegart=='Buchungsbestaetigung' else ''}>Buchungsbestätigung</option>
+                      <option value="Sonstiges"{' selected' if belegart=='Sonstiges' else ''}>Sonstiges</option>
+                    </select>
+                  </form>
+                </dd>
                 <dt style="color:var(--muted);font-size:12px">Anbieter</dt>
                 <dd style="font-weight:600">{vendor or "–"}</dd>
                 <dt style="color:var(--muted);font-size:12px">Reisender</dt>
@@ -694,6 +706,20 @@ def beleg_detail(bid: int):
         return HTMLResponse(shell("Fehler",
             f'<div class="alert alert-err">{e}</div>'
             f'<pre style="font-size:11px">{traceback.format_exc()[:400]}</pre>'))
+
+@app.post("/beleg/{bid}/belegart")
+async def beleg_belegart_speichern(bid: int, request: Request):
+    """Speichert manuell gewählte Belegart (Rechnung/Quittung/etc.)."""
+    form = await request.form()
+    belegart = (form.get("belegart") or "").strip() or None
+    try:
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(f"UPDATE belege SET belegart={P} WHERE id={P}", (belegart, bid))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
 
 @app.post("/beleg/{bid}/zuordnen")
 async def beleg_zuordnen(bid: int, request: Request):
@@ -1728,6 +1754,7 @@ def init():
             except Exception:
                 db.rollback()
         cur.close(); db.close()
+        repair_legacy_columns()
         return {"status": "ok", "version": APP_VERSION,
                 "db": "postgresql" if is_postgres() else "sqlite"}
     except Exception as e:
