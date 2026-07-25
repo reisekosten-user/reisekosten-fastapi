@@ -282,4 +282,5 @@ def get_migrations() -> list[str]:
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS vma_netto NUMERIC(6,2)",
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS quelle TEXT DEFAULT 'auto'",
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS notiz TEXT",
+        "ALTER TABLE vma_tage ALTER COLUMN reise_id DROP NOT NULL",
     ]

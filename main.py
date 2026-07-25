@@ -31,7 +31,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.2-g"
+APP_VERSION  = "2.2-i"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2598,6 +2598,12 @@ def reise_detail(code: str):
                         vma_voll, vma_halb FROM reise_laender
                         WHERE reise_code = {P} ORDER BY datum_von""", (rcode,))
         land_rows = cur.fetchall()
+
+        # VMA je Tag
+        cur.execute(f"""SELECT datum, land_code, land_name, ist_halber_satz,
+                        fruehstueck, mittagessen, abendessen, vma_netto
+                        FROM vma_tage WHERE reise_code = {P} ORDER BY datum""", (rcode,))
+        vma_tage_rows = cur.fetchall()
         cur.close(); db.close()
 
         today = date.today()
@@ -2668,6 +2674,38 @@ def reise_detail(code: str):
             f'<span class="badge badge-green">{get(m,"kuerzel",0)} – {get(m,"klarname",1)}</span>'
             for m in ma_rows) or "–"
 
+        wochentage = ["Mo","Di","Mi","Do","Fr","Sa","So"]
+        vma_tage_zeilen = ""
+        vma_tage_summe = 0.0
+        for i, vt in enumerate(vma_tage_rows):
+            vd = get(vt,"datum",0)
+            if isinstance(vd, str): vd = date.fromisoformat(vd[:10])
+            lcode_t = get(vt,"land_code",1) or "DE"
+            lname_t = get(vt,"land_name",2) or "Deutschland"
+            ist_halb = bool(get(vt,"ist_halber_satz",3))
+            frueh = bool(get(vt,"fruehstueck",4))
+            mittag = bool(get(vt,"mittagessen",5))
+            abend = bool(get(vt,"abendessen",6))
+            netto = float(get(vt,"vma_netto",7) or 0)
+            vma_tage_summe += netto
+
+            wt = wochentage[vd.weekday()] if vd else "–"
+            datum_txt = f"{wt} {vd.day:02d}.{vd.month:02d}." if vd else "–"
+            halb_badge = ('<span style="font-size:10px;background:#fef3c7;color:#92400e;'
+                           'padding:1px 7px;border-radius:10px">½ Satz</span>') if ist_halb else ""
+
+            def mtag(aktiv, label):
+                if aktiv:
+                    return f'<span style="font-size:11px;color:#166534">✓ {label}</span>'
+                return f'<span style="font-size:11px;color:#c4cdd8">– {label}</span>'
+
+            vma_tage_zeilen += f"""<tr>
+                <td style="white-space:nowrap"><b>{datum_txt}</b> {halb_badge}</td>
+                <td>🌍 {lname_t} ({lcode_t})</td>
+                <td>{mtag(frueh,"Frühstück")} &nbsp; {mtag(mittag,"Mittag")} &nbsp; {mtag(abend,"Abend")}</td>
+                <td style="text-align:right;font-weight:600;color:var(--green)">{netto:.2f} EUR</td>
+            </tr>"""
+
         content = f"""
         <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:20px;flex-wrap:wrap">
           <div style="flex:1">
@@ -2695,6 +2733,14 @@ def reise_detail(code: str):
             <a href="/reise/{rcode}/land/neu" class="btn btn-secondary btn-sm">+ Land hinzufügen</a>
           </div>
           {'<div class="table-wrap"><table><thead><tr><th>Land</th><th>Von</th><th>Bis</th><th style="text-align:right">VMA Voll</th><th style="text-align:right">VMA Halb</th><th>Tage</th><th style="text-align:right">Gesamt</th><th></th></tr></thead><tbody>' + vma_zeilen + f'</tbody><tfoot><tr><td colspan="6" style="text-align:right;font-weight:600;padding:10px 14px;border-top:2px solid var(--border)">VMA Gesamt:</td><td style="font-weight:700;font-size:15px;color:var(--green);text-align:right;padding:10px 14px;border-top:2px solid var(--border)">{vma_total:.2f} EUR</td><td style="border-top:2px solid var(--border)"></td></tr></tfoot></table></div>' if land_rows else '<div class="card-body"><div class="empty-state"><b>Noch keine Länder hinterlegt</b><p>Füge Länder hinzu für die automatische VMA-Berechnung</p><a href="/reise/{rcode}/land/neu" class="btn btn-primary" style="margin-top:12px">+ Land hinzufügen</a></div></div>'}
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">📅 VMA je Tag</span>
+            <a href="/reise/{rcode}/uebersicht" class="btn btn-secondary btn-sm">Mahlzeiten bearbeiten</a>
+          </div>
+          {'<div class="table-wrap"><table><thead><tr><th>Tag</th><th>Land</th><th>Mahlzeiten</th><th style="text-align:right">VMA netto</th></tr></thead><tbody>' + vma_tage_zeilen + f'</tbody><tfoot><tr><td colspan="3" style="text-align:right;font-weight:600;padding:10px 14px;border-top:2px solid var(--border)">VMA Gesamt (netto):</td><td style="font-weight:700;font-size:15px;color:var(--green);text-align:right;padding:10px 14px;border-top:2px solid var(--border)">' + f'{vma_tage_summe:.2f} EUR</td></tr></tfoot></table></div>' if vma_tage_rows else '<div class="card-body"><div class="empty-state"><b>Noch keine VMA-Tage berechnet</b><p>Erst Länder hinterlegen, dann VMA generieren</p><a href="/reise/' + rcode + '/vma-generieren" class="btn btn-primary" style="margin-top:12px">🔄 VMA berechnen</a></div></div>'}
         </div>
 
         <div style="margin-top:12px">
