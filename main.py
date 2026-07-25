@@ -1,5 +1,5 @@
 """
-# v2.1-o – Startup Event + Timeout fix
+# v2.1-p – Bessere API-Fehlerausgabe
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -557,7 +557,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-o"
+APP_VERSION = "2.1-p"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -882,7 +882,7 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
             if resp.status_code != 200:
                 return {"fehler": f"HTTP {resp.status_code}: {resp.text[:200]}",
                         "pflichtfelder_ok": False,
-                        "fehlende_pflichtfelder": ["API-Fehler"]}
+                        "fehlende_pflichtfelder": [f"HTTP {resp.status_code}: {resp.text[:200]}"]}
 
             raw = resp.json()["choices"][0]["message"]["content"].strip()
             m = re.search(r'\{.*\}', raw, re.DOTALL)
@@ -895,7 +895,7 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
                 result["fehlende_pflichtfelder"] = fehlend
                 return result
             return {"fehler": "Kein JSON", "pflichtfelder_ok": False,
-                    "fehlende_pflichtfelder": ["Kein JSON"]}
+                    "fehlende_pflichtfelder": [f"Kein JSON: {raw[:150]}"]}
     except Exception as e:
         import traceback
         return {"fehler": str(e), "pflichtfelder_ok": False,
@@ -996,7 +996,7 @@ JSON-Format:
             if resp.status_code != 200:
                 return {"fehler": f"HTTP {resp.status_code}: {resp.text[:300]}",
                         "pflichtfelder_ok": False,
-                        "fehlende_pflichtfelder": ["API-Fehler"]}
+                        "fehlende_pflichtfelder": [f"HTTP {resp.status_code}: {resp.text[:200]}"]}
 
             raw = resp.json()["choices"][0]["message"]["content"].strip()
             m = re.search(r'\{.*\}', raw, re.DOTALL)
@@ -1010,7 +1010,7 @@ JSON-Format:
                 return result
             return {"fehler": "Kein JSON in Antwort", "raw": raw[:300],
                     "pflichtfelder_ok": False,
-                    "fehlende_pflichtfelder": ["Kein JSON"]}
+                    "fehlende_pflichtfelder": [f"Kein JSON: {raw[:150]}"]}
 
     except Exception as e:
         import traceback
