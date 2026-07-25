@@ -1,5 +1,5 @@
 """
-# v2.1-n – f-string Syntax fix
+# v2.1-o – Startup Event + Timeout fix
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -557,7 +557,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-n"
+APP_VERSION = "2.1-o"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -590,6 +590,10 @@ def shell(title: str, content: str, page: str = "") -> str:
 
 # ── FastAPI App ────────────────────────────────────────────────────────────────
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
+
+@app.on_event("startup")
+async def startup():
+    print(f"[Startup] Herrhammer Reisekosten {APP_VERSION} gestartet")
 
 if not os.path.exists("static"):
     os.makedirs("static", exist_ok=True)
