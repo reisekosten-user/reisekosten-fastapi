@@ -15,9 +15,16 @@ def anonymisieren(text: str, ma_namen: list, ma_mails: list) -> str:
     """
     result = text
 
-    # 1. E-Mail-Adressen ZUERST ersetzen (vor allen anderen Ersetzungen)
+    # 1. E-Mail-Adressen ZUERST – immer alle, auch mit mailto: Prefix
+    result = re.sub(r'mailto:[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
+                    'mailto:max.mustermann@beispiel.de', result, flags=re.IGNORECASE)
     result = re.sub(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
                     'max.mustermann@beispiel.de', result)
+    # Bekannte Organisations-Mails aus der DB ebenfalls ersetzen (bereits in ma_mails)
+    for mail in ma_mails:
+        if mail and '@' in mail:
+            result = re.sub(re.escape(mail), 'max.mustermann@beispiel.de',
+                           result, flags=re.IGNORECASE)
 
     # 2. Herrhammer (alle Varianten)
     result = re.sub(r'HERRHAMMER\s+GMBH\s+\w*', 'Musterfirma GmbH', result, flags=re.IGNORECASE)

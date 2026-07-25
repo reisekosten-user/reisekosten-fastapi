@@ -1,5 +1,5 @@
 """
-# v2.2-e – Mitarbeiter: E-Mail + Rolle (Reisender/Organisator)
+# v2.2-f – Dashboard Alarm, Organisatoren fix, Anonymisierung E-Mails
 Modulare Struktur – Einstiegspunkt
 """
 # v2.2-a – Modularisierung komplett
@@ -31,7 +31,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.2-e"
+APP_VERSION  = "2.2-f"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -1868,14 +1868,69 @@ def dashboard():
               </table></div>
             </div>"""
 
-        warn_html = (
-            f'<a href="/unzugeordnet" style="display:inline-flex;align-items:center;'
-            f'gap:8px;background:#fef2f2;border:1px solid #fca5a5;color:#991b1b;'
-            f'padding:10px 16px;border-radius:8px;text-decoration:none;font-weight:600;'
-            f'margin-bottom:20px;font-size:13px">'
-            f'⚠ {unzugeordnet} Beleg{"e" if unzugeordnet!=1 else ""} ohne Reisezuordnung'
-            f' → Jetzt zuordnen</a>'
-        ) if unzugeordnet > 0 else ""
+        # Weitere Alarme prüfen
+        try:
+            cur2 = db.cursor() if not db.closed else get_db().cursor()
+        except:
+            db2 = get_db(); cur2 = db2.cursor()
+        
+        alarme = []
+        if unzugeordnet > 0:
+            alarme.append({
+                "url": "/unzugeordnet",
+                "text": f'⚠ {unzugeordnet} Beleg{"e" if unzugeordnet!=1 else ""} ohne Reisezuordnung',
+                "sub": "Jetzt zuordnen →"
+            })
+        try:
+            cur2.execute(
+                "SELECT COUNT(*) FROM belege WHERE pflichtfelder_ok = FALSE"
+                if is_postgres() else
+                "SELECT COUNT(*) FROM belege WHERE pflichtfelder_ok = 0")
+            n_fehler = cur2.fetchone()[0]
+            if n_fehler > 0:
+                alarme.append({
+                    "url": "/belege",
+                    "text": f'⚠ {n_fehler} Beleg{"e" if n_fehler!=1 else ""} mit fehlenden Pflichtfeldern',
+                    "sub": "Zur Belegliste →"
+                })
+        except: pass
+        try:
+            cur2.execute(
+                """SELECT COUNT(*) FROM belege
+                   WHERE waehrung != 'EUR' AND (kurs_eur IS NULL OR kurs_eur = 0)""")
+            n_kurs = cur2.fetchone()[0]
+            if n_kurs > 0:
+                alarme.append({
+                    "url": "/belege",
+                    "text": f'💱 {n_kurs} Auslandsbeleg{"e" if n_kurs!=1 else ""} ohne Wechselkurs',
+                    "sub": "Kurs nachtragen →"
+                })
+        except: pass
+        try: cur2.close()
+        except: pass
+
+        if alarme:
+            warn_items = "".join(
+                f'<a href="{a["url"]}" style="display:flex;align-items:center;'
+                f'justify-content:space-between;padding:10px 16px;'
+                f'text-decoration:none;color:#991b1b;border-bottom:1px solid #fecaca">'
+                f'<span style="font-weight:600">{a["text"]}</span>'
+                f'<span style="font-size:12px;color:#ef4444">{a["sub"]}</span>'
+                f'</a>'
+                for a in alarme)
+            warn_html = (
+                f'<div style="background:#fef2f2;border:1px solid #fca5a5;'
+                f'border-radius:var(--radius);margin-bottom:20px;overflow:hidden">'
+                f'<div style="padding:8px 16px;background:#fecaca;font-size:11px;'
+                f'font-weight:700;color:#991b1b;text-transform:uppercase;letter-spacing:.05em">'
+                f'🔔 Aktionen erforderlich ({len(alarme)})</div>'
+                f'{warn_items}</div>')
+        else:
+            warn_html = (
+                f'<div style="background:var(--green-l);border:1px solid #6ee7b7;'
+                f'border-radius:var(--radius);padding:10px 16px;margin-bottom:20px;'
+                f'font-size:13px;color:#065f46;font-weight:500">'
+                f'✅ Alles in Ordnung – keine offenen Aktionen</div>')
 
         content = f"""
         <div style="display:flex;align-items:center;justify-content:space-between;
