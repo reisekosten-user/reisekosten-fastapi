@@ -1,5 +1,5 @@
 """
-# v2.1-j – PNG RGBA Transparenz fix + weißer Hintergrund
+# v2.1-k – Bild-Erkennung fix: GPT Vision für Fotos
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -539,7 +539,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-j"
+APP_VERSION = "2.1-k"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -1041,13 +1041,21 @@ async def beleg_verarbeiten(
     # 2. Text aus PDF lesen
     rohtext = pdf_text_lesen(original_pdf)
 
+    # Bild ohne extrahierbaren Text → GPT-4o Vision direkt
+    is_image = content_type in ("image/jpeg","image/jpg","image/png",
+                                "image/heic","image/heif","image/webp")
+    if is_image and len(rohtext.strip()) < 20:
+        ki_result = await gpt_analyse_bild(datei_bytes, content_type, dateiname)
+        rohtext = json.dumps(ki_result, ensure_ascii=False, indent=2)
+    else:
+        ki_result = await gpt_analyse(rohtext, dateiname)
+
     # 3. Anonymisieren
     ma_namen, ma_mails = lade_ma_daten()
     anon_text = anonymisieren(rohtext, ma_namen, ma_mails)
     anon_pdf = text_zu_pdf(anon_text, f"Anonymisiert: {dateiname}")
 
     # 4. GPT-4o Analyse
-    ki_result = await gpt_analyse(rohtext, dateiname)
     ki_json_str = json.dumps(ki_result, ensure_ascii=False)
 
     # Zusammenfassung aus KI-Ergebnis
