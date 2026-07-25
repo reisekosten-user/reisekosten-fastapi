@@ -1,5 +1,5 @@
 """
-# v2.1-h – JPG/PNG: GPT-4o Vision OCR bei Fotos ohne Text
+# v2.1-i – Bild-Upscaling für bessere OCR-Qualität
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -539,7 +539,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-h"
+APP_VERSION = "2.1-i"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -776,10 +776,29 @@ async def gpt_analyse_bild(bild_bytes: bytes, content_type: str,
                 "pflichtfelder_ok": False,
                 "fehlende_pflichtfelder": ["OPENAI_API_KEY fehlt"]}
 
-    b64 = base64.b64encode(bild_bytes).decode()
-    # HEIC nicht direkt unterstützt → als JPEG behandeln
-    if content_type in ("image/heic", "image/heif"):
+    # Bild optimieren: upscale wenn zu klein, HEIC konvertieren
+    try:
+        from PIL import Image, ImageOps
+        img = Image.open(io.BytesIO(bild_bytes))
+        try: img = ImageOps.exif_transpose(img)
+        except: pass
+        if img.mode not in ("RGB", "L"): img = img.convert("RGB")
+        # Mindestgröße 1000px auf längster Seite für gute OCR-Qualität
+        w, h = img.size
+        min_px = 1000
+        if max(w, h) < min_px:
+            scale = min_px / max(w, h)
+            img = img.resize((int(w*scale), int(h*scale)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=95)
+        bild_bytes = buf.getvalue()
         content_type = "image/jpeg"
+    except Exception as img_e:
+        print(f"[Bild-Optimierung] {img_e}")
+        if content_type in ("image/heic", "image/heif"):
+            content_type = "image/jpeg"
+
+    b64 = base64.b64encode(bild_bytes).decode()
 
     prompt = """Analysiere dieses Foto eines Reisebelegs und fülle ALLE erkennbaren Felder aus.
 Antworte NUR mit einem validen JSON-Objekt – kein Text davor oder danach.
