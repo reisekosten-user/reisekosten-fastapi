@@ -299,8 +299,6 @@ tr:hover td { background: #fafbfe; }
 }
 """
 
-APP_VERSION = "2.1-q"
-
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
         cls = "nav-link active" if page == p else "nav-link"
@@ -351,7 +349,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 
 @app.on_event("startup")
 async def startup():
