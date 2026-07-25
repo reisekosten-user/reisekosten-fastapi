@@ -1096,13 +1096,99 @@ def reise_uebersicht(code: str):
         monate = ["Jan","Feb","Mär","Apr","Mai","Jun",
                   "Jul","Aug","Sep","Okt","Nov","Dez"]
 
+        def cb(rcode, vid, lcode, ist_halb, name, checked, label, abzug_pct):
+            ch = "checked" if checked else ""
+            return (f'<label style="display:inline-flex;align-items:center;gap:4px;'
+                    f'cursor:pointer;font-size:12px;color:#374151;margin-right:10px">'
+                    f'<input type="checkbox" name="{name}" value="1" {ch} '
+                    f'onchange="this.form.submit()" style="width:auto;margin:0">'
+                    f'{label} <span style="color:#c81e1e;font-size:10px">-{abzug_pct}%</span>'
+                    f'</label>')
+
+        def beleg_zeile(b):
+            bid = g(b,"id",0); typ = g(b,"transportart",1) or "Sonstiges"
+            freitext = g(b,"transportart_freitext",2) or ""
+            anbieter = g(b,"anbieter",3) or "–"
+            betrag = g(b,"betrag_brutto",4)
+            waehrung = g(b,"waehrung",5) or "EUR"
+            ort_von = g(b,"event_ort_von",8) or ""
+            ort_bis = g(b,"event_ort_bis",9) or ""
+            hotel_name = g(b,"hotel_name",10) or ""
+            ci_dat = g(b,"hotel_checkin_datum",11)
+            ci_zeit = g(b,"hotel_checkin_zeit",12) or ""
+            co_dat = g(b,"hotel_checkout_datum",13)
+            co_zeit = g(b,"hotel_checkout_zeit",14) or ""
+            naechte = g(b,"hotel_naechte",15) or ""
+
+            seg_info = ""
+            ki_str = g(b,"ki_json",19) or ""
+            if ki_str:
+                try:
+                    ki = json.loads(ki_str)
+                    segs = ki.get("segmente") or []
+                    if segs:
+                        seg_parts = []
+                        for s in segs:
+                            fn = s.get("transport_nummer","") or ""
+                            tn = s.get("transport_name","") or ""
+                            vi = s.get("von_iata","") or ""
+                            ni = s.get("nach_iata","") or ""
+                            ab_z = s.get("abreise_zeit","") or ""
+                            an_z = s.get("ankunft_zeit","") or ""
+                            tz_ab = s.get("abreise_zeitzone","") or ""
+                            tz_an = s.get("ankunft_zeitzone","") or ""
+                            hin = s.get("hinweis","") or ""
+                            p = f"{tn} {fn}: {vi}→{ni} {ab_z}{' '+tz_ab if tz_ab else ''}–{an_z}{' '+tz_an if tz_an else ''}"
+                            if hin: p += f" ({hin})"
+                            seg_parts.append(p)
+                        seg_info = " · ".join(seg_parts)
+                except: pass
+
+            if not seg_info:
+                if hotel_name:
+                    ci_s = fmt_date(ci_dat) + (" " + ci_zeit if ci_zeit else "")
+                    co_s = fmt_date(co_dat) + (" " + co_zeit if co_zeit else "")
+                    seg_info = f"{hotel_name} · Check-in {ci_s} · Check-out {co_s}"
+                    if naechte: seg_info += f" · {naechte} Nächte"
+                elif ort_von or ort_bis:
+                    seg_info = f"{ort_von}" + (f" → {ort_bis}" if ort_bis else "")
+
+            badge = BADGE.get(typ, BADGE["Sonstiges"])
+            if freitext: badge = badge.replace("Sonstiges", f"Sonstiges – {freitext}")
+            bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
+
+            return (
+                f'<div style="display:flex;align-items:flex-start;justify-content:space-between;'
+                f'gap:8px;margin-bottom:6px">'
+                f'<div style="min-width:0">{badge}<br>'
+                f'<span style="font-size:12px;font-weight:600">{anbieter}</span>'
+                + (f'<br><span style="font-size:11px;color:#64748b">{seg_info}</span>' if seg_info else "")
+                + f'</div>'
+                f'<div style="text-align:right;white-space:nowrap">'
+                f'<div style="font-size:12px;font-weight:600">{bet_s}</div>'
+                f'<a href="/beleg/{bid}" style="font-size:11px;color:#2563eb;text-decoration:none">Detail</a>'
+                f'</div></div>')
+
+        QUELLE_LABEL = {
+            "Flug-Segment": "auto · Flug",
+            "Hotel-Beleg": "auto · Hotel",
+            "Manuell": "auto · Reise-Land",
+            "Standard": "auto · Standard",
+            "manuell": "✎ manuell",
+        }
+
         for i in range(tage_gesamt):
             tag = ab + timedelta(days=i)
             wt = wochentage[tag.weekday()]
-            datum_s = f"{wt} {tag.day:02d}. {monate[tag.month-1]} {tag.year}"
-            datum_iso = tag.isoformat()
+            datum_s = f"{wt} {tag.day:02d}.{tag.month:02d}."
+            zeile_bg = "#fafbfe" if i % 2 == 1 else "#ffffff"
 
-            # VMA-Zeile für diesen Tag
+            # Belege für diesen Tag
+            tages_belege = belege_by_date.get(tag, [])
+            tages_summe = sum(float(g(b,"betrag_brutto",4) or 0) for b in tages_belege)
+            belege_col = "".join(beleg_zeile(b) for b in tages_belege) or \
+                '<span style="font-size:11px;color:#94a3b8;font-style:italic">keine Belege</span>'
+
             vr = vma_by_date.get(tag)
             if vr:
                 vid = g(vr,"id",0)
@@ -1114,151 +1200,59 @@ def reise_uebersicht(code: str):
                 frueh = bool(g(vr,"fruehstueck",7))
                 mittag = bool(g(vr,"mittagessen",8))
                 abend = bool(g(vr,"abendessen",9))
-                vma_brutto = float(g(vr,"vma_brutto",10) or 0)
                 vma_netto = float(g(vr,"vma_netto",11) or 0)
-                quelle = g(vr,"quelle",12) or "auto"
+                quelle = g(vr,"quelle",12) or "Standard"
 
                 basis_txt = f"{halb:.2f} €" if ist_halb else f"{voll:.2f} €"
-                halb_badge = '<span style="font-size:10px;background:#fef3c7;color:#92400e;padding:1px 6px;border-radius:10px;margin-left:4px">½ Satz</span>' if ist_halb else ""
-                auto_badge = '<span style="font-size:10px;color:#94a3b8;margin-left:4px">auto</span>' if quelle=="auto" else '<span style="font-size:10px;color:#7c3aed;margin-left:4px">✎ manuell</span>'
+                halb_label = "½ Anreisetag" if i == 0 else ("½ Abreisetag" if i == tage_gesamt-1 else "½ Satz")
+                halb_badge = f'<span style="font-size:10px;background:#fef3c7;color:#92400e;padding:1px 7px;border-radius:10px">{halb_label}</span>' if ist_halb else ""
+                quelle_txt = QUELLE_LABEL.get(quelle, quelle)
+                quelle_color = "#7c3aed" if quelle == "manuell" else "#94a3b8"
 
-                def cb(name, checked, label, abzug_pct):
-                    ch = "checked" if checked else ""
-                    return (f'<label style="display:inline-flex;align-items:center;gap:4px;'
-                            f'cursor:pointer;font-size:12px;color:var(--text-secondary)">'
-                            f'<input type="checkbox" name="{name}" value="1" {ch} '
-                            f'onchange="this.form.submit()" style="width:auto;margin:0">'
-                            f'{label} <span style="color:#ef4444;font-size:11px">-{abzug_pct}%</span>'
-                            f'</label>')
-
-                vma_row = (
-                    f'<tr style="background:#f0fdf4">'
-                    f'<td style="padding:8px 12px;font-size:12px;color:#64748b;white-space:nowrap">'
-                    f'<b style="color:#059669">VMA</b></td>'
-                    f'<td style="padding:8px 12px">'
-                    f'<span style="font-size:12px;font-weight:500;color:#059669">'
-                    f'🌍 {lname} ({lcode})</span>{halb_badge}{auto_badge}</td>'
-                    f'<td style="padding:8px 12px">'
-                    f'<form method="post" action="/reise/{rcode}/vma/{vid}/speichern" '
-                    f'style="display:inline-flex;gap:12px;align-items:center;flex-wrap:wrap">'
+                zeile = (
+                    f'<tr style="background:{zeile_bg};border-bottom:1px solid #f3f4f6">'
+                    f'<td style="padding:10px 12px;vertical-align:top;white-space:nowrap">'
+                    f'<div style="font-weight:600;color:#0d1b2a">{datum_s}</div>{halb_badge}</td>'
+                    f'<td style="padding:10px 12px;vertical-align:top">'
+                    f'<div style="font-weight:500">🌍 {lname} ({lcode})</div>'
+                    f'<div style="font-size:11px;color:{quelle_color}">{quelle_txt}</div></td>'
+                    f'<td style="padding:10px 12px;vertical-align:top">'
+                    f'<form method="post" action="/reise/{rcode}/vma/{vid}/speichern">'
                     f'<input type="hidden" name="land_code" value="{lcode}">'
                     f'<input type="hidden" name="ist_halber_satz" value="{"1" if ist_halb else ""}">'
-                    f'{cb("fruehstueck", frueh, "Frühstück", 20)}'
-                    f'{cb("mittagessen", mittag, "Mittagessen", 40)}'
-                    f'{cb("abendessen", abend, "Abendessen", 40)}'
+                    f'{cb(rcode, vid, lcode, ist_halb, "fruehstueck", frueh, "Frühstück", 20)}'
+                    f'{cb(rcode, vid, lcode, ist_halb, "mittagessen", mittag, "Mittag", 40)}'
+                    f'{cb(rcode, vid, lcode, ist_halb, "abendessen", abend, "Abend", 40)}'
                     f'</form></td>'
-                    f'<td style="padding:8px 12px;text-align:right;font-weight:600;'
-                    f'color:#059669;white-space:nowrap">'
-                    f'<span style="text-decoration:line-through;color:#94a3b8;font-weight:400;font-size:11px">{basis_txt}</span> '
-                    f'{vma_netto:.2f} €</td>'
-                    f'<td style="padding:8px 12px"></td>'
-                    f'</tr>')
+                    f'<td style="padding:10px 12px;text-align:right;vertical-align:top;white-space:nowrap">'
+                    f'<div style="text-decoration:line-through;color:#94a3b8;font-size:11px">{basis_txt}</div>'
+                    f'<div style="font-weight:700;color:#047857">{vma_netto:.2f} €</div></td>'
+                    f'<td style="padding:10px 12px;vertical-align:top">{belege_col}'
+                    + (f'<div style="font-size:11px;color:#5a6a7a;margin-top:2px">Summe: {tages_summe:.2f} €</div>' if tages_belege else "")
+                    + '</td></tr>'
+                )
             else:
-                vma_row = (
-                    f'<tr style="background:#fafafa">'
-                    f'<td colspan="5" style="padding:6px 12px;font-size:11px;color:#94a3b8">'
-                    f'VMA für diesen Tag nicht berechnet – '
-                    f'<a href="/reise/{rcode}/vma-generieren" style="color:#2563eb">Generieren</a>'
-                    f'</td></tr>')
+                zeile = (
+                    f'<tr style="background:{zeile_bg};border-bottom:1px solid #f3f4f6">'
+                    f'<td style="padding:10px 12px;vertical-align:top;white-space:nowrap">'
+                    f'<div style="font-weight:600;color:#0d1b2a">{datum_s}</div></td>'
+                    f'<td colspan="3" style="padding:10px 12px;font-size:12px;color:#94a3b8">'
+                    f'VMA nicht berechnet – '
+                    f'<a href="/reise/{rcode}/vma-generieren" style="color:#2563eb">Generieren</a></td>'
+                    f'<td style="padding:10px 12px;vertical-align:top">{belege_col}</td></tr>'
+                )
 
-            rows_html += vma_row
-
-            # Beleg-Zeilen für diesen Tag
-            tages_belege = belege_by_date.get(tag, [])
-            for b in tages_belege:
-                bid = g(b,"id",0); typ = g(b,"transportart",1) or "Sonstiges"
-                freitext = g(b,"transportart_freitext",2) or ""
-                anbieter = g(b,"anbieter",3) or "–"
-                betrag = g(b,"betrag_brutto",4)
-                waehrung = g(b,"waehrung",5) or "EUR"
-                ort_von = g(b,"event_ort_von",8) or ""
-                ort_bis = g(b,"event_ort_bis",9) or ""
-                hotel_name = g(b,"hotel_name",10) or ""
-                ci_dat = g(b,"hotel_checkin_datum",11)
-                ci_zeit = g(b,"hotel_checkin_zeit",12) or ""
-                co_dat = g(b,"hotel_checkout_datum",13)
-                co_zeit = g(b,"hotel_checkout_zeit",14) or ""
-                naechte = g(b,"hotel_naechte",15) or ""
-
-                # Details aus KI-JSON (Segmente)
-                seg_info = ""
-                ki_str = g(b,"ki_json",19) or ""
-                if ki_str:
-                    try:
-                        ki = json.loads(ki_str)
-                        segs = ki.get("segmente") or []
-                        if segs:
-                            seg_parts = []
-                            for s in segs:
-                                fn = s.get("transport_nummer","") or ""
-                                tn = s.get("transport_name","") or ""
-                                vi = s.get("von_iata","") or ""
-                                ni = s.get("nach_iata","") or ""
-                                ab_z = s.get("abreise_zeit","") or ""
-                                an_z = s.get("ankunft_zeit","") or ""
-                                tz_ab = s.get("abreise_zeitzone","") or ""
-                                tz_an = s.get("ankunft_zeitzone","") or ""
-                                hin = s.get("hinweis","") or ""
-                                p = f"{tn} {fn}: {vi}→{ni} {ab_z}{' '+tz_ab if tz_ab else ''}–{an_z}{' '+tz_an if tz_an else ''}"
-                                if hin: p += f" ({hin})"
-                                seg_parts.append(p)
-                            seg_info = " · ".join(seg_parts)
-                    except: pass
-
-                if not seg_info:
-                    if hotel_name:
-                        ci_s = fmt_date(ci_dat) + (" " + ci_zeit if ci_zeit else "")
-                        co_s = fmt_date(co_dat) + (" " + co_zeit if co_zeit else "")
-                        seg_info = f"{hotel_name} · Check-in {ci_s} · Check-out {co_s}"
-                        if naechte: seg_info += f" · {naechte} Nächte"
-                    elif ort_von or ort_bis:
-                        seg_info = f"{ort_von}" + (f" → {ort_bis}" if ort_bis else "")
-
-                badge = BADGE.get(typ, BADGE["Sonstiges"])
-                if freitext: badge = badge.replace("Sonstiges", f"Sonstiges – {freitext}")
-                bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
-
-                rows_html += (
-                    f'<tr>'
-                    f'<td style="padding:8px 12px;font-size:12px;color:#64748b">'
-                    f'&nbsp;</td>'
-                    f'<td style="padding:8px 12px">{badge}</td>'
-                    f'<td style="padding:8px 12px;font-size:13px">'
-                    f"<b>{anbieter}</b>"
-                    + (f'<br><small style="color:#64748b;font-size:11px">{seg_info}</small>' if seg_info else "")
-                    + f'</td>'
-                    + f'<td style="padding:8px 12px;text-align:right;font-weight:600;white-space:nowrap">{bet_s}</td>'
-                    + f'<td style="padding:8px 12px;white-space:nowrap">'
-                    + f'<a href="/beleg/{bid}/pdf/original" target="_blank" style="font-size:11px;color:#2563eb;border:0.5px solid #bfdbfe;border-radius:4px;padding:2px 6px;text-decoration:none;margin-right:4px">Orig</a>'
-                    + f'<a href="/beleg/{bid}/pdf/anon" target="_blank" style="font-size:11px;color:#2563eb;border:0.5px solid #bfdbfe;border-radius:4px;padding:2px 6px;text-decoration:none;margin-right:4px">Anon</a>'
-                    + f'<a href="/beleg/{bid}/pdf/analyse" target="_blank" style="font-size:11px;color:#2563eb;border:0.5px solid #bfdbfe;border-radius:4px;padding:2px 6px;text-decoration:none">KI</a>'
-                    + '</td></tr>')
-
-            # Tages-Trennlinie
-            rows_html += (
-                f'<tr><td colspan="5" style="padding:0;height:2px;'
-                f'background:var(--border)"></td></tr>')
+            rows_html += zeile
 
         # Belege ohne Datum
         undated = belege_by_date.get(None, [])
         if undated:
-            rows_html += (f'<tr><td colspan="5" style="padding:8px 12px;'
-                         f'font-size:12px;color:#94a3b8;font-style:italic">'
-                         f'Belege ohne Datum ({len(undated)})</td></tr>')
-            for b in undated:
-                bid = g(b,"id",0); typ = g(b,"transportart",1) or "Sonstiges"
-                anbieter = g(b,"anbieter",3) or "–"
-                betrag = g(b,"betrag_brutto",4)
-                waehrung = g(b,"waehrung",5) or "EUR"
-                bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
-                badge = BADGE.get(typ, BADGE["Sonstiges"])
-                rows_html += (f'<tr><td style="padding:8px 12px"></td>'
-                    f'<td style="padding:8px 12px">{badge}</td>'
-                    f'<td style="padding:8px 12px;font-size:13px">{anbieter}</td>'
-                    f'<td style="padding:8px 12px;text-align:right;font-weight:600">{bet_s}</td>'
-                    f'<td style="padding:8px 12px">'
-                    f'<a href="/beleg/{bid}" style="font-size:11px;color:#2563eb">Detail</a>'
-                    f'</td></tr>')
+            undated_html = "".join(beleg_zeile(b) for b in undated)
+            rows_html += (
+                f'<tr><td colspan="5" style="padding:10px 12px;font-size:12px;'
+                f'color:#94a3b8;font-style:italic">Belege ohne Datum ({len(undated)})</td></tr>'
+                f'<tr><td colspan="5" style="padding:10px 12px">{undated_html}</td></tr>'
+            )
 
         content = f"""
         <div style="display:flex;align-items:flex-start;justify-content:space-between;
@@ -1298,15 +1292,15 @@ def reise_uebersicht(code: str):
             <thead>
               <tr style="background:#f8fafc;border-bottom:1px solid #e2e8f0">
                 <th style="padding:10px 12px;font-size:11px;color:#64748b;
-                           text-align:left;width:80px">Datum</th>
+                           text-align:left;width:120px">Tag</th>
                 <th style="padding:10px 12px;font-size:11px;color:#64748b;
-                           text-align:left;width:140px">Art</th>
+                           text-align:left;width:170px">Land / Satz</th>
                 <th style="padding:10px 12px;font-size:11px;color:#64748b;
-                           text-align:left">Details / Mahlzeiten</th>
+                           text-align:left;width:220px">Mahlzeiten</th>
                 <th style="padding:10px 12px;font-size:11px;color:#64748b;
-                           text-align:right;width:110px">Kosten</th>
+                           text-align:right;width:100px">VMA netto</th>
                 <th style="padding:10px 12px;font-size:11px;color:#64748b;
-                           text-align:left;width:150px">Belege</th>
+                           text-align:left">Belege</th>
               </tr>
             </thead>
             <tbody>
