@@ -146,6 +146,10 @@ def get_schema() -> list[str]:
                 tanken_preis_einheit  NUMERIC(8,3),
                 tanken_tankstelle     TEXT,
                 tanken_kennzeichen    TEXT,
+                kurs_eur              NUMERIC(10,4),
+                betrag_eur            NUMERIC(10,2),
+                kurs_datum            DATE,
+                kurs_quelle           TEXT,
                 status                TEXT DEFAULT 'neu',
                 fehler                TEXT,
                 erstellt              TIMESTAMP DEFAULT NOW()
@@ -241,6 +245,10 @@ def get_schema() -> list[str]:
                 tanken_preis_einheit  REAL,
                 tanken_tankstelle     TEXT,
                 tanken_kennzeichen    TEXT,
+                kurs_eur              REAL,
+                betrag_eur            REAL,
+                kurs_datum            TEXT,
+                kurs_quelle           TEXT,
                 status                TEXT DEFAULT 'neu',
                 fehler                TEXT,
                 erstellt              TEXT DEFAULT (datetime('now'))

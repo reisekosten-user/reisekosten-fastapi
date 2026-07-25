@@ -1,5 +1,5 @@
 """
-main.py – Herrhammer Reisekosten v2.2
+# v2.2-b – Abschluss-Übersicht + Wechselkurs + Logo
 Modulare Struktur – Einstiegspunkt
 """
 # v2.2-a – Modularisierung komplett
@@ -31,7 +31,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.2-a"
+APP_VERSION  = "2.2-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -204,7 +204,9 @@ def shell(title: str, content: str, page: str = "") -> str:
 </head>
 <body>
 <nav>
-  <a href="/" class="nav-brand">✈ Reisekosten</a>
+  <a href="/" class="nav-brand" style="display:flex;align-items:center;gap:10px;padding:6px 0">
+    <img src="/static/logo3.png" alt="Herrhammer" style="height:32px;width:auto">
+  </a>
   {nav("start", "Dashboard", "/")}
   {nav("mitarbeiter", "Mitarbeiter", "/mitarbeiter")}
   {nav("reisen", "Reisen", "/reisen")}
@@ -339,7 +341,8 @@ def beleg_detail(bid: int):
             hotel_checkout_datum, hotel_checkout_zeit, hotel_naechte,
             tanken_kraftstoff, tanken_menge, tanken_einheit,
             tanken_preis_einheit, tanken_tankstelle, tanken_kennzeichen,
-            status, fehler, erstellt
+            status, fehler, erstellt,
+            kurs_eur, betrag_eur, kurs_datum, kurs_quelle
             FROM belege WHERE id={P}""", (bid,))
         r = cur.fetchone()
         # Reisen für Zuordnung
@@ -372,6 +375,8 @@ def beleg_detail(bid: int):
         tank_einh=get(r,"tanken_einheit",35); tank_preis=get(r,"tanken_preis_einheit",36)
         tank_stelle=get(r,"tanken_tankstelle",37); tank_kfz=get(r,"tanken_kennzeichen",38)
         status=get(r,"status",39); fehler=get(r,"fehler",40); erstellt=get(r,"erstellt",41)
+        kurs_eur=get(r,"kurs_eur",42); betrag_eur=get(r,"betrag_eur",43)
+        kurs_datum=get(r,"kurs_datum",44); kurs_quelle=get(r,"kurs_quelle",45)
         zusammenfassung = f"{typ}: {vendor} – {betrag_brutto} {waehrung}" if vendor else ""
 
         # KI-JSON parsen
@@ -491,6 +496,8 @@ def beleg_detail(bid: int):
                 <dd style="font-family:monospace">{buchungscode or "–"}</dd>
                 <dt style="color:var(--muted);font-size:12px">Rechnungsnr.</dt>
                 <dd style="font-family:monospace">{rechnr or "–"}</dd>
+                {f'<dt style="color:var(--muted);font-size:12px">EUR-Betrag</dt><dd style="font-weight:600;color:var(--green)">{float(betrag_eur):.2f} EUR</dd>' if betrag_eur else ('<dt style="color:var(--amber);font-size:12px">EUR-Betrag</dt><dd style="color:var(--amber);font-size:12px">⚠ Kurs fehlt – bitte nachtragen</dd>' if waehrung and waehrung != "EUR" else "")}
+                {f'<dt style="color:var(--muted);font-size:12px">Kurs</dt><dd style="font-family:monospace">{kurs_eur} ({kurs_datum or ""} {kurs_quelle or ""})</dd>' if kurs_eur else ""}
                 {f'<dt style="color:var(--muted);font-size:12px">Hotel</dt><dd style="font-weight:600">{hotel_name}</dd>' if hotel_name else ""}
                 {f'<dt style="color:var(--muted);font-size:12px">Check-in</dt><dd>{fmt_date(hotel_ci_dat)} {hotel_ci_zeit or ""}</dd>' if hotel_ci_dat else ""}
                 {f'<dt style="color:var(--muted);font-size:12px">Check-out</dt><dd>{fmt_date(hotel_co_dat)} {hotel_co_zeit or ""}</dd>' if hotel_co_dat else ""}
@@ -527,6 +534,38 @@ def beleg_detail(bid: int):
                   Speichern
                 </button>
               </form>
+              {"" if waehrung == "EUR" else f'''
+              <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+              <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px">
+                💱 Wechselkurs ({waehrung} → EUR)
+              </div>
+              <form method="post" action="/beleg/{bid2}/kurs">
+                <div class="form-grid form-grid-2" style="gap:8px">
+                  <div class="form-group" style="margin:0">
+                    <label>Kurs (1 {waehrung} = ? EUR)</label>
+                    <input type="number" step="0.0001" name="kurs_eur"
+                           value="{kurs_eur or ""}" placeholder="z.B. 0.9200"
+                           class="inp" style="font-family:monospace">
+                  </div>
+                  <div class="form-group" style="margin:0">
+                    <label>Kursdatum</label>
+                    <input type="date" name="kurs_datum" class="inp"
+                           value="{str(kurs_datum)[:10] if kurs_datum else ""}">
+                  </div>
+                  <div class="form-group full" style="margin:0">
+                    <label>Quelle (z.B. EZB, Bank)</label>
+                    <input type="text" name="kurs_quelle" class="inp"
+                           value="{kurs_quelle or ""}" placeholder="EZB / Kreditkarte">
+                  </div>
+                </div>
+                <div style="margin-top:8px;padding:8px;background:var(--blue-l);
+                            border-radius:var(--radius-s);font-size:12px;color:var(--blue)">
+                  EUR-Betrag: <b>{f"{float(betrag_brutto)*float(kurs_eur):.2f} EUR" if betrag_brutto and kurs_eur else "wird berechnet"}</b>
+                </div>
+                <button type="submit" class="btn btn-success" style="margin-top:8px;width:100%">
+                  💱 Kurs speichern
+                </button>
+              </form>'''}
             </div>
           </div>
         </div>
@@ -1178,6 +1217,351 @@ def reise_uebersicht(code: str):
 
 
 # ── System-Routen ─────────────────────────────────────────────────────────────
+@app.post("/beleg/{bid}/kurs")
+async def beleg_kurs_speichern(bid: int, request: Request):
+    """Speichert Wechselkurs für Auslandsbeleg."""
+    form = await request.form()
+    try:
+        kurs = float(form.get("kurs_eur") or 0) or None
+        kurs_datum = (form.get("kurs_datum") or "").strip() or None
+        kurs_quelle = (form.get("kurs_quelle") or "").strip() or None
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        # Betrag_eur berechnen
+        cur.execute(f"SELECT betrag_brutto FROM belege WHERE id={P}", (bid,))
+        r = cur.fetchone()
+        brutto = float(r[0] if isinstance(r,tuple) else r["betrag_brutto"]) if r else 0
+        betrag_eur = round(brutto * kurs, 2) if kurs and brutto else None
+        cur.execute(f"""UPDATE belege SET
+            kurs_eur={P}, betrag_eur={P}, kurs_datum={P}, kurs_quelle={P}
+            WHERE id={P}""",
+            (kurs, betrag_eur, kurs_datum, kurs_quelle, bid))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
+
+@app.get("/reise/{code}/abschluss", response_class=HTMLResponse)
+def reise_abschluss(code: str):
+    """
+    Abschluss-Übersicht einer Reise:
+    - VMA-Tabelle komplett
+    - Kostenaufstellung (nur Rechnungen/Quittungen)
+    - Hinweise bei fehlenden Rechnungen
+    - Wechselkurs-Status
+    """
+    rcode = code.upper()
+    try:
+        db = get_db(); cur = db.cursor()
+        P = ph()
+
+        cur.execute(f"""SELECT code,titel,abreise,rueckkehr,notiz
+            FROM reisen WHERE code={P}""", (rcode,))
+        r = cur.fetchone()
+        if not r:
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler",
+                '<div class="alert alert-err">Reise nicht gefunden</div>'))
+        def g(row,k,i): return row[k] if hasattr(row,'keys') else row[i]
+        titel=g(r,"titel",1); ab=g(r,"abreise",2); zu=g(r,"rueckkehr",3)
+
+        # Mitarbeiter
+        cur.execute(f"""SELECT m.kuerzel, m.klarname FROM mitarbeiter m
+            JOIN reise_mitarbeiter rm ON rm.kuerzel=m.kuerzel
+            WHERE rm.reise_code={P} ORDER BY m.klarname""", (rcode,))
+        ma_rows = cur.fetchall()
+
+        # VMA-Tage
+        cur.execute(f"""SELECT datum,land_code,land_name,vma_satz_voll,vma_satz_halb,
+            ist_halber_satz,fruehstueck,mittagessen,abendessen,vma_brutto,vma_netto
+            FROM vma_tage WHERE reise_code={P} ORDER BY datum""", (rcode,))
+        vma_rows = cur.fetchall()
+
+        # Alle Belege
+        cur.execute(f"""SELECT id,belegart,transportart,transportart_freitext,
+            anbieter,rechnungsnummer,belegdatum,
+            betrag_brutto,betrag_netto,betrag_mwst,waehrung,
+            land_beleg,betrag_eur,kurs_eur,kurs_datum,kurs_quelle,
+            s3_original,status
+            FROM belege WHERE reise_code={P}
+            ORDER BY belegdatum NULLS LAST, id""", (rcode,))
+        belege = cur.fetchall()
+        cur.close(); db.close()
+
+        # VMA berechnen
+        vma_total_netto = sum(float(g(v,"vma_netto",10) or 0) for v in vma_rows)
+
+        # Belege kategorisieren
+        rechnungen = []      # Rechnung/Quittung/Receipt
+        bestaetigung = []    # Nur Buchungsbestätigung
+        kurs_fehlt = []      # Auslandsbelege ohne Kurs
+
+        RECHNUNG_ARTEN = {"rechnung","quittung","receipt"}
+        for b in belege:
+            art = (g(b,"belegart",1) or "").lower()
+            is_rechnung = any(r in art for r in RECHNUNG_ARTEN)
+            waehrung = g(b,"waehrung",10) or "EUR"
+            if is_rechnung:
+                rechnungen.append(b)
+                if waehrung != "EUR" and not g(b,"kurs_eur",13):
+                    kurs_fehlt.append(b)
+            else:
+                bestaetigung.append(b)
+
+        kosten_eur = sum(
+            float(g(b,"betrag_eur",12) or g(b,"betrag_brutto",7) or 0)
+            for b in rechnungen
+            if (g(b,"waehrung",10) or "EUR") == "EUR" or g(b,"betrag_eur",12))
+
+        # Wochentage
+        wt = ["Mo","Di","Mi","Do","Fr","Sa","So"]
+        mo = ["Jan","Feb","Mär","Apr","Mai","Jun",
+              "Jul","Aug","Sep","Okt","Nov","Dez"]
+
+        def fdat(d):
+            if not d: return "–"
+            if isinstance(d, date): return d.strftime("%d.%m.%Y")
+            try: return date.fromisoformat(str(d)[:10]).strftime("%d.%m.%Y")
+            except: return str(d)[:10]
+
+        # ── VMA-Tabelle ───────────────────────────────────────────────────────
+        vma_html = ""
+        for v in vma_rows:
+            dat = g(v,"datum",0)
+            if isinstance(dat,str): dat = date.fromisoformat(dat[:10])
+            lcode=g(v,"land_code",1); lname=g(v,"land_name",2)
+            voll=float(g(v,"vma_satz_voll",3) or 0)
+            halb=float(g(v,"vma_satz_halb",4) or 0)
+            ist_halb=bool(g(v,"ist_halber_satz",5))
+            frueh=bool(g(v,"fruehstueck",6))
+            mitt=bool(g(v,"mittagessen",7))
+            abend=bool(g(v,"abendessen",8))
+            netto=float(g(v,"vma_netto",10) or 0)
+
+            abzuege = []
+            if frueh: abzuege.append("Frühstück")
+            if mitt: abzuege.append("Mittagessen")
+            if abend: abzuege.append("Abendessen")
+
+            vma_html += f"""<tr>
+                <td>{wt[dat.weekday()]} {dat.strftime("%d.%m.%Y")}</td>
+                <td><span style="font-family:monospace;font-size:11px;
+                    background:#f1f5f9;padding:1px 6px;border-radius:4px">{lcode}</span>
+                    {lname}</td>
+                <td style="text-align:right;font-family:monospace">
+                    {"½ " if ist_halb else ""}{halb if ist_halb else voll:.2f} €</td>
+                <td style="font-size:12px;color:#64748b">
+                    {", ".join(abzuege) if abzuege else "–"}</td>
+                <td style="text-align:right;font-weight:600;color:#059669;
+                    font-family:monospace">{netto:.2f} €</td>
+            </tr>"""
+
+        # ── Kosten-Tabelle ────────────────────────────────────────────────────
+        kosten_html = ""
+        summen = {}  # pro Transportart
+        for b in rechnungen:
+            bid2=g(b,"id",0); art=g(b,"belegart",1) or "–"
+            typ=g(b,"transportart",2) or "Sonstiges"
+            freitext=g(b,"transportart_freitext",3) or ""
+            anbieter=g(b,"anbieter",4) or "–"
+            rechnr=g(b,"rechnungsnummer",5) or "–"
+            bd=g(b,"belegdatum",6)
+            brutto=g(b,"betrag_brutto",7); netto_b=g(b,"betrag_netto",8)
+            mwst=g(b,"betrag_mwst",9); waehrung=g(b,"waehrung",10) or "EUR"
+            land=g(b,"land_beleg",11) or ""
+            betrag_eur_b=g(b,"betrag_eur",12); kurs=g(b,"kurs_eur",13)
+
+            typ_label = typ + (f" – {freitext}" if freitext else "")
+
+            # Betrag-Spalte
+            if waehrung == "EUR":
+                bet_s = f"{float(brutto):.2f} EUR" if brutto else "–"
+                mwst_s = (f"MwSt: {float(mwst):.2f} EUR"
+                          if mwst and land == "DE" else
+                          "VAT: nicht abzugsfähig (Ausland)" if mwst and land != "DE"
+                          else "")
+                eur_val = float(brutto) if brutto else 0
+            else:
+                bet_s = f"{float(brutto):.2f} {waehrung}" if brutto else "–"
+                if betrag_eur_b:
+                    bet_s += f" = {float(betrag_eur_b):.2f} EUR (Kurs: {kurs})"
+                    eur_val = float(betrag_eur_b)
+                else:
+                    bet_s += f' <span style="color:#ef4444">⚠ Kurs fehlt</span>'
+                    eur_val = 0
+                mwst_s = "Auslandsbeleg – Vorsteuer nicht abzugsfähig"
+
+            summen[typ] = summen.get(typ, 0) + eur_val
+
+            kosten_html += f"""<tr>
+                <td>{fdat(bd)}</td>
+                <td><span style="font-size:11px;background:#f1f5f9;padding:1px 6px;
+                    border-radius:4px">{typ_label}</span></td>
+                <td><b>{anbieter}</b></td>
+                <td style="font-family:monospace;font-size:11px;color:#64748b">{rechnr}</td>
+                <td style="text-align:right;font-family:monospace">
+                    {bet_s}</td>
+                <td style="font-size:11px;color:#64748b">{mwst_s}</td>
+                <td>
+                  <a href="/beleg/{bid2}/pdf/original" target="_blank"
+                     class="btn btn-secondary btn-sm">PDF</a>
+                </td>
+            </tr>"""
+
+        # Summen pro Kategorie
+        summen_html = ""
+        for typ, summe in sorted(summen.items()):
+            summen_html += f"""<tr style="background:#f8fafc">
+                <td colspan="4" style="text-align:right;font-size:12px;
+                    color:#64748b;padding:6px 14px">Summe {typ}</td>
+                <td style="text-align:right;font-family:monospace;
+                    font-weight:600;padding:6px 14px">{summe:.2f} EUR</td>
+                <td colspan="2"></td>
+            </tr>"""
+
+        # Buchungsbestätigungen (Hinweis)
+        best_html = ""
+        if bestaetigung:
+            items = ""
+            for b in bestaetigung:
+                typ=g(b,"transportart",2) or "?"
+                anbieter=g(b,"anbieter",4) or "–"
+                bid2=g(b,"id",0)
+                items += (f'<li style="margin:4px 0">{typ}: {anbieter} – ' 
+                          f'<a href="/beleg/{bid2}" style="color:var(--blue)">'
+                          f'Beleg #{bid2}</a> ' 
+                          f'<span style="color:#ef4444;font-size:11px">'
+                          f'⚠ Keine Rechnung vorhanden</span></li>')
+            best_html = f"""
+            <div class="alert alert-warn" style="margin-top:16px">
+              <b>⚠ Nur Buchungsbestätigung vorhanden – keine Rechnung:</b>
+              <ul style="margin-top:8px;padding-left:16px">{items}</ul>
+            </div>"""
+
+        # Fehlende Kurse
+        kurs_html = ""
+        if kurs_fehlt:
+            items = ""
+            for b in kurs_fehlt:
+                bid2=g(b,"id",0); w=g(b,"waehrung",10); brutto=g(b,"betrag_brutto",7)
+                anbieter=g(b,"anbieter",4) or "–"
+                items += (f'<li style="margin:4px 0">' 
+                          f'<a href="/beleg/{bid2}" style="color:var(--blue)">' 
+                          f'Beleg #{bid2}</a>: {anbieter} – {brutto} {w} ' 
+                          f'<span style="color:#ef4444">⚠ Kurs fehlt</span></li>')
+            kurs_html = f"""
+            <div class="alert alert-err" style="margin-top:8px">
+              <b>❌ Wechselkurs fehlt – bitte nachtragen:</b>
+              <ul style="margin-top:8px;padding-left:16px">{items}</ul>
+            </div>"""
+
+        ma_str = " · ".join(f"{g(m,'kuerzel',0)} – {g(m,'klarname',1)}"
+                             for m in ma_rows)
+
+        content = f"""
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;
+                    margin-bottom:20px;flex-wrap:wrap;gap:12px">
+          <div>
+            <div style="font-family:monospace;font-size:12px;color:#64748b">{rcode}</div>
+            <h1 class="page-title" style="margin:4px 0">{titel}</h1>
+            <div style="font-size:13px;color:#64748b">
+              📅 {fdat(ab)} – {fdat(zu)} &nbsp;·&nbsp; 👤 {ma_str}
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <a href="/reise/{rcode}/abschluss/pdf" class="btn btn-primary">
+              📄 PDF-Export
+            </a>
+            <a href="/reise/{rcode}/uebersicht" class="btn btn-secondary">
+              📋 Übersicht
+            </a>
+            <a href="/reise/{rcode}" class="btn btn-secondary">← Reise</a>
+          </div>
+        </div>
+
+        <!-- Zusammenfassung -->
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:24px;font-weight:600;color:#059669">{vma_total_netto:.2f} €</div>
+            <div style="font-size:12px;color:#64748b">VMA gesamt (netto)</div>
+          </div></div>
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:24px;font-weight:600">{kosten_eur:.2f} €</div>
+            <div style="font-size:12px;color:#64748b">Kosten (Rechnungen)</div>
+          </div></div>
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:24px;font-weight:600;color:#2563eb">
+              {vma_total_netto + kosten_eur:.2f} €</div>
+            <div style="font-size:12px;color:#64748b">Gesamt zur Abrechnung</div>
+          </div></div>
+        </div>
+
+        {kurs_html}
+        {best_html}
+
+        <!-- VMA-Tabelle -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-header">
+            <span class="card-title">🌍 Verpflegungsmehraufwand</span>
+            <span style="font-size:13px;font-weight:600;color:#059669">
+              {vma_total_netto:.2f} EUR</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th>Datum</th><th>Land</th><th style="text-align:right">Satz</th>
+                <th>Abzüge</th><th style="text-align:right">Netto</th>
+              </tr></thead>
+              <tbody>
+                {vma_html or '<tr><td colspan="5" class="empty-state">Keine VMA-Daten – bitte Übersicht aufrufen</td></tr>'}
+              </tbody>
+              <tfoot><tr style="border-top:2px solid var(--border)">
+                <td colspan="4" style="text-align:right;font-weight:600;padding:10px 14px">
+                  Gesamt VMA:</td>
+                <td style="text-align:right;font-weight:700;font-size:15px;
+                    color:#059669;padding:10px 14px">{vma_total_netto:.2f} EUR</td>
+              </tr></tfoot>
+            </table>
+          </div>
+        </div>
+
+        <!-- Kosten-Tabelle -->
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">🧾 Belege (Rechnungen & Quittungen)</span>
+            <span style="font-size:13px;font-weight:600">{kosten_eur:.2f} EUR</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th>Datum</th><th>Art</th><th>Anbieter</th>
+                <th>Rechnungsnr.</th><th style="text-align:right">Betrag</th>
+                <th>MwSt-Hinweis</th><th>PDF</th>
+              </tr></thead>
+              <tbody>
+                {kosten_html or '<tr><td colspan="7" class="empty-state">Keine Rechnungen vorhanden</td></tr>'}
+                {summen_html}
+              </tbody>
+              <tfoot><tr style="border-top:2px solid var(--border);background:#f0fdf4">
+                <td colspan="4" style="text-align:right;font-weight:600;padding:10px 14px">
+                  Gesamt Kosten:</td>
+                <td style="text-align:right;font-weight:700;font-size:15px;
+                    color:#059669;padding:10px 14px">{kosten_eur:.2f} EUR</td>
+                <td colspan="2"></td>
+              </tr></tfoot>
+            </table>
+          </div>
+        </div>"""
+
+        return HTMLResponse(shell(f"Abschluss {rcode}", content, "reisen"))
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:500]}</pre>'))
+
+
 @app.get("/test-openai")
 async def test_openai():
     """Testet die OpenAI API-Verbindung."""
@@ -1995,7 +2379,8 @@ def reise_detail(code: str):
             {f'<div style="margin-top:8px;font-size:13px;color:var(--muted)">{notiz}</div>' if notiz else ''}
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <a href="/reise/{rcode}/uebersicht" class="btn btn-primary">📋 Übersicht</a>
+            <a href="/reise/{rcode}/abschluss" class="btn btn-primary">🧾 Abschluss</a>
+            <a href="/reise/{rcode}/uebersicht" class="btn btn-secondary">📋 Übersicht</a>
             <a href="/reise/{rcode}/bearbeiten" class="btn btn-secondary">✏ Bearbeiten</a>
           </div>
         </div>
