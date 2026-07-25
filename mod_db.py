@@ -268,4 +268,18 @@ def get_migrations() -> list[str]:
     return [
         "ALTER TABLE mitarbeiter ADD COLUMN email2 TEXT",
         "ALTER TABLE mitarbeiter ADD COLUMN email3 TEXT",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS reise_code TEXT",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS datum DATE",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS land_code TEXT",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS land_name TEXT",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS vma_satz_voll NUMERIC(6,2)",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS vma_satz_halb NUMERIC(6,2)",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS ist_halber_satz BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS fruehstueck BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS mittagessen BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS abendessen BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS vma_brutto NUMERIC(6,2)",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS vma_netto NUMERIC(6,2)",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS quelle TEXT DEFAULT 'auto'",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS notiz TEXT",
     ]

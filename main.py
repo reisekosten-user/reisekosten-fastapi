@@ -31,7 +31,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.2-f"
+APP_VERSION  = "2.2-g"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -1244,6 +1244,27 @@ def reise_uebersicht(code: str):
 
             rows_html += zeile
 
+        # Belege außerhalb des Reisezeitraums (z.B. Datum nach Rückkehr)
+        tage_im_bereich = {ab + timedelta(days=i) for i in range(tage_gesamt)}
+        ausserhalb = {d: bs for d, bs in belege_by_date.items()
+                      if d is not None and d not in tage_im_bereich}
+        if ausserhalb:
+            anzahl_ausserhalb = sum(len(bs) for bs in ausserhalb.values())
+            rows_html += (
+                f'<tr><td colspan="5" style="padding:10px 12px;font-size:12px;'
+                f'color:#b45309;font-style:italic">'
+                f'⚠ Belege außerhalb des Reisezeitraums ({anzahl_ausserhalb})</td></tr>'
+            )
+            for d in sorted(ausserhalb.keys()):
+                tag_html = "".join(beleg_zeile(b) for b in ausserhalb[d])
+                rows_html += (
+                    f'<tr><td style="padding:10px 12px;vertical-align:top;white-space:nowrap">'
+                    f'<div style="font-weight:600;color:#0d1b2a">{fmt_date(d)}</div></td>'
+                    f'<td colspan="3" style="padding:10px 12px;font-size:12px;color:#94a3b8">'
+                    f'liegt nicht im Reisezeitraum ({fmt_date(ab)} – {fmt_date(zu)})</td>'
+                    f'<td style="padding:10px 12px;vertical-align:top">{tag_html}</td></tr>'
+                )
+
         # Belege ohne Datum
         undated = belege_by_date.get(None, [])
         if undated:
@@ -1815,7 +1836,7 @@ def dashboard():
             elif typ=="geplant":
                 delta = (ab-today).days if ab else 0
                 badge = f'<span class="badge badge-blue">in {delta} Tagen</span>'
-                link_extra = ""
+                link_extra = f'<a href="/reise/{code}/uebersicht" style="font-size:11px;color:var(--muted);margin-left:8px">Übersicht</a>'
             else:
                 badge = '<span class="badge badge-gray">Abgeschlossen</span>'
                 link_extra = f'<a href="/reise/{code}/abschluss" style="font-size:11px;color:var(--muted);margin-left:8px">Abschluss</a>'
