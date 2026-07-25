@@ -55,6 +55,8 @@ def get_schema() -> list[str]:
             """CREATE TABLE IF NOT EXISTS mitarbeiter (
                 kuerzel     TEXT PRIMARY KEY,
                 klarname    TEXT NOT NULL,
+                email       TEXT,
+                rolle       TEXT DEFAULT 'reisender',
                 aktiv       BOOLEAN DEFAULT TRUE,
                 erstellt    TIMESTAMP DEFAULT NOW()
             )""",
@@ -160,6 +162,8 @@ def get_schema() -> list[str]:
             """CREATE TABLE IF NOT EXISTS mitarbeiter (
                 kuerzel     TEXT PRIMARY KEY,
                 klarname    TEXT NOT NULL,
+                email       TEXT,
+                rolle       TEXT DEFAULT 'reisender',
                 aktiv       INTEGER DEFAULT 1,
                 erstellt    TEXT DEFAULT (datetime('now'))
             )""",

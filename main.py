@@ -1,5 +1,5 @@
 """
-# v2.2-d – Neues Design: Blau, Logo groß, sauber
+# v2.2-e – Mitarbeiter: E-Mail + Rolle (Reisender/Organisator)
 Modulare Struktur – Einstiegspunkt
 """
 # v2.2-a – Modularisierung komplett
@@ -31,7 +31,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.2-d"
+APP_VERSION  = "2.2-e"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -1930,11 +1930,11 @@ def dashboard():
 def mitarbeiter_liste():
     try:
         db = get_db(); cur = db.cursor()
-        cur.execute("""SELECT m.kuerzel, m.klarname, m.aktiv,
+        cur.execute("""SELECT m.kuerzel, m.klarname, m.email, m.rolle, m.aktiv,
                        COUNT(rm.reise_code) as reise_count
                        FROM mitarbeiter m
                        LEFT JOIN reise_mitarbeiter rm ON rm.kuerzel = m.kuerzel
-                       GROUP BY m.kuerzel, m.klarname, m.aktiv
+                       GROUP BY m.kuerzel, m.klarname, m.email, m.rolle, m.aktiv
                        ORDER BY m.klarname""")
         rows = cur.fetchall()
         cur.close(); db.close()
@@ -1942,18 +1942,29 @@ def mitarbeiter_liste():
         def get(r, key, idx):
             return r[key] if hasattr(r, 'keys') else r[idx]
 
+        ROLLEN = {
+            "reisender": '<span class="badge badge-blue">✈ Reisender</span>',
+            "organisator": '<span class="badge badge-purple">📋 Organisator</span>',
+        }
+
         zeilen = ""
         for r in rows:
             kuerzel = get(r,"kuerzel",0)
             klarname = get(r,"klarname",1)
-            aktiv = get(r,"aktiv",2)
-            rcnt = get(r,"reise_count",3)
-            badge = ('<span class="badge badge-green">Aktiv</span>' if aktiv
-                     else '<span class="badge badge-gray">Inaktiv</span>')
+            email   = get(r,"email",2) or "–"
+            rolle   = get(r,"rolle",3) or "reisender"
+            aktiv   = get(r,"aktiv",4)
+            rcnt    = get(r,"reise_count",5)
+            aktiv_badge = ('<span class="badge badge-green">Aktiv</span>' if aktiv
+                           else '<span class="badge badge-gray">Inaktiv</span>')
+            rolle_badge = ROLLEN.get(rolle,
+                f'<span class="badge badge-gray">{rolle}</span>')
             zeilen += f"""<tr>
                 <td class="td-mono" style="font-weight:700">{kuerzel}</td>
                 <td style="font-weight:500">{klarname}</td>
-                <td>{badge}</td>
+                <td style="font-size:12px;color:var(--muted)">{email}</td>
+                <td>{rolle_badge}</td>
+                <td>{aktiv_badge}</td>
                 <td style="color:var(--muted)">{rcnt}</td>
                 <td>
                   <a href="/mitarbeiter/{kuerzel}/bearbeiten"
@@ -1970,7 +1981,8 @@ def mitarbeiter_liste():
           <div class="table-wrap">
             <table>
               <thead><tr>
-                <th>Kürzel</th><th>Name</th><th>Status</th><th>Reisen</th><th></th>
+                <th>Kürzel</th><th>Name</th><th>E-Mail</th><th>Rolle</th>
+                <th>Status</th><th>Reisen</th><th></th>
               </tr></thead>
               <tbody>
                 {zeilen or '<tr><td colspan="5"><div class="empty-state">Noch keine Mitarbeiter – <a href="/mitarbeiter/neu">Jetzt anlegen</a></div></td></tr>'}
@@ -1989,18 +2001,32 @@ def mitarbeiter_neu_form():
     <div class="card" style="max-width:480px">
       <div class="card-body">
         <form method="post" action="/mitarbeiter/neu">
-          <div class="form-grid">
+          <div class="form-grid form-grid-2">
             <div class="form-group">
               <label>Kürzel <span class="required">*</span></label>
               <input type="text" name="kuerzel" maxlength="5" required
                      placeholder="z.B. RD" style="text-transform:uppercase"
                      autofocus>
-              <div class="form-hint">2–5 Buchstaben, eindeutig pro Mitarbeiter</div>
+              <div class="form-hint">2–5 Buchstaben, eindeutig</div>
             </div>
             <div class="form-group">
               <label>Klarname <span class="required">*</span></label>
               <input type="text" name="klarname" required
                      placeholder="z.B. Ralf Diesslin">
+            </div>
+            <div class="form-group">
+              <label>E-Mail-Adresse</label>
+              <input type="email" name="email"
+                     placeholder="rdiesslin@herrhammer.de">
+              <div class="form-hint">Für automatische Beleg-Erkennung</div>
+            </div>
+            <div class="form-group">
+              <label>Rolle <span class="required">*</span></label>
+              <select name="rolle">
+                <option value="reisender">✈ Reisender</option>
+                <option value="organisator">📋 Organisator</option>
+              </select>
+              <div class="form-hint">Reisender = fährt selbst · Organisator = bucht für andere</div>
             </div>
           </div>
           <div class="form-actions">
@@ -2017,6 +2043,8 @@ async def mitarbeiter_neu(request: Request):
     form = await request.form()
     kuerzel = (form.get("kuerzel") or "").strip().upper()
     klarname = (form.get("klarname") or "").strip()
+    email   = (form.get("email") or "").strip() or None
+    rolle   = (form.get("rolle") or "reisender").strip()
     if not kuerzel or not klarname:
         return HTMLResponse(shell("Fehler",
             '<div class="alert alert-err">Kürzel und Name sind Pflichtfelder.</div>'
@@ -2028,8 +2056,8 @@ async def mitarbeiter_neu(request: Request):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
-        cur.execute(f"INSERT INTO mitarbeiter (kuerzel, klarname) VALUES ({P},{P})",
-                    (kuerzel, klarname))
+        cur.execute(f"INSERT INTO mitarbeiter (kuerzel, klarname, email, rolle) VALUES ({P},{P},{P},{P})",
+                    (kuerzel, klarname, email, rolle))
         db.commit(); cur.close(); db.close()
         return RedirectResponse("/mitarbeiter", status_code=303)
     except Exception as e:
@@ -2047,7 +2075,7 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
-        cur.execute(f"SELECT kuerzel, klarname, aktiv FROM mitarbeiter WHERE kuerzel={P}",
+        cur.execute(f"SELECT kuerzel, klarname, email, rolle, aktiv FROM mitarbeiter WHERE kuerzel={P}",
                     (kuerzel.upper(),))
         r = cur.fetchone()
         cur.close(); db.close()
@@ -2056,7 +2084,9 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
                 '<div class="alert alert-err">Mitarbeiter nicht gefunden.</div>'))
         k = r[0] if isinstance(r, tuple) else r["kuerzel"]
         n = r[1] if isinstance(r, tuple) else r["klarname"]
-        a = r[2] if isinstance(r, tuple) else r["aktiv"]
+        em = (r[2] if isinstance(r, tuple) else r.get("email","")) or ""
+        ro = (r[3] if isinstance(r, tuple) else r.get("rolle","reisender")) or "reisender"
+        a = r[4] if isinstance(r, tuple) else r["aktiv"]
         aktiv_check = "checked" if a else ""
         content = f"""
         <h1 class="page-title">Mitarbeiter bearbeiten</h1>
@@ -2072,6 +2102,20 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
                 <div class="form-group">
                   <label>Klarname <span class="required">*</span></label>
                   <input type="text" name="klarname" value="{n}" required autofocus>
+                </div>
+                <div class="form-group">
+                  <label>E-Mail-Adresse</label>
+                  <input type="email" name="email" value="{em}"
+                         placeholder="rdiesslin@herrhammer.de">
+                </div>
+                <div class="form-group">
+                  <label>Rolle</label>
+                  <select name="rolle">
+                    <option value="reisender" {"selected" if ro=="reisender" else ""}>
+                      ✈ Reisender</option>
+                    <option value="organisator" {"selected" if ro=="organisator" else ""}>
+                      📋 Organisator</option>
+                  </select>
                 </div>
                 <div class="form-group full">
                   <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -2096,7 +2140,9 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
 async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
     form = await request.form()
     klarname = (form.get("klarname") or "").strip()
-    aktiv = bool(form.get("aktiv"))
+    email    = (form.get("email") or "").strip() or None
+    rolle    = (form.get("rolle") or "reisender").strip()
+    aktiv    = bool(form.get("aktiv"))
     if not klarname:
         return HTMLResponse(shell("Fehler",
             '<div class="alert alert-err">Name darf nicht leer sein.</div>'))
@@ -2105,8 +2151,8 @@ async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
         P = ph()
         aktiv_val = True if is_postgres() else 1
         inaktiv_val = False if is_postgres() else 0
-        cur.execute(f"UPDATE mitarbeiter SET klarname={P}, aktiv={P} WHERE kuerzel={P}",
-                    (klarname, aktiv_val if aktiv else inaktiv_val, kuerzel.upper()))
+        cur.execute(f"UPDATE mitarbeiter SET klarname={P}, email={P}, rolle={P}, aktiv={P} WHERE kuerzel={P}",
+                    (klarname, email, rolle, aktiv_val if aktiv else inaktiv_val, kuerzel.upper()))
         db.commit(); cur.close(); db.close()
         return RedirectResponse("/mitarbeiter", status_code=303)
     except Exception as e:
