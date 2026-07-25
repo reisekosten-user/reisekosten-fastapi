@@ -1,5 +1,5 @@
 """
-# v2.1-m – Reise-Übersicht mit VMA-Tagen + Mahlzeiten
+# v2.1-n – f-string Syntax fix
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -557,7 +557,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-m"
+APP_VERSION = "2.1-n"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -2357,22 +2357,15 @@ def reise_uebersicht(code: str):
                     f'&nbsp;</td>'
                     f'<td style="padding:8px 12px">{badge}</td>'
                     f'<td style="padding:8px 12px;font-size:13px">'
-                    f'<b>{anbieter}</b>'
-                    f'{"<br><small style='color:#64748b;font-size:11px'>" + seg_info + "</small>" if seg_info else ""}'
-                    f'</td>'
-                    f'<td style="padding:8px 12px;text-align:right;font-weight:600;white-space:nowrap">'
-                    f'{bet_s}</td>'
-                    f'<td style="padding:8px 12px;white-space:nowrap">'
-                    f'<a href="/beleg/{bid}/pdf/original" target="_blank" '
-                    f'style="font-size:11px;color:#2563eb;border:0.5px solid #bfdbfe;'
-                    f'border-radius:4px;padding:2px 6px;text-decoration:none;margin-right:4px">Orig</a>'
-                    f'<a href="/beleg/{bid}/pdf/anon" target="_blank" '
-                    f'style="font-size:11px;color:#2563eb;border:0.5px solid #bfdbfe;'
-                    f'border-radius:4px;padding:2px 6px;text-decoration:none;margin-right:4px">Anon</a>'
-                    f'<a href="/beleg/{bid}/pdf/analyse" target="_blank" '
-                    f'style="font-size:11px;color:#2563eb;border:0.5px solid #bfdbfe;'
-                    f'border-radius:4px;padding:2px 6px;text-decoration:none">KI</a>'
-                    f'</td></tr>')
+                    f"<b>{anbieter}</b>"
+                    + (f'<br><small style="color:#64748b;font-size:11px">{seg_info}</small>' if seg_info else "")
+                    + f'</td>'
+                    + f'<td style="padding:8px 12px;text-align:right;font-weight:600;white-space:nowrap">{bet_s}</td>'
+                    + f'<td style="padding:8px 12px;white-space:nowrap">'
+                    + f'<a href="/beleg/{bid}/pdf/original" target="_blank" style="font-size:11px;color:#2563eb;border:0.5px solid #bfdbfe;border-radius:4px;padding:2px 6px;text-decoration:none;margin-right:4px">Orig</a>'
+                    + f'<a href="/beleg/{bid}/pdf/anon" target="_blank" style="font-size:11px;color:#2563eb;border:0.5px solid #bfdbfe;border-radius:4px;padding:2px 6px;text-decoration:none;margin-right:4px">Anon</a>'
+                    + f'<a href="/beleg/{bid}/pdf/analyse" target="_blank" style="font-size:11px;color:#2563eb;border:0.5px solid #bfdbfe;border-radius:4px;padding:2px 6px;text-decoration:none">KI</a>'
+                    + '</td></tr>')
 
             # Tages-Trennlinie
             rows_html += (
