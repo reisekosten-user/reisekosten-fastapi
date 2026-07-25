@@ -258,3 +258,14 @@ def get_schema() -> list[str]:
                 erstellt              TEXT DEFAULT (datetime('now'))
             )""",
         ]
+
+def get_migrations() -> list[str]:
+    """
+    Nachträgliche Schema-Änderungen für bestehende Datenbanken.
+    Wird über /init ausgeführt. Jede Anweisung läuft einzeln ab –
+    schlägt eine fehl (z.B. Spalte existiert schon), wird sie übersprungen.
+    """
+    return [
+        "ALTER TABLE mitarbeiter ADD COLUMN email2 TEXT",
+        "ALTER TABLE mitarbeiter ADD COLUMN email3 TEXT",
+    ]

@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 # ── Module importieren ────────────────────────────────────────────────────────
-from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schema
+from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schema, get_migrations
 from mod_vma import VMA_SAETZE, IATA_TO_LAND, LAENDER_LISTE, vma_fuer_land
 from mod_anon import anonymisieren
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
@@ -1705,7 +1705,14 @@ def init():
         db = get_db(); cur = db.cursor()
         for sql in get_schema():
             cur.execute(sql)
-        db.commit(); cur.close(); db.close()
+        db.commit()
+        for sql in get_migrations():
+            try:
+                cur.execute(sql)
+                db.commit()
+            except Exception:
+                db.rollback()
+        cur.close(); db.close()
         return {"status": "ok", "version": APP_VERSION,
                 "db": "postgresql" if is_postgres() else "sqlite"}
     except Exception as e:
@@ -1982,11 +1989,11 @@ def dashboard():
 def mitarbeiter_liste():
     try:
         db = get_db(); cur = db.cursor()
-        cur.execute("""SELECT m.kuerzel, m.klarname, m.email, m.rolle, m.aktiv,
+        cur.execute("""SELECT m.kuerzel, m.klarname, m.email, m.email2, m.email3, m.rolle, m.aktiv,
                        COUNT(rm.reise_code) as reise_count
                        FROM mitarbeiter m
                        LEFT JOIN reise_mitarbeiter rm ON rm.kuerzel = m.kuerzel
-                       GROUP BY m.kuerzel, m.klarname, m.email, m.rolle, m.aktiv
+                       GROUP BY m.kuerzel, m.klarname, m.email, m.email2, m.email3, m.rolle, m.aktiv
                        ORDER BY m.klarname""")
         rows = cur.fetchall()
         cur.close(); db.close()
@@ -2003,10 +2010,11 @@ def mitarbeiter_liste():
         for r in rows:
             kuerzel = get(r,"kuerzel",0)
             klarname = get(r,"klarname",1)
-            email   = get(r,"email",2) or "–"
-            rolle   = get(r,"rolle",3) or "reisender"
-            aktiv   = get(r,"aktiv",4)
-            rcnt    = get(r,"reise_count",5)
+            email_liste = [get(r,"email",2), get(r,"email2",3), get(r,"email3",4)]
+            email   = "<br>".join(e for e in email_liste if e) or "–"
+            rolle   = get(r,"rolle",5) or "reisender"
+            aktiv   = get(r,"aktiv",6)
+            rcnt    = get(r,"reise_count",7)
             aktiv_badge = ('<span class="badge badge-green">Aktiv</span>' if aktiv
                            else '<span class="badge badge-gray">Inaktiv</span>')
             rolle_badge = ROLLEN.get(rolle,
@@ -2067,10 +2075,18 @@ def mitarbeiter_neu_form():
                      placeholder="z.B. Ralf Diesslin">
             </div>
             <div class="form-group">
-              <label>E-Mail-Adresse</label>
+              <label>E-Mail-Adresse 1</label>
               <input type="email" name="email"
                      placeholder="rdiesslin@herrhammer.de">
               <div class="form-hint">Für automatische Beleg-Erkennung</div>
+            </div>
+            <div class="form-group">
+              <label>E-Mail-Adresse 2</label>
+              <input type="email" name="email2" placeholder="optional">
+            </div>
+            <div class="form-group">
+              <label>E-Mail-Adresse 3</label>
+              <input type="email" name="email3" placeholder="optional">
             </div>
             <div class="form-group">
               <label>Rolle <span class="required">*</span></label>
@@ -2096,6 +2112,8 @@ async def mitarbeiter_neu(request: Request):
     kuerzel = (form.get("kuerzel") or "").strip().upper()
     klarname = (form.get("klarname") or "").strip()
     email   = (form.get("email") or "").strip() or None
+    email2  = (form.get("email2") or "").strip() or None
+    email3  = (form.get("email3") or "").strip() or None
     rolle   = (form.get("rolle") or "reisender").strip()
     if not kuerzel or not klarname:
         return HTMLResponse(shell("Fehler",
@@ -2108,8 +2126,8 @@ async def mitarbeiter_neu(request: Request):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
-        cur.execute(f"INSERT INTO mitarbeiter (kuerzel, klarname, email, rolle) VALUES ({P},{P},{P},{P})",
-                    (kuerzel, klarname, email, rolle))
+        cur.execute(f"INSERT INTO mitarbeiter (kuerzel, klarname, email, email2, email3, rolle) VALUES ({P},{P},{P},{P},{P},{P})",
+                    (kuerzel, klarname, email, email2, email3, rolle))
         db.commit(); cur.close(); db.close()
         return RedirectResponse("/mitarbeiter", status_code=303)
     except Exception as e:
@@ -2127,7 +2145,7 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
-        cur.execute(f"SELECT kuerzel, klarname, email, rolle, aktiv FROM mitarbeiter WHERE kuerzel={P}",
+        cur.execute(f"SELECT kuerzel, klarname, email, rolle, aktiv, email2, email3 FROM mitarbeiter WHERE kuerzel={P}",
                     (kuerzel.upper(),))
         r = cur.fetchone()
         cur.close(); db.close()
@@ -2139,6 +2157,8 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
         em = (r[2] if isinstance(r, tuple) else r.get("email","")) or ""
         ro = (r[3] if isinstance(r, tuple) else r.get("rolle","reisender")) or "reisender"
         a = r[4] if isinstance(r, tuple) else r["aktiv"]
+        em2 = (r[5] if isinstance(r, tuple) else r.get("email2","")) or ""
+        em3 = (r[6] if isinstance(r, tuple) else r.get("email3","")) or ""
         aktiv_check = "checked" if a else ""
         content = f"""
         <h1 class="page-title">Mitarbeiter bearbeiten</h1>
@@ -2156,9 +2176,17 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
                   <input type="text" name="klarname" value="{n}" required autofocus>
                 </div>
                 <div class="form-group">
-                  <label>E-Mail-Adresse</label>
+                  <label>E-Mail-Adresse 1</label>
                   <input type="email" name="email" value="{em}"
                          placeholder="rdiesslin@herrhammer.de">
+                </div>
+                <div class="form-group">
+                  <label>E-Mail-Adresse 2</label>
+                  <input type="email" name="email2" value="{em2}" placeholder="optional">
+                </div>
+                <div class="form-group">
+                  <label>E-Mail-Adresse 3</label>
+                  <input type="email" name="email3" value="{em3}" placeholder="optional">
                 </div>
                 <div class="form-group">
                   <label>Rolle</label>
@@ -2193,6 +2221,8 @@ async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
     form = await request.form()
     klarname = (form.get("klarname") or "").strip()
     email    = (form.get("email") or "").strip() or None
+    email2   = (form.get("email2") or "").strip() or None
+    email3   = (form.get("email3") or "").strip() or None
     rolle    = (form.get("rolle") or "reisender").strip()
     aktiv    = bool(form.get("aktiv"))
     if not klarname:
@@ -2203,8 +2233,8 @@ async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
         P = ph()
         aktiv_val = True if is_postgres() else 1
         inaktiv_val = False if is_postgres() else 0
-        cur.execute(f"UPDATE mitarbeiter SET klarname={P}, email={P}, rolle={P}, aktiv={P} WHERE kuerzel={P}",
-                    (klarname, email, rolle, aktiv_val if aktiv else inaktiv_val, kuerzel.upper()))
+        cur.execute(f"UPDATE mitarbeiter SET klarname={P}, email={P}, email2={P}, email3={P}, rolle={P}, aktiv={P} WHERE kuerzel={P}",
+                    (klarname, email, email2, email3, rolle, aktiv_val if aktiv else inaktiv_val, kuerzel.upper()))
         db.commit(); cur.close(); db.close()
         return RedirectResponse("/mitarbeiter", status_code=303)
     except Exception as e:

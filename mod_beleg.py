@@ -344,10 +344,16 @@ def lade_ma_daten() -> tuple:
     """Lädt Mitarbeiternamen aus DB für Anonymisierung."""
     try:
         db = get_db(); cur = db.cursor()
-        cur.execute("SELECT klarname FROM mitarbeiter")
-        namen = [r[0] if isinstance(r, tuple) else r["klarname"] for r in cur.fetchall()]
+        cur.execute("SELECT klarname, email, email2, email3 FROM mitarbeiter")
+        rows = cur.fetchall()
         cur.close(); db.close()
+        namen = [r[0] if isinstance(r, tuple) else r["klarname"] for r in rows]
         mails = [IMAP_USER] if IMAP_USER else []
+        for r in rows:
+            for idx in (1, 2, 3):
+                val = r[idx] if isinstance(r, tuple) else r[["email","email2","email3"][idx-1]]
+                if val:
+                    mails.append(val)
         return namen, mails
     except: return [], []
 
