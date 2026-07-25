@@ -1,5 +1,5 @@
 """
-# v2.2-b – Abschluss-Übersicht + Wechselkurs + Logo
+# v2.2-d – Neues Design: Blau, Logo groß, sauber
 Modulare Struktur – Einstiegspunkt
 """
 # v2.2-a – Modularisierung komplett
@@ -31,84 +31,149 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.2-b"
+APP_VERSION  = "2.2-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
 CSS = """
 :root {
-    --bg: #f8fafc; --white: #ffffff; --border: #e2e8f0;
-    --text: #0f172a; --muted: #64748b; --light: #94a3b8;
-    --blue: #2563eb; --blue-d: #1d4ed8; --blue-l: #eff6ff;
-    --green: #059669; --green-l: #ecfdf5;
-    --amber: #d97706; --amber-l: #fffbeb;
-    --red: #dc2626; --red-l: #fef2f2;
-    --radius: 8px; --radius-s: 6px;
-    --shadow: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.04);
-    --shadow-md: 0 4px 6px rgba(0,0,0,.07), 0 2px 4px rgba(0,0,0,.04);
+    --bg: #f0f4f8;
+    --white: #ffffff;
+    --border: #dde3ea;
+    --border-strong: #c4cdd8;
+    --text: #0d1b2a;
+    --muted: #5a6a7a;
+    --light: #8fa0b0;
+    --blue: #1a56db;
+    --blue-d: #1344b8;
+    --blue-l: #eff4ff;
+    --blue-nav: #0f2d6e;
+    --green: #047857;
+    --green-l: #ecfdf5;
+    --amber: #b45309;
+    --amber-l: #fffbeb;
+    --red: #c81e1e;
+    --red-l: #fef2f2;
+    --radius: 10px;
+    --radius-s: 6px;
+    --shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+    --shadow-md: 0 4px 12px rgba(0,0,0,.08);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-       background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+}
 
 /* Navigation */
 nav {
-    background: #1e293b; padding: 0 24px;
-    display: flex; align-items: center; gap: 0;
-    position: sticky; top: 0; z-index: 100;
-    box-shadow: 0 2px 8px rgba(0,0,0,.2);
-    height: 52px;
+    background: linear-gradient(135deg, #0f2d6e 0%, #1a56db 100%);
+    padding: 0 28px;
+    display: flex;
+    align-items: center;
+    gap: 0;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 2px 12px rgba(15,45,110,.3);
+    height: 60px;
 }
 .nav-brand {
-    color: #f1f5f9; font-weight: 700; font-size: 15px;
-    margin-right: 24px; white-space: nowrap;
+    display: flex;
+    align-items: center;
+    margin-right: 32px;
+    padding: 4px 0;
     text-decoration: none;
+    flex-shrink: 0;
+}
+.nav-brand img {
+    height: 42px;
+    width: auto;
+    filter: brightness(0) invert(1);
+    opacity: 0.95;
 }
 .nav-link {
-    color: #94a3b8; text-decoration: none; font-size: 13px; font-weight: 500;
-    padding: 16px 12px; border-bottom: 2px solid transparent;
-    transition: color .15s, border-color .15s; white-space: nowrap;
+    color: rgba(255,255,255,0.7);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 20px 14px;
+    border-bottom: 3px solid transparent;
+    transition: color .15s, border-color .15s;
+    white-space: nowrap;
+    letter-spacing: .01em;
 }
-.nav-link:hover { color: #f1f5f9; }
-.nav-link.active { color: #f1f5f9; border-bottom-color: #3b82f6; }
-.nav-right { margin-left: auto; font-size: 11px; color: #475569; }
+.nav-link:hover { color: white; border-bottom-color: rgba(255,255,255,0.4); }
+.nav-link.active { color: white; border-bottom-color: #60a5fa; }
+.nav-right { margin-left: auto; font-size: 11px; color: rgba(255,255,255,0.4);
+             font-family: monospace; letter-spacing:.05em; }
 
 /* Layout */
-main { padding: 28px 24px; max-width: 1100px; margin: 0 auto; }
-.page-title { font-size: 22px; font-weight: 700; color: var(--text); margin-bottom: 20px; }
+main { padding: 28px 28px; max-width: 1200px; margin: 0 auto; }
+.page-title { font-size: 22px; font-weight: 700; color: var(--text); margin-bottom: 20px;
+              letter-spacing: -.02em; }
 
 /* Karten */
 .card {
-    background: var(--white); border: 1px solid var(--border);
-    border-radius: var(--radius); box-shadow: var(--shadow);
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
     margin-bottom: 16px;
 }
 .card-header {
-    padding: 14px 20px; border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #fafbfc;
+    border-radius: var(--radius) var(--radius) 0 0;
 }
-.card-title { font-size: 15px; font-weight: 600; }
+.card-title { font-size: 14px; font-weight: 600; color: var(--text); }
 .card-body { padding: 20px; }
+
+/* Stat-Karten */
+.stat-card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 20px;
+    text-align: center;
+    transition: box-shadow .15s, transform .15s;
+}
+.stat-card:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.stat-num { font-size: 32px; font-weight: 700; letter-spacing: -.03em; }
+.stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; font-weight: 500; }
 
 /* Buttons */
 .btn {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 8px 16px; border-radius: var(--radius-s);
-    font-size: 13px; font-weight: 600; cursor: pointer;
-    text-decoration: none; border: none; transition: all .15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border-radius: var(--radius-s);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    border: none;
+    transition: all .15s;
     white-space: nowrap;
+    letter-spacing: .01em;
 }
 .btn-primary { background: var(--blue); color: white; }
-.btn-primary:hover { background: var(--blue-d); }
+.btn-primary:hover { background: var(--blue-d); box-shadow: 0 2px 8px rgba(26,86,219,.3); }
 .btn-success { background: var(--green); color: white; }
-.btn-success:hover { background: #047857; }
-.btn-secondary {
-    background: white; color: #374151;
-    border: 1px solid var(--border);
-}
-.btn-secondary:hover { background: #f9fafb; border-color: #9ca3af; }
+.btn-success:hover { background: #036545; }
+.btn-secondary { background: white; color: #374151; border: 1px solid var(--border); }
+.btn-secondary:hover { background: #f9fafb; border-color: var(--border-strong); }
 .btn-danger { background: var(--red); color: white; }
-.btn-danger:hover { background: #b91c1c; }
+.btn-danger:hover { background: #a31717; }
 .btn-sm { padding: 5px 10px; font-size: 12px; }
 
 /* Formulare */
@@ -117,74 +182,120 @@ main { padding: 28px 24px; max-width: 1100px; margin: 0 auto; }
 .form-grid-3 { grid-template-columns: 1fr 1fr 1fr; }
 .form-group { display: flex; flex-direction: column; gap: 4px; }
 .form-group.full { grid-column: 1 / -1; }
-label { font-size: 12px; font-weight: 600; color: #374151; }
+label { font-size: 12px; font-weight: 600; color: #374151; letter-spacing: .01em; }
 .required { color: var(--red); margin-left: 2px; }
 input[type="text"], input[type="date"], input[type="email"],
 input[type="number"], select, textarea {
-    width: 100%; padding: 8px 12px;
-    border: 1px solid var(--border); border-radius: var(--radius-s);
-    font-size: 13px; background: white; color: var(--text);
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    font-size: 13px;
+    background: white;
+    color: var(--text);
     transition: border-color .15s, box-shadow .15s;
 }
 input:focus, select:focus, textarea:focus {
-    outline: none; border-color: var(--blue);
-    box-shadow: 0 0 0 3px rgba(37,99,235,.1);
+    outline: none;
+    border-color: var(--blue);
+    box-shadow: 0 0 0 3px rgba(26,86,219,.1);
 }
 .form-hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .form-actions {
-    display: flex; gap: 8px; padding-top: 16px;
-    border-top: 1px solid var(--border); margin-top: 20px;
+    display: flex;
+    gap: 8px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    margin-top: 20px;
 }
 
 /* Tabellen */
-.table-wrap { overflow-x: auto; }
+.table-wrap { overflow-x: auto; border-radius: 0 0 var(--radius) var(--radius); }
 table { width: 100%; border-collapse: collapse; }
 th {
-    text-align: left; padding: 10px 14px;
-    font-size: 11px; font-weight: 700; color: var(--muted);
-    text-transform: uppercase; letter-spacing: .05em;
+    text-align: left;
+    padding: 9px 14px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .06em;
     border-bottom: 1px solid var(--border);
-    background: #f8fafc; white-space: nowrap;
+    background: #fafbfc;
+    white-space: nowrap;
 }
 td {
-    padding: 11px 14px; font-size: 13px;
-    border-bottom: 1px solid #f1f5f9; vertical-align: middle;
+    padding: 11px 14px;
+    font-size: 13px;
+    border-bottom: 1px solid #f3f4f6;
+    vertical-align: middle;
 }
 tr:last-child td { border-bottom: none; }
-tr:hover td { background: #fafafa; }
+tr:hover td { background: #fafbfe; }
 .td-mono { font-family: "SF Mono", "Fira Code", monospace; font-size: 12px; }
 
 /* Badges */
 .badge {
-    display: inline-block; padding: 2px 8px; border-radius: 4px;
-    font-size: 11px; font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .02em;
 }
-.badge-blue { background: var(--blue-l); color: var(--blue); }
-.badge-green { background: var(--green-l); color: var(--green); }
-.badge-amber { background: var(--amber-l); color: var(--amber); }
-.badge-red { background: var(--red-l); color: var(--red); }
-.badge-gray { background: #f1f5f9; color: var(--muted); }
+.badge-blue { background: #dbeafe; color: #1e40af; }
+.badge-green { background: #d1fae5; color: #065f46; }
+.badge-amber { background: #fef3c7; color: #92400e; }
+.badge-red { background: var(--red-l); color: #991b1b; }
+.badge-gray { background: #f3f4f6; color: #6b7280; }
+.badge-purple { background: #ede9fe; color: #5b21b6; }
 
 /* Alerts */
-.alert { padding: 12px 16px; border-radius: var(--radius); font-size: 13px; margin-bottom: 16px; }
-.alert-ok { background: var(--green-l); border: 1px solid #6ee7b7; color: #065f46; }
-.alert-warn { background: var(--amber-l); border: 1px solid #fcd34d; color: #92400e; }
-.alert-err { background: var(--red-l); border: 1px solid #fca5a5; color: #991b1b; }
+.alert {
+    padding: 12px 16px;
+    border-radius: var(--radius-s);
+    font-size: 13px;
+    margin-bottom: 16px;
+    border-left: 4px solid;
+}
+.alert-ok { background: var(--green-l); border-color: #34d399; color: #065f46; }
+.alert-warn { background: var(--amber-l); border-color: #fbbf24; color: #92400e; }
+.alert-err { background: var(--red-l); border-color: #f87171; color: #991b1b; }
+.alert-info { background: var(--blue-l); border-color: #93c5fd; color: #1e40af; }
 
 /* Leerer Zustand */
-.empty-state {
-    text-align: center; padding: 48px 20px; color: var(--light);
-}
+.empty-state { text-align: center; padding: 40px 20px; color: var(--light); }
 .empty-state p { margin-top: 8px; font-size: 13px; }
 
-/* VMA-Tabelle Farben */
-.vma-row-de { background: #f0fdf4; }
-.vma-row-eu { background: #eff6ff; }
-.vma-row-int { background: #fafafa; }
+/* Reise-Sektion Header */
+.sektion-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 24px 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--border);
+}
+.sektion-titel {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+}
+.sektion-count {
+    background: var(--blue-l);
+    color: var(--blue);
+    padding: 2px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 700;
+}
 
 @media (max-width: 640px) {
     .form-grid-2, .form-grid-3 { grid-template-columns: 1fr; }
     main { padding: 16px; }
+    nav { padding: 0 16px; }
 }
 """
 
@@ -1642,116 +1753,165 @@ def dashboard():
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
+        today = date.today()
 
-        cur.execute("SELECT COUNT(*) FROM mitarbeiter WHERE aktiv = TRUE" if is_postgres()
+        # Mitarbeiter
+        cur.execute("SELECT COUNT(*) FROM mitarbeiter WHERE aktiv = TRUE"
+                    if is_postgres()
                     else "SELECT COUNT(*) FROM mitarbeiter WHERE aktiv = 1")
         ma_count = cur.fetchone()[0]
 
-        cur.execute("SELECT COUNT(*) FROM reisen")
-        r_count = cur.fetchone()[0]
-
-        today = date.today()
-        if is_postgres():
-            cur.execute("SELECT COUNT(*) FROM reisen WHERE abreise <= %s AND rueckkehr >= %s",
-                        (today, today))
-        else:
-            cur.execute("SELECT COUNT(*) FROM reisen WHERE abreise <= ? AND rueckkehr >= ?",
-                        (str(today), str(today)))
-        aktiv_count = cur.fetchone()[0]
-
-        # Aktuelle und kommende Reisen
+        # Alle Reisen mit Mitarbeitern
         if is_postgres():
             cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
-                           STRING_AGG(rm.kuerzel, ', ' ORDER BY rm.kuerzel) as ma
-                           FROM reisen r
-                           LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
-                           WHERE r.rueckkehr >= %s
-                           GROUP BY r.code, r.titel, r.abreise, r.rueckkehr
-                           ORDER BY r.abreise
-                           LIMIT 10""", (today,))
+                STRING_AGG(rm.kuerzel, ', ' ORDER BY rm.kuerzel) as ma
+                FROM reisen r
+                LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
+                GROUP BY r.code, r.titel, r.abreise, r.rueckkehr
+                ORDER BY r.abreise DESC""")
         else:
             cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
-                           GROUP_CONCAT(rm.kuerzel, ', ') as ma
-                           FROM reisen r
-                           LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
-                           WHERE r.rueckkehr >= ?
-                           GROUP BY r.code, r.titel, r.abreise, r.rueckkehr
-                           ORDER BY r.abreise
-                           LIMIT 10""", (str(today),))
-        rows = cur.fetchall()
-        # Unzugeordnete Belege zaehlen
+                GROUP_CONCAT(rm.kuerzel, ', ') as ma
+                FROM reisen r
+                LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
+                GROUP BY r.code, r.titel, r.abreise, r.rueckkehr
+                ORDER BY r.abreise DESC""")
+        alle_reisen = cur.fetchall()
+
+        # Unzugeordnete Belege
         try:
             cur.execute("SELECT COUNT(*) FROM belege WHERE reise_code IS NULL")
             unzugeordnet = cur.fetchone()[0]
-        except:
-            unzugeordnet = 0
+        except: unzugeordnet = 0
         cur.close(); db.close()
 
-        def status_badge(ab, zu):
-            if isinstance(ab, str): ab = date.fromisoformat(ab)
-            if isinstance(zu, str): zu = date.fromisoformat(zu)
-            if today < ab:
-                tage = (ab - today).days
-                return f'<span class="badge badge-blue">In {tage} Tag{"en" if tage!=1 else ""}</span>'
-            elif today <= zu:
-                return '<span class="badge badge-green">● Aktiv</span>'
-            else:
-                return '<span class="badge badge-gray">Fertig</span>'
+        def to_date(v):
+            if isinstance(v, date): return v
+            try: return date.fromisoformat(str(v)[:10])
+            except: return None
 
-        reise_rows = ""
-        for r in rows:
-            code, titel, ab, zu, ma = (r if isinstance(r, tuple)
-                                        else (r["code"],r["titel"],r["abreise"],r["rueckkehr"],r["ma"]))
-            reise_rows += f"""<tr>
-                <td><a href="/reise/{code}" class="td-mono" style="color:var(--blue)">{code}</a></td>
-                <td style="font-weight:500"><a href="/reise/{code}" style="color:inherit;text-decoration:none">{titel}</a></td>
+        def get(r,k,i): return r[k] if hasattr(r,'keys') else r[i]
+
+        # In 3 Gruppen aufteilen
+        aktiv = []; geplant = []; abgeschlossen = []
+        for r in alle_reisen:
+            ab = to_date(get(r,"abreise",2))
+            zu = to_date(get(r,"rueckkehr",3))
+            if not ab or not zu:
+                geplant.append(r)
+            elif today < ab:
+                geplant.append(r)
+            elif today <= zu:
+                aktiv.append(r)
+            else:
+                abgeschlossen.append(r)
+
+        def reise_zeile(r, typ=""):
+            code=get(r,"code",0); titel=get(r,"titel",1)
+            ab=to_date(get(r,"abreise",2)); zu=to_date(get(r,"rueckkehr",3))
+            ma=get(r,"ma",4) or "–"
+            tage = (zu-ab).days+1 if ab and zu else "?"
+            if typ=="aktiv":
+                badge = '<span class="badge badge-green">● Aktiv</span>'
+                link_extra = f'<a href="/reise/{code}/uebersicht" style="font-size:11px;color:var(--muted);margin-left:8px">Übersicht</a>'
+            elif typ=="geplant":
+                delta = (ab-today).days if ab else 0
+                badge = f'<span class="badge badge-blue">in {delta} Tagen</span>'
+                link_extra = ""
+            else:
+                badge = '<span class="badge badge-gray">Abgeschlossen</span>'
+                link_extra = f'<a href="/reise/{code}/abschluss" style="font-size:11px;color:var(--muted);margin-left:8px">Abschluss</a>'
+            return f"""<tr>
+                <td><a href="/reise/{code}" class="td-mono"
+                    style="color:var(--blue);font-weight:600">{code}</a>{link_extra}</td>
+                <td style="font-weight:500">
+                  <a href="/reise/{code}" style="color:inherit;text-decoration:none">{titel}</a>
+                </td>
                 <td>{fmt_date(ab)}</td>
                 <td>{fmt_date(zu)}</td>
-                <td style="color:var(--muted)">{ma or "–"}</td>
-                <td>{status_badge(ab, zu)}</td>
+                <td style="color:var(--muted)">{ma}</td>
+                <td style="text-align:center;color:var(--muted)">{tage}</td>
+                <td>{badge}</td>
             </tr>"""
 
-        content = f"""
-        <h1 class="page-title">Dashboard</h1>
-        {f'<a href="/unzugeordnet" style="display:inline-flex;align-items:center;gap:8px;'
-          f'background:#fef2f2;border:1px solid #fca5a5;color:#991b1b;'
-          f'padding:10px 16px;border-radius:8px;text-decoration:none;font-weight:600;'
-          f'margin-bottom:20px;font-size:13px">'
-          f'⚠ {unzugeordnet} Beleg{"e" if unzugeordnet!=1 else ""} ohne Reisezuordnung → Jetzt zuordnen'
-          f'</a>' if unzugeordnet > 0 else ''}
+        def sektion(titel_s, emoji, rows, typ, limit=None):
+            if not rows:
+                return f"""<div class="card" style="margin-bottom:16px">
+                  <div class="card-header">
+                    <span class="card-title">{emoji} {titel_s} (0)</span>
+                    <a href="/reisen/neu" class="btn btn-primary btn-sm">+ Neue Reise</a>
+                  </div>
+                  <div class="empty-state"><p>Keine {titel_s.lower()}</p></div>
+                </div>"""
+            anzeige = rows[:limit] if limit else rows
+            mehr = len(rows) - len(anzeige)
+            zeilen = "".join(reise_zeile(r, typ) for r in anzeige)
+            mehr_link = (f'<tr><td colspan="7" style="text-align:center;padding:10px;'
+                         f'font-size:12px;color:var(--muted)">'
+                         f'<a href="/reisen" style="color:var(--blue)">'
+                         f'+ {mehr} weitere anzeigen →</a></td></tr>') if mehr else ""
+            return f"""<div class="sektion-header">
+              <span class="sektion-titel">{emoji} {titel_s}</span>
+              <span class="sektion-count">{len(rows)}</span>
+              <div style="margin-left:auto">
+                <a href="/reisen/neu" class="btn btn-primary btn-sm">+ Neue Reise</a>
+              </div>
+            </div>
+            <div class="card" style="margin-bottom:16px">
+              <div class="table-wrap"><table>
+                <thead><tr>
+                  <th>Code</th><th>Titel</th><th>Abreise</th>
+                  <th>Rückkehr</th><th>Mitarbeiter</th><th style="text-align:center">Tage</th>
+                  <th>Status</th>
+                </tr></thead>
+                <tbody>{zeilen}{mehr_link}</tbody>
+              </table></div>
+            </div>"""
 
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px">
-          <div class="card"><div class="card-body" style="text-align:center">
-            <div style="font-size:36px;font-weight:700;color:var(--blue)">{ma_count}</div>
-            <div style="color:var(--muted);font-size:12px;margin-top:4px">Aktive Mitarbeiter</div>
-          </div></div>
-          <div class="card"><div class="card-body" style="text-align:center">
-            <div style="font-size:36px;font-weight:700;color:var(--green)">{aktiv_count}</div>
-            <div style="color:var(--muted);font-size:12px;margin-top:4px">Laufende Reisen</div>
-          </div></div>
-          <div class="card"><div class="card-body" style="text-align:center">
-            <div style="font-size:36px;font-weight:700;color:var(--text)">{r_count}</div>
-            <div style="color:var(--muted);font-size:12px;margin-top:4px">Reisen gesamt</div>
-          </div></div>
+        warn_html = (
+            f'<a href="/unzugeordnet" style="display:inline-flex;align-items:center;'
+            f'gap:8px;background:#fef2f2;border:1px solid #fca5a5;color:#991b1b;'
+            f'padding:10px 16px;border-radius:8px;text-decoration:none;font-weight:600;'
+            f'margin-bottom:20px;font-size:13px">'
+            f'⚠ {unzugeordnet} Beleg{"e" if unzugeordnet!=1 else ""} ohne Reisezuordnung'
+            f' → Jetzt zuordnen</a>'
+        ) if unzugeordnet > 0 else ""
+
+        content = f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    margin-bottom:20px">
+          <h1 class="page-title" style="margin:0">Dashboard</h1>
+          <div style="display:flex;gap:8px">
+            <a href="/mails-abrufen" class="btn btn-success">📬 Mails abrufen</a>
+            <a href="/beleg/upload" class="btn btn-secondary">📎 Beleg hochladen</a>
+          </div>
         </div>
 
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">Aktuelle & kommende Reisen</span>
-            <a href="/reisen/neu" class="btn btn-primary btn-sm">+ Neue Reise</a>
+        {warn_html}
+
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px">
+          <div class="stat-card" style="border-top:3px solid var(--green)">
+            <div class="stat-num" style="color:var(--green)">{len(aktiv)}</div>
+            <div class="stat-label">🟢 Aktive Reisen</div>
           </div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr>
-                <th>Code</th><th>Titel</th><th>Abreise</th>
-                <th>Rückkehr</th><th>Mitarbeiter</th><th>Status</th>
-              </tr></thead>
-              <tbody>
-                {reise_rows or '<tr><td colspan="6"><div class="empty-state">Keine Reisen – <a href="/reisen/neu">Erste Reise anlegen</a></div></td></tr>'}
-              </tbody>
-            </table>
+          <div class="stat-card" style="border-top:3px solid var(--blue)">
+            <div class="stat-num" style="color:var(--blue)">{len(geplant)}</div>
+            <div class="stat-label">📋 In Planung</div>
           </div>
-        </div>"""
+          <div class="stat-card" style="border-top:3px solid var(--border-strong)">
+            <div class="stat-num" style="color:var(--muted)">{len(abgeschlossen)}</div>
+            <div class="stat-label">✓ Abgeschlossen</div>
+          </div>
+          <div class="stat-card" style="border-top:3px solid #8b5cf6">
+            <div class="stat-num" style="color:#5b21b6">{ma_count}</div>
+            <div class="stat-label">👤 Mitarbeiter</div>
+          </div>
+        </div>
+
+        {sektion("Aktuelle Reisen", "🟢", aktiv, "aktiv")}
+        {sektion("In Planung", "📋", geplant, "geplant")}
+        {sektion("Abgeschlossen", "✓", abgeschlossen, "abgeschlossen", limit=5)}
+        """
         return HTMLResponse(shell("Dashboard", content, "start"))
     except Exception as e:
         import traceback
@@ -1763,6 +1923,7 @@ def dashboard():
         </div>
         <pre style="font-size:11px;color:var(--muted)">{traceback.format_exc()[:500]}</pre>
         """))
+
 
 # ── Mitarbeiter ────────────────────────────────────────────────────────────────
 @app.get("/mitarbeiter", response_class=HTMLResponse)
