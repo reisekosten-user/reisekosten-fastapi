@@ -1,5 +1,5 @@
 """
-# v2.1-p – Bessere API-Fehlerausgabe
+# v2.1-q – Posteingang Query fix + alte Spaltennamen
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -557,7 +557,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-p"
+APP_VERSION = "2.1-q"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -1519,8 +1519,9 @@ def belege_unzugeordnet():
     """Alle Belege ohne Reisezuordnung – müssen zugeordnet werden."""
     try:
         db = get_db(); cur = db.cursor()
-        cur.execute("""SELECT id, typ, dateiname, vendor, betrag, waehrung,
-            belegdatum, ki_zusammenfassung, erstellt
+        cur.execute("""SELECT id, transportart, transportart_freitext,
+            dateiname, anbieter, betrag_brutto, waehrung,
+            belegdatum, status, erstellt
             FROM belege WHERE reise_code IS NULL
             ORDER BY erstellt DESC""")
         rows = cur.fetchall()
@@ -1556,10 +1557,11 @@ def belege_unzugeordnet():
 
         karten = ""
         for r in rows:
-            bid=get(r,"id",0); typ=get(r,"typ",1); datei=get(r,"dateiname",2)
-            vendor=get(r,"vendor",3); betrag=get(r,"betrag",4)
-            waehrung=get(r,"waehrung",5); bd=get(r,"belegdatum",6)
-            zusamm=get(r,"ki_zusammenfassung",7)
+            bid=get(r,"id",0); typ=get(r,"transportart",1)
+            freitext=get(r,"transportart_freitext",2) or ""
+            datei=get(r,"dateiname",3); vendor=get(r,"anbieter",4)
+            betrag=get(r,"betrag_brutto",5); waehrung=get(r,"waehrung",6)
+            bd=get(r,"belegdatum",7); zusamm=get(r,"status",8)
 
             tc = typ_farben.get(typ or "Sonstiges","#f1f5f9:#475569").split(":")
             typ_badge = (f'<span style="background:{tc[0]};color:{tc[1]};'
