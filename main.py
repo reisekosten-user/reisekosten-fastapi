@@ -1,5 +1,5 @@
 """
-# v2.1-i – Bild-Upscaling für bessere OCR-Qualität
+# v2.1-j – PNG RGBA Transparenz fix + weißer Hintergrund
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -539,7 +539,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-i"
+APP_VERSION = "2.1-j"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -782,7 +782,13 @@ async def gpt_analyse_bild(bild_bytes: bytes, content_type: str,
         img = Image.open(io.BytesIO(bild_bytes))
         try: img = ImageOps.exif_transpose(img)
         except: pass
-        if img.mode not in ("RGB", "L"): img = img.convert("RGB")
+        # RGBA (PNG mit Transparenz) → weißer Hintergrund
+        if img.mode == "RGBA":
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[3])
+            img = bg
+        elif img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
         # Mindestgröße 1000px auf längster Seite für gute OCR-Qualität
         w, h = img.size
         min_px = 1000
