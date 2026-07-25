@@ -1,5 +1,5 @@
 """
-# v2.1-k – Bild-Erkennung fix: GPT Vision für Fotos
+# v2.1-m – Reise-Übersicht mit VMA-Tagen + Mahlzeiten
 Herrhammer Reisekosten – Schritt a)
 Mitarbeiter- und Reiseverwaltung
 
@@ -273,6 +273,24 @@ def get_schema() -> list[str]:
                 CONSTRAINT fk_rl_reise FOREIGN KEY (reise_code)
                     REFERENCES reisen(code) ON DELETE CASCADE
             )""",
+            """CREATE TABLE IF NOT EXISTS vma_tage (
+                id              SERIAL PRIMARY KEY,
+                reise_code      TEXT NOT NULL REFERENCES reisen(code) ON DELETE CASCADE,
+                datum           DATE NOT NULL,
+                land_code       TEXT NOT NULL,
+                land_name       TEXT NOT NULL,
+                vma_satz_voll   NUMERIC(6,2) NOT NULL,
+                vma_satz_halb   NUMERIC(6,2) NOT NULL,
+                ist_halber_satz BOOLEAN DEFAULT FALSE,
+                fruehstueck     BOOLEAN DEFAULT FALSE,
+                mittagessen     BOOLEAN DEFAULT FALSE,
+                abendessen      BOOLEAN DEFAULT FALSE,
+                vma_brutto      NUMERIC(6,2),
+                vma_netto       NUMERIC(6,2),
+                quelle          TEXT DEFAULT 'auto',
+                notiz           TEXT,
+                UNIQUE(reise_code, datum)
+            )""",
             """CREATE TABLE IF NOT EXISTS belege (
                 id                    SERIAL PRIMARY KEY,
                 reise_code            TEXT REFERENCES reisen(code) ON DELETE SET NULL,
@@ -539,7 +557,7 @@ tr:hover td { background: #fafafa; }
 }
 """
 
-APP_VERSION = "2.1-k"
+APP_VERSION = "2.1-m"
 
 def shell(title: str, content: str, page: str = "") -> str:
     def nav(p, label, url):
@@ -1375,7 +1393,7 @@ def beleg_detail(bid: int):
                 <dt style="color:var(--muted);font-size:12px">Datei</dt>
                 <dd style="font-size:12px;color:var(--muted)">{dateiname}</dd>
                 <dt style="color:var(--muted);font-size:12px">Transportart</dt>
-                <dd>{typ_badge}</dd>
+                <dd>{typ_badge}{f' – {ki.get("transportart_freitext")}' if ki.get("transportart_freitext") else ""}</dd>
                 <dt style="color:var(--muted);font-size:12px">Belegart</dt>
                 <dd>{belegart or "–"}</dd>
                 <dt style="color:var(--muted);font-size:12px">Anbieter</dt>
@@ -1892,6 +1910,557 @@ async def mails_abrufen():
         </div>'''
 
     return HTMLResponse(shell("Mails abrufen", body))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VMA-TAGE LOGIK
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def vma_berechnen(voll: float, halb: float, ist_halb: bool,
+                  frueh: bool, mittag: bool, abend: bool) -> tuple:
+    """
+    Berechnet VMA brutto und netto nach deutschem Steuerrecht.
+    Abzüge: Frühstück 20%, Mittagessen 40%, Abendessen 40% vom vollen Satz.
+    Basis: halber oder voller Tagessatz.
+    Ergebnis nie negativ.
+    """
+    basis = float(halb) if ist_halb else float(voll)
+    abzug = 0.0
+    if frueh:   abzug += float(voll) * 0.20
+    if mittag:  abzug += float(voll) * 0.40
+    if abend:   abzug += float(voll) * 0.40
+    brutto = basis
+    netto = max(0.0, basis - abzug)
+    return round(brutto, 2), round(netto, 2)
+
+def land_fuer_tag(reise_code: str, datum: date, db) -> tuple:
+    """
+    Ermittelt das Land für einen Tag aus:
+    1. Flug-Segmenten (Ankunftsland des letzten Segments des Tages)
+    2. Hotel-Belegen (Land des Hotels an diesem Tag)
+    3. Reise-Länder-Tabelle (manuell hinterlegt)
+    Gibt (land_code, land_name, quelle) zurück.
+    """
+    cur = db.cursor()
+    P = ph()
+    datum_s = datum.isoformat()
+
+    # 1. Flug-Segmente: letztes Segment das an diesem Tag ankommt
+    cur.execute(f"""SELECT ki_json FROM belege
+        WHERE reise_code={P} AND transportart='Flug'
+        AND (event_datum_von={P} OR event_datum_bis={P})
+        ORDER BY erstellt DESC""", (reise_code, datum_s, datum_s))
+
+    letztes_land = None
+    letztes_iata = None
+    for row in cur.fetchall():
+        ki_str = row[0] if isinstance(row, tuple) else row["ki_json"]
+        if not ki_str: continue
+        try:
+            ki = json.loads(ki_str)
+            segs = ki.get("segmente") or []
+            # Segmente die an diesem Tag ankommen
+            for s in segs:
+                an_dat = s.get("ankunft_datum","")
+                if an_dat == datum_s or an_dat == datum.strftime("%d.%m.%Y"):
+                    nach_iata = s.get("nach_iata","")
+                    if nach_iata and nach_iata in IATA_TO_LAND:
+                        letztes_iata = nach_iata
+                        letztes_land = IATA_TO_LAND[nach_iata]
+        except: pass
+
+    if letztes_land:
+        lname = VMA_SAETZE.get(letztes_land, {}).get("name", letztes_land)
+        cur.close()
+        return letztes_land, lname, "Flug-Segment"
+
+    # 2. Hotel-Beleg: Hotel das an diesem Tag aktiv ist
+    cur.execute(f"""SELECT land_beleg, ki_json FROM belege
+        WHERE reise_code={P} AND transportart='Hotel'
+        AND hotel_checkin_datum<={P} AND hotel_checkout_datum>{P}""",
+        (reise_code, datum_s, datum_s))
+    row = cur.fetchone()
+    if row:
+        land = (row[0] if isinstance(row, tuple) else row["land_beleg"]) or ""
+        if land and land in VMA_SAETZE:
+            lname = VMA_SAETZE.get(land, {}).get("name", land)
+            cur.close()
+            return land, lname, "Hotel-Beleg"
+
+    # 3. Reise-Länder (manuell)
+    cur.execute(f"""SELECT land_code, land_name FROM reise_laender
+        WHERE reise_code={P} AND datum_von<={P} AND datum_bis>={P}
+        ORDER BY id LIMIT 1""", (reise_code, datum_s, datum_s))
+    row = cur.fetchone()
+    if row:
+        lcode = row[0] if isinstance(row, tuple) else row["land_code"]
+        lname = row[1] if isinstance(row, tuple) else row["land_name"]
+        cur.close()
+        return lcode, lname, "Manuell"
+
+    cur.close()
+    return "DE", "Deutschland", "Standard"
+
+def fruehstueck_aus_beleg(reise_code: str, datum: date, db) -> bool:
+    """
+    Prüft ob ein Hotel-Beleg für diesen Tag Frühstück enthält.
+    GPT erkennt 'inkl. Frühstück' → fruehstueck=True.
+    """
+    cur = db.cursor()
+    P = ph()
+    datum_s = datum.isoformat()
+    cur.execute(f"""SELECT ki_json FROM belege
+        WHERE reise_code={P} AND transportart='Hotel'
+        AND hotel_checkin_datum<={P} AND hotel_checkout_datum>{P}""",
+        (reise_code, datum_s, datum_s))
+    row = cur.fetchone()
+    cur.close()
+    if not row: return False
+    ki_str = row[0] if isinstance(row, tuple) else row["ki_json"]
+    if not ki_str: return False
+    try:
+        ki = json.loads(ki_str)
+        rohtext = ki.get("rohtext","") or ""
+        notiz = ki.get("notiz","") or ""
+        combined = (rohtext + notiz).lower()
+        keywords = ["frühstück","fruehstueck","breakfast","petit-déjeuner",
+                    "inkl. frühstück","with breakfast","bb ","b&b"]
+        return any(k in combined for k in keywords)
+    except: return False
+
+def vma_tage_generieren(reise_code: str, db) -> int:
+    """
+    Generiert oder aktualisiert VMA-Tage für eine Reise.
+    - Iteriert über alle Tage zwischen Abreise und Rückkehr
+    - Ermittelt Land aus Belegen/Ländern
+    - Erster + letzter Tag = halber Satz
+    - Frühstück aus Hotel-Beleg automatisch
+    - Überschreibt NICHT manuell geänderte Einträge (quelle='manuell')
+    Gibt Anzahl erstellter/aktualisierter Tage zurück.
+    """
+    cur = db.cursor()
+    P = ph()
+
+    cur.execute(f"SELECT abreise, rueckkehr FROM reisen WHERE code={P}", (reise_code,))
+    r = cur.fetchone()
+    if not r:
+        cur.close(); return 0
+
+    ab = r[0] if isinstance(r, tuple) else r["abreise"]
+    zu = r[1] if isinstance(r, tuple) else r["rueckkehr"]
+
+    if isinstance(ab, str): ab = date.fromisoformat(ab[:10])
+    if isinstance(zu, str): zu = date.fromisoformat(zu[:10])
+
+    tage = (zu - ab).days + 1
+    count = 0
+
+    for i in range(tage):
+        tag = ab + timedelta(days=i)
+        ist_halb = (i == 0 or i == tage - 1)
+
+        # Manuell geänderte Einträge nicht überschreiben
+        cur.execute(f"SELECT id, quelle FROM vma_tage WHERE reise_code={P} AND datum={P}",
+                    (reise_code, tag.isoformat()))
+        existing = cur.fetchone()
+        if existing:
+            q = (existing[1] if isinstance(existing, tuple) else existing["quelle"]) or ""
+            if q == "manuell":
+                continue  # Manuell → nicht anfassen
+
+        lcode, lname, quelle = land_fuer_tag(reise_code, tag, db)
+        satz = VMA_SAETZE.get(lcode, VMA_SAETZE["DE"])
+        voll = satz["voll"]; halb = satz["halb"]
+
+        # Frühstück aus Beleg
+        frueh = fruehstueck_aus_beleg(reise_code, tag, db)
+        brutto, netto = vma_berechnen(voll, halb, ist_halb, frueh, False, False)
+
+        if existing:
+            cur.execute(f"""UPDATE vma_tage SET
+                land_code={P}, land_name={P}, vma_satz_voll={P}, vma_satz_halb={P},
+                ist_halber_satz={P}, fruehstueck={P}, vma_brutto={P}, vma_netto={P},
+                quelle={P} WHERE reise_code={P} AND datum={P}""",
+                (lcode, lname, voll, halb, ist_halb, frueh, brutto, netto,
+                 quelle, reise_code, tag.isoformat()))
+        else:
+            cur.execute(f"""INSERT INTO vma_tage
+                (reise_code, datum, land_code, land_name, vma_satz_voll, vma_satz_halb,
+                 ist_halber_satz, fruehstueck, mittagessen, abendessen,
+                 vma_brutto, vma_netto, quelle)
+                VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})""",
+                (reise_code, tag.isoformat(), lcode, lname, voll, halb,
+                 ist_halb, frueh, False, False, brutto, netto, quelle))
+        count += 1
+
+    db.commit()
+    cur.close()
+    return count
+
+
+@app.get("/reise/{code}/vma-generieren")
+async def vma_generieren(code: str):
+    """Generiert VMA-Tage aus Belegen und Länder-Einträgen."""
+    try:
+        db = get_db()
+        n = vma_tage_generieren(code.upper(), db)
+        db.close()
+        return RedirectResponse(f"/reise/{code.upper()}/uebersicht", status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
+@app.post("/reise/{code}/vma/{vid}/speichern")
+async def vma_tag_speichern(code: str, vid: int, request: Request):
+    """Speichert manuell geänderten VMA-Tag."""
+    form = await request.form()
+    frueh   = bool(form.get("fruehstueck"))
+    mittag  = bool(form.get("mittagessen"))
+    abend   = bool(form.get("abendessen"))
+    lcode   = (form.get("land_code") or "DE").strip().upper()
+    ist_halb= bool(form.get("ist_halber_satz"))
+    notiz   = (form.get("notiz") or "").strip()
+
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        # Sätze aus DB oder VMA-Tabelle
+        satz = VMA_SAETZE.get(lcode, VMA_SAETZE["DE"])
+        voll = satz["voll"]; halb = satz["halb"]
+        lname = satz.get("name", lcode)
+        brutto, netto = vma_berechnen(voll, halb, ist_halb, frueh, mittag, abend)
+        cur.execute(f"""UPDATE vma_tage SET
+            land_code={P}, land_name={P}, vma_satz_voll={P}, vma_satz_halb={P},
+            ist_halber_satz={P}, fruehstueck={P}, mittagessen={P}, abendessen={P},
+            vma_brutto={P}, vma_netto={P}, quelle='manuell', notiz={P}
+            WHERE id={P}""",
+            (lcode, lname, voll, halb, ist_halb, frueh, mittag, abend,
+             brutto, netto, notiz or None, vid))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/reise/{code.upper()}/uebersicht", status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
+@app.get("/reise/{code}/uebersicht", response_class=HTMLResponse)
+def reise_uebersicht(code: str):
+    """Reise-Übersicht: Timeline mit VMA pro Tag + Belegen."""
+    rcode = code.upper()
+    try:
+        db = get_db(); cur = db.cursor()
+        P = ph()
+
+        # Reise
+        cur.execute(f"SELECT code,titel,abreise,rueckkehr FROM reisen WHERE code={P}", (rcode,))
+        r = cur.fetchone()
+        if not r:
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Nicht gefunden</div>'))
+        def g(row,k,i): return row[k] if hasattr(row,'keys') else row[i]
+        titel=g(r,"titel",1); ab=g(r,"abreise",2); zu=g(r,"rueckkehr",3)
+
+        # VMA-Tage
+        cur.execute(f"""SELECT id,datum,land_code,land_name,vma_satz_voll,vma_satz_halb,
+            ist_halber_satz,fruehstueck,mittagessen,abendessen,
+            vma_brutto,vma_netto,quelle,notiz
+            FROM vma_tage WHERE reise_code={P} ORDER BY datum""", (rcode,))
+        vma_rows = cur.fetchall()
+        vma_by_date = {}
+        for vr in vma_rows:
+            d = g(vr,"datum",1)
+            if isinstance(d, str): d = date.fromisoformat(d[:10])
+            vma_by_date[d] = vr
+
+        # Belege
+        cur.execute(f"""SELECT id,transportart,transportart_freitext,anbieter,
+            betrag_brutto,waehrung,event_datum_von,event_datum_bis,
+            event_ort_von,event_ort_bis,hotel_name,hotel_checkin_datum,
+            hotel_checkin_zeit,hotel_checkout_datum,hotel_checkout_zeit,
+            hotel_naechte,s3_original,s3_anon,s3_analyse,ki_json,belegdatum
+            FROM belege WHERE reise_code={P}
+            ORDER BY COALESCE(event_datum_von,belegdatum)""", (rcode,))
+        belege = cur.fetchall()
+        cur.close(); db.close()
+
+        # Reisedaten ermitteln
+        if isinstance(ab, str): ab = date.fromisoformat(ab[:10])
+        if isinstance(zu, str): zu = date.fromisoformat(zu[:10])
+        tage_gesamt = (zu - ab).days + 1
+
+        # Belege nach Tag gruppieren
+        def beleg_datum(b):
+            ev = g(b,"event_datum_von",6)
+            bd = g(b,"belegdatum",20)
+            for v in [ev, bd]:
+                if v:
+                    if isinstance(v, date): return v
+                    try: return date.fromisoformat(str(v)[:10])
+                    except: pass
+            return None
+
+        belege_by_date = {}
+        for b in belege:
+            bd = beleg_datum(b)
+            if bd:
+                belege_by_date.setdefault(bd, []).append(b)
+            else:
+                belege_by_date.setdefault(None, []).append(b)
+
+        # Farben pro Transportart
+        BADGE = {
+            "Flug": '<span style="background:#dbeafe;color:#1e40af;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">✈ Flug</span>',
+            "Hotel": '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">🏨 Hotel</span>',
+            "Mietwagen": '<span style="background:#ede9fe;color:#5b21b6;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">🚗 Mietwagen</span>',
+            "Taxi": '<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">🚕 Taxi</span>',
+            "Bahn": '<span style="background:#e0e7ff;color:#3730a3;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">🚆 Bahn</span>',
+            "Tanken": '<span style="background:#f0fdf4;color:#14532d;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">⛽ Tanken</span>',
+            "Verpflegung": '<span style="background:#fff7ed;color:#9a3412;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">🍽 Verpflegung</span>',
+            "Bewirtung": '<span style="background:#fff7ed;color:#9a3412;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">🍽 Bewirtung</span>',
+            "Sonstiges": '<span style="background:#f1f5f9;color:#475569;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">📄 Sonstiges</span>',
+        }
+
+        # VMA Gesamtsumme
+        vma_total = sum(
+            float(g(vr,"vma_netto",11) or 0) for vr in vma_rows)
+        kosten_total = sum(
+            float(g(b,"betrag_brutto",4) or 0) for b in belege)
+
+        # HTML generieren
+        rows_html = ""
+        wochentage = ["Mo","Di","Mi","Do","Fr","Sa","So"]
+        monate = ["Jan","Feb","Mär","Apr","Mai","Jun",
+                  "Jul","Aug","Sep","Okt","Nov","Dez"]
+
+        for i in range(tage_gesamt):
+            tag = ab + timedelta(days=i)
+            wt = wochentage[tag.weekday()]
+            datum_s = f"{wt} {tag.day:02d}. {monate[tag.month-1]} {tag.year}"
+            datum_iso = tag.isoformat()
+
+            # VMA-Zeile für diesen Tag
+            vr = vma_by_date.get(tag)
+            if vr:
+                vid = g(vr,"id",0)
+                lcode = g(vr,"land_code",2) or "DE"
+                lname = g(vr,"land_name",3) or "Deutschland"
+                voll = float(g(vr,"vma_satz_voll",4) or 0)
+                halb = float(g(vr,"vma_satz_halb",5) or 0)
+                ist_halb = bool(g(vr,"ist_halber_satz",6))
+                frueh = bool(g(vr,"fruehstueck",7))
+                mittag = bool(g(vr,"mittagessen",8))
+                abend = bool(g(vr,"abendessen",9))
+                vma_brutto = float(g(vr,"vma_brutto",10) or 0)
+                vma_netto = float(g(vr,"vma_netto",11) or 0)
+                quelle = g(vr,"quelle",12) or "auto"
+
+                basis_txt = f"{halb:.2f} €" if ist_halb else f"{voll:.2f} €"
+                halb_badge = '<span style="font-size:10px;background:#fef3c7;color:#92400e;padding:1px 6px;border-radius:10px;margin-left:4px">½ Satz</span>' if ist_halb else ""
+                auto_badge = '<span style="font-size:10px;color:#94a3b8;margin-left:4px">auto</span>' if quelle=="auto" else '<span style="font-size:10px;color:#7c3aed;margin-left:4px">✎ manuell</span>'
+
+                def cb(name, checked, label, abzug_pct):
+                    ch = "checked" if checked else ""
+                    return (f'<label style="display:inline-flex;align-items:center;gap:4px;'
+                            f'cursor:pointer;font-size:12px;color:var(--text-secondary)">'
+                            f'<input type="checkbox" name="{name}" value="1" {ch} '
+                            f'onchange="this.form.submit()" style="width:auto;margin:0">'
+                            f'{label} <span style="color:#ef4444;font-size:11px">-{abzug_pct}%</span>'
+                            f'</label>')
+
+                vma_row = (
+                    f'<tr style="background:#f0fdf4">'
+                    f'<td style="padding:8px 12px;font-size:12px;color:#64748b;white-space:nowrap">'
+                    f'<b style="color:#059669">VMA</b></td>'
+                    f'<td style="padding:8px 12px">'
+                    f'<span style="font-size:12px;font-weight:500;color:#059669">'
+                    f'🌍 {lname} ({lcode})</span>{halb_badge}{auto_badge}</td>'
+                    f'<td style="padding:8px 12px">'
+                    f'<form method="post" action="/reise/{rcode}/vma/{vid}/speichern" '
+                    f'style="display:inline-flex;gap:12px;align-items:center;flex-wrap:wrap">'
+                    f'<input type="hidden" name="land_code" value="{lcode}">'
+                    f'<input type="hidden" name="ist_halber_satz" value="{"1" if ist_halb else ""}">'
+                    f'{cb("fruehstueck", frueh, "Frühstück", 20)}'
+                    f'{cb("mittagessen", mittag, "Mittagessen", 40)}'
+                    f'{cb("abendessen", abend, "Abendessen", 40)}'
+                    f'</form></td>'
+                    f'<td style="padding:8px 12px;text-align:right;font-weight:600;'
+                    f'color:#059669;white-space:nowrap">'
+                    f'<span style="text-decoration:line-through;color:#94a3b8;font-weight:400;font-size:11px">{basis_txt}</span> '
+                    f'{vma_netto:.2f} €</td>'
+                    f'<td style="padding:8px 12px"></td>'
+                    f'</tr>')
+            else:
+                vma_row = (
+                    f'<tr style="background:#fafafa">'
+                    f'<td colspan="5" style="padding:6px 12px;font-size:11px;color:#94a3b8">'
+                    f'VMA für diesen Tag nicht berechnet – '
+                    f'<a href="/reise/{rcode}/vma-generieren" style="color:#2563eb">Generieren</a>'
+                    f'</td></tr>')
+
+            rows_html += vma_row
+
+            # Beleg-Zeilen für diesen Tag
+            tages_belege = belege_by_date.get(tag, [])
+            for b in tages_belege:
+                bid = g(b,"id",0); typ = g(b,"transportart",1) or "Sonstiges"
+                freitext = g(b,"transportart_freitext",2) or ""
+                anbieter = g(b,"anbieter",3) or "–"
+                betrag = g(b,"betrag_brutto",4)
+                waehrung = g(b,"waehrung",5) or "EUR"
+                ort_von = g(b,"event_ort_von",8) or ""
+                ort_bis = g(b,"event_ort_bis",9) or ""
+                hotel_name = g(b,"hotel_name",10) or ""
+                ci_dat = g(b,"hotel_checkin_datum",11)
+                ci_zeit = g(b,"hotel_checkin_zeit",12) or ""
+                co_dat = g(b,"hotel_checkout_datum",13)
+                co_zeit = g(b,"hotel_checkout_zeit",14) or ""
+                naechte = g(b,"hotel_naechte",15) or ""
+
+                # Details aus KI-JSON (Segmente)
+                seg_info = ""
+                ki_str = g(b,"ki_json",19) or ""
+                if ki_str:
+                    try:
+                        ki = json.loads(ki_str)
+                        segs = ki.get("segmente") or []
+                        if segs:
+                            seg_parts = []
+                            for s in segs:
+                                fn = s.get("transport_nummer","") or ""
+                                tn = s.get("transport_name","") or ""
+                                vi = s.get("von_iata","") or ""
+                                ni = s.get("nach_iata","") or ""
+                                ab_z = s.get("abreise_zeit","") or ""
+                                an_z = s.get("ankunft_zeit","") or ""
+                                tz_ab = s.get("abreise_zeitzone","") or ""
+                                tz_an = s.get("ankunft_zeitzone","") or ""
+                                hin = s.get("hinweis","") or ""
+                                p = f"{tn} {fn}: {vi}→{ni} {ab_z}{' '+tz_ab if tz_ab else ''}–{an_z}{' '+tz_an if tz_an else ''}"
+                                if hin: p += f" ({hin})"
+                                seg_parts.append(p)
+                            seg_info = " · ".join(seg_parts)
+                    except: pass
+
+                if not seg_info:
+                    if hotel_name:
+                        ci_s = fmt_date(ci_dat) + (" " + ci_zeit if ci_zeit else "")
+                        co_s = fmt_date(co_dat) + (" " + co_zeit if co_zeit else "")
+                        seg_info = f"{hotel_name} · Check-in {ci_s} · Check-out {co_s}"
+                        if naechte: seg_info += f" · {naechte} Nächte"
+                    elif ort_von or ort_bis:
+                        seg_info = f"{ort_von}" + (f" → {ort_bis}" if ort_bis else "")
+
+                badge = BADGE.get(typ, BADGE["Sonstiges"])
+                if freitext: badge = badge.replace("Sonstiges", f"Sonstiges – {freitext}")
+                bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
+
+                rows_html += (
+                    f'<tr>'
+                    f'<td style="padding:8px 12px;font-size:12px;color:#64748b">'
+                    f'&nbsp;</td>'
+                    f'<td style="padding:8px 12px">{badge}</td>'
+                    f'<td style="padding:8px 12px;font-size:13px">'
+                    f'<b>{anbieter}</b>'
+                    f'{"<br><small style='color:#64748b;font-size:11px'>" + seg_info + "</small>" if seg_info else ""}'
+                    f'</td>'
+                    f'<td style="padding:8px 12px;text-align:right;font-weight:600;white-space:nowrap">'
+                    f'{bet_s}</td>'
+                    f'<td style="padding:8px 12px;white-space:nowrap">'
+                    f'<a href="/beleg/{bid}/pdf/original" target="_blank" '
+                    f'style="font-size:11px;color:#2563eb;border:0.5px solid #bfdbfe;'
+                    f'border-radius:4px;padding:2px 6px;text-decoration:none;margin-right:4px">Orig</a>'
+                    f'<a href="/beleg/{bid}/pdf/anon" target="_blank" '
+                    f'style="font-size:11px;color:#2563eb;border:0.5px solid #bfdbfe;'
+                    f'border-radius:4px;padding:2px 6px;text-decoration:none;margin-right:4px">Anon</a>'
+                    f'<a href="/beleg/{bid}/pdf/analyse" target="_blank" '
+                    f'style="font-size:11px;color:#2563eb;border:0.5px solid #bfdbfe;'
+                    f'border-radius:4px;padding:2px 6px;text-decoration:none">KI</a>'
+                    f'</td></tr>')
+
+            # Tages-Trennlinie
+            rows_html += (
+                f'<tr><td colspan="5" style="padding:0;height:2px;'
+                f'background:var(--border)"></td></tr>')
+
+        # Belege ohne Datum
+        undated = belege_by_date.get(None, [])
+        if undated:
+            rows_html += (f'<tr><td colspan="5" style="padding:8px 12px;'
+                         f'font-size:12px;color:#94a3b8;font-style:italic">'
+                         f'Belege ohne Datum ({len(undated)})</td></tr>')
+            for b in undated:
+                bid = g(b,"id",0); typ = g(b,"transportart",1) or "Sonstiges"
+                anbieter = g(b,"anbieter",3) or "–"
+                betrag = g(b,"betrag_brutto",4)
+                waehrung = g(b,"waehrung",5) or "EUR"
+                bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
+                badge = BADGE.get(typ, BADGE["Sonstiges"])
+                rows_html += (f'<tr><td style="padding:8px 12px"></td>'
+                    f'<td style="padding:8px 12px">{badge}</td>'
+                    f'<td style="padding:8px 12px;font-size:13px">{anbieter}</td>'
+                    f'<td style="padding:8px 12px;text-align:right;font-weight:600">{bet_s}</td>'
+                    f'<td style="padding:8px 12px">'
+                    f'<a href="/beleg/{bid}" style="font-size:11px;color:#2563eb">Detail</a>'
+                    f'</td></tr>')
+
+        content = f"""
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;
+                    margin-bottom:20px;flex-wrap:wrap;gap:12px">
+          <div>
+            <div style="font-family:monospace;font-size:12px;color:#64748b">{rcode}</div>
+            <h1 class="page-title" style="margin:4px 0">{titel}</h1>
+            <div style="font-size:13px;color:#64748b">
+              📅 {fmt_date(ab)} – {fmt_date(zu)} &nbsp;·&nbsp;
+              {tage_gesamt} Tage
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <a href="/reise/{rcode}/vma-generieren" class="btn btn-success">
+              🔄 VMA neu berechnen</a>
+            <a href="/reise/{rcode}" class="btn btn-secondary">← Reise</a>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:24px;font-weight:500;color:#059669">{vma_total:.2f} €</div>
+            <div style="font-size:12px;color:#64748b">VMA gesamt (netto)</div>
+          </div></div>
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:24px;font-weight:500">{kosten_total:.2f} €</div>
+            <div style="font-size:12px;color:#64748b">Kosten aus Belegen</div>
+          </div></div>
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:24px;font-weight:500">{len(belege)}</div>
+            <div style="font-size:12px;color:#64748b">Belege</div>
+          </div></div>
+        </div>
+
+        <div class="card" style="padding:0;overflow:hidden">
+          <table style="width:100%;border-collapse:collapse">
+            <thead>
+              <tr style="background:#f8fafc;border-bottom:1px solid #e2e8f0">
+                <th style="padding:10px 12px;font-size:11px;color:#64748b;
+                           text-align:left;width:80px">Datum</th>
+                <th style="padding:10px 12px;font-size:11px;color:#64748b;
+                           text-align:left;width:140px">Art</th>
+                <th style="padding:10px 12px;font-size:11px;color:#64748b;
+                           text-align:left">Details / Mahlzeiten</th>
+                <th style="padding:10px 12px;font-size:11px;color:#64748b;
+                           text-align:right;width:110px">Kosten</th>
+                <th style="padding:10px 12px;font-size:11px;color:#64748b;
+                           text-align:left;width:150px">Belege</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows_html}
+            </tbody>
+          </table>
+        </div>"""
+
+        return HTMLResponse(shell(f"Übersicht {rcode}", content, "reisen"))
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:500]}</pre>'))
 
 
 @app.get("/test-openai")
@@ -2707,6 +3276,7 @@ def reise_detail(code: str):
             {f'<div style="margin-top:8px;font-size:13px;color:var(--muted)">{notiz}</div>' if notiz else ''}
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <a href="/reise/{rcode}/uebersicht" class="btn btn-primary">📋 Übersicht</a>
             <a href="/reise/{rcode}/bearbeiten" class="btn btn-secondary">✏ Bearbeiten</a>
           </div>
         </div>
