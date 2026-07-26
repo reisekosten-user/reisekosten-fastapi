@@ -13,6 +13,7 @@ S3_ENDPOINT  = os.getenv("S3_ENDPOINT", "")
 S3_BUCKET    = os.getenv("S3_BUCKET", "")
 S3_ACCESS_KEY= os.getenv("S3_ACCESS_KEY", "")
 S3_SECRET_KEY= os.getenv("S3_SECRET_KEY", "")
+IMAP_USER    = os.getenv("IMAP_USER", "")
 
 from mod_db import get_db, ph, is_postgres, fmt_date
 from mod_anon import anonymisieren
@@ -355,7 +356,47 @@ def lade_ma_daten() -> tuple:
                 if val:
                     mails.append(val)
         return namen, mails
-    except: return [], []
+    except Exception as e:
+        import traceback
+        print(f"[lade_ma_daten FEHLER] Anonymisierung nutzt leere Mitarbeiterliste! {e}")
+        print(traceback.format_exc()[:500])
+        return [], []
+
+
+async def beleg_neu_anonymisieren(bid: int) -> dict:
+    """
+    Führt die Anonymisierung für einen bereits gespeicherten Beleg erneut aus
+    (z.B. wenn beim ersten Durchlauf die Mitarbeiterliste leer war) und
+    überschreibt anon_text + anon.pdf in DB und S3.
+    """
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    cur.execute(f"SELECT rohtext, dateiname, s3_anon FROM belege WHERE id={P}", (bid,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); db.close()
+        return {"fehler": "Beleg nicht gefunden"}
+
+    rohtext = row[0] if isinstance(row, tuple) else row["rohtext"]
+    dateiname = row[1] if isinstance(row, tuple) else row["dateiname"]
+    s3_anon_key = row[2] if isinstance(row, tuple) else row["s3_anon"]
+
+    if not rohtext:
+        cur.close(); db.close()
+        return {"fehler": "Kein Rohtext vorhanden – kann nicht neu anonymisiert werden"}
+
+    ma_namen, ma_mails = lade_ma_daten()
+    anon_text = anonymisieren(rohtext, ma_namen, ma_mails)
+    anon_pdf = text_zu_pdf(anon_text, f"Anonymisiert: {dateiname or ''}")
+
+    if s3_anon_key:
+        s3_upload(s3_anon_key, anon_pdf)
+
+    cur.execute(f"UPDATE belege SET anon_text={P} WHERE id={P}",
+                (anon_text[:50000] or None, bid))
+    db.commit(); cur.close(); db.close()
+
+    return {"ok": True, "ma_anzahl": len(ma_namen)}
 
 
 async def beleg_verarbeiten(

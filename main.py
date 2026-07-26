@@ -20,6 +20,7 @@ from mod_anon import anonymisieren
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         lade_ma_daten, get_s3, s3_upload, s3_download,
                         bild_zu_pdf, text_zu_pdf, pdf_text_lesen,
+                        beleg_neu_anonymisieren,
                         OPENAI_KEY, OPENAI_MODEL, OPENAI_URL,
                         S3_ENDPOINT, S3_BUCKET)
 from mod_mail import fetch_mails
@@ -31,7 +32,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.2-j"
+APP_VERSION  = "2.2-k"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -644,6 +645,11 @@ def beleg_detail(bid: int):
                 <a href="/beleg/{bid2}/pdf/analyse" target="_blank"
                    class="btn btn-secondary">🔍 Analyse-PDF öffnen</a>
               </div>
+              <form method="post" action="/beleg/{bid2}/neu-anonymisieren" style="margin-top:8px">
+                <button type="submit" class="btn btn-secondary" style="width:100%">
+                  🔄 Neu anonymisieren
+                </button>
+              </form>
               <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
               <form method="post" action="/beleg/{bid2}/zuordnen">
                 <div class="form-group">
@@ -706,6 +712,16 @@ def beleg_detail(bid: int):
         return HTMLResponse(shell("Fehler",
             f'<div class="alert alert-err">{e}</div>'
             f'<pre style="font-size:11px">{traceback.format_exc()[:400]}</pre>'))
+
+@app.post("/beleg/{bid}/neu-anonymisieren")
+async def beleg_neu_anonymisieren_route(bid: int):
+    """Führt die Anonymisierung für diesen Beleg erneut aus (z.B. nach Bugfix)."""
+    result = await beleg_neu_anonymisieren(bid)
+    if result.get("fehler"):
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{result["fehler"]}</div>'
+            f'<a href="/beleg/{bid}" class="btn btn-secondary">Zurück</a>'))
+    return RedirectResponse(f"/beleg/{bid}", status_code=303)
 
 @app.post("/beleg/{bid}/belegart")
 async def beleg_belegart_speichern(bid: int, request: Request):
