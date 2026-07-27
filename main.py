@@ -33,7 +33,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.4-a"
+APP_VERSION  = "2.4-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2762,10 +2762,10 @@ def reise_detail(code: str):
         # werden pro Beleg nur EINMAL vergeben (beim ersten Auftreten).
         events_by_date: dict = {}
 
-        def add_event(d, zeit, titel_txt, bid, bet_s, bg, fg):
+        def add_event(d, zeit, titel_txt, sub_txt, bid, bet_s, bg, fg):
             if not d: return
             events_by_date.setdefault(d, []).append(
-                (zeit or "99:99", "beleg", bid, titel_txt, bet_s, bg, fg))
+                (zeit or "99:99", "beleg", bid, titel_txt, sub_txt, bet_s, bg, fg))
 
         for b in beleg_rows_tag:
             bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
@@ -2783,39 +2783,56 @@ def reise_detail(code: str):
 
             if segs:
                 for s in segs:
-                    d = to_d_ddmmyyyy(s.get("abreise_datum")) or \
+                    d_ab = to_d_ddmmyyyy(s.get("abreise_datum")) or \
                         to_d(get(b,"event_datum_von",9)) or to_d(get(b,"belegdatum",6))
+                    d_an = to_d_ddmmyyyy(s.get("ankunft_datum")) or d_ab
                     zeit = s.get("abreise_zeit","") or ""
+                    an_zeit = s.get("ankunft_zeit","") or ""
                     von = s.get("von_ort") or s.get("von_iata") or "?"
                     nach = s.get("nach_ort") or s.get("nach_iata") or "?"
                     tname = s.get("transport_name","") or ""
                     tnum = s.get("transport_nummer","") or ""
+                    ab_term = s.get("abreise_terminal") or ""
+                    an_term = s.get("ankunft_terminal") or ""
+                    hinweis = s.get("hinweis") or ""
                     titel_txt = f"{icon} {tname} {tnum} · {von} → {nach}".replace("  "," ").strip()
+
+                    sub_parts = [f"Ab {zeit}" + (f" {ab_term}" if ab_term else "")]
+                    an_txt = f"An {an_zeit}" + (f" {an_term}" if an_term else "")
+                    if d_an and d_an != d_ab: an_txt += f" ({d_an.day:02d}.{d_an.month:02d}.)"
+                    sub_parts.append(an_txt)
+                    if hinweis: sub_parts.append(hinweis)
+                    sub_txt = " · ".join(p for p in sub_parts if p.strip() not in ("Ab", "An"))
+
                     zeile_bet = bet_s if not kosten_vergeben else None
                     if zeile_bet: kosten_vergeben = True
-                    add_event(d, zeit, titel_txt, bid, zeile_bet, bg, fg)
+                    add_event(d_ab, zeit, titel_txt, sub_txt, bid, zeile_bet, bg, fg)
             elif typ == "Hotel":
                 ci_d = to_d(get(b,"hotel_checkin_datum",11)) or to_d(get(b,"event_datum_von",9))
                 co_d = to_d(get(b,"hotel_checkout_datum",12)) or to_d(get(b,"event_datum_bis",10))
                 ci_z = get(b,"hotel_checkin_zeit",7) or ""
                 co_z = get(b,"hotel_checkout_zeit",13) or ""
-                add_event(ci_d, ci_z, f"{icon} Hotel einchecken · {anbieter}", bid, bet_s, bg, fg)
+                add_event(ci_d, ci_z, f"{icon} Hotel einchecken · {anbieter}",
+                          f"{fmt_date(ci_d)}" if ci_d else "", bid, bet_s, bg, fg)
                 if bet_s: kosten_vergeben = True
                 if co_d and co_d != ci_d:
-                    add_event(co_d, co_z, f"{icon} Hotel auschecken · {anbieter}", bid, None, bg, fg)
+                    add_event(co_d, co_z, f"{icon} Hotel auschecken · {anbieter}",
+                              f"{fmt_date(co_d)}" if co_d else "", bid, None, bg, fg)
             elif typ == "Mietwagen":
                 ab_d = to_d(get(b,"event_datum_von",9)) or to_d(get(b,"belegdatum",6))
                 bis_d = to_d(get(b,"event_datum_bis",10))
                 zeit = zeit_aus_beleg(b)
-                add_event(ab_d, zeit, f"{icon} Mietwagen abholen · {anbieter}", bid, bet_s, bg, fg)
+                add_event(ab_d, zeit, f"{icon} Mietwagen abholen · {anbieter}",
+                          f"{fmt_date(ab_d)}" if ab_d else "", bid, bet_s, bg, fg)
                 if bet_s: kosten_vergeben = True
                 if bis_d and bis_d != ab_d:
-                    add_event(bis_d, "", f"{icon} Mietwagen abgeben · {anbieter}", bid, None, bg, fg)
+                    add_event(bis_d, "", f"{icon} Mietwagen abgeben · {anbieter}",
+                              f"{fmt_date(bis_d)}" if bis_d else "", bid, None, bg, fg)
             else:
                 d = to_d(get(b,"event_datum_von",9)) or to_d(get(b,"belegdatum",6))
                 zeit = get(b,"event_zeit",14) or ""
                 titel_txt = f"{icon} {typ}" + (f" – {freitext}" if freitext else "") + f" · {anbieter}"
-                add_event(d, zeit, titel_txt, bid, bet_s, bg, fg)
+                add_event(d, zeit, titel_txt, f"{fmt_date(d)}" if d else "", bid, bet_s, bg, fg)
 
         termine_je_tag: dict = {}
         for t in termin_rows:
@@ -2825,20 +2842,20 @@ def reise_detail(code: str):
 
         def tagesablauf_html(tag_datum, rcode):
             eintraege = list(events_by_date.get(tag_datum, []))
-            tages_summe = sum(float(e[4].split()[0]) for e in eintraege if e[4])
+            tages_summe = sum(float(e[5].split()[0]) for e in eintraege if e[5])
             for t in termine_je_tag.get(tag_datum, []):
                 tid = get(t,"id",0); von = get(t,"uhrzeit_von",2) or ""; bis = get(t,"uhrzeit_bis",3) or ""
                 titel_t = get(t,"titel",4); typ_t = get(t,"typ",5) or "termin"
                 icon = TERMIN_ICON.get(typ_t, "📌")
                 zeit_txt = f"{von}–{bis}" if von and bis else (von or "")
-                eintraege.append((von or "99:99", "termin", tid, f"{icon} {titel_t}", zeit_txt, None, None))
+                eintraege.append((von or "99:99", "termin", tid, f"{icon} {titel_t}", "", zeit_txt, None, None))
 
             eintraege.sort(key=lambda x: x[0])
             if not eintraege:
                 return '<div style="padding:12px 16px;font-size:12px;color:var(--muted);font-style:italic">Keine Termine oder Belege an diesem Tag.</div>'
 
             rows = ""
-            for zeit, art, eid, titel_txt, rechts, bg, fg in eintraege:
+            for zeit, art, eid, titel_txt, sub_txt, rechts, bg, fg in eintraege:
                 zeit_disp = "" if zeit == "99:99" else zeit
                 if art == "beleg":
                     rechts_html = (f'<span style="background:{bg};color:{fg};padding:2px 8px;'
@@ -2850,9 +2867,10 @@ def reise_detail(code: str):
                     link = (f'<a href="/reise/{rcode}/termin/{eid}/bearbeiten" style="font-size:11px;color:var(--muted);text-decoration:none">✎</a> '
                             f'<a href="/reise/{rcode}/termin/{eid}/loeschen" style="font-size:11px;color:var(--muted);text-decoration:none" '
                             f'onclick="return confirm(\'Termin löschen?\')">🗑</a>')
+                sub_html = f'<div style="font-size:11px;color:var(--muted);margin-top:1px">{sub_txt}</div>' if sub_txt else ""
                 rows += f"""<div style="display:flex;gap:12px;padding:8px 16px;border-bottom:1px solid var(--border);align-items:flex-start">
                     <div style="width:44px;flex-shrink:0;font-size:12px;color:var(--muted);font-weight:600;padding-top:1px">{zeit_disp}</div>
-                    <div style="flex:1;font-size:13px">{titel_txt}</div>
+                    <div style="flex:1;font-size:13px">{titel_txt}{sub_html}</div>
                     <div style="text-align:right;white-space:nowrap;display:flex;gap:8px;align-items:center">{rechts_html}{link}</div>
                 </div>"""
             if tages_summe > 0:
