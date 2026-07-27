@@ -334,6 +334,7 @@ def get_migrations() -> list[str]:
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS notiz TEXT",
         "ALTER TABLE vma_tage ALTER COLUMN reise_id DROP NOT NULL",
         "ALTER TABLE reise_laender ADD COLUMN IF NOT EXISTS ort TEXT",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS event_zeit TEXT",
     ]
 
 def repair_legacy_columns():

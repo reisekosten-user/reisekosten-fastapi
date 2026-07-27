@@ -21,7 +21,7 @@ from mod_anon import anonymisieren
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         lade_ma_daten, get_s3, s3_upload, s3_download,
                         bild_zu_pdf, text_zu_pdf, pdf_text_lesen,
-                        beleg_neu_anonymisieren,
+                        beleg_neu_anonymisieren, beleg_neu_analysieren,
                         OPENAI_KEY, OPENAI_MODEL, OPENAI_URL,
                         S3_ENDPOINT, S3_BUCKET)
 from mod_mail import fetch_mails
@@ -33,7 +33,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.3-e"
+APP_VERSION  = "2.4-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -656,6 +656,11 @@ def beleg_detail(bid: int):
                   🔄 Neu anonymisieren
                 </button>
               </form>
+              <form method="post" action="/beleg/{bid2}/neu-analysieren" style="margin-top:8px">
+                <button type="submit" class="btn btn-secondary" style="width:100%">
+                  🧠 Neu analysieren
+                </button>
+              </form>
               <a href="/beleg/{bid2}/loeschen" class="btn btn-secondary"
                  style="display:block;margin-top:8px;text-align:center;color:#b91c1c;border-color:#fca5a5"
                  onclick="return confirm('Diesen Beleg unwiderruflich löschen?')">
@@ -735,6 +740,16 @@ def beleg_loeschen(bid: int):
         return RedirectResponse("/belege", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.post("/beleg/{bid}/neu-analysieren")
+async def beleg_neu_analysieren_route(bid: int):
+    """Führt die KI-Analyse für diesen Beleg erneut aus (z.B. um event_zeit nachzuladen)."""
+    result = await beleg_neu_analysieren(bid)
+    if result.get("fehler"):
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{result["fehler"]}</div>'
+            f'<a href="/beleg/{bid}" class="btn btn-secondary">Zurück</a>'))
+    return RedirectResponse(f"/beleg/{bid}", status_code=303)
 
 @app.post("/beleg/{bid}/neu-anonymisieren")
 async def beleg_neu_anonymisieren_route(bid: int):
@@ -2675,7 +2690,7 @@ def reise_detail(code: str):
         cur.execute(f"""SELECT id, transportart, transportart_freitext, anbieter,
                         betrag_brutto, waehrung, belegdatum, hotel_checkin_zeit, ki_json,
                         event_datum_von, event_datum_bis, hotel_checkin_datum,
-                        hotel_checkout_datum, hotel_checkout_zeit
+                        hotel_checkout_datum, hotel_checkout_zeit, event_zeit
                         FROM belege WHERE reise_code = {P} ORDER BY belegdatum""", (rcode,))
         beleg_rows_tag = cur.fetchall()
 
@@ -2736,25 +2751,71 @@ def reise_detail(code: str):
             if isinstance(v, str): return date.fromisoformat(v[:10])
             return v
 
-        # Zweite Zeit für "Ende"-Ereignisse (Mietwagen-Abgabe, Hotel-Checkout)
-        ENDE_LABEL = {"Mietwagen": ("abgeben", "🚗"), "Hotel": ("auschecken", "🏨")}
+        def to_d_ddmmyyyy(v):
+            if not v: return None
+            try: return datetime.strptime(str(v).strip(), "%d.%m.%Y").date()
+            except: return None
 
-        belege_je_tag: dict = {}
+        # Events aus Belegen aufbauen: pro Flug-/Bahn-Segment eine eigene Zeile,
+        # Mietwagen/Hotel als Abholen+Abgeben bzw. Check-in+Check-out, sonst eine
+        # Zeile mit Uhrzeit aus event_zeit (z.B. Tankbeleg, Mautbeleg). Kosten
+        # werden pro Beleg nur EINMAL vergeben (beim ersten Auftreten).
+        events_by_date: dict = {}
+
+        def add_event(d, zeit, titel_txt, bid, bet_s, bg, fg):
+            if not d: return
+            events_by_date.setdefault(d, []).append(
+                (zeit or "99:99", "beleg", bid, titel_txt, bet_s, bg, fg))
+
         for b in beleg_rows_tag:
-            # Leistungsdatum (wann die Leistung tatsächlich stattfand) hat Vorrang
-            # vor dem Belegdatum (z.B. Ausstellungsdatum einer Flugrechnung, das
-            # Wochen vor dem eigentlichen Flug liegen kann).
-            typ = get(b, "transportart", 1) or "Sonstiges"
-            start = to_d(get(b, "event_datum_von", 9)) or to_d(get(b, "belegdatum", 6))
-            if typ == "Hotel":
-                ende = to_d(get(b, "hotel_checkout_datum", 12)) or to_d(get(b, "event_datum_bis", 10))
-                start = to_d(get(b, "hotel_checkin_datum", 11)) or start
+            bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
+            freitext = get(b,"transportart_freitext",2) or ""
+            anbieter = get(b,"anbieter",3) or "–"
+            betrag = get(b,"betrag_brutto",4); waehrung = get(b,"waehrung",5) or "EUR"
+            icon, bg, fg = BADGE_DETAIL.get(typ, BADGE_DETAIL["Sonstiges"])
+            bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else None
+            kosten_vergeben = False
+
+            segs = []
+            if typ in ("Flug", "Bahn"):
+                try: segs = json.loads(get(b,"ki_json",8) or "").get("segmente") or []
+                except Exception: segs = []
+
+            if segs:
+                for s in segs:
+                    d = to_d_ddmmyyyy(s.get("abreise_datum")) or \
+                        to_d(get(b,"event_datum_von",9)) or to_d(get(b,"belegdatum",6))
+                    zeit = s.get("abreise_zeit","") or ""
+                    von = s.get("von_ort") or s.get("von_iata") or "?"
+                    nach = s.get("nach_ort") or s.get("nach_iata") or "?"
+                    tname = s.get("transport_name","") or ""
+                    tnum = s.get("transport_nummer","") or ""
+                    titel_txt = f"{icon} {tname} {tnum} · {von} → {nach}".replace("  "," ").strip()
+                    zeile_bet = bet_s if not kosten_vergeben else None
+                    if zeile_bet: kosten_vergeben = True
+                    add_event(d, zeit, titel_txt, bid, zeile_bet, bg, fg)
+            elif typ == "Hotel":
+                ci_d = to_d(get(b,"hotel_checkin_datum",11)) or to_d(get(b,"event_datum_von",9))
+                co_d = to_d(get(b,"hotel_checkout_datum",12)) or to_d(get(b,"event_datum_bis",10))
+                ci_z = get(b,"hotel_checkin_zeit",7) or ""
+                co_z = get(b,"hotel_checkout_zeit",13) or ""
+                add_event(ci_d, ci_z, f"{icon} Hotel einchecken · {anbieter}", bid, bet_s, bg, fg)
+                if bet_s: kosten_vergeben = True
+                if co_d and co_d != ci_d:
+                    add_event(co_d, co_z, f"{icon} Hotel auschecken · {anbieter}", bid, None, bg, fg)
+            elif typ == "Mietwagen":
+                ab_d = to_d(get(b,"event_datum_von",9)) or to_d(get(b,"belegdatum",6))
+                bis_d = to_d(get(b,"event_datum_bis",10))
+                zeit = zeit_aus_beleg(b)
+                add_event(ab_d, zeit, f"{icon} Mietwagen abholen · {anbieter}", bid, bet_s, bg, fg)
+                if bet_s: kosten_vergeben = True
+                if bis_d and bis_d != ab_d:
+                    add_event(bis_d, "", f"{icon} Mietwagen abgeben · {anbieter}", bid, None, bg, fg)
             else:
-                ende = to_d(get(b, "event_datum_bis", 10))
-            if not start: continue
-            belege_je_tag.setdefault(start, []).append((b, "start"))
-            if ende and ende != start and typ in ENDE_LABEL:
-                belege_je_tag.setdefault(ende, []).append((b, "ende"))
+                d = to_d(get(b,"event_datum_von",9)) or to_d(get(b,"belegdatum",6))
+                zeit = get(b,"event_zeit",14) or ""
+                titel_txt = f"{icon} {typ}" + (f" – {freitext}" if freitext else "") + f" · {anbieter}"
+                add_event(d, zeit, titel_txt, bid, bet_s, bg, fg)
 
         termine_je_tag: dict = {}
         for t in termin_rows:
@@ -2763,34 +2824,8 @@ def reise_detail(code: str):
             termine_je_tag.setdefault(td, []).append(t)
 
         def tagesablauf_html(tag_datum, rcode):
-            eintraege = []
-            tages_summe = 0.0
-            for b, rolle in belege_je_tag.get(tag_datum, []):
-                bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
-                freitext = get(b,"transportart_freitext",2) or ""
-                anbieter = get(b,"anbieter",3) or "–"
-                betrag = get(b,"betrag_brutto",4); waehrung = get(b,"waehrung",5) or "EUR"
-                icon, bg, fg = BADGE_DETAIL.get(typ, BADGE_DETAIL["Sonstiges"])
-
-                if rolle == "start":
-                    if typ == "Hotel":
-                        zeit = get(b,"hotel_checkin_zeit",7) or ""
-                        titel_txt = f"{icon} Hotel einchecken · {anbieter}"
-                    elif typ == "Mietwagen":
-                        zeit = zeit_aus_beleg(b)
-                        titel_txt = f"{icon} Mietwagen abholen · {anbieter}"
-                    else:
-                        zeit = zeit_aus_beleg(b)
-                        titel_txt = f"{icon} {typ}" + (f" – {freitext}" if freitext else "") + f" · {anbieter}"
-                    bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else None
-                    if bet_s: tages_summe += float(betrag)
-                else:  # ende – nur Hinweis, Betrag zählt nicht doppelt
-                    label, ic = ENDE_LABEL.get(typ, ("Ende", icon))
-                    zeit = get(b,"hotel_checkout_zeit",13) or "" if typ == "Hotel" else ""
-                    titel_txt = f"{ic} {typ} {label} · {anbieter}"
-                    bet_s = None
-
-                eintraege.append((zeit or "99:99", "beleg", bid, titel_txt, bet_s, bg, fg))
+            eintraege = list(events_by_date.get(tag_datum, []))
+            tages_summe = sum(float(e[4].split()[0]) for e in eintraege if e[4])
             for t in termine_je_tag.get(tag_datum, []):
                 tid = get(t,"id",0); von = get(t,"uhrzeit_von",2) or ""; bis = get(t,"uhrzeit_bis",3) or ""
                 titel_t = get(t,"titel",4); typ_t = get(t,"typ",5) or "termin"
@@ -2885,7 +2920,7 @@ def reise_detail(code: str):
         # Belege mit Datum außerhalb des berechneten Reisezeitraums – sonst verschwinden sie
         tage_im_bereich = {get(vt,"datum",1) if not isinstance(get(vt,"datum",1), str)
                             else date.fromisoformat(get(vt,"datum",1)[:10]) for vt in vma_tage_rows}
-        ausserhalb_tage = sorted(d for d in belege_je_tag.keys() if d not in tage_im_bereich)
+        ausserhalb_tage = sorted(d for d in events_by_date.keys() if d not in tage_im_bereich)
         if ausserhalb_tage:
             tage_blocks += ('<div style="padding:10px 16px;font-size:12px;color:#b45309;'
                              'font-style:italic;background:#fffbeb">⚠ Belege außerhalb des '

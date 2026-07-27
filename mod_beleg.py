@@ -172,6 +172,7 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
   "waehrung": "EUR",
   "event_datum_von": "DD.MM.YYYY",
   "event_datum_bis": "DD.MM.YYYY",
+  "event_zeit": "HH:MM (Uhrzeit auf dem Beleg, z.B. bei Tankquittung, Parkschein, Mautbeleg)",
   "event_ort_von": "Ort",
   "event_ort_bis": null,
   "tanken_kraftstoff": "Benzin|Diesel|AdBlue|Super|SuperPlus|Elektro",
@@ -262,6 +263,7 @@ JSON-Format:
   "waehrung": "EUR",
   "event_datum_von": "DD.MM.YYYY",
   "event_datum_bis": "DD.MM.YYYY",
+  "event_zeit": "HH:MM (Uhrzeit auf dem Beleg, z.B. bei Tankquittung, Parkschein, Mautbeleg – NICHT bei Flug/Bahn/Hotel, dafuer gibt es eigene Zeitfelder)",
   "event_ort_von": "Stadtname",
   "event_ort_bis": "Stadtname",
   "hotel_name": "Hotelname",
@@ -361,6 +363,84 @@ def lade_ma_daten() -> tuple:
         print(f"[lade_ma_daten FEHLER] Anonymisierung nutzt leere Mitarbeiterliste! {e}")
         print(traceback.format_exc()[:500])
         return [], []
+
+
+async def beleg_neu_analysieren(bid: int) -> dict:
+    """
+    Führt die KI-Analyse für einen bereits gespeicherten Beleg erneut aus
+    (z.B. um neue Felder wie event_zeit nachträglich zu befüllen) und
+    aktualisiert die Analyse-Felder in der DB. Nutzt den gespeicherten
+    Rohtext – funktioniert nicht für reine Bild-Belege ohne Text.
+    """
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    cur.execute(f"SELECT rohtext FROM belege WHERE id={P}", (bid,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); db.close()
+        return {"fehler": "Beleg nicht gefunden"}
+    rohtext = row[0] if isinstance(row, tuple) else row["rohtext"]
+    cur.close(); db.close()
+
+    if not rohtext or rohtext.strip().startswith("{"):
+        return {"fehler": "Kein Text-Rohtext vorhanden (Bild-Beleg) – Neuanalyse nicht möglich"}
+
+    ki_result = await gpt_analyse(rohtext, "")
+    if "fehler" in ki_result and not ki_result.get("anbieter"):
+        return {"fehler": ki_result.get("fehler", "KI-Analyse fehlgeschlagen")}
+
+    def pd(key):
+        v = ki_result.get(key)
+        if not v: return None
+        try:
+            from datetime import datetime as _dtt
+            return _dtt.strptime(str(v).strip(), "%d.%m.%Y").date()
+        except: return None
+
+    def pn(key):
+        v = ki_result.get(key)
+        try: return float(v) if v is not None else None
+        except: return None
+
+    ki_json_str = json.dumps(ki_result, ensure_ascii=False)
+    pflicht_ok = bool(ki_result.get("pflichtfelder_ok", False))
+    fehlend_str = json.dumps(ki_result.get("fehlende_pflichtfelder", []), ensure_ascii=False)
+    status = "ok" if pflicht_ok else "fehlerhaft"
+
+    db = get_db(); cur = db.cursor()
+    cur.execute(f"""UPDATE belege SET
+        ki_json={P}, pflichtfelder_ok={P}, fehlende_felder={P},
+        belegdatum={P}, belegart={P}, transportart={P}, transportart_freitext={P},
+        anbieter={P}, rechnungsnummer={P}, buchungscode={P}, reisender={P}, land_beleg={P},
+        betrag_brutto={P}, betrag_netto={P}, betrag_mwst={P}, waehrung={P},
+        event_datum_von={P}, event_datum_bis={P}, event_zeit={P},
+        event_ort_von={P}, event_ort_bis={P},
+        hotel_name={P}, hotel_checkin_datum={P}, hotel_checkin_zeit={P},
+        hotel_checkout_datum={P}, hotel_checkout_zeit={P}, hotel_naechte={P},
+        tanken_kraftstoff={P}, tanken_menge={P}, tanken_einheit={P},
+        tanken_preis_einheit={P}, tanken_tankstelle={P}, tanken_kennzeichen={P},
+        status={P}
+        WHERE id={P}""", (
+        ki_json_str, pflicht_ok, fehlend_str,
+        pd("belegdatum"), ki_result.get("belegart"),
+        ki_result.get("transportart"), ki_result.get("transportart_freitext"),
+        ki_result.get("anbieter"), ki_result.get("rechnungsnummer"),
+        ki_result.get("buchungscode"), ki_result.get("reisender"),
+        ki_result.get("land_beleg"),
+        pn("betrag_brutto"), pn("betrag_netto"), pn("betrag_mwst"),
+        ki_result.get("waehrung","EUR"),
+        pd("event_datum_von"), pd("event_datum_bis"), ki_result.get("event_zeit"),
+        ki_result.get("event_ort_von"), ki_result.get("event_ort_bis"),
+        ki_result.get("hotel_name"), pd("hotel_checkin_datum"),
+        ki_result.get("hotel_checkin_zeit"), pd("hotel_checkout_datum"),
+        ki_result.get("hotel_checkout_zeit"),
+        ki_result.get("hotel_naechte"),
+        ki_result.get("tanken_kraftstoff"), pn("tanken_menge"),
+        ki_result.get("tanken_einheit"), pn("tanken_preis_pro_einheit"),
+        ki_result.get("tanken_tankstelle"), ki_result.get("tanken_kennzeichen"),
+        status, bid))
+    db.commit(); cur.close(); db.close()
+    return {"ok": True}
 
 
 async def beleg_neu_anonymisieren(bid: int) -> dict:
@@ -528,7 +608,7 @@ async def beleg_verarbeiten(
          belegdatum, belegart, transportart, transportart_freitext,
          anbieter, rechnungsnummer, buchungscode, reisender, land_beleg,
          betrag_brutto, betrag_netto, betrag_mwst, waehrung,
-         event_datum_von, event_datum_bis, event_ort_von, event_ort_bis,
+         event_datum_von, event_datum_bis, event_zeit, event_ort_von, event_ort_bis,
          hotel_name, hotel_checkin_datum, hotel_checkin_zeit,
          hotel_checkout_datum, hotel_checkout_zeit, hotel_naechte,
          tanken_kraftstoff, tanken_menge, tanken_einheit,
@@ -536,7 +616,7 @@ async def beleg_verarbeiten(
          status)
         VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},{P},{P},{P},{P},
-                {P},{P},{P},{P},{P},{P},{P},{P},
+                {P},{P},{P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},{P},{P})"""
 
@@ -551,7 +631,7 @@ async def beleg_verarbeiten(
         ki_result.get("land_beleg"),
         pn("betrag_brutto"), pn("betrag_netto"), pn("betrag_mwst"),
         ki_result.get("waehrung","EUR"),
-        pd("event_datum_von"), pd("event_datum_bis"),
+        pd("event_datum_von"), pd("event_datum_bis"), ki_result.get("event_zeit"),
         ki_result.get("event_ort_von"), ki_result.get("event_ort_bis"),
         ki_result.get("hotel_name"), pd("hotel_checkin_datum"),
         ki_result.get("hotel_checkin_zeit"), pd("hotel_checkout_datum"),
