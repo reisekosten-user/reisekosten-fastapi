@@ -33,7 +33,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.3-d"
+APP_VERSION  = "2.3-e"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2666,15 +2666,16 @@ def reise_detail(code: str):
         land_rows = cur.fetchall()
 
         # VMA je Tag
-        cur.execute(f"""SELECT datum, land_code, land_name, ist_halber_satz,
-                        fruehstueck, mittagessen, abendessen, vma_netto
+        cur.execute(f"""SELECT id, datum, land_code, land_name, ist_halber_satz,
+                        fruehstueck, mittagessen, abendessen, vma_netto, vma_satz_voll, vma_satz_halb
                         FROM vma_tage WHERE reise_code = {P} ORDER BY datum""", (rcode,))
         vma_tage_rows = cur.fetchall()
 
         # Belege für den Tagesverlauf
         cur.execute(f"""SELECT id, transportart, transportart_freitext, anbieter,
                         betrag_brutto, waehrung, belegdatum, hotel_checkin_zeit, ki_json,
-                        event_datum_von
+                        event_datum_von, event_datum_bis, hotel_checkin_datum,
+                        hotel_checkout_datum, hotel_checkout_zeit
                         FROM belege WHERE reise_code = {P} ORDER BY belegdatum""", (rcode,))
         beleg_rows_tag = cur.fetchall()
 
@@ -2697,56 +2698,12 @@ def reise_detail(code: str):
         else:
             status_html = '<span class="badge badge-gray">Abgeschlossen</span>'
 
-        # VMA-Berechnung Übersicht
-        vma_total = 0.0
-        vma_zeilen = ""
-        if land_rows:
-            for lr in land_rows:
-                lid = get(lr,"id",0)
-                lvon = get(lr,"datum_von",1)
-                lbis = get(lr,"datum_bis",2)
-                lcode_l = get(lr,"land_code",3)
-                lname_l = get(lr,"land_name",4)
-                vvoll = get(lr,"vma_voll",5) or 0
-                vhalb = get(lr,"vma_halb",6) or 0
-
-                # Tage berechnen
-                try:
-                    # Datum aus PostgreSQL (date-Objekt) oder String
-                    def to_date(v):
-                        if isinstance(v, date): return v
-                        return date.fromisoformat(str(v)[:10])
-                    d_von = to_date(lvon)
-                    d_bis = to_date(lbis)
-                    tage = (d_bis - d_von).days + 1
-                    # Steuerrecht: Erster + letzter Tag = halber Satz
-                    # Bei 1 Tag (Hin- und Rückreise selber Tag) = halber Satz
-                    if tage <= 0:
-                        betrag = 0.0
-                    elif tage == 1:
-                        betrag = float(vhalb)
-                    elif tage == 2:
-                        betrag = float(vhalb) * 2
-                    else:
-                        betrag = float(vhalb) + (float(vvoll) * (tage - 2)) + float(vhalb)
-                    vma_total += betrag
-                    tage_txt = f"{tage} Tag{'e' if tage!=1 else ''}"
-                    betrag_txt = f"{betrag:.2f} EUR"
-                except Exception as ve:
-                    tage_txt = f"Fehler: {ve}"; betrag_txt = "–"
-
-                vma_zeilen += f"""<tr>
-                    <td><span class="badge badge-blue">{lcode_l}</span> {lname_l}</td>
-                    <td>{fmt_date(lvon)}</td><td>{fmt_date(lbis)}</td>
-                    <td style="text-align:right">{vvoll:.2f} EUR</td>
-                    <td style="text-align:right">{vhalb:.2f} EUR</td>
-                    <td>{tage_txt}</td>
-                    <td style="font-weight:600;text-align:right">{betrag_txt}</td>
-                    <td>
-                      <a href="/reise/{rcode}/land/{lid}/bearbeiten"
-                         class="btn btn-secondary btn-sm">✏</a>
-                    </td>
-                </tr>"""
+        # Länder – kompakte Zeile statt großer Tabelle (VMA je Tag steht unten beim Tagesverlauf)
+        laender_kompakt = " · ".join(
+            f'{get(lr,"land_code",3)} {get(lr,"land_name",4)} '
+            f'({fmt_date(get(lr,"datum_von",1))}–{fmt_date(get(lr,"datum_bis",2))}) '
+            f'<a href="/reise/{rcode}/land/{get(lr,"id",0)}/bearbeiten" style="color:var(--muted)">✏</a>'
+            for lr in land_rows)
 
         ma_html = " ".join(
             f'<span class="badge badge-green">{get(m,"kuerzel",0)} – {get(m,"klarname",1)}</span>'
@@ -2774,15 +2731,30 @@ def reise_detail(code: str):
             except: pass
             return ""
 
+        def to_d(v):
+            if not v: return None
+            if isinstance(v, str): return date.fromisoformat(v[:10])
+            return v
+
+        # Zweite Zeit für "Ende"-Ereignisse (Mietwagen-Abgabe, Hotel-Checkout)
+        ENDE_LABEL = {"Mietwagen": ("abgeben", "🚗"), "Hotel": ("auschecken", "🏨")}
+
         belege_je_tag: dict = {}
         for b in beleg_rows_tag:
             # Leistungsdatum (wann die Leistung tatsächlich stattfand) hat Vorrang
             # vor dem Belegdatum (z.B. Ausstellungsdatum einer Flugrechnung, das
             # Wochen vor dem eigentlichen Flug liegen kann).
-            bd = get(b, "event_datum_von", 9) or get(b, "belegdatum", 6)
-            if not bd: continue
-            if isinstance(bd, str): bd = date.fromisoformat(bd[:10])
-            belege_je_tag.setdefault(bd, []).append(b)
+            typ = get(b, "transportart", 1) or "Sonstiges"
+            start = to_d(get(b, "event_datum_von", 9)) or to_d(get(b, "belegdatum", 6))
+            if typ == "Hotel":
+                ende = to_d(get(b, "hotel_checkout_datum", 12)) or to_d(get(b, "event_datum_bis", 10))
+                start = to_d(get(b, "hotel_checkin_datum", 11)) or start
+            else:
+                ende = to_d(get(b, "event_datum_bis", 10))
+            if not start: continue
+            belege_je_tag.setdefault(start, []).append((b, "start"))
+            if ende and ende != start and typ in ENDE_LABEL:
+                belege_je_tag.setdefault(ende, []).append((b, "ende"))
 
         termine_je_tag: dict = {}
         for t in termin_rows:
@@ -2792,15 +2764,32 @@ def reise_detail(code: str):
 
         def tagesablauf_html(tag_datum, rcode):
             eintraege = []
-            for b in belege_je_tag.get(tag_datum, []):
+            tages_summe = 0.0
+            for b, rolle in belege_je_tag.get(tag_datum, []):
                 bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
                 freitext = get(b,"transportart_freitext",2) or ""
                 anbieter = get(b,"anbieter",3) or "–"
                 betrag = get(b,"betrag_brutto",4); waehrung = get(b,"waehrung",5) or "EUR"
-                zeit = zeit_aus_beleg(b)
                 icon, bg, fg = BADGE_DETAIL.get(typ, BADGE_DETAIL["Sonstiges"])
-                titel_txt = f"{icon} {typ}" + (f" – {freitext}" if freitext else "") + f" · {anbieter}"
-                bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else None
+
+                if rolle == "start":
+                    if typ == "Hotel":
+                        zeit = get(b,"hotel_checkin_zeit",7) or ""
+                        titel_txt = f"{icon} Hotel einchecken · {anbieter}"
+                    elif typ == "Mietwagen":
+                        zeit = zeit_aus_beleg(b)
+                        titel_txt = f"{icon} Mietwagen abholen · {anbieter}"
+                    else:
+                        zeit = zeit_aus_beleg(b)
+                        titel_txt = f"{icon} {typ}" + (f" – {freitext}" if freitext else "") + f" · {anbieter}"
+                    bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else None
+                    if bet_s: tages_summe += float(betrag)
+                else:  # ende – nur Hinweis, Betrag zählt nicht doppelt
+                    label, ic = ENDE_LABEL.get(typ, ("Ende", icon))
+                    zeit = get(b,"hotel_checkout_zeit",13) or "" if typ == "Hotel" else ""
+                    titel_txt = f"{ic} {typ} {label} · {anbieter}"
+                    bet_s = None
+
                 eintraege.append((zeit or "99:99", "beleg", bid, titel_txt, bet_s, bg, fg))
             for t in termine_je_tag.get(tag_datum, []):
                 tid = get(t,"id",0); von = get(t,"uhrzeit_von",2) or ""; bis = get(t,"uhrzeit_bis",3) or ""
@@ -2831,18 +2820,36 @@ def reise_detail(code: str):
                     <div style="flex:1;font-size:13px">{titel_txt}</div>
                     <div style="text-align:right;white-space:nowrap;display:flex;gap:8px;align-items:center">{rechts_html}{link}</div>
                 </div>"""
+            if tages_summe > 0:
+                rows += (f'<div style="display:flex;justify-content:flex-end;padding:8px 16px;'
+                          f'background:var(--bg)"><span style="font-size:12px;font-weight:600;'
+                          f'color:var(--text)">Summe Belege: {tages_summe:.2f} EUR</span></div>')
             return rows
 
         wochentage = ["Mo","Di","Mi","Do","Fr","Sa","So"]
         vma_tage_summe = 0.0
         tage_blocks = ""
+
+        def cb(rcode, vid, name, checked, label, abzug_pct):
+            ch = "checked" if checked else ""
+            return (f'<label style="display:inline-flex;align-items:center;gap:4px;'
+                    f'cursor:pointer;font-size:12px;color:var(--muted);margin-right:10px">'
+                    f'<input type="checkbox" name="{name}" value="1" {ch} '
+                    f'onchange="this.form.submit()" style="width:auto;margin:0">'
+                    f'{label} <span style="color:#c81e1e;font-size:10px">-{abzug_pct}%</span>'
+                    f'</label>')
+
         for i, vt in enumerate(vma_tage_rows):
-            vd = get(vt,"datum",0)
+            vid = get(vt,"id",0)
+            vd = get(vt,"datum",1)
             if isinstance(vd, str): vd = date.fromisoformat(vd[:10])
-            lcode_t = get(vt,"land_code",1) or "DE"
-            lname_t = get(vt,"land_name",2) or "Deutschland"
-            ist_halb = bool(get(vt,"ist_halber_satz",3))
-            netto = float(get(vt,"vma_netto",7) or 0)
+            lcode_t = get(vt,"land_code",2) or "DE"
+            lname_t = get(vt,"land_name",3) or "Deutschland"
+            ist_halb = bool(get(vt,"ist_halber_satz",4))
+            frueh = bool(get(vt,"fruehstueck",5))
+            mittag = bool(get(vt,"mittagessen",6))
+            abend = bool(get(vt,"abendessen",7))
+            netto = float(get(vt,"vma_netto",8) or 0)
             vma_tage_summe += netto
 
             wt = wochentage[vd.weekday()] if vd else "–"
@@ -2851,25 +2858,33 @@ def reise_detail(code: str):
                            'padding:1px 7px;border-radius:10px">½ Satz</span>') if ist_halb else ""
 
             tage_blocks += f"""<div style="border-bottom:1px solid var(--border)">
-              <div style="padding:12px 16px;display:flex;justify-content:space-between;
-                          align-items:center;background:var(--bg);gap:12px;flex-wrap:wrap">
-                <div>
-                  <div style="font-weight:700;color:var(--text);font-size:14px">{datum_txt} {halb_badge}</div>
-                  <div style="font-size:11px;color:var(--muted);margin-top:2px">🌍 {lname_t} ({lcode_t})</div>
+              <div style="padding:12px 16px;background:var(--bg)">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+                  <div>
+                    <div style="font-weight:700;color:var(--text);font-size:14px">{datum_txt} {halb_badge}</div>
+                    <div style="font-size:11px;color:var(--muted);margin-top:2px">🌍 {lname_t} ({lcode_t})</div>
+                  </div>
+                  <div style="text-align:right">
+                    <div style="font-size:16px;font-weight:700;color:var(--green)">{netto:.2f} EUR VMA netto</div>
+                  </div>
+                  <a href="/reise/{rcode}/termin/neu?datum={vd.isoformat() if vd else ''}"
+                     style="font-size:11px;color:#2563eb;text-decoration:none;border:0.5px solid #bfdbfe;
+                            border-radius:6px;padding:4px 10px">+ Termin</a>
                 </div>
-                <div style="text-align:right">
-                  <div style="font-size:16px;font-weight:700;color:var(--green)">{netto:.2f} EUR VMA netto</div>
-                </div>
-                <a href="/reise/{rcode}/termin/neu?datum={vd.isoformat() if vd else ''}"
-                   style="font-size:11px;color:#2563eb;text-decoration:none;border:0.5px solid #bfdbfe;
-                          border-radius:6px;padding:4px 10px">+ Termin</a>
+                <form method="post" action="/reise/{rcode}/vma/{vid}/speichern" style="margin-top:8px">
+                  <input type="hidden" name="land_code" value="{lcode_t}">
+                  <input type="hidden" name="ist_halber_satz" value="{'1' if ist_halb else ''}">
+                  {cb(rcode, vid, "fruehstueck", frueh, "Frühstück", 20)}
+                  {cb(rcode, vid, "mittagessen", mittag, "Mittag", 40)}
+                  {cb(rcode, vid, "abendessen", abend, "Abend", 40)}
+                </form>
               </div>
               {tagesablauf_html(vd, rcode)}
             </div>"""
 
         # Belege mit Datum außerhalb des berechneten Reisezeitraums – sonst verschwinden sie
-        tage_im_bereich = {get(vt,"datum",0) if not isinstance(get(vt,"datum",0), str)
-                            else date.fromisoformat(get(vt,"datum",0)[:10]) for vt in vma_tage_rows}
+        tage_im_bereich = {get(vt,"datum",1) if not isinstance(get(vt,"datum",1), str)
+                            else date.fromisoformat(get(vt,"datum",1)[:10]) for vt in vma_tage_rows}
         ausserhalb_tage = sorted(d for d in belege_je_tag.keys() if d not in tage_im_bereich)
         if ausserhalb_tage:
             tage_blocks += ('<div style="padding:10px 16px;font-size:12px;color:#b45309;'
@@ -2903,16 +2918,11 @@ def reise_detail(code: str):
             <a href="/reise/{rcode}/abschluss" class="btn btn-primary">🧾 Abschluss</a>
             <a href="/reise/{rcode}/uebersicht" class="btn btn-secondary">📋 Übersicht</a>
             <a href="/reise/{rcode}/bearbeiten" class="btn btn-secondary">✏ Bearbeiten</a>
+            <a href="/reise/{rcode}/land/neu" class="btn btn-secondary">🌍 + Land</a>
           </div>
         </div>
 
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">🌍 Länder & VMA-Sätze</span>
-            <a href="/reise/{rcode}/land/neu" class="btn btn-secondary btn-sm">+ Land hinzufügen</a>
-          </div>
-          {'<div class="table-wrap"><table><thead><tr><th>Land</th><th>Von</th><th>Bis</th><th style="text-align:right">VMA Voll</th><th style="text-align:right">VMA Halb</th><th>Tage</th><th style="text-align:right">Gesamt</th><th></th></tr></thead><tbody>' + vma_zeilen + f'</tbody><tfoot><tr><td colspan="6" style="text-align:right;font-weight:600;padding:10px 14px;border-top:2px solid var(--border)">VMA Gesamt:</td><td style="font-weight:700;font-size:15px;color:var(--green);text-align:right;padding:10px 14px;border-top:2px solid var(--border)">{vma_total:.2f} EUR</td><td style="border-top:2px solid var(--border)"></td></tr></tfoot></table></div>' if land_rows else '<div class="card-body"><div class="empty-state"><b>Noch keine Länder hinterlegt</b><p>Füge Länder hinzu für die automatische VMA-Berechnung</p><a href="/reise/{rcode}/land/neu" class="btn btn-primary" style="margin-top:12px">+ Land hinzufügen</a></div></div>'}
-        </div>
+        {'<div style="font-size:12px;color:var(--muted);margin-bottom:16px">🌍 ' + laender_kompakt + '</div>' if laender_kompakt else ''}
 
         <div class="card">
           <div class="card-header">
