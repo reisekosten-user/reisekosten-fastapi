@@ -170,6 +170,17 @@ def get_schema() -> list[str]:
                 aktualisiert TIMESTAMP DEFAULT NOW(),
                 UNIQUE(land_code, ort)
             )""",
+            """CREATE TABLE IF NOT EXISTS termine (
+                id            SERIAL PRIMARY KEY,
+                reise_code    TEXT NOT NULL REFERENCES reisen(code) ON DELETE CASCADE,
+                datum         DATE NOT NULL,
+                uhrzeit_von   TEXT,
+                uhrzeit_bis   TEXT,
+                titel         TEXT NOT NULL,
+                typ           TEXT DEFAULT 'termin',
+                notiz         TEXT,
+                erstellt      TIMESTAMP DEFAULT NOW()
+            )""",
         ]
     else:
         return [
@@ -284,6 +295,17 @@ def get_schema() -> list[str]:
                 quelle      TEXT DEFAULT 'pauschbetrag-api',
                 aktualisiert TEXT DEFAULT (datetime('now')),
                 UNIQUE(land_code, ort)
+            )""",
+            """CREATE TABLE IF NOT EXISTS termine (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                reise_code    TEXT REFERENCES reisen(code) ON DELETE CASCADE,
+                datum         TEXT NOT NULL,
+                uhrzeit_von   TEXT,
+                uhrzeit_bis   TEXT,
+                titel         TEXT NOT NULL,
+                typ           TEXT DEFAULT 'termin',
+                notiz         TEXT,
+                erstellt      TEXT DEFAULT (datetime('now'))
             )""",
         ]
 

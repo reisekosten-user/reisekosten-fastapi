@@ -33,7 +33,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.3-a"
+APP_VERSION  = "2.3-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2653,6 +2653,17 @@ def reise_detail(code: str):
                         fruehstueck, mittagessen, abendessen, vma_netto
                         FROM vma_tage WHERE reise_code = {P} ORDER BY datum""", (rcode,))
         vma_tage_rows = cur.fetchall()
+
+        # Belege für den Tagesverlauf
+        cur.execute(f"""SELECT id, transportart, transportart_freitext, anbieter,
+                        betrag_brutto, waehrung, belegdatum, hotel_checkin_zeit, ki_json
+                        FROM belege WHERE reise_code = {P} ORDER BY belegdatum""", (rcode,))
+        beleg_rows_tag = cur.fetchall()
+
+        # Manuelle Termine für den Tagesverlauf
+        cur.execute(f"""SELECT id, datum, uhrzeit_von, uhrzeit_bis, titel, typ
+                        FROM termine WHERE reise_code = {P} ORDER BY datum, uhrzeit_von""", (rcode,))
+        termin_rows = cur.fetchall()
         cur.close(); db.close()
 
         today = date.today()
@@ -2723,37 +2734,117 @@ def reise_detail(code: str):
             f'<span class="badge badge-green">{get(m,"kuerzel",0)} – {get(m,"klarname",1)}</span>'
             for m in ma_rows) or "–"
 
+        # Belege und Termine nach Datum gruppieren
+        TERMIN_ICON = {
+            "termin": "🤝", "fahrt": "🚕", "mietwagen": "🚗",
+            "hotel": "🏨", "sonstiges": "📌",
+        }
+        BADGE_DETAIL = {
+            "Flug": ("✈", "#dbeafe", "#1e40af"), "Hotel": ("🏨", "#dcfce7", "#166534"),
+            "Mietwagen": ("🚗", "#ede9fe", "#5b21b6"), "Taxi": ("🚕", "#fef3c7", "#92400e"),
+            "Bahn": ("🚆", "#e0e7ff", "#3730a3"), "Tanken": ("⛽", "#fee2e2", "#991b1b"),
+            "Bewirtung": ("🍽", "#fff7ed", "#9a3412"), "Sonstiges": ("📄", "#f1f5f9", "#475569"),
+        }
+
+        def zeit_aus_beleg(b):
+            zeit = get(b, "hotel_checkin_zeit", 7)
+            if zeit: return zeit
+            ki_str = get(b, "ki_json", 8) or ""
+            try:
+                segs = json.loads(ki_str).get("segmente") or []
+                if segs: return segs[0].get("abreise_zeit", "") or ""
+            except: pass
+            return ""
+
+        belege_je_tag: dict = {}
+        for b in beleg_rows_tag:
+            bd = get(b, "belegdatum", 6)
+            if not bd: continue
+            if isinstance(bd, str): bd = date.fromisoformat(bd[:10])
+            belege_je_tag.setdefault(bd, []).append(b)
+
+        termine_je_tag: dict = {}
+        for t in termin_rows:
+            td = get(t, "datum", 1)
+            if isinstance(td, str): td = date.fromisoformat(td[:10])
+            termine_je_tag.setdefault(td, []).append(t)
+
+        def tagesablauf_html(tag_datum, rcode):
+            eintraege = []
+            for b in belege_je_tag.get(tag_datum, []):
+                bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
+                freitext = get(b,"transportart_freitext",2) or ""
+                anbieter = get(b,"anbieter",3) or "–"
+                betrag = get(b,"betrag_brutto",4); waehrung = get(b,"waehrung",5) or "EUR"
+                zeit = zeit_aus_beleg(b)
+                icon, bg, fg = BADGE_DETAIL.get(typ, BADGE_DETAIL["Sonstiges"])
+                titel_txt = f"{icon} {typ}" + (f" – {freitext}" if freitext else "") + f" · {anbieter}"
+                bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else None
+                eintraege.append((zeit or "99:99", "beleg", bid, titel_txt, bet_s, bg, fg))
+            for t in termine_je_tag.get(tag_datum, []):
+                tid = get(t,"id",0); von = get(t,"uhrzeit_von",2) or ""; bis = get(t,"uhrzeit_bis",3) or ""
+                titel_t = get(t,"titel",4); typ_t = get(t,"typ",5) or "termin"
+                icon = TERMIN_ICON.get(typ_t, "📌")
+                zeit_txt = f"{von}–{bis}" if von and bis else (von or "")
+                eintraege.append((von or "99:99", "termin", tid, f"{icon} {titel_t}", zeit_txt, None, None))
+
+            eintraege.sort(key=lambda x: x[0])
+            if not eintraege:
+                return '<div style="padding:12px 16px;font-size:12px;color:var(--muted);font-style:italic">Keine Termine oder Belege an diesem Tag.</div>'
+
+            rows = ""
+            for zeit, art, eid, titel_txt, rechts, bg, fg in eintraege:
+                zeit_disp = "" if zeit == "99:99" else zeit
+                if art == "beleg":
+                    rechts_html = (f'<span style="background:{bg};color:{fg};padding:2px 8px;'
+                                    f'border-radius:12px;font-size:11px;font-weight:500">{rechts}</span>'
+                                    if rechts else '<span style="font-size:11px;color:var(--muted);font-style:italic">kein Betrag</span>')
+                    link = f'<a href="/beleg/{eid}" style="font-size:11px;color:#2563eb;text-decoration:none">Detail</a>'
+                else:
+                    rechts_html = f'<span style="font-size:11px;color:#7c3aed">✎ manuell · {rechts}</span>' if rechts else '<span style="font-size:11px;color:#7c3aed">✎ manuell</span>'
+                    link = (f'<a href="/reise/{rcode}/termin/{eid}/bearbeiten" style="font-size:11px;color:var(--muted);text-decoration:none">✎</a> '
+                            f'<a href="/reise/{rcode}/termin/{eid}/loeschen" style="font-size:11px;color:var(--muted);text-decoration:none" '
+                            f'onclick="return confirm(\'Termin löschen?\')">🗑</a>')
+                rows += f"""<div style="display:flex;gap:12px;padding:8px 16px;border-bottom:1px solid var(--border);align-items:flex-start">
+                    <div style="width:44px;flex-shrink:0;font-size:12px;color:var(--muted);font-weight:600;padding-top:1px">{zeit_disp}</div>
+                    <div style="flex:1;font-size:13px">{titel_txt}</div>
+                    <div style="text-align:right;white-space:nowrap;display:flex;gap:8px;align-items:center">{rechts_html}{link}</div>
+                </div>"""
+            return rows
+
         wochentage = ["Mo","Di","Mi","Do","Fr","Sa","So"]
-        vma_tage_zeilen = ""
         vma_tage_summe = 0.0
+        tage_blocks = ""
         for i, vt in enumerate(vma_tage_rows):
             vd = get(vt,"datum",0)
             if isinstance(vd, str): vd = date.fromisoformat(vd[:10])
             lcode_t = get(vt,"land_code",1) or "DE"
             lname_t = get(vt,"land_name",2) or "Deutschland"
             ist_halb = bool(get(vt,"ist_halber_satz",3))
-            frueh = bool(get(vt,"fruehstueck",4))
-            mittag = bool(get(vt,"mittagessen",5))
-            abend = bool(get(vt,"abendessen",6))
             netto = float(get(vt,"vma_netto",7) or 0)
             vma_tage_summe += netto
 
             wt = wochentage[vd.weekday()] if vd else "–"
-            datum_txt = f"{wt} {vd.day:02d}.{vd.month:02d}." if vd else "–"
+            datum_txt = f"{wt} {vd.day:02d}.{vd.month:02d}.{vd.year}" if vd else "–"
             halb_badge = ('<span style="font-size:10px;background:#fef3c7;color:#92400e;'
                            'padding:1px 7px;border-radius:10px">½ Satz</span>') if ist_halb else ""
 
-            def mtag(aktiv, label):
-                if aktiv:
-                    return f'<span style="font-size:11px;color:#166534">✓ {label}</span>'
-                return f'<span style="font-size:11px;color:#c4cdd8">– {label}</span>'
-
-            vma_tage_zeilen += f"""<tr>
-                <td style="white-space:nowrap"><b>{datum_txt}</b> {halb_badge}</td>
-                <td>🌍 {lname_t} ({lcode_t})</td>
-                <td>{mtag(frueh,"Frühstück")} &nbsp; {mtag(mittag,"Mittag")} &nbsp; {mtag(abend,"Abend")}</td>
-                <td style="text-align:right;font-weight:600;color:var(--green)">{netto:.2f} EUR</td>
-            </tr>"""
+            tage_blocks += f"""<div style="border-bottom:1px solid var(--border)">
+              <div style="padding:12px 16px;display:flex;justify-content:space-between;
+                          align-items:center;background:var(--bg);gap:12px;flex-wrap:wrap">
+                <div>
+                  <div style="font-weight:700;color:var(--text);font-size:14px">{datum_txt} {halb_badge}</div>
+                  <div style="font-size:11px;color:var(--muted);margin-top:2px">🌍 {lname_t} ({lcode_t})</div>
+                </div>
+                <div style="text-align:right">
+                  <div style="font-size:16px;font-weight:700;color:var(--green)">{netto:.2f} EUR VMA netto</div>
+                </div>
+                <a href="/reise/{rcode}/termin/neu?datum={vd.isoformat() if vd else ''}"
+                   style="font-size:11px;color:#2563eb;text-decoration:none;border:0.5px solid #bfdbfe;
+                          border-radius:6px;padding:4px 10px">+ Termin</a>
+              </div>
+              {tagesablauf_html(vd, rcode)}
+            </div>"""
 
         content = f"""
         <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:20px;flex-wrap:wrap">
@@ -2786,10 +2877,9 @@ def reise_detail(code: str):
 
         <div class="card">
           <div class="card-header">
-            <span class="card-title">📅 VMA je Tag</span>
-            <a href="/reise/{rcode}/uebersicht" class="btn btn-secondary btn-sm">Mahlzeiten bearbeiten</a>
+            <span class="card-title">📅 Tagesverlauf & VMA</span>
           </div>
-          {'<div class="table-wrap"><table><thead><tr><th>Tag</th><th>Land</th><th>Mahlzeiten</th><th style="text-align:right">VMA netto</th></tr></thead><tbody>' + vma_tage_zeilen + f'</tbody><tfoot><tr><td colspan="3" style="text-align:right;font-weight:600;padding:10px 14px;border-top:2px solid var(--border)">VMA Gesamt (netto):</td><td style="font-weight:700;font-size:15px;color:var(--green);text-align:right;padding:10px 14px;border-top:2px solid var(--border)">' + f'{vma_tage_summe:.2f} EUR</td></tr></tfoot></table></div>' if vma_tage_rows else '<div class="card-body"><div class="empty-state"><b>Noch keine VMA-Tage berechnet</b><p>Erst Länder hinterlegen, dann VMA generieren</p><a href="/reise/' + rcode + '/vma-generieren" class="btn btn-primary" style="margin-top:12px">🔄 VMA berechnen</a></div></div>'}
+          {tage_blocks if vma_tage_rows else '<div class="card-body"><div class="empty-state"><b>Noch keine VMA-Tage berechnet</b><p>Erst Länder hinterlegen, dann VMA generieren</p><a href="/reise/' + rcode + '/vma-generieren" class="btn btn-primary" style="margin-top:12px">🔄 VMA berechnen</a></div></div>'}
         </div>
 
         <div style="margin-top:12px">
@@ -3097,6 +3187,173 @@ def land_loeschen(code: str, lid: int):
         P = ph()
         db = get_db(); cur = db.cursor()
         cur.execute(f"DELETE FROM reise_laender WHERE id={P}", (lid,))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/reise/{rcode}", status_code=303)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+# ── Manuelle Termine ────────────────────────────────────────────────────────────
+TERMIN_TYPEN = [
+    ("termin", "🤝 Termin"), ("fahrt", "🚕 Fahrt"), ("mietwagen", "🚗 Mietwagen"),
+    ("hotel", "🏨 Hotel"), ("sonstiges", "📌 Sonstiges"),
+]
+
+@app.get("/reise/{code}/termin/neu", response_class=HTMLResponse)
+def termin_neu_form(code: str, datum: str = ""):
+    rcode = code.upper()
+    typ_opts = "".join(f'<option value="{v}">{l}</option>' for v, l in TERMIN_TYPEN)
+    content = f"""
+    <h1 class="page-title">Termin hinzufügen – {rcode}</h1>
+    <div class="card" style="max-width:500px">
+      <div class="card-body">
+        <form method="post" action="/reise/{rcode}/termin/neu">
+          <div class="form-grid form-grid-2">
+            <div class="form-group full">
+              <label>Titel <span class="required">*</span></label>
+              <input type="text" name="titel" required placeholder="z.B. Kundentermin">
+            </div>
+            <div class="form-group">
+              <label>Typ</label>
+              <select name="typ">{typ_opts}</select>
+            </div>
+            <div class="form-group">
+              <label>Datum <span class="required">*</span></label>
+              <input type="date" name="datum" value="{datum}" required>
+            </div>
+            <div class="form-group">
+              <label>Uhrzeit von</label>
+              <input type="time" name="uhrzeit_von">
+            </div>
+            <div class="form-group">
+              <label>Uhrzeit bis</label>
+              <input type="time" name="uhrzeit_bis">
+            </div>
+            <div class="form-group full">
+              <label>Notiz</label>
+              <input type="text" name="notiz" placeholder="optional">
+            </div>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Hinzufügen</button>
+            <a href="/reise/{rcode}" class="btn btn-secondary">Abbrechen</a>
+          </div>
+        </form>
+      </div>
+    </div>"""
+    return HTMLResponse(shell(f"Termin – {rcode}", content, "reisen"))
+
+@app.post("/reise/{code}/termin/neu")
+async def termin_neu(code: str, request: Request):
+    rcode = code.upper()
+    form = await request.form()
+    titel = (form.get("titel") or "").strip()
+    typ = (form.get("typ") or "termin").strip()
+    datum = (form.get("datum") or "").strip()
+    von = (form.get("uhrzeit_von") or "").strip() or None
+    bis = (form.get("uhrzeit_bis") or "").strip() or None
+    notiz = (form.get("notiz") or "").strip() or None
+    if not titel or not datum:
+        return HTMLResponse(shell("Fehler",
+            '<div class="alert alert-err">Titel und Datum sind Pflicht.</div>'
+            f'<a href="/reise/{rcode}/termin/neu" class="btn btn-secondary">Zurück</a>'))
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(
+            f"INSERT INTO termine (reise_code,datum,uhrzeit_von,uhrzeit_bis,titel,typ,notiz) "
+            f"VALUES ({P},{P},{P},{P},{P},{P},{P})",
+            (rcode, datum, von, bis, titel, typ, notiz))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/reise/{rcode}", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.get("/reise/{code}/termin/{tid}/bearbeiten", response_class=HTMLResponse)
+def termin_bearbeiten_form(code: str, tid: int):
+    rcode = code.upper()
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT id,datum,uhrzeit_von,uhrzeit_bis,titel,typ,notiz FROM termine WHERE id={P}", (tid,))
+        r = cur.fetchone()
+        cur.close(); db.close()
+        if not r:
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Termin nicht gefunden.</div>'))
+        g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
+        datum_v = str(g("datum",1))[:10]; von_v = g("uhrzeit_von",2) or ""; bis_v = g("uhrzeit_bis",3) or ""
+        titel_v = g("titel",4); typ_v = g("typ",5) or "termin"; notiz_v = g("notiz",6) or ""
+        typ_opts = "".join(
+            f'<option value="{v}"{" selected" if v==typ_v else ""}>{l}</option>' for v, l in TERMIN_TYPEN)
+        content = f"""
+        <h1 class="page-title">Termin bearbeiten – {rcode}</h1>
+        <div class="card" style="max-width:500px">
+          <div class="card-body">
+            <form method="post" action="/reise/{rcode}/termin/{tid}/bearbeiten">
+              <div class="form-grid form-grid-2">
+                <div class="form-group full">
+                  <label>Titel <span class="required">*</span></label>
+                  <input type="text" name="titel" value="{titel_v}" required>
+                </div>
+                <div class="form-group">
+                  <label>Typ</label>
+                  <select name="typ">{typ_opts}</select>
+                </div>
+                <div class="form-group">
+                  <label>Datum <span class="required">*</span></label>
+                  <input type="date" name="datum" value="{datum_v}" required>
+                </div>
+                <div class="form-group">
+                  <label>Uhrzeit von</label>
+                  <input type="time" name="uhrzeit_von" value="{von_v}">
+                </div>
+                <div class="form-group">
+                  <label>Uhrzeit bis</label>
+                  <input type="time" name="uhrzeit_bis" value="{bis_v}">
+                </div>
+                <div class="form-group full">
+                  <label>Notiz</label>
+                  <input type="text" name="notiz" value="{notiz_v}">
+                </div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Speichern</button>
+                <a href="/reise/{rcode}" class="btn btn-secondary">Abbrechen</a>
+              </div>
+            </form>
+          </div>
+        </div>"""
+        return HTMLResponse(shell(f"Termin – {rcode}", content, "reisen"))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.post("/reise/{code}/termin/{tid}/bearbeiten")
+async def termin_bearbeiten(code: str, tid: int, request: Request):
+    rcode = code.upper()
+    form = await request.form()
+    titel = (form.get("titel") or "").strip()
+    typ = (form.get("typ") or "termin").strip()
+    datum = (form.get("datum") or "").strip()
+    von = (form.get("uhrzeit_von") or "").strip() or None
+    bis = (form.get("uhrzeit_bis") or "").strip() or None
+    notiz = (form.get("notiz") or "").strip() or None
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(
+            f"UPDATE termine SET titel={P},typ={P},datum={P},uhrzeit_von={P},uhrzeit_bis={P},notiz={P} WHERE id={P}",
+            (titel, typ, datum, von, bis, notiz, tid))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/reise/{rcode}", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.get("/reise/{code}/termin/{tid}/loeschen")
+def termin_loeschen(code: str, tid: int):
+    rcode = code.upper()
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"DELETE FROM termine WHERE id={P}", (tid,))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/reise/{rcode}", status_code=303)
     except Exception as e:
