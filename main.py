@@ -33,7 +33,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.3-c"
+APP_VERSION  = "2.3-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -656,6 +656,11 @@ def beleg_detail(bid: int):
                   🔄 Neu anonymisieren
                 </button>
               </form>
+              <a href="/beleg/{bid2}/loeschen" class="btn btn-secondary"
+                 style="display:block;margin-top:8px;text-align:center;color:#b91c1c;border-color:#fca5a5"
+                 onclick="return confirm('Diesen Beleg unwiderruflich löschen?')">
+                🗑 Beleg löschen
+              </a>
               <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
               <form method="post" action="/beleg/{bid2}/zuordnen">
                 <div class="form-group">
@@ -718,6 +723,18 @@ def beleg_detail(bid: int):
         return HTMLResponse(shell("Fehler",
             f'<div class="alert alert-err">{e}</div>'
             f'<pre style="font-size:11px">{traceback.format_exc()[:400]}</pre>'))
+
+@app.get("/beleg/{bid}/loeschen")
+def beleg_loeschen(bid: int):
+    """Löscht einen Beleg unwiderruflich aus der Datenbank (Dateien in S3 bleiben)."""
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"DELETE FROM belege WHERE id={P}", (bid,))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse("/belege", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
 @app.post("/beleg/{bid}/neu-anonymisieren")
 async def beleg_neu_anonymisieren_route(bid: int):
@@ -2656,7 +2673,8 @@ def reise_detail(code: str):
 
         # Belege für den Tagesverlauf
         cur.execute(f"""SELECT id, transportart, transportart_freitext, anbieter,
-                        betrag_brutto, waehrung, belegdatum, hotel_checkin_zeit, ki_json
+                        betrag_brutto, waehrung, belegdatum, hotel_checkin_zeit, ki_json,
+                        event_datum_von
                         FROM belege WHERE reise_code = {P} ORDER BY belegdatum""", (rcode,))
         beleg_rows_tag = cur.fetchall()
 
@@ -2758,7 +2776,10 @@ def reise_detail(code: str):
 
         belege_je_tag: dict = {}
         for b in beleg_rows_tag:
-            bd = get(b, "belegdatum", 6)
+            # Leistungsdatum (wann die Leistung tatsächlich stattfand) hat Vorrang
+            # vor dem Belegdatum (z.B. Ausstellungsdatum einer Flugrechnung, das
+            # Wochen vor dem eigentlichen Flug liegen kann).
+            bd = get(b, "event_datum_von", 9) or get(b, "belegdatum", 6)
             if not bd: continue
             if isinstance(bd, str): bd = date.fromisoformat(bd[:10])
             belege_je_tag.setdefault(bd, []).append(b)

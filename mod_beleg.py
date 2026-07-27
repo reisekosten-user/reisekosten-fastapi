@@ -447,6 +447,36 @@ async def beleg_verarbeiten(
     # 4. GPT-4o Analyse
     ki_json_str = json.dumps(ki_result, ensure_ascii=False)
 
+    # 4b. Duplikat-Check: gleicher Anbieter + Betrag + Belegdatum (oder gleiche Rechnungsnummer)
+    # bereits vorhanden? Dann keinen neuen Beleg anlegen.
+    anbieter_chk = ki_result.get("anbieter")
+    betrag_chk = ki_result.get("betrag_brutto")
+    beleg_dat_chk = ki_result.get("belegdatum")
+    rechnr_chk = ki_result.get("rechnungsnummer")
+    if anbieter_chk and betrag_chk:
+        P0 = ph()
+        db0 = get_db(); cur0 = db0.cursor()
+        try:
+            if rechnr_chk:
+                cur0.execute(f"SELECT id FROM belege WHERE rechnungsnummer={P0} AND anbieter={P0} AND betrag_brutto={P0}",
+                             (rechnr_chk, anbieter_chk, float(betrag_chk)))
+            else:
+                bd_parsed = None
+                try:
+                    from datetime import datetime as _dtt2
+                    bd_parsed = _dtt2.strptime(str(beleg_dat_chk).strip(), "%d.%m.%Y").date()
+                except: pass
+                cur0.execute(f"SELECT id FROM belege WHERE anbieter={P0} AND betrag_brutto={P0} AND belegdatum={P0}",
+                             (anbieter_chk, float(betrag_chk), bd_parsed))
+            dupe_row = cur0.fetchone()
+        except Exception:
+            dupe_row = None
+        cur0.close(); db0.close()
+        if dupe_row:
+            dupe_id = dupe_row[0] if isinstance(dupe_row, tuple) else dupe_row["id"]
+            return {"beleg_id": dupe_id, "duplikat": True, "status": "duplikat",
+                    "zusammenfassung": f"Duplikat – bereits vorhanden als Beleg #{dupe_id}, nicht erneut angelegt."}
+
     # Zusammenfassung aus KI-Ergebnis
     if "fehler" not in ki_result:
         typ = ki_result.get("dokumenttyp", "Sonstiges")
