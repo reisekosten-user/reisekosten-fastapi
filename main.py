@@ -33,7 +33,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.3-b"
+APP_VERSION  = "2.3-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2846,6 +2846,24 @@ def reise_detail(code: str):
               {tagesablauf_html(vd, rcode)}
             </div>"""
 
+        # Belege mit Datum außerhalb des berechneten Reisezeitraums – sonst verschwinden sie
+        tage_im_bereich = {get(vt,"datum",0) if not isinstance(get(vt,"datum",0), str)
+                            else date.fromisoformat(get(vt,"datum",0)[:10]) for vt in vma_tage_rows}
+        ausserhalb_tage = sorted(d for d in belege_je_tag.keys() if d not in tage_im_bereich)
+        if ausserhalb_tage:
+            tage_blocks += ('<div style="padding:10px 16px;font-size:12px;color:#b45309;'
+                             'font-style:italic;background:#fffbeb">⚠ Belege außerhalb des '
+                             'Reisezeitraums (Datum passt nicht zur Reisedauer)</div>')
+            for d in ausserhalb_tage:
+                wt = wochentage[d.weekday()]
+                datum_txt = f"{wt} {d.day:02d}.{d.month:02d}.{d.year}"
+                tage_blocks += f"""<div style="border-bottom:1px solid var(--border)">
+                  <div style="padding:10px 16px;background:var(--bg)">
+                    <div style="font-weight:700;color:var(--text);font-size:14px">{datum_txt}</div>
+                  </div>
+                  {tagesablauf_html(d, rcode)}
+                </div>"""
+
         content = f"""
         <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:20px;flex-wrap:wrap">
           <div style="flex:1">
@@ -2879,7 +2897,7 @@ def reise_detail(code: str):
           <div class="card-header">
             <span class="card-title">📅 Tagesverlauf & VMA</span>
           </div>
-          {tage_blocks if vma_tage_rows else '<div class="card-body"><div class="empty-state"><b>Noch keine VMA-Tage berechnet</b><p>Erst Länder hinterlegen, dann VMA generieren</p><a href="/reise/' + rcode + '/vma-generieren" class="btn btn-primary" style="margin-top:12px">🔄 VMA berechnen</a></div></div>'}
+          {tage_blocks if tage_blocks else '<div class="card-body"><div class="empty-state"><b>Noch keine VMA-Tage berechnet</b><p>Erst Länder hinterlegen, dann VMA generieren</p><a href="/reise/' + rcode + '/vma-generieren" class="btn btn-primary" style="margin-top:12px">🔄 VMA berechnen</a></div></div>'}
         </div>
 
         <div style="margin-top:12px">
