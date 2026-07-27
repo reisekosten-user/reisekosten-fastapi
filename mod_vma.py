@@ -1,8 +1,11 @@
 """
 mod_vma.py – VMA-Sätze 2026, IATA-Codes, Länderlisten
-Stabil / abgeschlossen
 """
 from __future__ import annotations
+import httpx
+from datetime import date as _date
+
+PAUSCHBETRAG_URL = "https://cdn.jsdelivr.net/npm/pauschbetrag-api@1/ALL.json"
 
 # Quelle: BMF-Schreiben Auslandsreisekosten 2024 (gilt weiter für 2026)
 VMA_SAETZE: dict[str, dict] = {
@@ -354,4 +357,168 @@ def vma_fuer_land(land_code: str) -> tuple[float, float]:
     """Gibt (voll, halb) VMA-Satz für Ländercode zurück."""
     s = VMA_SAETZE.get(land_code.upper(), {"voll": 28.00, "halb": 14.00})
     return s["voll"], s["halb"]
+
+
+def _land_name_de(iso_code: str) -> str:
+    """Deutscher Ländername per Babel, Fallback: eigene Liste, dann Code."""
+    try:
+        from babel import Locale
+        name = Locale("de").territories.get(iso_code.upper())
+        if name:
+            return name
+    except Exception:
+        pass
+    return VMA_SAETZE.get(iso_code.upper(), {}).get("name", iso_code.upper())
+
+
+def importiere_aktuelle_saetze() -> dict:
+    """
+    Lädt die aktuellen BMF-Auslandstagegeld-Sätze (inkl. Städte-Sonderfälle
+    wie Los Angeles, New York etc.) von der öffentlichen pauschbetrag-api
+    (https://github.com/david-loe/pauschbetrag-api, offizielle BMF-Quelle)
+    und speichert sie in der Tabelle vma_saetze.
+    """
+    from mod_db import get_db, ph, is_postgres
+
+    try:
+        resp = httpx.get(PAUSCHBETRAG_URL, timeout=30.0)
+        resp.raise_for_status()
+        perioden = resp.json()
+    except Exception as e:
+        return {"fehler": f"Abruf fehlgeschlagen: {e}"}
+
+    if not perioden:
+        return {"fehler": "Keine Daten erhalten"}
+
+    # Aktuell gültige Periode: validUntil ist null, sonst die mit dem
+    # spätesten validFrom nehmen
+    aktuelle = next((p for p in perioden if p.get("validUntil") is None), None)
+    if not aktuelle:
+        aktuelle = sorted(perioden, key=lambda p: p.get("validFrom", ""))[-1]
+
+    gueltig_ab = aktuelle.get("validFrom")
+    gueltig_bis = aktuelle.get("validUntil")
+    laender = aktuelle.get("data", [])
+
+    db = get_db(); cur = db.cursor()
+    P = ph()
+    anzahl_laender = 0
+    anzahl_staedte = 0
+
+    for land in laender:
+        code = (land.get("countryCode") or "").upper()
+        if not code:
+            continue
+        name = _land_name_de(code)
+        voll = land.get("catering24")
+        halb = land.get("catering8")
+        uebernacht = land.get("overnight")
+        if voll is None or halb is None:
+            continue
+
+        if is_postgres():
+            cur.execute(f"""
+                INSERT INTO vma_saetze (land_code, ort, land_name, vma_voll, vma_halb,
+                    uebernachtung, gueltig_ab, gueltig_bis, quelle, aktualisiert)
+                VALUES ({P},NULL,{P},{P},{P},{P},{P},{P},'pauschbetrag-api',NOW())
+                ON CONFLICT (land_code, ort) DO UPDATE SET
+                    land_name={P}, vma_voll={P}, vma_halb={P}, uebernachtung={P},
+                    gueltig_ab={P}, gueltig_bis={P}, quelle='pauschbetrag-api', aktualisiert=NOW()
+            """, (code, name, voll, halb, uebernacht, gueltig_ab, gueltig_bis,
+                  name, voll, halb, uebernacht, gueltig_ab, gueltig_bis))
+        else:
+            cur.execute(f"""
+                INSERT INTO vma_saetze (land_code, ort, land_name, vma_voll, vma_halb,
+                    uebernachtung, gueltig_ab, gueltig_bis, quelle)
+                VALUES ({P},NULL,{P},{P},{P},{P},{P},{P},'pauschbetrag-api')
+                ON CONFLICT (land_code, ort) DO UPDATE SET
+                    land_name=excluded.land_name, vma_voll=excluded.vma_voll,
+                    vma_halb=excluded.vma_halb, uebernachtung=excluded.uebernachtung,
+                    gueltig_ab=excluded.gueltig_ab, gueltig_bis=excluded.gueltig_bis
+            """, (code, name, voll, halb, uebernacht, gueltig_ab, gueltig_bis))
+        anzahl_laender += 1
+
+        for special in (land.get("specials") or []):
+            stadt = (special.get("city") or "").strip()
+            if not stadt:
+                continue
+            s_voll = special.get("catering24")
+            s_halb = special.get("catering8")
+            s_uebernacht = special.get("overnight")
+            if s_voll is None or s_halb is None:
+                continue
+            stadt_name = f"{name} – {stadt}"
+            if is_postgres():
+                cur.execute(f"""
+                    INSERT INTO vma_saetze (land_code, ort, land_name, vma_voll, vma_halb,
+                        uebernachtung, gueltig_ab, gueltig_bis, quelle, aktualisiert)
+                    VALUES ({P},{P},{P},{P},{P},{P},{P},{P},'pauschbetrag-api',NOW())
+                    ON CONFLICT (land_code, ort) DO UPDATE SET
+                        land_name={P}, vma_voll={P}, vma_halb={P}, uebernachtung={P},
+                        gueltig_ab={P}, gueltig_bis={P}, quelle='pauschbetrag-api', aktualisiert=NOW()
+                """, (code, stadt, stadt_name, s_voll, s_halb, s_uebernacht, gueltig_ab, gueltig_bis,
+                      stadt_name, s_voll, s_halb, s_uebernacht, gueltig_ab, gueltig_bis))
+            else:
+                cur.execute(f"""
+                    INSERT INTO vma_saetze (land_code, ort, land_name, vma_voll, vma_halb,
+                        uebernachtung, gueltig_ab, gueltig_bis, quelle)
+                    VALUES ({P},{P},{P},{P},{P},{P},{P},{P},'pauschbetrag-api')
+                    ON CONFLICT (land_code, ort) DO UPDATE SET
+                        land_name=excluded.land_name, vma_voll=excluded.vma_voll,
+                        vma_halb=excluded.vma_halb, uebernachtung=excluded.uebernachtung,
+                        gueltig_ab=excluded.gueltig_ab, gueltig_bis=excluded.gueltig_bis
+                """, (code, stadt, stadt_name, s_voll, s_halb, s_uebernacht, gueltig_ab, gueltig_bis))
+            anzahl_staedte += 1
+
+    db.commit(); cur.close(); db.close()
+
+    return {
+        "ok": True,
+        "laender": anzahl_laender,
+        "staedte": anzahl_staedte,
+        "gueltig_ab": gueltig_ab,
+    }
+
+
+def vma_fuer_land_erweitert(cur, land_code: str, ort: str | None = None) -> dict:
+    """
+    Liefert den VMA-Satz für ein Land, optional mit Städte-Sonderfall.
+    Reihenfolge: 1) importierter Städte-Satz  2) importierter Länder-Satz
+    3) fest hinterlegter Satz im Code (Fallback, falls noch nicht importiert).
+    """
+    from mod_db import ph
+    P = ph()
+    land_code = (land_code or "DE").upper()
+
+    if ort:
+        cur.execute(f"SELECT land_name, vma_voll, vma_halb FROM vma_saetze "
+                    f"WHERE land_code={P} AND ort={P}", (land_code, ort))
+        row = cur.fetchone()
+        if row:
+            n = row[0] if isinstance(row, tuple) else row["land_name"]
+            v = row[1] if isinstance(row, tuple) else row["vma_voll"]
+            h = row[2] if isinstance(row, tuple) else row["vma_halb"]
+            return {"land_name": n, "voll": float(v), "halb": float(h), "quelle": "importiert (Stadt)"}
+
+    cur.execute(f"SELECT land_name, vma_voll, vma_halb FROM vma_saetze "
+                f"WHERE land_code={P} AND ort IS NULL", (land_code,))
+    row = cur.fetchone()
+    if row:
+        n = row[0] if isinstance(row, tuple) else row["land_name"]
+        v = row[1] if isinstance(row, tuple) else row["vma_voll"]
+        h = row[2] if isinstance(row, tuple) else row["vma_halb"]
+        return {"land_name": n, "voll": float(v), "halb": float(h), "quelle": "importiert"}
+
+    s = VMA_SAETZE.get(land_code, {"name": land_code, "voll": 28.00, "halb": 14.00})
+    return {"land_name": s["name"], "voll": s["voll"], "halb": s["halb"], "quelle": "code (nicht importiert)"}
+
+
+def staedte_fuer_land(cur, land_code: str) -> list[str]:
+    """Liste der importierten Städte-Sonderfälle für ein Land (z.B. für USA: Los Angeles, New York, ...)."""
+    from mod_db import ph
+    P = ph()
+    cur.execute(f"SELECT ort FROM vma_saetze WHERE land_code={P} AND ort IS NOT NULL ORDER BY ort",
+                (land_code.upper(),))
+    rows = cur.fetchall()
+    return [r[0] if isinstance(r, tuple) else r["ort"] for r in rows]
 

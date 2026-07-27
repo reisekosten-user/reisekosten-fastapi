@@ -15,7 +15,8 @@ from fastapi.staticfiles import StaticFiles
 
 # ── Module importieren ────────────────────────────────────────────────────────
 from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schema, get_migrations, repair_legacy_columns
-from mod_vma import VMA_SAETZE, IATA_TO_LAND, LAENDER_LISTE, vma_fuer_land
+from mod_vma import (VMA_SAETZE, IATA_TO_LAND, LAENDER_LISTE, vma_fuer_land,
+                      importiere_aktuelle_saetze, vma_fuer_land_erweitert)
 from mod_anon import anonymisieren
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         lade_ma_daten, get_s3, s3_upload, s3_download,
@@ -32,7 +33,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.2-k"
+APP_VERSION  = "2.3-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -592,6 +593,11 @@ def beleg_detail(bid: int):
                       <option value="Rechnung"{' selected' if belegart=='Rechnung' else ''}>Rechnung</option>
                       <option value="Quittung"{' selected' if belegart=='Quittung' else ''}>Quittung</option>
                       <option value="Buchungsbestaetigung"{' selected' if belegart=='Buchungsbestaetigung' else ''}>Buchungsbestätigung</option>
+                      <option value="Tankbeleg"{' selected' if belegart=='Tankbeleg' else ''}>Tankbeleg (Rechnung)</option>
+                      <option value="Hotel"{' selected' if belegart=='Hotel' else ''}>Hotel</option>
+                      <option value="Taxi"{' selected' if belegart=='Taxi' else ''}>Taxi</option>
+                      <option value="Bewirtung"{' selected' if belegart=='Bewirtung' else ''}>Bewirtung</option>
+                      <option value="Sonstige Kosten"{' selected' if belegart=='Sonstige Kosten' else ''}>Sonstige Kosten (z.B. Extragepäck)</option>
                       <option value="Sonstiges"{' selected' if belegart=='Sonstiges' else ''}>Sonstiges</option>
                     </select>
                   </form>
@@ -2904,8 +2910,14 @@ def land_neu_form(code: str):
           <div class="form-grid form-grid-2">
             <div class="form-group full">
               <label>Land <span class="required">*</span></label>
-              <select name="land_code" required onchange="showVMA(this.value)">
+              <select name="land_code" id="land_code" required onchange="ladeVMA(this.value)">
                 {land_opts}
+              </select>
+            </div>
+            <div class="form-group full">
+              <label>Ort / Region</label>
+              <select name="ort" id="ort_select" onchange="zeigeSatz()">
+                <option value="">Standard (ganzes Land)</option>
               </select>
               <div id="vma-info" class="form-hint" style="color:var(--green)"></div>
             </div>
@@ -2926,13 +2938,34 @@ def land_neu_form(code: str):
       </div>
     </div>
     <script>
-    const VMA = {json.dumps(VMA_SAETZE)};
-    function showVMA(code) {{
-        const info = VMA[code];
-        const el = document.getElementById('vma-info');
-        if (info) el.textContent = info.name + ': ' + info.voll + ' EUR/Tag · ' + info.halb + ' EUR halber Satz';
+    let aktuelleInfo = null;
+    async function ladeVMA(code) {{
+        const res = await fetch('/vma-saetze/info/' + code);
+        const data = await res.json();
+        aktuelleInfo = data;
+        const sel = document.getElementById('ort_select');
+        sel.innerHTML = '<option value="">Standard (ganzes Land)</option>';
+        (data.staedte || []).forEach(s => {{
+            const opt = document.createElement('option');
+            opt.value = s.ort;
+            opt.textContent = s.ort + ' (' + s.voll.toFixed(2) + ' EUR / ' + s.halb.toFixed(2) + ' EUR)';
+            sel.appendChild(opt);
+        }});
+        zeigeSatz();
     }}
-    showVMA(document.querySelector('select[name="land_code"]').value);
+    function zeigeSatz() {{
+        const el = document.getElementById('vma-info');
+        const ort = document.getElementById('ort_select').value;
+        if (!aktuelleInfo) {{ el.textContent = ''; return; }}
+        if (ort) {{
+            const s = (aktuelleInfo.staedte || []).find(x => x.ort === ort);
+            if (s) el.textContent = s.name + ': ' + s.voll.toFixed(2) + ' EUR/Tag · ' + s.halb.toFixed(2) + ' EUR halber Satz';
+        }} else if (aktuelleInfo.standard) {{
+            const s = aktuelleInfo.standard;
+            el.textContent = s.land_name + ' (' + s.quelle + '): ' + s.voll.toFixed(2) + ' EUR/Tag · ' + s.halb.toFixed(2) + ' EUR halber Satz';
+        }}
+    }}
+    ladeVMA(document.getElementById('land_code').value);
     </script>"""
     return HTMLResponse(shell(f"Land – {rcode}", content, "reisen"))
 
@@ -2941,6 +2974,7 @@ async def land_neu(code: str, request: Request):
     rcode = code.upper()
     form = await request.form()
     land_code = (form.get("land_code") or "").strip().upper()
+    ort = (form.get("ort") or "").strip() or None
     datum_von = (form.get("datum_von") or "").strip()
     datum_bis = (form.get("datum_bis") or "").strip()
     if not all([land_code, datum_von, datum_bis]):
@@ -2949,13 +2983,14 @@ async def land_neu(code: str, request: Request):
             f'<a href="/reise/{rcode}/land/neu" class="btn btn-secondary">Zurück</a>'))
     try:
         P = ph()
-        land_name = VMA_SAETZE.get(land_code, {}).get("name", land_code)
-        vvoll, vhalb = vma_fuer_land(land_code)
         db = get_db(); cur = db.cursor()
+        info = vma_fuer_land_erweitert(cur, land_code, ort)
+        land_name = info["land_name"]
+        vvoll, vhalb = info["voll"], info["halb"]
         cur.execute(
-            f"INSERT INTO reise_laender (reise_code,datum_von,datum_bis,land_code,land_name,vma_voll,vma_halb) "
-            f"VALUES ({P},{P},{P},{P},{P},{P},{P})",
-            (rcode, datum_von, datum_bis, land_code, land_name, vvoll, vhalb))
+            f"INSERT INTO reise_laender (reise_code,datum_von,datum_bis,land_code,land_name,vma_voll,vma_halb,ort) "
+            f"VALUES ({P},{P},{P},{P},{P},{P},{P},{P})",
+            (rcode, datum_von, datum_bis, land_code, land_name, vvoll, vhalb, ort))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/reise/{rcode}", status_code=303)
     except Exception as e:
@@ -3068,33 +3103,114 @@ def land_loeschen(code: str, lid: int):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 # ── VMA-Tabelle Übersicht ──────────────────────────────────────────────────────
+@app.post("/vma-saetze/import")
+def vma_saetze_import():
+    result = importiere_aktuelle_saetze()
+    if result.get("fehler"):
+        msg = f"fehler={result['fehler']}"
+    else:
+        msg = f"ok=1&laender={result['laender']}&staedte={result['staedte']}&ab={result.get('gueltig_ab','')}"
+    return RedirectResponse(f"/vma?{msg}", status_code=303)
+
+@app.get("/vma-saetze/info/{land_code}")
+def vma_saetze_info(land_code: str):
+    """JSON: Standard-Satz + Städte-Sonderfälle für ein Land (für das Land-Formular)."""
+    try:
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        standard = vma_fuer_land_erweitert(cur, land_code, None)
+        cur.execute(f"SELECT ort, land_name, vma_voll, vma_halb FROM vma_saetze "
+                    f"WHERE land_code={P} AND ort IS NOT NULL ORDER BY ort", (land_code.upper(),))
+        rows = cur.fetchall()
+        cur.close(); db.close()
+        staedte = [{"ort": (r[0] if isinstance(r, tuple) else r["ort"]),
+                    "name": (r[1] if isinstance(r, tuple) else r["land_name"]),
+                    "voll": float(r[2] if isinstance(r, tuple) else r["vma_voll"]),
+                    "halb": float(r[3] if isinstance(r, tuple) else r["vma_halb"])} for r in rows]
+        return JSONResponse({"standard": standard, "staedte": staedte})
+    except Exception as e:
+        return JSONResponse({"standard": None, "staedte": [], "fehler": str(e)})
+
 @app.get("/vma", response_class=HTMLResponse)
-def vma_uebersicht():
+def vma_uebersicht(ok: str = "", fehler: str = "", laender: str = "", staedte: str = "", ab: str = ""):
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("""SELECT land_code, ort, land_name, vma_voll, vma_halb, gueltig_ab, aktualisiert
+                       FROM vma_saetze ORDER BY land_name, ort""")
+        rows = cur.fetchall()
+        cur.close(); db.close()
+    except Exception:
+        rows = []
+
+    def g(r, key, idx):
+        return r[key] if hasattr(r, "keys") else r[idx]
+
+    importiert_am = None
+    laender_map: dict[str, dict] = {}
+    for r in rows:
+        lc = g(r,"land_code",0); ort = g(r,"ort",1); ln = g(r,"land_name",2)
+        voll = float(g(r,"vma_voll",3)); halb = float(g(r,"vma_halb",4))
+        importiert_am = g(r,"aktualisiert",6) or importiert_am
+        eintrag = laender_map.setdefault(lc, {"name": None, "voll": None, "halb": None, "staedte": []})
+        if ort:
+            eintrag["staedte"].append({"name": ln, "voll": voll, "halb": halb})
+        else:
+            eintrag["name"] = ln; eintrag["voll"] = voll; eintrag["halb"] = halb
+
     zeilen = ""
-    for code, info in sorted(VMA_SAETZE.items(), key=lambda x: x[1]["name"]):
-        region = ("🇩🇪" if code == "DE"
-                  else "🇪🇺" if code in ("FR","CH","AT","GB","IT","ES","NL","BE","PL",
-                                          "CZ","SE","NO","DK","FI","PT","GR","TR","HU",
-                                          "RO","HR","BG","SK","SI","RS")
-                  else "🌍")
-        zeilen += f"""<tr>
-            <td class="td-mono">{code}</td>
-            <td>{region} {info["name"]}</td>
-            <td style="text-align:right;font-weight:600">{info["voll"]:.2f} EUR</td>
-            <td style="text-align:right">{info["halb"]:.2f} EUR</td>
-        </tr>"""
+    if laender_map:
+        # Importierte Sätze aus der DB anzeigen
+        for lc, info in sorted(laender_map.items(), key=lambda x: x[1]["name"] or x[0]):
+            if info["voll"] is None:
+                continue
+            zeilen += f"""<tr>
+                <td class="td-mono">{lc}</td>
+                <td>🌍 {info["name"]}</td>
+                <td style="text-align:right;font-weight:600">{info["voll"]:.2f} EUR</td>
+                <td style="text-align:right">{info["halb"]:.2f} EUR</td>
+            </tr>"""
+            for st in sorted(info["staedte"], key=lambda s: s["name"]):
+                zeilen += f"""<tr style="background:#fafbfe">
+                    <td class="td-mono" style="color:var(--muted)">↳</td>
+                    <td style="padding-left:24px">📍 {st["name"]}</td>
+                    <td style="text-align:right;font-weight:600">{st["voll"]:.2f} EUR</td>
+                    <td style="text-align:right">{st["halb"]:.2f} EUR</td>
+                </tr>"""
+    else:
+        # Fallback: fest hinterlegte Sätze im Code
+        for code, info in sorted(VMA_SAETZE.items(), key=lambda x: x[1]["name"]):
+            zeilen += f"""<tr>
+                <td class="td-mono">{code}</td>
+                <td>🌍 {info["name"]}</td>
+                <td style="text-align:right;font-weight:600">{info["voll"]:.2f} EUR</td>
+                <td style="text-align:right">{info["halb"]:.2f} EUR</td>
+            </tr>"""
+
+    banner = ""
+    if ok:
+        banner = (f'<div class="alert alert-ok" style="margin-bottom:16px">'
+                  f'✓ Import erfolgreich: {laender} Länder, {staedte} Städte-Sonderfälle '
+                  f'(gültig ab {ab}).</div>')
+    elif fehler:
+        banner = f'<div class="alert alert-err" style="margin-bottom:16px">Import fehlgeschlagen: {fehler}</div>'
+    elif not laender_map:
+        banner = ('<div class="alert alert-warn" style="margin-bottom:20px">'
+                   'Es wurden noch keine aktuellen Sätze importiert – unten stehen die im Code '
+                   'hinterlegten Werte (Stand 2024/2026, ohne Städte-Sonderfälle).</div>')
 
     content = f"""
-    <h1 class="page-title">VMA-Tagessätze 2026</h1>
-    <div class="alert alert-warn" style="margin-bottom:20px">
-      Quelle: BMF-Schreiben Auslandsreisekosten 2024 (§ 9 Abs. 4a EStG).
-      Stand: Januar 2026. Bei Änderungen bitte Buchhalter kontaktieren.
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h1 class="page-title" style="margin:0">VMA-Tagessätze</h1>
+      <form method="post" action="/vma-saetze/import">
+        <button type="submit" class="btn btn-primary">🔄 Aktuelle Sätze importieren</button>
+      </form>
     </div>
+    {banner}
     <div class="card">
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>ISO</th><th>Land</th>
+            <th>ISO</th><th>Land / Ort</th>
             <th style="text-align:right">Voller Satz/Tag</th>
             <th style="text-align:right">Halber Satz/Tag</th>
           </tr></thead>
@@ -3105,7 +3221,9 @@ def vma_uebersicht():
     <div class="alert alert-ok" style="margin-top:16px">
       <b>Regel:</b> Erster und letzter Reisetag → halber Satz. Volle Tage dazwischen → voller Satz.
       Bei Aufenthalt in mehreren Ländern gilt der Satz des Landes, in dem der Reisende
-      um 24:00 Uhr Ortszeit war.
+      um 24:00 Uhr Ortszeit war. Städte-Sonderfälle (z.B. Los Angeles) werden beim
+      "Land hinzufügen" in der Reise automatisch zur Auswahl angeboten, sobald importiert.
+      Quelle: <a href="https://github.com/david-loe/pauschbetrag-api" target="_blank" style="color:var(--muted)">pauschbetrag-api</a> (offizielle BMF-Daten).
     </div>"""
-    return HTMLResponse(shell("VMA-Sätze 2026", content, "vma"))
+    return HTMLResponse(shell("VMA-Sätze", content, "vma"))
 

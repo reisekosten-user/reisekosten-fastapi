@@ -156,6 +156,20 @@ def get_schema() -> list[str]:
                 fehler                TEXT,
                 erstellt              TIMESTAMP DEFAULT NOW()
             )""",
+            """CREATE TABLE IF NOT EXISTS vma_saetze (
+                id          SERIAL PRIMARY KEY,
+                land_code   TEXT NOT NULL,
+                ort         TEXT,
+                land_name   TEXT NOT NULL,
+                vma_voll    NUMERIC(6,2) NOT NULL,
+                vma_halb    NUMERIC(6,2) NOT NULL,
+                uebernachtung NUMERIC(6,2),
+                gueltig_ab  TEXT,
+                gueltig_bis TEXT,
+                quelle      TEXT DEFAULT 'pauschbetrag-api',
+                aktualisiert TIMESTAMP DEFAULT NOW(),
+                UNIQUE(land_code, ort)
+            )""",
         ]
     else:
         return [
@@ -257,6 +271,20 @@ def get_schema() -> list[str]:
                 fehler                TEXT,
                 erstellt              TEXT DEFAULT (datetime('now'))
             )""",
+            """CREATE TABLE IF NOT EXISTS vma_saetze (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                land_code   TEXT NOT NULL,
+                ort         TEXT,
+                land_name   TEXT NOT NULL,
+                vma_voll    REAL NOT NULL,
+                vma_halb    REAL NOT NULL,
+                uebernachtung REAL,
+                gueltig_ab  TEXT,
+                gueltig_bis TEXT,
+                quelle      TEXT DEFAULT 'pauschbetrag-api',
+                aktualisiert TEXT DEFAULT (datetime('now')),
+                UNIQUE(land_code, ort)
+            )""",
         ]
 
 def get_migrations() -> list[str]:
@@ -283,6 +311,7 @@ def get_migrations() -> list[str]:
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS quelle TEXT DEFAULT 'auto'",
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS notiz TEXT",
         "ALTER TABLE vma_tage ALTER COLUMN reise_id DROP NOT NULL",
+        "ALTER TABLE reise_laender ADD COLUMN IF NOT EXISTS ort TEXT",
     ]
 
 def repair_legacy_columns():

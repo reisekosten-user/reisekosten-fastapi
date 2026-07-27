@@ -30,8 +30,10 @@ def land_fuer_tag(reise_code: str, datum: date, db) -> tuple:
     Ermittelt das Land für einen Tag aus:
     1. Flug-Segmenten (Ankunftsland des letzten Segments des Tages)
     2. Hotel-Belegen (Land des Hotels an diesem Tag)
-    3. Reise-Länder-Tabelle (manuell hinterlegt)
-    Gibt (land_code, land_name, quelle) zurück.
+    3. Reise-Länder-Tabelle (manuell hinterlegt, inkl. Orts-/Städte-Sonderfälle)
+    Gibt (land_code, land_name, quelle, override) zurück.
+    override ist None oder {"voll": x, "halb": y} – wenn gesetzt, hat der beim
+    manuellen Land-Eintrag hinterlegte Satz Vorrang vor dem Standard-Satz.
     """
     cur = db.cursor()
     P = ph()
@@ -64,7 +66,7 @@ def land_fuer_tag(reise_code: str, datum: date, db) -> tuple:
     if letztes_land:
         lname = VMA_SAETZE.get(letztes_land, {}).get("name", letztes_land)
         cur.close()
-        return letztes_land, lname, "Flug-Segment"
+        return letztes_land, lname, "Flug-Segment", None
 
     # 2. Hotel-Beleg: Hotel das an diesem Tag aktiv ist
     cur.execute(f"""SELECT land_beleg, ki_json FROM belege
@@ -77,21 +79,24 @@ def land_fuer_tag(reise_code: str, datum: date, db) -> tuple:
         if land and land in VMA_SAETZE:
             lname = VMA_SAETZE.get(land, {}).get("name", land)
             cur.close()
-            return land, lname, "Hotel-Beleg"
+            return land, lname, "Hotel-Beleg", None
 
-    # 3. Reise-Länder (manuell)
-    cur.execute(f"""SELECT land_code, land_name FROM reise_laender
+    # 3. Reise-Länder (manuell, inkl. Orts-Sonderfall wie z.B. Los Angeles)
+    cur.execute(f"""SELECT land_code, land_name, vma_voll, vma_halb FROM reise_laender
         WHERE reise_code={P} AND datum_von<={P} AND datum_bis>={P}
         ORDER BY id LIMIT 1""", (reise_code, datum_s, datum_s))
     row = cur.fetchone()
     if row:
         lcode = row[0] if isinstance(row, tuple) else row["land_code"]
         lname = row[1] if isinstance(row, tuple) else row["land_name"]
+        voll = row[2] if isinstance(row, tuple) else row["vma_voll"]
+        halb = row[3] if isinstance(row, tuple) else row["vma_halb"]
+        override = {"voll": float(voll), "halb": float(halb)} if voll is not None and halb is not None else None
         cur.close()
-        return lcode, lname, "Manuell"
+        return lcode, lname, "Manuell", override
 
     cur.close()
-    return "DE", "Deutschland", "Standard"
+    return "DE", "Deutschland", "Standard", None
 
 def fruehstueck_aus_beleg(reise_code: str, datum: date, db) -> bool:
     """
@@ -160,9 +165,12 @@ def vma_tage_generieren(reise_code: str, db) -> int:
             if q == "manuell":
                 continue  # Manuell → nicht anfassen
 
-        lcode, lname, quelle = land_fuer_tag(reise_code, tag, db)
-        satz = VMA_SAETZE.get(lcode, VMA_SAETZE["DE"])
-        voll = satz["voll"]; halb = satz["halb"]
+        lcode, lname, quelle, override = land_fuer_tag(reise_code, tag, db)
+        if override:
+            voll = override["voll"]; halb = override["halb"]
+        else:
+            satz = VMA_SAETZE.get(lcode, VMA_SAETZE["DE"])
+            voll = satz["voll"]; halb = satz["halb"]
 
         # Frühstück aus Beleg
         frueh = fruehstueck_aus_beleg(reise_code, tag, db)
