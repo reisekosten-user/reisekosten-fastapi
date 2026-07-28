@@ -170,6 +170,7 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
   "betrag_netto": null,
   "betrag_mwst": null,
   "waehrung": "EUR",
+  "zahlungsart": "Kreditkarte|Bar|Ueberweisung|Unbekannt (erkennbar an Visa/Mastercard/Amex, maskierter Kartennummer wie xxxx1234, 'bar bezahlt'/cash, oder Ueberweisungshinweisen)",
   "event_datum_von": "DD.MM.YYYY",
   "event_datum_bis": "DD.MM.YYYY",
   "event_zeit": "HH:MM (Uhrzeit auf dem Beleg, z.B. bei Tankquittung, Parkschein, Mautbeleg)",
@@ -211,9 +212,9 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
             if m:
                 result = json.loads(m.group(0))
                 pflicht = ["belegdatum","transportart","anbieter",
-                           "betrag_brutto","waehrung","event_datum_von"]
+                           "betrag_brutto","waehrung","event_datum_von","zahlungsart"]
                 if result.get("belegart") == "Buchungsbestaetigung":
-                    pflicht = [f for f in pflicht if f not in ("betrag_brutto","waehrung")]
+                    pflicht = [f for f in pflicht if f not in ("betrag_brutto","waehrung","zahlungsart")]
                 fehlend = [f for f in pflicht if not result.get(f)]
                 result["pflichtfelder_ok"] = len(fehlend) == 0
                 result["fehlende_pflichtfelder"] = fehlend
@@ -263,6 +264,7 @@ JSON-Format:
   "betrag_netto": 89.33,
   "betrag_mwst": 17.87,
   "waehrung": "EUR",
+  "zahlungsart": "Kreditkarte|Bar|Ueberweisung|Unbekannt (erkennbar an Visa/Mastercard/Amex, maskierter Kartennummer wie xxxx1234, 'bar bezahlt'/cash, oder Ueberweisungshinweisen; bei Reisebuero-Buchungen meist Ueberweisung)",
   "event_datum_von": "DD.MM.YYYY",
   "event_datum_bis": "DD.MM.YYYY",
   "event_zeit": "HH:MM (Uhrzeit auf dem Beleg, z.B. bei Tankquittung, Parkschein, Mautbeleg – NICHT bei Flug/Bahn/Hotel, dafuer gibt es eigene Zeitfelder)",
@@ -330,9 +332,9 @@ JSON-Format:
             if m:
                 result = json.loads(m.group(0))
                 pflicht = ["belegdatum","transportart","anbieter",
-                           "betrag_brutto","waehrung","event_datum_von"]
+                           "betrag_brutto","waehrung","event_datum_von","zahlungsart"]
                 if result.get("belegart") == "Buchungsbestaetigung":
-                    pflicht = [f for f in pflicht if f not in ("betrag_brutto","waehrung")]
+                    pflicht = [f for f in pflicht if f not in ("betrag_brutto","waehrung","zahlungsart")]
                 fehlend = [f for f in pflicht if not result.get(f)]
                 result["pflichtfelder_ok"] = len(fehlend) == 0
                 result["fehlende_pflichtfelder"] = fehlend
@@ -418,7 +420,7 @@ async def beleg_neu_analysieren(bid: int) -> dict:
         ki_json={P}, pflichtfelder_ok={P}, fehlende_felder={P},
         belegdatum={P}, belegart={P}, transportart={P}, transportart_freitext={P},
         anbieter={P}, rechnungsnummer={P}, buchungscode={P}, reisender={P}, land_beleg={P},
-        betrag_brutto={P}, betrag_netto={P}, betrag_mwst={P}, waehrung={P},
+        betrag_brutto={P}, betrag_netto={P}, betrag_mwst={P}, waehrung={P}, zahlungsart={P},
         event_datum_von={P}, event_datum_bis={P}, event_zeit={P},
         event_ort_von={P}, event_ort_bis={P},
         hotel_name={P}, hotel_checkin_datum={P}, hotel_checkin_zeit={P},
@@ -434,7 +436,7 @@ async def beleg_neu_analysieren(bid: int) -> dict:
         ki_result.get("buchungscode"), ki_result.get("reisender"),
         ki_result.get("land_beleg"),
         pn("betrag_brutto"), pn("betrag_netto"), pn("betrag_mwst"),
-        ki_result.get("waehrung","EUR"),
+        ki_result.get("waehrung","EUR"), ki_result.get("zahlungsart"),
         pd("event_datum_von"), pd("event_datum_bis"), ki_result.get("event_zeit"),
         ki_result.get("event_ort_von"), ki_result.get("event_ort_bis"),
         ki_result.get("hotel_name"), pd("hotel_checkin_datum"),
@@ -613,7 +615,7 @@ async def beleg_verarbeiten(
          pflichtfelder_ok, fehlende_felder,
          belegdatum, belegart, transportart, transportart_freitext,
          anbieter, rechnungsnummer, buchungscode, reisender, land_beleg,
-         betrag_brutto, betrag_netto, betrag_mwst, waehrung,
+         betrag_brutto, betrag_netto, betrag_mwst, waehrung, zahlungsart,
          event_datum_von, event_datum_bis, event_zeit, event_ort_von, event_ort_bis,
          hotel_name, hotel_checkin_datum, hotel_checkin_zeit,
          hotel_checkout_datum, hotel_checkout_zeit, hotel_naechte,
@@ -622,7 +624,8 @@ async def beleg_verarbeiten(
          status)
         VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},{P},{P},{P},{P},
-                {P},{P},{P},{P},{P},{P},{P},{P},{P},
+                {P},{P},{P},{P},{P},
+                {P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},{P},{P})"""
 
@@ -636,7 +639,7 @@ async def beleg_verarbeiten(
         ki_result.get("buchungscode"), ki_result.get("reisender"),
         ki_result.get("land_beleg"),
         pn("betrag_brutto"), pn("betrag_netto"), pn("betrag_mwst"),
-        ki_result.get("waehrung","EUR"),
+        ki_result.get("waehrung","EUR"), ki_result.get("zahlungsart"),
         pd("event_datum_von"), pd("event_datum_bis"), ki_result.get("event_zeit"),
         ki_result.get("event_ort_von"), ki_result.get("event_ort_bis"),
         ki_result.get("hotel_name"), pd("hotel_checkin_datum"),

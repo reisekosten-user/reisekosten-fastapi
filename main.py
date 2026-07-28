@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi import FastAPI, Request, Form, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
 # ── Module importieren ────────────────────────────────────────────────────────
 from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schema, get_migrations, repair_legacy_columns
@@ -24,16 +25,19 @@ from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         beleg_neu_anonymisieren, beleg_neu_analysieren,
                         OPENAI_KEY, OPENAI_MODEL, OPENAI_URL,
                         S3_ENDPOINT, S3_BUCKET)
-from mod_mail import fetch_mails
+from mod_mail import fetch_mails, sende_dms_mail
 from mod_vma_tage import (vma_berechnen, land_fuer_tag,
                            fruehstueck_aus_beleg, vma_tage_generieren)
+from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
+                       hat_bereits_passwoerter, pfad_ist_offen)
 
 # ── Konfiguration ─────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.4-d"
+SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
+APP_VERSION  = "2.5-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -324,7 +328,7 @@ def shell(title: str, content: str, page: str = "") -> str:
   {nav("belege", "Belege", "/belege")}
   {nav("mails", "📬 Mails", "/mails-abrufen")}
   {nav("vma", "VMA-Sätze", "/vma")}
-  <div class="nav-right">v{APP_VERSION}</div>
+  <div class="nav-right">v{APP_VERSION} &nbsp;·&nbsp; <a href="/logout" style="color:inherit">🚪 Logout</a></div>
 </nav>
 <main>
 {content}
@@ -334,6 +338,23 @@ def shell(title: str, content: str, page: str = "") -> str:
 
 # ── FastAPI App ────────────────────────────────────────────────────────────────
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
+
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
+                    same_site="lax", max_age=60*60*24*14)
+
+@app.middleware("http")
+async def login_erforderlich(request: Request, call_next):
+    pfad = request.url.path
+    if pfad_ist_offen(pfad):
+        return await call_next(request)
+    if not hat_bereits_passwoerter():
+        # Noch kein Passwort im System vergeben → Ersteinrichtung erlauben
+        if pfad != "/setup":
+            return RedirectResponse("/setup", status_code=303)
+        return await call_next(request)
+    if not request.session.get("kuerzel"):
+        return RedirectResponse(f"/login?next={pfad}", status_code=303)
+    return await call_next(request)
 
 @app.on_event("startup")
 async def startup():
@@ -452,7 +473,8 @@ def beleg_detail(bid: int):
             tanken_kraftstoff, tanken_menge, tanken_einheit,
             tanken_preis_einheit, tanken_tankstelle, tanken_kennzeichen,
             status, fehler, erstellt,
-            kurs_eur, betrag_eur, kurs_datum, kurs_quelle
+            kurs_eur, betrag_eur, kurs_datum, kurs_quelle,
+            zahlungsart, geprueft, pruef_vermerk, geprueft_von, geprueft_am, dms_versendet_am
             FROM belege WHERE id={P}""", (bid,))
         r = cur.fetchone()
         # Reisen für Zuordnung
@@ -487,6 +509,9 @@ def beleg_detail(bid: int):
         status=get(r,"status",39); fehler=get(r,"fehler",40); erstellt=get(r,"erstellt",41)
         kurs_eur=get(r,"kurs_eur",42); betrag_eur=get(r,"betrag_eur",43)
         kurs_datum=get(r,"kurs_datum",44); kurs_quelle=get(r,"kurs_quelle",45)
+        zahlungsart=get(r,"zahlungsart",46); geprueft=bool(get(r,"geprueft",47))
+        pruef_vermerk=get(r,"pruef_vermerk",48); geprueft_von=get(r,"geprueft_von",49)
+        geprueft_am=get(r,"geprueft_am",50); dms_versendet_am=get(r,"dms_versendet_am",51)
         zusammenfassung = f"{typ}: {vendor} – {betrag_brutto} {waehrung}" if vendor else ""
 
         # KI-JSON parsen
@@ -614,6 +639,21 @@ def beleg_detail(bid: int):
                   <a href="/beleg/{bid2}/betrag/bearbeiten" style="font-size:12px;color:var(--muted);
                      text-decoration:none;font-weight:400;margin-left:6px">✏</a></dd>
                 {'<div class="alert alert-warn" style="margin:8px 0;font-size:12px">Bei Buchungsbestätigungen ist noch kein Betrag nötig – kann später über das ✏ nachgetragen werden.</div>' if not betrag_brutto and belegart == 'Buchungsbestaetigung' else ''}
+                <dt style="color:var(--muted);font-size:12px">Bezahlart</dt>
+                <dd>
+                  <form method="post" action="/beleg/{bid2}/zahlungsart" style="display:inline-block">
+                    <select name="zahlungsart" onchange="this.form.submit()"
+                            style="padding:4px 8px;font-size:12px;border:1px solid var(--border);
+                                   border-radius:6px;background:white">
+                      <option value=""{' selected' if not zahlungsart else ''}>– wählen –</option>
+                      <option value="Kreditkarte"{' selected' if zahlungsart=='Kreditkarte' else ''}>💳 Kreditkarte</option>
+                      <option value="Bar"{' selected' if zahlungsart=='Bar' else ''}>💵 Bar</option>
+                      <option value="Ueberweisung"{' selected' if zahlungsart=='Ueberweisung' else ''}>🏦 Überweisung</option>
+                      <option value="Unbekannt"{' selected' if zahlungsart=='Unbekannt' else ''}>❓ Unbekannt</option>
+                    </select>
+                  </form>
+                  {'' if zahlungsart or belegart == 'Buchungsbestaetigung' else '<span style="font-size:11px;color:#b45309;margin-left:6px">⚠ bitte nachtragen</span>'}
+                </dd>
                 {f'<dt style="color:var(--muted);font-size:12px">Netto</dt><dd>{float(betrag_netto):.2f} {waehrung}</dd>' if betrag_netto else ""}
                 {f'<dt style="color:var(--muted);font-size:12px">{"MwSt." if land == "DE" else "VAT"}</dt><dd>{float(betrag_mwst):.2f} {waehrung}</dd>' if betrag_mwst else ""}
                 <dt style="color:var(--muted);font-size:12px">Belegdatum</dt>
@@ -713,6 +753,37 @@ def beleg_detail(bid: int):
               </form>'''}
             </div>
           </div>
+
+          {f'''<div class="card">
+            <div class="card-header"><span class="card-title">✅ Prüfung & Archivierung</span></div>
+            <div class="card-body">
+              {'<div class="alert alert-ok" style="font-size:12px">Geprüft von <b>' + (geprueft_von or '–') + '</b> am ' + fmt_date(geprueft_am) + (' · "' + pruef_vermerk + '"' if pruef_vermerk else '') + '</div>' if geprueft else '<div class="alert alert-warn" style="font-size:12px">Noch nicht geprüft.</div>'}
+              <form method="post" action="/beleg/{bid2}/pruefen" style="margin-top:10px">
+                <div class="form-group">
+                  <label>Prüfvermerk</label>
+                  <input type="text" name="pruef_vermerk" value="{pruef_vermerk or ''}"
+                         placeholder="z.B. sachlich korrekt, Reise bestätigt">
+                </div>
+                <div class="form-group">
+                  <label>Geprüft von (Kürzel)</label>
+                  <input type="text" name="geprueft_von" value="{geprueft_von or ''}" maxlength="5" placeholder="z.B. RD">
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%">
+                  {"✓ Prüfung aktualisieren" if geprueft else "✓ Als geprüft markieren"}
+                </button>
+              </form>
+              <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+              {('<div class="alert alert-ok" style="font-size:12px">📤 An DMS gesendet am ' + fmt_date(dms_versendet_am) + '</div>') if dms_versendet_am else (
+                f'''<form method="post" action="/beleg/{bid2}/dms-senden">
+                  <button type="submit" class="btn btn-success" style="width:100%"
+                    {"" if geprueft and rcode else "disabled"}>
+                    📤 An DMS senden (Archivierung)
+                  </button>
+                </form>
+                {'<div style="font-size:11px;color:var(--muted);margin-top:6px">Voraussetzung: geprüft + Reise zugeordnet.</div>' if not (geprueft and rcode) else ''}'''
+              )}
+            </div>
+          </div>''' if belegart in ("Rechnung","Quittung") else ""}
         </div>
 
         {seg_html}
@@ -835,6 +906,97 @@ async def beleg_neu_anonymisieren_route(bid: int):
             f'<div class="alert alert-err">{result["fehler"]}</div>'
             f'<a href="/beleg/{bid}" class="btn btn-secondary">Zurück</a>'))
     return RedirectResponse(f"/beleg/{bid}", status_code=303)
+
+@app.post("/beleg/{bid}/pruefen")
+async def beleg_pruefen(bid: int, request: Request):
+    """Markiert einen Umsatzbeleg als geprüft, mit Prüfvermerk und Kürzel."""
+    form = await request.form()
+    vermerk = (form.get("pruef_vermerk") or "").strip() or None
+    geprueft_von = (form.get("geprueft_von") or "").strip().upper() or None
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        if is_postgres():
+            cur.execute(f"UPDATE belege SET geprueft=TRUE, pruef_vermerk={P}, "
+                        f"geprueft_von={P}, geprueft_am=NOW() WHERE id={P}",
+                        (vermerk, geprueft_von, bid))
+        else:
+            cur.execute(f"UPDATE belege SET geprueft=1, pruef_vermerk={P}, "
+                        f"geprueft_von={P}, geprueft_am=datetime('now') WHERE id={P}",
+                        (vermerk, geprueft_von, bid))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.post("/beleg/{bid}/dms-senden")
+async def beleg_dms_senden(bid: int):
+    """Schickt einen geprüften, reise-zugeordneten Umsatzbeleg per Mail ans DMS."""
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"""SELECT reise_code, dateiname, s3_original, anbieter, betrag_brutto,
+                        waehrung, belegdatum, belegart, zahlungsart, pruef_vermerk,
+                        geprueft, geprueft_von, geprueft_am
+                        FROM belege WHERE id={P}""", (bid,))
+        r = cur.fetchone()
+        cur.close(); db.close()
+        if not r:
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Beleg nicht gefunden.</div>'))
+        g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
+        rcode = g("reise_code",0); dateiname = g("dateiname",1); s3o = g("s3_original",2)
+        anbieter = g("anbieter",3) or "–"; betrag = g("betrag_brutto",4); waehrung = g("waehrung",5) or "EUR"
+        belegdat = g("belegdatum",6); belegart_v = g("belegart",7)
+        zahlungsart_v = g("zahlungsart",8) or "–"; vermerk = g("pruef_vermerk",9) or "–"
+        geprueft_v = bool(g("geprueft",10)); geprueft_von_v = g("geprueft_von",11) or "–"
+
+        if not geprueft_v or not rcode:
+            return HTMLResponse(shell("Fehler",
+                '<div class="alert alert-err">Beleg muss geprüft und einer Reise zugeordnet sein.</div>'
+                f'<a href="/beleg/{bid}" class="btn btn-secondary">Zurück</a>'))
+        if not s3o:
+            return HTMLResponse(shell("Fehler",
+                '<div class="alert alert-err">Kein Original-Dokument in S3 vorhanden.</div>'
+                f'<a href="/beleg/{bid}" class="btn btn-secondary">Zurück</a>'))
+
+        pdf_bytes = s3_download(s3o)
+        betreff = f"Reisekosten-Beleg {rcode} – {anbieter} – {betrag or ''} {waehrung}".strip()
+        text = (f"Beleg #{bid} zur Archivierung\n\n"
+                f"Reise: {rcode}\nAnbieter: {anbieter}\nBetrag: {betrag} {waehrung}\n"
+                f"Belegdatum: {fmt_date(belegdat)}\nBelegart: {belegart_v}\nZahlungsart: {zahlungsart_v}\n"
+                f"Geprüft von: {geprueft_von_v}\nPrüfvermerk: {vermerk}\n")
+        anhang_name = dateiname or f"beleg_{bid}.pdf"
+        result = sende_dms_mail(betreff, text, pdf_bytes, anhang_name)
+
+        if result.get("fehler"):
+            return HTMLResponse(shell("Fehler",
+                f'<div class="alert alert-err">DMS-Versand fehlgeschlagen: {result["fehler"]}</div>'
+                f'<a href="/beleg/{bid}" class="btn btn-secondary">Zurück</a>'))
+
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        if is_postgres():
+            cur.execute(f"UPDATE belege SET dms_versendet_am=NOW() WHERE id={P}", (bid,))
+        else:
+            cur.execute(f"UPDATE belege SET dms_versendet_am=datetime('now') WHERE id={P}", (bid,))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.post("/beleg/{bid}/zahlungsart")
+async def beleg_zahlungsart_speichern(bid: int, request: Request):
+    """Speichert manuell gewählte Bezahlart (Kreditkarte/Bar/Überweisung)."""
+    form = await request.form()
+    zahlungsart = (form.get("zahlungsart") or "").strip() or None
+    try:
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(f"UPDATE belege SET zahlungsart={P} WHERE id={P}", (zahlungsart, bid))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
 
 @app.post("/beleg/{bid}/belegart")
 async def beleg_belegart_speichern(bid: int, request: Request):
@@ -1878,6 +2040,123 @@ async def test_openai():
                 "trace": traceback.format_exc()[:500]}
 
 
+# ── Login / Logout / Ersteinrichtung ───────────────────────────────────────────
+def login_seite(fehler: str = "", next_url: str = "/") -> str:
+    return f"""<!DOCTYPE html>
+<html lang="de"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login – Herrhammer Reisekosten</title><style>{CSS}</style></head>
+<body>
+<main style="max-width:380px;margin:80px auto">
+  <div style="text-align:center;margin-bottom:24px">
+    <img src="/static/logo3.png" alt="Herrhammer" style="height:40px">
+  </div>
+  <div class="card"><div class="card-body">
+    <h1 class="page-title" style="font-size:18px;margin-bottom:16px">Anmelden</h1>
+    {f'<div class="alert alert-err" style="margin-bottom:12px">{fehler}</div>' if fehler else ''}
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="{next_url}">
+      <div class="form-group">
+        <label>Kürzel</label>
+        <input type="text" name="kuerzel" required autofocus maxlength="5" style="text-transform:uppercase">
+      </div>
+      <div class="form-group">
+        <label>Passwort</label>
+        <input type="password" name="passwort" required>
+      </div>
+      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:8px">Anmelden</button>
+    </form>
+  </div></div>
+</main>
+</body></html>"""
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form(next: str = "/"):
+    return HTMLResponse(login_seite(next_url=next))
+
+@app.post("/login")
+async def login_post(request: Request):
+    form = await request.form()
+    kuerzel = (form.get("kuerzel") or "").strip()
+    passwort = (form.get("passwort") or "")
+    next_url = (form.get("next") or "/").strip() or "/"
+    ma = login_pruefen(kuerzel, passwort)
+    if not ma:
+        return HTMLResponse(login_seite("Kürzel oder Passwort falsch.", next_url))
+    request.session["kuerzel"] = ma["kuerzel"]
+    request.session["klarname"] = ma["klarname"]
+    return RedirectResponse(next_url if next_url.startswith("/") else "/", status_code=303)
+
+@app.get("/logout")
+def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse("/login", status_code=303)
+
+@app.get("/setup", response_class=HTMLResponse)
+def setup_form():
+    if hat_bereits_passwoerter():
+        return HTMLResponse(shell("Gesperrt",
+            '<div class="alert alert-err">Die Ersteinrichtung ist bereits abgeschlossen. '
+            'Bitte über <a href="/login">Login</a> anmelden.</div>'))
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT kuerzel, klarname FROM mitarbeiter WHERE aktiv=TRUE ORDER BY klarname")
+        rows = cur.fetchall()
+        cur.close(); db.close()
+        opts = "".join(
+            f'<option value="{(r[0] if isinstance(r,tuple) else r["kuerzel"])}">'
+            f'{(r[0] if isinstance(r,tuple) else r["kuerzel"])} – {(r[1] if isinstance(r,tuple) else r["klarname"])}</option>'
+            for r in rows)
+    except Exception:
+        opts = ""
+    content = f"""
+    <div style="max-width:420px;margin:0 auto">
+      <div class="card"><div class="card-body">
+        <h1 class="page-title" style="font-size:18px">Ersteinrichtung – erstes Passwort vergeben</h1>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:16px">
+          Es ist noch kein Login im System hinterlegt. Wähle einen bestehenden Mitarbeiter
+          und vergib das erste Passwort. Danach ist diese Seite gesperrt.</p>
+        {'<div class="alert alert-warn">Es sind noch keine Mitarbeiter angelegt – lege zuerst über die Datenbank/Import einen an, oder wende dich an den Entwickler.</div>' if not opts else f'''
+        <form method="post" action="/setup">
+          <div class="form-group">
+            <label>Mitarbeiter</label>
+            <select name="kuerzel" required>{opts}</select>
+          </div>
+          <div class="form-group">
+            <label>Neues Passwort</label>
+            <input type="password" name="passwort" required minlength="8">
+          </div>
+          <div class="form-group">
+            <label>Passwort wiederholen</label>
+            <input type="password" name="passwort2" required minlength="8">
+          </div>
+          <button type="submit" class="btn btn-primary" style="width:100%">Passwort setzen</button>
+        </form>'''}
+      </div></div>
+    </div>"""
+    return HTMLResponse(shell("Ersteinrichtung", content))
+
+@app.post("/setup")
+async def setup_post(request: Request):
+    if hat_bereits_passwoerter():
+        return HTMLResponse(shell("Gesperrt", '<div class="alert alert-err">Ersteinrichtung bereits abgeschlossen.</div>'))
+    form = await request.form()
+    kuerzel = (form.get("kuerzel") or "").strip().upper()
+    pw1 = form.get("passwort") or ""; pw2 = form.get("passwort2") or ""
+    if not kuerzel or len(pw1) < 8 or pw1 != pw2:
+        return HTMLResponse(shell("Fehler",
+            '<div class="alert alert-err">Passwörter fehlen, stimmen nicht überein oder sind zu kurz (min. 8 Zeichen).</div>'
+            '<a href="/setup" class="btn btn-secondary">Zurück</a>'))
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"UPDATE mitarbeiter SET passwort_hash={P} WHERE kuerzel={P}",
+                    (passwort_hashen(pw1), kuerzel))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse("/login", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
 @app.get("/init")
 def init():
     """Legt Tabellen an. Bestehende Tabellen werden NICHT gelöscht."""
@@ -2392,8 +2671,45 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
               </div>
             </form>
           </div>
+        </div>
+        <div class="card" style="max-width:480px;margin-top:16px">
+          <div class="card-header"><span class="card-title">🔒 Login-Passwort</span></div>
+          <div class="card-body">
+            <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+              Setzt ein neues Passwort für den Login dieses Mitarbeiters (überschreibt ein
+              eventuell vorhandenes Passwort).</p>
+            <form method="post" action="/mitarbeiter/{k}/passwort">
+              <div class="form-group">
+                <label>Neues Passwort</label>
+                <input type="password" name="passwort" required minlength="8">
+              </div>
+              <div class="form-group">
+                <label>Wiederholen</label>
+                <input type="password" name="passwort2" required minlength="8">
+              </div>
+              <button type="submit" class="btn btn-primary" style="width:100%">Passwort setzen</button>
+            </form>
+          </div>
         </div>"""
         return HTMLResponse(shell(f"MA {k} bearbeiten", content, "mitarbeiter"))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.post("/mitarbeiter/{kuerzel}/passwort")
+async def mitarbeiter_passwort_setzen(kuerzel: str, request: Request):
+    form = await request.form()
+    pw1 = form.get("passwort") or ""; pw2 = form.get("passwort2") or ""
+    if len(pw1) < 8 or pw1 != pw2:
+        return HTMLResponse(shell("Fehler",
+            '<div class="alert alert-err">Passwörter stimmen nicht überein oder sind zu kurz (min. 8 Zeichen).</div>'
+            f'<a href="/mitarbeiter/{kuerzel}/bearbeiten" class="btn btn-secondary">Zurück</a>'))
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"UPDATE mitarbeiter SET passwort_hash={P} WHERE kuerzel={P}",
+                    (passwort_hashen(pw1), kuerzel.upper()))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/mitarbeiter/{kuerzel}/bearbeiten", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 

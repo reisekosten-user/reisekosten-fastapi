@@ -1,18 +1,65 @@
 """
-mod_mail.py – IMAP Mail-Import
-Stabil / abgeschlossen
+mod_mail.py – IMAP Mail-Import + SMTP-Versand (DMS-Archivierung)
 """
 from __future__ import annotations
-import imaplib, email as _email_mod, re, json, os
+import imaplib, smtplib, email as _email_mod, re, json, os
 from email.header import decode_header as _decode_header
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 
 IMAP_HOST = os.getenv("IMAP_HOST", "")
 IMAP_USER = os.getenv("IMAP_USER", "")
 IMAP_PASS = os.getenv("IMAP_PASS", "")
 
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465") or "465")
+SMTP_USER = os.getenv("SMTP_USER", "") or IMAP_USER
+SMTP_PASS = os.getenv("SMTP_PASS", "") or IMAP_PASS
+DMS_EMAIL_TO = os.getenv("DMS_EMAIL_TO", "")
+
 from mod_db import get_db, ph, is_postgres
-from mod_beleg import beleg_verarbeiten
+from mod_beleg import beleg_verarbeiten, get_s3, s3_download
 from mod_anon import anonymisieren
+
+
+def dms_konfiguriert() -> bool:
+    return bool(SMTP_HOST and SMTP_USER and SMTP_PASS and DMS_EMAIL_TO)
+
+
+def sende_dms_mail(betreff: str, text: str, anhang_bytes: bytes, anhang_name: str) -> dict:
+    """
+    Verschickt einen Beleg per E-Mail an die DMS-Importadresse (DMS_EMAIL_TO).
+    Benötigt SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, DMS_EMAIL_TO als
+    Umgebungsvariablen. Nutzt SMTP_USER/PASS falls SMTP_* nicht gesetzt sind,
+    aber IMAP_USER/PASS (gleiches Postfach) vorhanden ist.
+    """
+    if not dms_konfiguriert():
+        return {"fehler": "DMS-Mailversand nicht konfiguriert (SMTP_HOST/USER/PASS/DMS_EMAIL_TO fehlen)"}
+
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = SMTP_USER
+        msg["To"] = DMS_EMAIL_TO
+        msg["Subject"] = betreff
+        msg.attach(MIMEText(text, "plain", "utf-8"))
+
+        part = MIMEApplication(anhang_bytes, Name=anhang_name)
+        part["Content-Disposition"] = f'attachment; filename="{anhang_name}"'
+        msg.attach(part)
+
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
+        else:
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+            server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+        server.sendmail(SMTP_USER, [DMS_EMAIL_TO], msg.as_string())
+        server.quit()
+        return {"ok": True}
+    except Exception as e:
+        return {"fehler": str(e)}
+
 
 def decode_mime_header(val: str) -> str:
     """Dekodiert MIME-kodierten Mail-Header."""

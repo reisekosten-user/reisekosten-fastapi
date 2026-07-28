@@ -335,6 +335,13 @@ def get_migrations() -> list[str]:
         "ALTER TABLE vma_tage ALTER COLUMN reise_id DROP NOT NULL",
         "ALTER TABLE reise_laender ADD COLUMN IF NOT EXISTS ort TEXT",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS event_zeit TEXT",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS zahlungsart TEXT",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS geprueft BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS pruef_vermerk TEXT",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS geprueft_von TEXT",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS geprueft_am TIMESTAMP",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS dms_versendet_am TIMESTAMP",
+        "ALTER TABLE mitarbeiter ADD COLUMN IF NOT EXISTS passwort_hash TEXT",
     ]
 
 def repair_legacy_columns():
