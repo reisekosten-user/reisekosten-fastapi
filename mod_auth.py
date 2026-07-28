@@ -7,7 +7,8 @@ import hashlib, os, secrets
 from mod_db import get_db, ph, is_postgres
 
 # Pfade, die IMMER ohne Login erreichbar sein müssen
-OFFENE_PFADE = ("/login", "/logout", "/setup", "/static", "/favicon.ico", "/init")
+OFFENE_PFADE = ("/login", "/logout", "/setup", "/static", "/favicon.ico", "/init",
+                 "/portal", "/cron")
 
 
 def passwort_hashen(passwort: str) -> str:

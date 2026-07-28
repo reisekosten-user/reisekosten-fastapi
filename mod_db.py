@@ -181,6 +181,36 @@ def get_schema() -> list[str]:
                 notiz         TEXT,
                 erstellt      TIMESTAMP DEFAULT NOW()
             )""",
+            """CREATE TABLE IF NOT EXISTS reise_zugang (
+                id                SERIAL PRIMARY KEY,
+                reise_code        TEXT NOT NULL REFERENCES reisen(code) ON DELETE CASCADE,
+                kuerzel           TEXT NOT NULL,
+                token             TEXT NOT NULL UNIQUE,
+                erstellt_am       TIMESTAMP DEFAULT NOW(),
+                email_gesendet_am TIMESTAMP,
+                UNIQUE(reise_code, kuerzel)
+            )""",
+            """CREATE TABLE IF NOT EXISTS reisetage_person (
+                id              SERIAL PRIMARY KEY,
+                reise_code      TEXT NOT NULL REFERENCES reisen(code) ON DELETE CASCADE,
+                kuerzel         TEXT NOT NULL,
+                datum           DATE NOT NULL,
+                land_code       TEXT,
+                land_name       TEXT,
+                vma_satz_voll   NUMERIC(6,2),
+                vma_satz_halb   NUMERIC(6,2),
+                ist_halber_satz BOOLEAN DEFAULT FALSE,
+                fruehstueck     BOOLEAN DEFAULT FALSE,
+                mittagessen     BOOLEAN DEFAULT FALSE,
+                abendessen      BOOLEAN DEFAULT FALSE,
+                vma_netto       NUMERIC(6,2),
+                reise_beginn    TEXT,
+                reise_ende      TEXT,
+                arbeit_beginn   TEXT,
+                arbeit_ende     TEXT,
+                notiz           TEXT,
+                UNIQUE(reise_code, kuerzel, datum)
+            )""",
         ]
     else:
         return [
@@ -306,6 +336,36 @@ def get_schema() -> list[str]:
                 typ           TEXT DEFAULT 'termin',
                 notiz         TEXT,
                 erstellt      TEXT DEFAULT (datetime('now'))
+            )""",
+            """CREATE TABLE IF NOT EXISTS reise_zugang (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                reise_code        TEXT REFERENCES reisen(code) ON DELETE CASCADE,
+                kuerzel           TEXT NOT NULL,
+                token             TEXT NOT NULL UNIQUE,
+                erstellt_am       TEXT DEFAULT (datetime('now')),
+                email_gesendet_am TEXT,
+                UNIQUE(reise_code, kuerzel)
+            )""",
+            """CREATE TABLE IF NOT EXISTS reisetage_person (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                reise_code      TEXT REFERENCES reisen(code) ON DELETE CASCADE,
+                kuerzel         TEXT NOT NULL,
+                datum           TEXT NOT NULL,
+                land_code       TEXT,
+                land_name       TEXT,
+                vma_satz_voll   REAL,
+                vma_satz_halb   REAL,
+                ist_halber_satz INTEGER DEFAULT 0,
+                fruehstueck     INTEGER DEFAULT 0,
+                mittagessen     INTEGER DEFAULT 0,
+                abendessen      INTEGER DEFAULT 0,
+                vma_netto       REAL,
+                reise_beginn    TEXT,
+                reise_ende      TEXT,
+                arbeit_beginn   TEXT,
+                arbeit_ende     TEXT,
+                notiz           TEXT,
+                UNIQUE(reise_code, kuerzel, datum)
             )""",
         ]
 

@@ -23,30 +23,25 @@ from mod_beleg import beleg_verarbeiten, get_s3, s3_download
 from mod_anon import anonymisieren
 
 
-def dms_konfiguriert() -> bool:
-    return bool(SMTP_HOST and SMTP_USER and SMTP_PASS and DMS_EMAIL_TO)
-
-
-def sende_dms_mail(betreff: str, text: str, anhang_bytes: bytes, anhang_name: str) -> dict:
+def sende_mail(empfaenger: str, betreff: str, text: str,
+                anhang_bytes: bytes | None = None, anhang_name: str | None = None) -> dict:
     """
-    Verschickt einen Beleg per E-Mail an die DMS-Importadresse (DMS_EMAIL_TO).
-    Benötigt SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, DMS_EMAIL_TO als
-    Umgebungsvariablen. Nutzt SMTP_USER/PASS falls SMTP_* nicht gesetzt sind,
-    aber IMAP_USER/PASS (gleiches Postfach) vorhanden ist.
+    Generischer SMTP-Versand (Text-Mail, optional mit einem Anhang).
+    Benötigt SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS als Umgebungsvariablen.
     """
-    if not dms_konfiguriert():
-        return {"fehler": "DMS-Mailversand nicht konfiguriert (SMTP_HOST/USER/PASS/DMS_EMAIL_TO fehlen)"}
-
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASS):
+        return {"fehler": "SMTP nicht konfiguriert (SMTP_HOST/USER/PASS fehlen)"}
     try:
         msg = MIMEMultipart()
         msg["From"] = SMTP_USER
-        msg["To"] = DMS_EMAIL_TO
+        msg["To"] = empfaenger
         msg["Subject"] = betreff
         msg.attach(MIMEText(text, "plain", "utf-8"))
 
-        part = MIMEApplication(anhang_bytes, Name=anhang_name)
-        part["Content-Disposition"] = f'attachment; filename="{anhang_name}"'
-        msg.attach(part)
+        if anhang_bytes is not None:
+            part = MIMEApplication(anhang_bytes, Name=anhang_name or "anhang.pdf")
+            part["Content-Disposition"] = f'attachment; filename="{anhang_name or "anhang.pdf"}"'
+            msg.attach(part)
 
         if SMTP_PORT == 465:
             server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
@@ -54,11 +49,22 @@ def sende_dms_mail(betreff: str, text: str, anhang_bytes: bytes, anhang_name: st
             server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
             server.starttls()
         server.login(SMTP_USER, SMTP_PASS)
-        server.sendmail(SMTP_USER, [DMS_EMAIL_TO], msg.as_string())
+        server.sendmail(SMTP_USER, [empfaenger], msg.as_string())
         server.quit()
         return {"ok": True}
     except Exception as e:
         return {"fehler": str(e)}
+
+
+def dms_konfiguriert() -> bool:
+    return bool(SMTP_HOST and SMTP_USER and SMTP_PASS and DMS_EMAIL_TO)
+
+
+def sende_dms_mail(betreff: str, text: str, anhang_bytes: bytes, anhang_name: str) -> dict:
+    """Verschickt einen Beleg per E-Mail an die DMS-Importadresse (DMS_EMAIL_TO)."""
+    if not dms_konfiguriert():
+        return {"fehler": "DMS-Mailversand nicht konfiguriert (SMTP_HOST/USER/PASS/DMS_EMAIL_TO fehlen)"}
+    return sende_mail(DMS_EMAIL_TO, betreff, text, anhang_bytes, anhang_name)
 
 
 def decode_mime_header(val: str) -> str:

@@ -30,6 +30,11 @@ from mod_vma_tage import (vma_berechnen, land_fuer_tag,
                            fruehstueck_aus_beleg, vma_tage_generieren)
 from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
                        hat_bereits_passwoerter, pfad_ist_offen)
+from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_token,
+                         tage_sicherstellen, tage_laden, tag_speichern,
+                         reisende_der_reise, zugaenge_der_reise, portal_mail_senden,
+                         cron_portal_mails, PORTAL_TAGE_VORHER)
+CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 # ── Konfiguration ─────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -37,7 +42,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.5-b"
+APP_VERSION  = "2.6-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3150,6 +3155,46 @@ def reise_detail(code: str):
             f'<span class="badge badge-green">{get(m,"kuerzel",0)} – {get(m,"klarname",1)}</span>'
             for m in ma_rows) or "–"
 
+        # Reisenden-Zugänge (Portal-Links) für die Karte vorbereiten
+        zugaenge_rows = ""
+        reisende_liste = reisende_der_reise(rcode)
+        bestehende_zugaenge = zugaenge_der_reise(rcode)
+        if reisende_liste:
+            for ma in reisende_liste:
+                mk = ma[0] if isinstance(ma, tuple) else ma["kuerzel"]
+                mn = ma[1] if isinstance(ma, tuple) else ma["klarname"]
+                me = ma[2] if isinstance(ma, tuple) else ma["email"]
+                info_z = bestehende_zugaenge.get(mk)
+                if info_z:
+                    link_txt = portal_link(info_z["token"])
+                    status_txt = (f'✓ gesendet am {fmt_date(info_z["email_gesendet_am"])}'
+                                   if info_z.get("email_gesendet_am") else "Link erstellt, noch nicht gesendet")
+                    link_html = f'<div style="font-size:11px;color:var(--muted);word-break:break-all">{link_txt}</div>'
+                else:
+                    status_txt = "Noch kein Zugang erstellt"
+                    link_html = ""
+                zugaenge_rows += f"""<div style="display:flex;justify-content:space-between;align-items:center;
+                    gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+                    <div><b>{mk}</b> – {mn}<div style="font-size:11px;color:var(--muted)">{status_txt}</div>{link_html}</div>
+                    <form method="post" action="/reise/{rcode}/zugang/{mk}/senden">
+                      <button type="submit" class="btn btn-secondary btn-sm"{' disabled' if not me else ''}>
+                        📧 {'Erneut senden' if info_z and info_z.get('email_gesendet_am') else 'Link senden'}
+                      </button>
+                    </form>
+                </div>"""
+            zugaenge_html = f"""<div class="card" style="margin-top:16px">
+              <div class="card-header"><span class="card-title">🔗 Reisenden-Zugänge (Portal)</span></div>
+              <div class="card-body">
+                <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+                  Jeder Reisende bekommt einen persönlichen Link zum Eintragen von
+                  Verpflegung und Reise-/Arbeitszeiten. Automatischer Versand {PORTAL_TAGE_VORHER}
+                  Tage vor Abreise (falls Cron eingerichtet ist), oder hier manuell.</p>
+                {zugaenge_rows}
+              </div>
+            </div>"""
+        else:
+            zugaenge_html = ""
+
         # Belege und Termine nach Datum gruppieren
         TERMIN_ICON = {
             "termin": "🤝", "fahrt": "🚕", "mietwagen": "🚗",
@@ -3409,6 +3454,8 @@ def reise_detail(code: str):
           </div>
           {('<div style="padding:12px 16px;background:#fef3c7;color:#92400e;font-size:12px;border-bottom:1px solid var(--border)">⚠ Für diese Reise wurde die VMA noch nicht berechnet – solange fehlen die Tages-Köpfe und Belege werden fälschlich als "außerhalb des Reisezeitraums" angezeigt. <a href="/reise/' + rcode + '/vma-generieren" style="color:#92400e;font-weight:600">🔄 Jetzt VMA berechnen</a></div>' if not vma_tage_rows else '') + (tage_blocks if tage_blocks else '<div class="card-body"><div class="empty-state"><b>Noch keine VMA-Tage berechnet</b><p>Erst Länder hinterlegen, dann VMA generieren</p><a href="/reise/' + rcode + '/vma-generieren" class="btn btn-primary" style="margin-top:12px">🔄 VMA berechnen</a></div></div>')}
         </div>
+
+        {zugaenge_html}
 
         <div style="margin-top:12px">
           <a href="/reisen" class="btn btn-secondary">← Zurück</a>
@@ -4012,3 +4059,154 @@ def vma_uebersicht(ok: str = "", fehler: str = "", laender: str = "", staedte: s
     </div>"""
     return HTMLResponse(shell("VMA-Sätze", content, "vma"))
 
+
+# ── Reisenden-Portal (Selbstbedienung, ohne Login, per Token) ─────────────────
+def portal_shell(titel: str, content: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="de"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{titel}</title><style>{CSS}</style></head>
+<body>
+<main style="max-width:640px;margin:24px auto;padding:0 12px">
+  <div style="text-align:center;margin-bottom:20px">
+    <img src="/static/logo3.png" alt="Herrhammer" style="height:36px">
+  </div>
+  {content}
+</main>
+</body></html>"""
+
+
+@app.get("/portal/{token}", response_class=HTMLResponse)
+def portal_ansicht(token: str):
+    info = zugang_aus_token(token)
+    if not info:
+        return HTMLResponse(portal_shell("Link ungültig",
+            '<div class="card"><div class="card-body">'
+            '<p>Dieser Link ist ungültig oder abgelaufen. Bitte wende dich an dein Büro.</p>'
+            '</div></div>'), status_code=404)
+
+    tage_sicherstellen(info["reise_code"], info["kuerzel"])
+    tage = tage_laden(info["reise_code"], info["kuerzel"])
+
+    wochentage = ["Mo","Di","Mi","Do","Fr","Sa","So"]
+    g = lambda r, k, i: r[k] if hasattr(r, "keys") else r[i]
+
+    zeilen = ""
+    vma_summe = 0.0
+    for t in tage:
+        tid = g(t,"id",0); vd = g(t,"datum",1)
+        if isinstance(vd, str): vd = date.fromisoformat(vd[:10])
+        lname = g(t,"land_name",3) or "Deutschland"; lcode = g(t,"land_code",2) or "DE"
+        ist_halb = bool(g(t,"ist_halber_satz",6))
+        frueh = bool(g(t,"fruehstueck",7)); mittag = bool(g(t,"mittagessen",8)); abend = bool(g(t,"abendessen",9))
+        netto = float(g(t,"vma_netto",10) or 0); vma_summe += netto
+        reise_beginn = g(t,"reise_beginn",11) or ""; reise_ende = g(t,"reise_ende",12) or ""
+        arbeit_beginn = g(t,"arbeit_beginn",13) or ""; arbeit_ende = g(t,"arbeit_ende",14) or ""
+        notiz = g(t,"notiz",15) or ""
+
+        wt = wochentage[vd.weekday()]
+        halb_txt = ' <span style="font-size:10px;background:#fef3c7;color:#92400e;padding:1px 7px;border-radius:10px">½ Satz</span>' if ist_halb else ""
+
+        def cb(name, checked, label):
+            ch = "checked" if checked else ""
+            return (f'<label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;'
+                    f'margin-right:14px;cursor:pointer"><input type="checkbox" name="{name}" value="1" '
+                    f'{ch} style="width:auto"> {label}</label>')
+
+        zeilen += f"""<div class="card" style="margin-bottom:12px">
+          <div class="card-body">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <div><b>{wt} {vd.day:02d}.{vd.month:02d}.{vd.year}</b>{halb_txt}
+                <div style="font-size:12px;color:var(--muted)">🌍 {lname} ({lcode})</div></div>
+              <div style="text-align:right;font-weight:700;color:var(--green)">{netto:.2f} EUR</div>
+            </div>
+            <form method="post" action="/portal/{token}/tag/{tid}">
+              <div style="margin-bottom:10px">{cb("fruehstueck",frueh,"🍳 Frühstück")}{cb("mittagessen",mittag,"🍽 Mittagessen")}{cb("abendessen",abend,"🌙 Abendessen")}</div>
+              <div class="form-grid form-grid-2">
+                <div class="form-group"><label style="font-size:12px">Reisebeginn (Uhrzeit)</label>
+                  <input type="time" name="reise_beginn" value="{reise_beginn}"></div>
+                <div class="form-group"><label style="font-size:12px">Reiseende (Uhrzeit)</label>
+                  <input type="time" name="reise_ende" value="{reise_ende}"></div>
+                <div class="form-group"><label style="font-size:12px">Arbeitsbeginn</label>
+                  <input type="time" name="arbeit_beginn" value="{arbeit_beginn}"></div>
+                <div class="form-group"><label style="font-size:12px">Arbeitsende</label>
+                  <input type="time" name="arbeit_ende" value="{arbeit_ende}"></div>
+                <div class="form-group full"><label style="font-size:12px">Notiz (optional)</label>
+                  <input type="text" name="notiz" value="{notiz}" placeholder="z.B. Verspätung, Besonderheiten"></div>
+              </div>
+              <button type="submit" class="btn btn-primary" style="width:100%;margin-top:6px">Speichern</button>
+            </form>
+          </div>
+        </div>"""
+
+    ab_txt = fmt_date(info["abreise"]); zu_txt = fmt_date(info["rueckkehr"])
+    content = f"""
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-body">
+        <h1 class="page-title" style="margin:0 0 4px 0">Hallo {info['klarname']} 👋</h1>
+        <p style="font-size:13px;color:var(--muted);margin:0">
+          Reise <b>{info['reise_code']}</b> – {info['titel']}<br>
+          📅 {ab_txt} – {zu_txt}
+        </p>
+        <p style="font-size:13px;margin-top:10px">
+          Bitte trage für jeden Reisetag ein, welche Mahlzeiten gestellt wurden und
+          deine tatsächlichen Reise-/Arbeitszeiten ein. Du kannst die Angaben jederzeit
+          über diesen Link wieder ändern.</p>
+        <div style="text-align:right;font-weight:700;margin-top:10px">
+          VMA gesamt (netto): <span style="color:var(--green)">{vma_summe:.2f} EUR</span>
+        </div>
+      </div>
+    </div>
+    {zeilen}
+    """
+    return HTMLResponse(portal_shell(f"Reise {info['reise_code']} – {info['klarname']}", content))
+
+
+@app.post("/portal/{token}/tag/{tag_id}")
+async def portal_tag_speichern(token: str, tag_id: int, request: Request):
+    info = zugang_aus_token(token)
+    if not info:
+        return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
+    form = await request.form()
+    tag_speichern(
+        tag_id,
+        bool(form.get("fruehstueck")), bool(form.get("mittagessen")), bool(form.get("abendessen")),
+        (form.get("reise_beginn") or "").strip(), (form.get("reise_ende") or "").strip(),
+        (form.get("arbeit_beginn") or "").strip(), (form.get("arbeit_ende") or "").strip(),
+        (form.get("notiz") or "").strip(),
+    )
+    return RedirectResponse(f"/portal/{token}", status_code=303)
+
+
+@app.get("/cron/portal-mails")
+def cron_portal_mails_route(key: str = ""):
+    if not CRON_SECRET or key != CRON_SECRET:
+        return JSONResponse({"fehler": "Ungültiger oder fehlender Schlüssel"}, status_code=403)
+    result = cron_portal_mails()
+    return JSONResponse(result)
+
+
+@app.post("/reise/{code}/zugang/{kuerzel}/senden")
+def reise_zugang_senden(code: str, kuerzel: str):
+    rcode = code.upper(); kuerzel = kuerzel.upper()
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT titel, abreise, rueckkehr FROM reisen WHERE code={P}", (rcode,))
+        r = cur.fetchone()
+        cur.execute(f"SELECT klarname, email FROM mitarbeiter WHERE kuerzel={P}", (kuerzel,))
+        m = cur.fetchone()
+        cur.close(); db.close()
+        if not r or not m:
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Reise oder Mitarbeiter nicht gefunden.</div>'))
+        g = lambda row, i: row[i]
+        titel, abreise, rueckkehr = g(r,0), g(r,1), g(r,2)
+        klarname, email = g(m,0), g(m,1)
+        result = portal_mail_senden(rcode, kuerzel, klarname, email, titel, abreise, rueckkehr)
+        if result.get("fehler"):
+            return HTMLResponse(shell("Fehler",
+                f'<div class="alert alert-err">Versand fehlgeschlagen: {result["fehler"]}</div>'
+                f'<a href="/reise/{rcode}" class="btn btn-secondary">Zurück</a>'))
+        return RedirectResponse(f"/reise/{rcode}", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
