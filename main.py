@@ -33,7 +33,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-APP_VERSION  = "2.4-c"
+APP_VERSION  = "2.4-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -610,7 +610,10 @@ def beleg_detail(bid: int):
                 <dd>{land or "–"}</dd>
                 <dt style="color:var(--muted);font-size:12px">Betrag brutto</dt>
                 <dd style="font-weight:700;color:var(--green);font-size:15px">
-                  {f"{float(betrag_brutto):.2f}" if betrag_brutto else "–"} {waehrung}</dd>
+                  {f"{float(betrag_brutto):.2f}" if betrag_brutto else "–"} {waehrung}
+                  <a href="/beleg/{bid2}/betrag/bearbeiten" style="font-size:12px;color:var(--muted);
+                     text-decoration:none;font-weight:400;margin-left:6px">✏</a></dd>
+                {'<div class="alert alert-warn" style="margin:8px 0;font-size:12px">Bei Buchungsbestätigungen ist noch kein Betrag nötig – kann später über das ✏ nachgetragen werden.</div>' if not betrag_brutto and belegart == 'Buchungsbestaetigung' else ''}
                 {f'<dt style="color:var(--muted);font-size:12px">Netto</dt><dd>{float(betrag_netto):.2f} {waehrung}</dd>' if betrag_netto else ""}
                 {f'<dt style="color:var(--muted);font-size:12px">{"MwSt." if land == "DE" else "VAT"}</dt><dd>{float(betrag_mwst):.2f} {waehrung}</dd>' if betrag_mwst else ""}
                 <dt style="color:var(--muted);font-size:12px">Belegdatum</dt>
@@ -729,6 +732,78 @@ def beleg_detail(bid: int):
             f'<div class="alert alert-err">{e}</div>'
             f'<pre style="font-size:11px">{traceback.format_exc()[:400]}</pre>'))
 
+@app.get("/beleg/{bid}/betrag/bearbeiten", response_class=HTMLResponse)
+def beleg_betrag_bearbeiten_form(bid: int):
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT betrag_brutto, waehrung, anbieter, belegart FROM belege WHERE id={P}", (bid,))
+        r = cur.fetchone()
+        cur.close(); db.close()
+        if not r:
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Beleg nicht gefunden.</div>'))
+        g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
+        betrag_v = g("betrag_brutto",0); waehrung_v = g("waehrung",1) or "EUR"
+        anbieter_v = g("anbieter",2) or ""; belegart_v = g("belegart",3) or ""
+        hinweis = ('<div class="alert alert-warn" style="margin-bottom:12px">Bei Buchungsbestätigungen ist '
+                   'ein Betrag optional.</div>') if belegart_v == "Buchungsbestaetigung" else ""
+        content = f"""
+        <h1 class="page-title">Betrag bearbeiten – Beleg #{bid}</h1>
+        <div class="card" style="max-width:420px">
+          <div class="card-body">
+            {hinweis}
+            <p style="font-size:13px;color:var(--muted);margin-bottom:12px">{anbieter_v}</p>
+            <form method="post" action="/beleg/{bid}/betrag/bearbeiten">
+              <div class="form-grid form-grid-2">
+                <div class="form-group">
+                  <label>Betrag brutto</label>
+                  <input type="number" step="0.01" name="betrag_brutto"
+                         value="{betrag_v if betrag_v is not None else ''}" placeholder="z.B. 107.20">
+                </div>
+                <div class="form-group">
+                  <label>Währung</label>
+                  <input type="text" name="waehrung" value="{waehrung_v}" maxlength="3">
+                </div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Speichern</button>
+                <a href="/beleg/{bid}" class="btn btn-secondary">Abbrechen</a>
+              </div>
+            </form>
+          </div>
+        </div>"""
+        return HTMLResponse(shell(f"Betrag – Beleg #{bid}", content))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.post("/beleg/{bid}/betrag/bearbeiten")
+async def beleg_betrag_bearbeiten(bid: int, request: Request):
+    form = await request.form()
+    betrag_raw = (form.get("betrag_brutto") or "").strip().replace(",", ".")
+    waehrung = (form.get("waehrung") or "EUR").strip().upper()[:3] or "EUR"
+    betrag = None
+    if betrag_raw:
+        try: betrag = float(betrag_raw)
+        except ValueError:
+            return HTMLResponse(shell("Fehler",
+                '<div class="alert alert-err">Betrag ist keine gültige Zahl.</div>'
+                f'<a href="/beleg/{bid}/betrag/bearbeiten" class="btn btn-secondary">Zurück</a>'))
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        # Wenn ein Betrag manuell eingetragen wird, ist der Beleg vollständig
+        if betrag is not None:
+            cur.execute(f"UPDATE belege SET betrag_brutto={P}, waehrung={P}, "
+                        f"pflichtfelder_ok=TRUE, fehlende_felder='[]', status='ok' WHERE id={P}",
+                        (betrag, waehrung, bid))
+        else:
+            cur.execute(f"UPDATE belege SET betrag_brutto={P}, waehrung={P} WHERE id={P}",
+                        (betrag, waehrung, bid))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
 @app.get("/beleg/{bid}/loeschen")
 def beleg_loeschen(bid: int):
     """Löscht einen Beleg unwiderruflich aus der Datenbank (Dateien in S3 bleiben)."""
@@ -770,6 +845,16 @@ async def beleg_belegart_speichern(bid: int, request: Request):
         db = get_db(); cur = db.cursor()
         P = ph()
         cur.execute(f"UPDATE belege SET belegart={P} WHERE id={P}", (belegart, bid))
+        if belegart == "Buchungsbestaetigung":
+            # Betrag ist bei Buchungsbestätigungen optional – fehlender Betrag
+            # allein macht den Beleg nicht mehr unvollständig.
+            cur.execute(f"""SELECT betrag_brutto, event_datum_von, belegdatum, transportart, anbieter
+                            FROM belege WHERE id={P}""", (bid,))
+            r = cur.fetchone()
+            g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
+            if r and g("event_datum_von",1) and g("belegdatum",2) and g("transportart",3) and g("anbieter",4):
+                cur.execute(f"UPDATE belege SET pflichtfelder_ok=TRUE, fehlende_felder='[]', "
+                            f"status='ok' WHERE id={P}", (bid,))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:

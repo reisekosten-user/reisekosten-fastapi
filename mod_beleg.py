@@ -212,6 +212,8 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
                 result = json.loads(m.group(0))
                 pflicht = ["belegdatum","transportart","anbieter",
                            "betrag_brutto","waehrung","event_datum_von"]
+                if result.get("belegart") == "Buchungsbestaetigung":
+                    pflicht = [f for f in pflicht if f not in ("betrag_brutto","waehrung")]
                 fehlend = [f for f in pflicht if not result.get(f)]
                 result["pflichtfelder_ok"] = len(fehlend) == 0
                 result["fehlende_pflichtfelder"] = fehlend
@@ -329,6 +331,8 @@ JSON-Format:
                 result = json.loads(m.group(0))
                 pflicht = ["belegdatum","transportart","anbieter",
                            "betrag_brutto","waehrung","event_datum_von"]
+                if result.get("belegart") == "Buchungsbestaetigung":
+                    pflicht = [f for f in pflicht if f not in ("betrag_brutto","waehrung")]
                 fehlend = [f for f in pflicht if not result.get(f)]
                 result["pflichtfelder_ok"] = len(fehlend) == 0
                 result["fehlende_pflichtfelder"] = fehlend
