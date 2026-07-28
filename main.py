@@ -591,6 +591,54 @@ def beleg_detail(bid: int):
                         else '<span class="badge badge-red">Fehler</span>' if status=="fehler"
                         else '<span class="badge badge-amber">Ausstehend</span>')
 
+        # Prüfung & DMS-Karte (nur bei Umsatzbelegen) – als Variablen vorbereitet,
+        # um verschachtelte f-strings im großen content-Block zu vermeiden.
+        pruef_karte_html = ""
+        if belegart in ("Rechnung", "Quittung"):
+            if geprueft:
+                vermerk_teil = f' · "{pruef_vermerk}"' if pruef_vermerk else ""
+                pruef_status_html = (
+                    '<div class="alert alert-ok" style="font-size:12px">Geprüft von <b>'
+                    + (geprueft_von or "–") + "</b> am " + fmt_date(geprueft_am) + vermerk_teil + "</div>")
+            else:
+                pruef_status_html = '<div class="alert alert-warn" style="font-size:12px">Noch nicht geprüft.</div>'
+
+            if dms_versendet_am:
+                dms_block_html = ('<div class="alert alert-ok" style="font-size:12px">📤 An DMS gesendet am '
+                                   + fmt_date(dms_versendet_am) + '</div>')
+            else:
+                darf_senden = bool(geprueft and rcode)
+                disabled_attr = "" if darf_senden else "disabled"
+                hinweis_html = ("" if darf_senden else
+                    '<div style="font-size:11px;color:var(--muted);margin-top:6px">'
+                    'Voraussetzung: geprüft + Reise zugeordnet.</div>')
+                dms_block_html = (
+                    f'<form method="post" action="/beleg/{bid2}/dms-senden">'
+                    f'<button type="submit" class="btn btn-success" style="width:100%" {disabled_attr}>'
+                    f'📤 An DMS senden (Archivierung)</button></form>{hinweis_html}')
+
+            pruef_button_text = "✓ Prüfung aktualisieren" if geprueft else "✓ Als geprüft markieren"
+            pruef_karte_html = f"""<div class="card">
+            <div class="card-header"><span class="card-title">✅ Prüfung & Archivierung</span></div>
+            <div class="card-body">
+              {pruef_status_html}
+              <form method="post" action="/beleg/{bid2}/pruefen" style="margin-top:10px">
+                <div class="form-group">
+                  <label>Prüfvermerk</label>
+                  <input type="text" name="pruef_vermerk" value="{pruef_vermerk or ''}"
+                         placeholder="z.B. sachlich korrekt, Reise bestätigt">
+                </div>
+                <div class="form-group">
+                  <label>Geprüft von (Kürzel)</label>
+                  <input type="text" name="geprueft_von" value="{geprueft_von or ''}" maxlength="5" placeholder="z.B. RD">
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%">{pruef_button_text}</button>
+              </form>
+              <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+              {dms_block_html}
+            </div>
+          </div>"""
+
         content = f"""
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
           <a href="/belege" class="btn btn-secondary">← Belege</a>
@@ -754,36 +802,7 @@ def beleg_detail(bid: int):
             </div>
           </div>
 
-          {f'''<div class="card">
-            <div class="card-header"><span class="card-title">✅ Prüfung & Archivierung</span></div>
-            <div class="card-body">
-              {'<div class="alert alert-ok" style="font-size:12px">Geprüft von <b>' + (geprueft_von or '–') + '</b> am ' + fmt_date(geprueft_am) + (' · "' + pruef_vermerk + '"' if pruef_vermerk else '') + '</div>' if geprueft else '<div class="alert alert-warn" style="font-size:12px">Noch nicht geprüft.</div>'}
-              <form method="post" action="/beleg/{bid2}/pruefen" style="margin-top:10px">
-                <div class="form-group">
-                  <label>Prüfvermerk</label>
-                  <input type="text" name="pruef_vermerk" value="{pruef_vermerk or ''}"
-                         placeholder="z.B. sachlich korrekt, Reise bestätigt">
-                </div>
-                <div class="form-group">
-                  <label>Geprüft von (Kürzel)</label>
-                  <input type="text" name="geprueft_von" value="{geprueft_von or ''}" maxlength="5" placeholder="z.B. RD">
-                </div>
-                <button type="submit" class="btn btn-primary" style="width:100%">
-                  {"✓ Prüfung aktualisieren" if geprueft else "✓ Als geprüft markieren"}
-                </button>
-              </form>
-              <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
-              {('<div class="alert alert-ok" style="font-size:12px">📤 An DMS gesendet am ' + fmt_date(dms_versendet_am) + '</div>') if dms_versendet_am else (
-                f'''<form method="post" action="/beleg/{bid2}/dms-senden">
-                  <button type="submit" class="btn btn-success" style="width:100%"
-                    {"" if geprueft and rcode else "disabled"}>
-                    📤 An DMS senden (Archivierung)
-                  </button>
-                </form>
-                {'<div style="font-size:11px;color:var(--muted);margin-top:6px">Voraussetzung: geprüft + Reise zugeordnet.</div>' if not (geprueft and rcode) else ''}'''
-              )}
-            </div>
-          </div>''' if belegart in ("Rechnung","Quittung") else ""}
+          {pruef_karte_html}
         </div>
 
         {seg_html}
