@@ -37,7 +37,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.5-a"
+APP_VERSION  = "2.5-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -339,8 +339,8 @@ def shell(title: str, content: str, page: str = "") -> str:
 # ── FastAPI App ────────────────────────────────────────────────────────────────
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 
-app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
-                    same_site="lax", max_age=60*60*24*14)
+# ── FastAPI App ────────────────────────────────────────────────────────────────
+app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 
 @app.middleware("http")
 async def login_erforderlich(request: Request, call_next):
@@ -355,6 +355,12 @@ async def login_erforderlich(request: Request, call_next):
     if not request.session.get("kuerzel"):
         return RedirectResponse(f"/login?next={pfad}", status_code=303)
     return await call_next(request)
+
+# WICHTIG: erst NACH der eigenen Middleware registrieren, damit SessionMiddleware
+# beim Ausführen "außen" liegt und request.session bereits gesetzt ist, bevor
+# login_erforderlich darauf zugreift (Starlette: zuletzt hinzugefügt = läuft zuerst).
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
+                    same_site="lax", max_age=60*60*24*14)
 
 @app.on_event("startup")
 async def startup():
