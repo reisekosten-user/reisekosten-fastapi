@@ -199,7 +199,7 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
                               "url": f"data:{content_type};base64,{b64}",
                               "detail": "high"}}
                       ]}],
-                      "max_tokens": 1500,
+                      "max_tokens": 3000,
                       "temperature": 0.0})
 
             if resp.status_code != 200:
@@ -245,6 +245,12 @@ async def gpt_analyse(rohtext: str, dateiname: str = "") -> dict:
     prompt = """Analysiere diesen Reisebeleg und fülle ALLE erkennbaren Felder aus.
 Antworte NUR mit einem validen JSON-Objekt – kein Text davor oder danach.
 Nicht erkennbare Felder = null.
+
+WICHTIG bei "segmente": Erfasse WIRKLICH JEDE einzelne Teilstrecke als eigenes
+Segment – Hinflug UND Rückflug, alle Zwischenstopps/Umstiege, auch kombinierte
+Bahn+Flug-Reisen (z.B. Zubringerzug zum Flughafen zählt als eigenes Segment).
+Ein Ticket mit z.B. 4 Teilstrecken (Zug, Flug, Flug, Zug) muss auch 4 Einträge
+in "segmente" ergeben, nicht nur den ersten.
 
 Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
 Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfeld null ist.
@@ -308,7 +314,7 @@ JSON-Format:
 }
 
 --- BELEGTEXT ---
-""" + rohtext[:8000]
+""" + rohtext[:30000]
 
     try:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -319,7 +325,7 @@ JSON-Format:
                 json={"model": OPENAI_MODEL,
                       "messages": [{"role": "user",
                                     "content": prompt}],
-                      "max_tokens": 2000,
+                      "max_tokens": 4000,
                       "temperature": 0.0})
 
             if resp.status_code != 200:
