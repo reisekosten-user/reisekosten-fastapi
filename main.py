@@ -42,7 +42,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.7-b"
+APP_VERSION  = "2.7-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3001,6 +3001,17 @@ def reisen_liste():
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
+@app.get("/reisen/naechster-code")
+def reisen_naechster_code(abreise: str = ""):
+    """JSON: nächster freier Reisecode für das Jahr des übergebenen Abreisedatums."""
+    try:
+        db = get_db(); cur = db.cursor()
+        code = next_reise_code(cur, abreise or None)
+        cur.close(); db.close()
+        return JSONResponse({"code": code})
+    except Exception as e:
+        return JSONResponse({"code": None, "fehler": str(e)})
+
 @app.get("/reisen/neu", response_class=HTMLResponse)
 def reise_neu_form():
     try:
@@ -3039,7 +3050,7 @@ def reise_neu_form():
 
           <div style="background:var(--blue-l);border:1px solid #bfdbfe;border-radius:var(--radius);
                       padding:12px 16px;margin-bottom:20px;display:flex;align-items:center;gap:12px">
-            <span style="font-size:22px;font-family:monospace;font-weight:700;color:var(--blue)">{code_vorschau}</span>
+            <span id="code-vorschau" style="font-size:22px;font-family:monospace;font-weight:700;color:var(--blue)">{code_vorschau}</span>
             <span style="font-size:12px;color:#3b82f6">Reisecode (wird automatisch vergeben)</span>
           </div>
 
@@ -3052,7 +3063,7 @@ def reise_neu_form():
             <div class="form-group">
               <label>Abreise <span class="required">*</span></label>
               <input type="date" name="abreise" required
-                     onchange="updateRueckkehr(this.value)">
+                     onchange="updateRueckkehr(this.value); updateCodeVorschau(this.value)">
             </div>
             <div class="form-group">
               <label>Rückkehr <span class="required">*</span></label>
@@ -3133,6 +3144,16 @@ def reise_neu_form():
         }}
     }}
 
+    async function updateCodeVorschau(abreise) {{
+        if (!abreise) return;
+        try {{
+            const res = await fetch('/reisen/naechster-code?abreise=' + abreise);
+            const data = await res.json();
+            const el = document.getElementById('code-vorschau');
+            if (el && data.code) el.textContent = data.code;
+        }} catch (e) {{}}
+    }}
+
     function updateVMA(sel) {{
         const code = sel.value;
         const info = VMA[code];
@@ -3205,7 +3226,7 @@ async def reise_neu(request: Request):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
-        code = next_reise_code(cur)
+        code = next_reise_code(cur, abreise)
 
         cur.execute(
             f"INSERT INTO reisen (code,titel,abreise,rueckkehr,notiz) VALUES ({P},{P},{P},{P},{P})",

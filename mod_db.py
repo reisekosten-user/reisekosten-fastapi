@@ -33,9 +33,25 @@ def fmt_date(d) -> str:
     try: return date.fromisoformat(s).strftime("%d.%m.%Y")
     except: return s
 
-def next_reise_code(cur) -> str:
-    """Generiert nächsten Reisecode YY-NNN."""
-    year = str(date.today().year)[-2:]
+def next_reise_code(cur, abreise_datum=None) -> str:
+    """
+    Generiert nächsten Reisecode YY-NNN. YY ist das Jahr der ABREISE (nicht das
+    heutige Erstellungsdatum) – legt man z.B. Ende 2026 schon eine Reise für
+    Anfang 2027 an, lautet der Code 27-001, nicht 26-xxx. Ohne übergebenes
+    Abreisedatum (z.B. für die Formular-Vorschau) wird das heutige Jahr genutzt.
+    Die laufende Nummer zählt pro Jahrgang hoch.
+    """
+    if abreise_datum:
+        if isinstance(abreise_datum, str):
+            try:
+                jahr = date.fromisoformat(abreise_datum[:10]).year
+            except ValueError:
+                jahr = date.today().year
+        else:
+            jahr = abreise_datum.year
+    else:
+        jahr = date.today().year
+    year = str(jahr)[-2:]
     P = ph()
     cur.execute(f"SELECT code FROM reisen WHERE code LIKE {P} ORDER BY code DESC LIMIT 1",
                 (f"{year}-%",))
