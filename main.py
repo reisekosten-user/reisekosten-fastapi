@@ -42,7 +42,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.6-a"
+APP_VERSION  = "2.6-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -1360,7 +1360,27 @@ async def vma_tag_speichern(code: str, vid: int, request: Request):
             (lcode, lname, voll, halb, ist_halb, frueh, mittag, abend,
              brutto, netto, notiz or None, vid))
         db.commit(); cur.close(); db.close()
-        return RedirectResponse(f"/reise/{code.upper()}/uebersicht", status_code=303)
+        ziel = request.headers.get("referer") or f"/reise/{code.upper()}/uebersicht"
+        return RedirectResponse(ziel, status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
+@app.post("/reise/{code}/vma/{vid}/trennungspauschale")
+async def vma_trennungspauschale_speichern(code: str, vid: int, request: Request):
+    """Speichert eine manuell korrigierte Trennungspauschale für einen Wochenend-Reisetag."""
+    form = await request.form()
+    try:
+        wert = float((form.get("trennungspauschale") or "0").strip())
+    except ValueError:
+        wert = 0.0
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"""UPDATE vma_tage SET trennungspauschale={P},
+                        trennungspauschale_quelle='manuell' WHERE id={P}""", (wert, vid))
+        db.commit(); cur.close(); db.close()
+        ziel = request.headers.get("referer") or f"/reise/{code.upper()}"
+        return RedirectResponse(ziel, status_code=303)
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
 
@@ -1754,7 +1774,8 @@ def reise_abschluss(code: str):
 
         # VMA-Tage
         cur.execute(f"""SELECT datum,land_code,land_name,vma_satz_voll,vma_satz_halb,
-            ist_halber_satz,fruehstueck,mittagessen,abendessen,vma_brutto,vma_netto
+            ist_halber_satz,fruehstueck,mittagessen,abendessen,vma_brutto,vma_netto,
+            trennungspauschale
             FROM vma_tage WHERE reise_code={P} ORDER BY datum""", (rcode,))
         vma_rows = cur.fetchall()
 
@@ -1771,6 +1792,7 @@ def reise_abschluss(code: str):
 
         # VMA berechnen
         vma_total_netto = sum(float(g(v,"vma_netto",10) or 0) for v in vma_rows)
+        trennung_total = sum(float(g(v,"trennungspauschale",11) or 0) for v in vma_rows)
 
         # Belege kategorisieren
         rechnungen = []      # Rechnung/Quittung/Receipt
@@ -1818,6 +1840,7 @@ def reise_abschluss(code: str):
             mitt=bool(g(v,"mittagessen",7))
             abend=bool(g(v,"abendessen",8))
             netto=float(g(v,"vma_netto",10) or 0)
+            trennung_v = float(g(v,"trennungspauschale",11) or 0)
 
             abzuege = []
             if frueh: abzuege.append("Frühstück")
@@ -1835,6 +1858,8 @@ def reise_abschluss(code: str):
                     {", ".join(abzuege) if abzuege else "–"}</td>
                 <td style="text-align:right;font-weight:600;color:#059669;
                     font-family:monospace">{netto:.2f} €</td>
+                <td style="text-align:right;font-weight:600;color:#7c3aed;
+                    font-family:monospace">{f"{trennung_v:.2f} €" if trennung_v else "–"}</td>
             </tr>"""
 
         # ── Kosten-Tabelle ────────────────────────────────────────────────────
@@ -1961,10 +1986,14 @@ def reise_abschluss(code: str):
         </div>
 
         <!-- Zusammenfassung -->
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
           <div class="card"><div class="card-body" style="text-align:center">
             <div style="font-size:24px;font-weight:600;color:#059669">{vma_total_netto:.2f} €</div>
             <div style="font-size:12px;color:#64748b">VMA gesamt (netto)</div>
+          </div></div>
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:24px;font-weight:600;color:#7c3aed">{trennung_total:.2f} €</div>
+            <div style="font-size:12px;color:#64748b">Trennungspauschale</div>
           </div></div>
           <div class="card"><div class="card-body" style="text-align:center">
             <div style="font-size:24px;font-weight:600">{kosten_eur:.2f} €</div>
@@ -1972,7 +2001,7 @@ def reise_abschluss(code: str):
           </div></div>
           <div class="card"><div class="card-body" style="text-align:center">
             <div style="font-size:24px;font-weight:600;color:#2563eb">
-              {vma_total_netto + kosten_eur:.2f} €</div>
+              {vma_total_netto + trennung_total + kosten_eur:.2f} €</div>
             <div style="font-size:12px;color:#64748b">Gesamt zur Abrechnung</div>
           </div></div>
         </div>
@@ -1985,22 +2014,25 @@ def reise_abschluss(code: str):
           <div class="card-header">
             <span class="card-title">🌍 Verpflegungsmehraufwand</span>
             <span style="font-size:13px;font-weight:600;color:#059669">
-              {vma_total_netto:.2f} EUR</span>
+              {vma_total_netto:.2f} EUR{f' <span style="color:#7c3aed">+ {trennung_total:.2f} EUR Trennungspauschale</span>' if trennung_total else ''}</span>
           </div>
           <div class="table-wrap">
             <table>
               <thead><tr>
                 <th>Datum</th><th>Land</th><th style="text-align:right">Satz</th>
                 <th>Abzüge</th><th style="text-align:right">Netto</th>
+                <th style="text-align:right">Trennungspauschale</th>
               </tr></thead>
               <tbody>
-                {vma_html or '<tr><td colspan="5" class="empty-state">Keine VMA-Daten – bitte Übersicht aufrufen</td></tr>'}
+                {vma_html or '<tr><td colspan="6" class="empty-state">Keine VMA-Daten – bitte Übersicht aufrufen</td></tr>'}
               </tbody>
               <tfoot><tr style="border-top:2px solid var(--border)">
                 <td colspan="4" style="text-align:right;font-weight:600;padding:10px 14px">
-                  Gesamt VMA:</td>
+                  Gesamt:</td>
                 <td style="text-align:right;font-weight:700;font-size:15px;
                     color:#059669;padding:10px 14px">{vma_total_netto:.2f} EUR</td>
+                <td style="text-align:right;font-weight:700;font-size:15px;
+                    color:#7c3aed;padding:10px 14px">{trennung_total:.2f} EUR</td>
               </tr></tfoot>
             </table>
           </div>
@@ -3113,7 +3145,8 @@ def reise_detail(code: str):
 
         # VMA je Tag
         cur.execute(f"""SELECT id, datum, land_code, land_name, ist_halber_satz,
-                        fruehstueck, mittagessen, abendessen, vma_netto, vma_satz_voll, vma_satz_halb
+                        fruehstueck, mittagessen, abendessen, vma_netto, vma_satz_voll, vma_satz_halb,
+                        trennungspauschale, trennungspauschale_quelle
                         FROM vma_tage WHERE reise_code = {P} ORDER BY datum""", (rcode,))
         vma_tage_rows = cur.fetchall()
 
@@ -3352,6 +3385,7 @@ def reise_detail(code: str):
 
         wochentage = ["Mo","Di","Mi","Do","Fr","Sa","So"]
         vma_tage_summe = 0.0
+        trennung_summe = 0.0
         tage_blocks = ""
 
         def cb(rcode, vid, name, checked, label, abzug_pct):
@@ -3362,6 +3396,18 @@ def reise_detail(code: str):
                     f'onchange="this.form.submit()" style="width:auto;margin:0">'
                     f'{label} <span style="color:#c81e1e;font-size:10px">-{abzug_pct}%</span>'
                     f'</label>')
+
+        def trenn_select(rcode, vid, aktuell):
+            opts = ""
+            for wert, label in ((0.0, "0 EUR – keine"), (40.0, "40 EUR – halb"), (80.0, "80 EUR – voll")):
+                sel = " selected" if abs((aktuell or 0) - wert) < 0.01 else ""
+                opts += f'<option value="{wert:.0f}"{sel}>{label}</option>'
+            return (f'<form method="post" action="/reise/{rcode}/vma/{vid}/trennungspauschale" '
+                    f'style="display:inline-flex;align-items:center;gap:4px;margin-left:10px">'
+                    f'<span style="font-size:11px;color:var(--muted)">Trennungspauschale:</span>'
+                    f'<select name="trennungspauschale" onchange="this.form.submit()" '
+                    f'style="font-size:11px;padding:2px 4px;border:1px solid var(--border);border-radius:4px">'
+                    f'{opts}</select></form>')
 
         for i, vt in enumerate(vma_tage_rows):
             vid = get(vt,"id",0)
@@ -3374,12 +3420,16 @@ def reise_detail(code: str):
             mittag = bool(get(vt,"mittagessen",6))
             abend = bool(get(vt,"abendessen",7))
             netto = float(get(vt,"vma_netto",8) or 0)
+            trennung = float(get(vt,"trennungspauschale",11) or 0)
             vma_tage_summe += netto
+            trennung_summe += trennung
 
             wt = wochentage[vd.weekday()] if vd else "–"
             datum_txt = f"{wt} {vd.day:02d}.{vd.month:02d}.{vd.year}" if vd else "–"
             halb_badge = ('<span style="font-size:10px;background:#fef3c7;color:#92400e;'
                            'padding:1px 7px;border-radius:10px">½ Satz</span>') if ist_halb else ""
+            trenn_badge = (f'<div style="font-size:12px;color:#7c3aed;font-weight:600;margin-top:2px">'
+                            f'+ {trennung:.2f} EUR Trennungspauschale</div>') if trennung else ""
 
             tage_blocks += f"""<div style="border-bottom:1px solid var(--border)">
               <div style="padding:12px 16px;background:var(--bg)">
@@ -3390,18 +3440,20 @@ def reise_detail(code: str):
                   </div>
                   <div style="text-align:right">
                     <div style="font-size:16px;font-weight:700;color:var(--green)">{netto:.2f} EUR VMA netto</div>
+                    {trenn_badge}
                   </div>
                   <a href="/reise/{rcode}/termin/neu?datum={vd.isoformat() if vd else ''}"
                      style="font-size:11px;color:#2563eb;text-decoration:none;border:0.5px solid #bfdbfe;
                             border-radius:6px;padding:4px 10px">+ Termin</a>
                 </div>
-                <form method="post" action="/reise/{rcode}/vma/{vid}/speichern" style="margin-top:8px">
+                <form method="post" action="/reise/{rcode}/vma/{vid}/speichern" style="margin-top:8px;display:inline-block">
                   <input type="hidden" name="land_code" value="{lcode_t}">
                   <input type="hidden" name="ist_halber_satz" value="{'1' if ist_halb else ''}">
                   {cb(rcode, vid, "fruehstueck", frueh, "Frühstück", 20)}
                   {cb(rcode, vid, "mittagessen", mittag, "Mittag", 40)}
                   {cb(rcode, vid, "abendessen", abend, "Abend", 40)}
                 </form>
+                {trenn_select(rcode, vid, trennung) if vd and vd.weekday() in (5,6) else ""}
               </div>
               {tagesablauf_html(vd, rcode)}
             </div>"""
@@ -3453,6 +3505,7 @@ def reise_detail(code: str):
             <span class="card-title">📅 Tagesverlauf & VMA</span>
           </div>
           {('<div style="padding:12px 16px;background:#fef3c7;color:#92400e;font-size:12px;border-bottom:1px solid var(--border)">⚠ Für diese Reise wurde die VMA noch nicht berechnet – solange fehlen die Tages-Köpfe und Belege werden fälschlich als "außerhalb des Reisezeitraums" angezeigt. <a href="/reise/' + rcode + '/vma-generieren" style="color:#92400e;font-weight:600">🔄 Jetzt VMA berechnen</a></div>' if not vma_tage_rows else '') + (tage_blocks if tage_blocks else '<div class="card-body"><div class="empty-state"><b>Noch keine VMA-Tage berechnet</b><p>Erst Länder hinterlegen, dann VMA generieren</p><a href="/reise/' + rcode + '/vma-generieren" class="btn btn-primary" style="margin-top:12px">🔄 VMA berechnen</a></div></div>')}
+          {'<div style="padding:12px 16px;display:flex;justify-content:flex-end;gap:24px;background:var(--bg)"><span style="font-size:13px;color:var(--muted)">VMA gesamt: <b style="color:var(--green)">' + f"{vma_tage_summe:.2f}" + ' EUR</b></span>' + (f'<span style="font-size:13px;color:var(--muted)">Trennungspauschale: <b style="color:#7c3aed">{trennung_summe:.2f} EUR</b></span>' if trennung_summe else '') + f'<span style="font-size:13px;font-weight:700">Gesamt: {vma_tage_summe + trennung_summe:.2f} EUR</span></div>' if vma_tage_rows else ''}
         </div>
 
         {zugaenge_html}

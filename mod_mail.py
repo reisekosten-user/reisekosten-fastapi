@@ -19,7 +19,7 @@ SMTP_PASS = os.getenv("SMTP_PASS", "") or IMAP_PASS
 DMS_EMAIL_TO = os.getenv("DMS_EMAIL_TO", "")
 
 from mod_db import get_db, ph, is_postgres
-from mod_beleg import beleg_verarbeiten, get_s3, s3_download
+from mod_beleg import beleg_verarbeiten, get_s3, s3_download, lade_ma_daten
 from mod_anon import anonymisieren
 
 

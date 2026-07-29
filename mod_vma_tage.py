@@ -157,11 +157,16 @@ def vma_tage_generieren(reise_code: str, db) -> int:
         ist_halb = (i == 0 or i == tage - 1)
 
         # Manuell geänderte Einträge nicht überschreiben
-        cur.execute(f"SELECT id, quelle FROM vma_tage WHERE reise_code={P} AND datum={P}",
+        cur.execute(f"""SELECT id, quelle, trennungspauschale_quelle, trennungspauschale
+                        FROM vma_tage WHERE reise_code={P} AND datum={P}""",
                     (reise_code, tag.isoformat()))
         existing = cur.fetchone()
+        trenn_quelle_alt = None
+        trenn_alt = None
         if existing:
             q = (existing[1] if isinstance(existing, tuple) else existing["quelle"]) or ""
+            trenn_quelle_alt = (existing[2] if isinstance(existing, tuple) else existing["trennungspauschale_quelle"]) or "auto"
+            trenn_alt = existing[3] if isinstance(existing, tuple) else existing["trennungspauschale"]
             if q == "manuell":
                 continue  # Manuell → nicht anfassen
 
@@ -176,25 +181,48 @@ def vma_tage_generieren(reise_code: str, db) -> int:
         frueh = fruehstueck_aus_beleg(reise_code, tag, db)
         brutto, netto = vma_berechnen(voll, halb, ist_halb, frueh, False, False)
 
+        # Trennungspauschale (Wochenend-Sonderregelung): manuell gesetzte Werte
+        # bleiben unangetastet, sonst automatische Berechnung.
+        if trenn_quelle_alt == "manuell":
+            trennung = trenn_alt or 0
+        else:
+            trennung = trennungspauschale_berechnen(tag, ist_halb)
+
         if existing:
             cur.execute(f"""UPDATE vma_tage SET
                 land_code={P}, land_name={P}, vma_satz_voll={P}, vma_satz_halb={P},
                 ist_halber_satz={P}, fruehstueck={P}, vma_brutto={P}, vma_netto={P},
-                quelle={P} WHERE reise_code={P} AND datum={P}""",
+                quelle={P}, trennungspauschale={P} WHERE reise_code={P} AND datum={P}""",
                 (lcode, lname, voll, halb, ist_halb, frueh, brutto, netto,
-                 quelle, reise_code, tag.isoformat()))
+                 quelle, trennung, reise_code, tag.isoformat()))
         else:
             cur.execute(f"""INSERT INTO vma_tage
                 (reise_code, datum, land_code, land_name, vma_satz_voll, vma_satz_halb,
                  ist_halber_satz, fruehstueck, mittagessen, abendessen,
-                 vma_brutto, vma_netto, quelle)
-                VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})""",
+                 vma_brutto, vma_netto, quelle, trennungspauschale)
+                VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})""",
                 (reise_code, tag.isoformat(), lcode, lname, voll, halb,
-                 ist_halb, frueh, False, False, brutto, netto, quelle))
+                 ist_halb, frueh, False, False, brutto, netto, quelle, trennung))
         count += 1
 
     db.commit()
     cur.close()
     return count
+
+
+def trennungspauschale_berechnen(tag: date, ist_halber_reisetag: bool) -> float:
+    """
+    Trennungspauschale für Wochenend-Reisetage (betriebliche Sonderregelung):
+    - Voller Reisetag an einem Samstag/Sonntag: 80 EUR
+    - An- oder Abreisetag (halber VMA-Satz), der auf ein Wochenende fällt: 40 EUR
+      (z.B. vor 12 Uhr angetreten oder nach 12 Uhr beendet)
+    - An Werktagen: 0 EUR
+    Automatisch ermittelt; bei Bedarf im Tagesverlauf manuell korrigierbar,
+    z.B. wenn am An-/Abreisetag die 12-Uhr-Grenze tatsächlich nicht erfüllt ist.
+    """
+    ist_wochenende = tag.weekday() in (5, 6)  # 5=Samstag, 6=Sonntag
+    if not ist_wochenende:
+        return 0.0
+    return 40.0 if ist_halber_reisetag else 80.0
 
 
