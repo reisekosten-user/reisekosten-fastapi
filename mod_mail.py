@@ -24,23 +24,30 @@ from mod_anon import anonymisieren
 
 
 def sende_mail(empfaenger: str, betreff: str, text: str,
-                anhang_bytes: bytes | None = None, anhang_name: str | None = None) -> dict:
+                anhang_bytes: bytes | None = None, anhang_name: str | None = None,
+                anhaenge: list | None = None) -> dict:
     """
-    Generischer SMTP-Versand (Text-Mail, optional mit einem Anhang).
+    Generischer SMTP-Versand (Text-Mail, optional mit Anhängen).
+    anhaenge: Liste von (bytes, dateiname)-Tupeln für mehrere Anhänge.
+    anhang_bytes/anhang_name: Abkürzung für genau einen Anhang (Rückwärtskompatibilität).
     Benötigt SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS als Umgebungsvariablen.
     """
     if not (SMTP_HOST and SMTP_USER and SMTP_PASS):
         return {"fehler": "SMTP nicht konfiguriert (SMTP_HOST/USER/PASS fehlen)"}
     try:
+        alle_anhaenge = list(anhaenge or [])
+        if anhang_bytes is not None:
+            alle_anhaenge.append((anhang_bytes, anhang_name or "anhang.pdf"))
+
         msg = MIMEMultipart()
         msg["From"] = SMTP_USER
         msg["To"] = empfaenger
         msg["Subject"] = betreff
         msg.attach(MIMEText(text, "plain", "utf-8"))
 
-        if anhang_bytes is not None:
-            part = MIMEApplication(anhang_bytes, Name=anhang_name or "anhang.pdf")
-            part["Content-Disposition"] = f'attachment; filename="{anhang_name or "anhang.pdf"}"'
+        for daten, name in alle_anhaenge:
+            part = MIMEApplication(daten, Name=name or "anhang.pdf")
+            part["Content-Disposition"] = f'attachment; filename="{name or "anhang.pdf"}"'
             msg.attach(part)
 
         if SMTP_PORT == 465:
@@ -60,11 +67,13 @@ def dms_konfiguriert() -> bool:
     return bool(SMTP_HOST and SMTP_USER and SMTP_PASS and DMS_EMAIL_TO)
 
 
-def sende_dms_mail(betreff: str, text: str, anhang_bytes: bytes, anhang_name: str) -> dict:
-    """Verschickt einen Beleg per E-Mail an die DMS-Importadresse (DMS_EMAIL_TO)."""
+def sende_dms_mail(betreff: str, text: str, anhang_bytes: bytes, anhang_name: str,
+                    weitere_anhaenge: list | None = None) -> dict:
+    """Verschickt einen (oder mehrere verknüpfte) Beleg(e) per E-Mail an Habel (DMS_EMAIL_TO)."""
     if not dms_konfiguriert():
         return {"fehler": "DMS-Mailversand nicht konfiguriert (SMTP_HOST/USER/PASS/DMS_EMAIL_TO fehlen)"}
-    return sende_mail(DMS_EMAIL_TO, betreff, text, anhang_bytes, anhang_name)
+    anhaenge = [(anhang_bytes, anhang_name)] + list(weitere_anhaenge or [])
+    return sende_mail(DMS_EMAIL_TO, betreff, text, anhaenge=anhaenge)
 
 
 def decode_mime_header(val: str) -> str:
