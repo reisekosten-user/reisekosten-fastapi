@@ -99,6 +99,63 @@ def text_zu_pdf(text: str, titel: str = "Dokument") -> bytes:
     doc.build(story)
     return buf.getvalue()
 
+def pruefkopf_pdf_erzeugen(reise_code: str, geprueft_von: str, geprueft_am, pruef_vermerk: str,
+                            anbieter: str, betrag: float, waehrung: str, belegdatum) -> bytes:
+    """Erstellt ein Deckblatt (1 Seite) mit den Prüf-Angaben, das dem Original-
+    Beleg vorangestellt wird, bevor er an Habel übertragen wird."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+        leftMargin=25*mm, rightMargin=25*mm, topMargin=25*mm, bottomMargin=25*mm)
+    styles = getSampleStyleSheet()
+    def esc(s): return (s or "–").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+    story = [
+        Paragraph("Prüfvermerk – Reisekostenbeleg", styles["Heading1"]),
+        Spacer(1, 8*mm),
+    ]
+    daten = [
+        ["Geprüft am / durch:", f"{fmt_date(geprueft_am)} · {esc(geprueft_von)}"],
+        ["Bemerkung:", esc(pruef_vermerk)],
+        ["Reise-ID:", esc(reise_code)],
+        ["Anbieter:", esc(anbieter)],
+        ["Betrag:", f"{betrag:.2f} {waehrung}" if betrag else "–"],
+        ["Belegdatum:", fmt_date(belegdatum)],
+    ]
+    tbl = Table(daten, colWidths=[45*mm, 110*mm])
+    tbl.setStyle(TableStyle([
+        ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 10),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING", (0,0), (-1,-1), 6),
+        ("LINEBELOW", (0,0), (-1,-1), 0.5, colors.HexColor("#e2e8f0")),
+        ("TEXTCOLOR", (0,0), (0,-1), colors.HexColor("#374151")),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 10*mm))
+    story.append(Paragraph("Es folgt der geprüfte Originalbeleg.", styles["Italic"]))
+    doc.build(story)
+    return buf.getvalue()
+
+
+def beleg_mit_pruefkopf(original_pdf_bytes: bytes, deckblatt_pdf_bytes: bytes) -> bytes:
+    """Fügt Deckblatt + Original-PDF zu einem gemeinsamen PDF zusammen."""
+    import pypdf
+    writer = pypdf.PdfWriter()
+    for seite in pypdf.PdfReader(io.BytesIO(deckblatt_pdf_bytes)).pages:
+        writer.add_page(seite)
+    for seite in pypdf.PdfReader(io.BytesIO(original_pdf_bytes)).pages:
+        writer.add_page(seite)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
 def pdf_text_lesen(pdf_bytes: bytes) -> str:
     """Liest Text aus PDF mit pypdf."""
     try:

@@ -23,6 +23,7 @@ from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         lade_ma_daten, get_s3, s3_upload, s3_download,
                         bild_zu_pdf, text_zu_pdf, pdf_text_lesen,
                         beleg_neu_anonymisieren, beleg_neu_analysieren,
+                        pruefkopf_pdf_erzeugen, beleg_mit_pruefkopf,
                         OPENAI_KEY, OPENAI_MODEL, OPENAI_URL,
                         S3_ENDPOINT, S3_BUCKET)
 from mod_mail import fetch_mails, sende_dms_mail
@@ -42,7 +43,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.7-c"
+APP_VERSION  = "2.7-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -606,6 +607,16 @@ def beleg_detail(bid: int, request: Request):
 
         # Prüfung, Habel-Versand & Verknüpfung (nur bei Umsatzbelegen) – als
         # Variablen vorbereitet, um verschachtelte f-strings zu vermeiden.
+        def fmt_zeitstempel(v):
+            if not v: return "–"
+            if isinstance(v, str):
+                try:
+                    from datetime import datetime as _dt
+                    v = _dt.fromisoformat(v[:19])
+                except Exception:
+                    return v[:16]
+            return v.strftime("%d.%m.%Y, %H:%M Uhr")
+
         pruef_karte_html = ""
         if belegart in ("Rechnung", "Quittung"):
             aktueller_user = request.session.get("klarname") or request.session.get("kuerzel") or "–"
@@ -613,7 +624,7 @@ def beleg_detail(bid: int, request: Request):
                 vermerk_teil = f' · "{pruef_vermerk}"' if pruef_vermerk else ""
                 pruef_status_html = (
                     '<div class="alert alert-ok" style="font-size:12px">Geprüft von <b>'
-                    + (geprueft_von or "–") + "</b> am " + fmt_date(geprueft_am) + vermerk_teil + "</div>")
+                    + (geprueft_von or "–") + "</b> am " + fmt_zeitstempel(geprueft_am) + vermerk_teil + "</div>")
             else:
                 pruef_status_html = ('<div class="alert alert-warn" style="font-size:12px">Noch nicht geprüft. '
                                       f'Wird gespeichert unter deinem Login: <b>{aktueller_user}</b></div>')
@@ -669,9 +680,14 @@ def beleg_detail(bid: int, request: Request):
             else:
                 verknuepfung_html = '<div style="font-size:11px;color:var(--muted);font-style:italic">Keine passenden Belege gefunden.</div>'
 
+            pruef_pdf_link_html = (
+                f'<a href="/beleg/{bid2}/pruef-pdf" target="_blank" class="btn btn-secondary" '
+                f'style="width:100%;text-align:center;display:block;margin-bottom:8px">'
+                f'👁 Prüf-PDF ansehen (Deckblatt + Original)</a>') if geprueft else ""
+
             if dms_versendet_am:
-                dms_block_html = ('<div class="alert alert-ok" style="font-size:12px">📤 An Habel gesendet am '
-                                   + fmt_date(dms_versendet_am) + '</div>')
+                dms_block_html = ('<div class="alert alert-ok" style="font-size:12px">📤 An Habel übertragen am '
+                                   + fmt_zeitstempel(dms_versendet_am) + '</div>')
             else:
                 darf_senden = bool(geprueft and rcode)
                 disabled_attr = "" if darf_senden else "disabled"
@@ -679,9 +695,10 @@ def beleg_detail(bid: int, request: Request):
                     '<div style="font-size:11px;color:var(--muted);margin-top:6px">'
                     'Voraussetzung: geprüft + Reise zugeordnet.</div>')
                 dms_block_html = (
+                    f'{pruef_pdf_link_html}'
                     f'<form method="post" action="/beleg/{bid2}/dms-senden">'
                     f'<button type="submit" class="btn btn-success" style="width:100%" {disabled_attr}>'
-                    f'📤 An Habel senden</button></form>{hinweis_html}')
+                    f'📤 Jetzt an Habel übertragen</button></form>{hinweis_html}')
 
             pruef_button_text = "✓ Prüfung aktualisieren" if geprueft else "✓ Als geprüft markieren"
             pruef_karte_html = f"""<div class="card">
@@ -1081,7 +1098,7 @@ async def beleg_dms_senden(bid: int):
                 v_dateiname = vg("dateiname",0); v_s3o = vg("s3_original",1)
                 v_belegart = vg("belegart",2); v_geprueft = bool(vg("geprueft",3))
                 if v_geprueft and v_s3o:
-                    weitere_anhaenge.append((s3_download(v_s3o), v_dateiname or f"beleg_{verk_id}.pdf"))
+                    weitere_anhaenge.append((pruef_pdf_fuer_beleg(verk_id), v_dateiname or f"beleg_{verk_id}.pdf"))
                     verk_hinweis = f"\nVerknüpfter Beleg #{verk_id} ({v_belegart}) im Anhang mitgeschickt.\n"
                 else:
                     verk_hinweis = f"\nHinweis: Verknüpfter Beleg #{verk_id} ist noch nicht geprüft – wird separat versendet, sobald geprüft.\n"
@@ -1096,7 +1113,7 @@ async def beleg_dms_senden(bid: int):
                 '<div class="alert alert-err">Kein Original-Dokument in S3 vorhanden.</div>'
                 f'<a href="/beleg/{bid}" class="btn btn-secondary">Zurück</a>'))
 
-        pdf_bytes = s3_download(s3o)
+        pdf_bytes = pruef_pdf_fuer_beleg(bid)
         betreff = f"Reisekosten-Beleg {rcode} – {anbieter} – {betrag or ''} {waehrung}".strip()
         text = (f"Beleg #{bid} zur Archivierung\n\n"
                 f"Reise: {rcode}\nAnbieter: {anbieter}\nBetrag: {betrag} {waehrung}\n"
@@ -1177,6 +1194,42 @@ async def beleg_zuordnen(bid: int, request: Request):
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+def pruef_pdf_fuer_beleg(bid: int) -> bytes:
+    """Baut das Prüf-PDF (Deckblatt + Original) für einen geprüften Beleg."""
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    cur.execute(f"""SELECT reise_code, geprueft_von, geprueft_am, pruef_vermerk,
+                    anbieter, betrag_brutto, waehrung, belegdatum, s3_original
+                    FROM belege WHERE id={P}""", (bid,))
+    r = cur.fetchone()
+    cur.close(); db.close()
+    if not r:
+        raise ValueError("Beleg nicht gefunden")
+    g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
+    rcode = g("reise_code",0); geprueft_von = g("geprueft_von",1); geprueft_am = g("geprueft_am",2)
+    vermerk = g("pruef_vermerk",3); anbieter = g("anbieter",4)
+    betrag = g("betrag_brutto",5); waehrung = g("waehrung",6) or "EUR"
+    belegdat = g("belegdatum",7); s3o = g("s3_original",8)
+    if not s3o:
+        raise ValueError("Kein Original-Dokument in S3 vorhanden")
+
+    deckblatt = pruefkopf_pdf_erzeugen(rcode, geprueft_von, geprueft_am, vermerk,
+                                        anbieter, float(betrag) if betrag else None,
+                                        waehrung, belegdat)
+    original = s3_download(s3o)
+    return beleg_mit_pruefkopf(original, deckblatt)
+
+@app.get("/beleg/{bid}/pruef-pdf")
+def beleg_pruef_pdf(bid: int):
+    """Zeigt das Prüf-PDF (Deckblatt + Original) zur Kontrolle, bevor an Habel übertragen wird."""
+    try:
+        data = pruef_pdf_fuer_beleg(bid)
+        from fastapi.responses import Response
+        return Response(content=data, media_type="application/pdf",
+                        headers={"Content-Disposition": f"inline; filename=beleg_{bid}_pruef.pdf"})
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
 
 @app.get("/beleg/{bid}/pdf/{typ}")
 def beleg_pdf(bid: int, typ: str):
