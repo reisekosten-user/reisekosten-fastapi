@@ -43,7 +43,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.8-a"
+APP_VERSION  = "2.8-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -634,6 +634,81 @@ def beleg_detail(bid: int, request: Request):
             </div>
           </div>"""
 
+        # Verknüpfung: unabhängig von der Belegart – jeder Beleg jeder Art kann
+        # mit jedem anderen Beleg derselben Reise zu einer Gruppe zusammengefasst
+        # werden (z.B. Buchungsbestätigung + Rechnung + Tankbeleg + ...).
+        verk_db = get_db(); verk_cur = verk_db.cursor()
+        P2 = ph()
+        gruppen_mitglieder = []
+        if gruppe_id:
+            verk_cur.execute(f"""SELECT id, belegart, anbieter, betrag_brutto, waehrung, geprueft
+                                 FROM belege WHERE beleg_gruppe_id={P2} AND id!={P2}
+                                 ORDER BY id""", (gruppe_id, bid2))
+            for vr in verk_cur.fetchall():
+                gg = lambda k,i: vr[k] if hasattr(vr,'keys') else vr[i]
+                gruppen_mitglieder.append({
+                    "id": gg("id",0), "belegart": gg("belegart",1) or "–", "anbieter": gg("anbieter",2) or "–",
+                    "betrag": gg("betrag_brutto",3), "waehrung": gg("waehrung",4) or "EUR",
+                    "geprueft": bool(gg("geprueft",5))})
+
+        # Kandidaten: ALLE Belege derselben Reise, die noch nicht in dieser
+        # Gruppe sind (unabhängig von der Belegart)
+        kandidaten_html = ""
+        if rcode:
+            verk_cur.execute(f"""SELECT id, belegart, transportart, anbieter, betrag_brutto, waehrung FROM belege
+                                 WHERE reise_code={P2} AND id!={P2}
+                                 AND (beleg_gruppe_id IS NULL OR beleg_gruppe_id!={P2})
+                                 ORDER BY erstellt DESC LIMIT 15""",
+                             (rcode, bid2, gruppe_id or 0))
+            for kr in verk_cur.fetchall():
+                kg = lambda k,i: kr[k] if hasattr(kr,'keys') else kr[i]
+                kid = kg("id",0); kart = kg("belegart",1) or kg("transportart",2) or "–"
+                kanb = kg("anbieter",3) or "–"
+                kbet = kg("betrag_brutto",4); kwae = kg("waehrung",5) or "EUR"
+                kbet_s = f"{float(kbet):.2f} {kwae}" if kbet else "–"
+                kandidaten_html += (
+                    f'<form method="post" action="/beleg/{bid2}/verknuepfen/{kid}" '
+                    f'style="display:flex;justify-content:space-between;align-items:center;'
+                    f'padding:6px 0;border-bottom:1px solid var(--border)">'
+                    f'<span style="font-size:12px">#{kid} · {kart} · {kanb} · {kbet_s}</span>'
+                    f'<button type="submit" class="btn btn-secondary btn-sm">+ Hinzufügen</button></form>')
+        verk_cur.close(); verk_db.close()
+
+        mitglieder_html = ""
+        for m in gruppen_mitglieder:
+            geprueft_icon = "✓ geprüft" if m["geprueft"] else "○ noch nicht geprüft"
+            bet_s = f'{float(m["betrag"]):.2f} {m["waehrung"]}' if m["betrag"] else "–"
+            mitglieder_html += (
+                f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                f'background:var(--bg);border-radius:6px;padding:8px 10px;margin-bottom:6px">'
+                f'<span style="font-size:12px"><a href="/beleg/{m["id"]}" style="color:#2563eb">'
+                f'#{m["id"]}</a> · {m["belegart"]} · {m["anbieter"]} · {bet_s} · {geprueft_icon}</span>'
+                f'<form method="post" action="/beleg/{bid2}/aus-gruppe-entfernen/{m["id"]}">'
+                f'<button type="submit" class="btn btn-secondary btn-sm">Entfernen</button></form></div>')
+
+        verknuepfung_html = ""
+        if mitglieder_html:
+            verknuepfung_html += (
+                f'<div style="font-size:11px;color:var(--muted);margin-bottom:8px">'
+                f'Dieser Beleg gehört zu einer Gruppe von {len(gruppen_mitglieder)+1} Belegen. '
+                f'Beim Senden an Habel werden alle geprüften Umsatzbelege dieser Gruppe automatisch '
+                f'zusammen verschickt.</div>{mitglieder_html}')
+        if kandidaten_html:
+            verknuepfung_html += (f'<div style="font-size:11px;color:var(--muted);margin:10px 0 6px">'
+                                  f'{"Weiteren" if mitglieder_html else "Beleg dieser Reise"} hinzufügen:</div>{kandidaten_html}')
+        if not verknuepfung_html:
+            verknuepfung_html = ('<div style="font-size:11px;color:var(--muted);font-style:italic">'
+                                  'Keine weiteren Belege in dieser Reise gefunden.</div>' if rcode else
+                                  '<div style="font-size:11px;color:var(--muted);font-style:italic">'
+                                  'Beleg muss zuerst einer Reise zugeordnet sein.</div>')
+
+        verknuepfung_karte_html = f"""<div class="card">
+            <div class="card-header"><span class="card-title">🔗 Verknüpfte Belege</span></div>
+            <div class="card-body">
+              {verknuepfung_html}
+            </div>
+          </div>"""
+
         pruef_karte_html = ""
         if belegart in ("Rechnung", "Quittung"):
             aktueller_user = request.session.get("klarname") or request.session.get("kuerzel") or "–"
@@ -645,66 +720,6 @@ def beleg_detail(bid: int, request: Request):
             else:
                 pruef_status_html = ('<div class="alert alert-warn" style="font-size:12px">Noch nicht geprüft. '
                                       f'Wird gespeichert unter deinem Login: <b>{aktueller_user}</b></div>')
-
-            # Gruppenmitglieder (beliebig viele Belege können zusammengefasst werden)
-            verk_db = get_db(); verk_cur = verk_db.cursor()
-            P2 = ph()
-            gruppen_mitglieder = []
-            if gruppe_id:
-                verk_cur.execute(f"""SELECT id, belegart, anbieter, betrag_brutto, waehrung, geprueft
-                                     FROM belege WHERE beleg_gruppe_id={P2} AND id!={P2}
-                                     ORDER BY id""", (gruppe_id, bid2))
-                for vr in verk_cur.fetchall():
-                    gg = lambda k,i: vr[k] if hasattr(vr,'keys') else vr[i]
-                    gruppen_mitglieder.append({
-                        "id": gg("id",0), "belegart": gg("belegart",1) or "–", "anbieter": gg("anbieter",2) or "–",
-                        "betrag": gg("betrag_brutto",3), "waehrung": gg("waehrung",4) or "EUR",
-                        "geprueft": bool(gg("geprueft",5))})
-
-            # Kandidaten: Belege derselben Reise, die noch in keiner Gruppe sind
-            kandidaten_html = ""
-            if rcode:
-                verk_cur.execute(f"""SELECT id, belegart, anbieter, betrag_brutto, waehrung FROM belege
-                                     WHERE reise_code={P2} AND id!={P2} AND beleg_gruppe_id IS NULL
-                                     AND belegart IN ('Rechnung','Quittung','Buchungsbestaetigung')
-                                     ORDER BY erstellt DESC LIMIT 8""", (rcode, bid2))
-                for kr in verk_cur.fetchall():
-                    kg = lambda k,i: kr[k] if hasattr(kr,'keys') else kr[i]
-                    kid = kg("id",0); kart = kg("belegart",1) or "–"; kanb = kg("anbieter",2) or "–"
-                    kbet = kg("betrag_brutto",3); kwae = kg("waehrung",4) or "EUR"
-                    kbet_s = f"{float(kbet):.2f} {kwae}" if kbet else "–"
-                    kandidaten_html += (
-                        f'<form method="post" action="/beleg/{bid2}/verknuepfen/{kid}" '
-                        f'style="display:flex;justify-content:space-between;align-items:center;'
-                        f'padding:6px 0;border-bottom:1px solid var(--border)">'
-                        f'<span style="font-size:12px">#{kid} · {kart} · {kanb} · {kbet_s}</span>'
-                        f'<button type="submit" class="btn btn-secondary btn-sm">+ Hinzufügen</button></form>')
-            verk_cur.close(); verk_db.close()
-
-            mitglieder_html = ""
-            for m in gruppen_mitglieder:
-                geprueft_icon = "✓ geprüft" if m["geprueft"] else "○ noch nicht geprüft"
-                bet_s = f'{float(m["betrag"]):.2f} {m["waehrung"]}' if m["betrag"] else "–"
-                mitglieder_html += (
-                    f'<div style="display:flex;justify-content:space-between;align-items:center;'
-                    f'background:var(--bg);border-radius:6px;padding:8px 10px;margin-bottom:6px">'
-                    f'<span style="font-size:12px"><a href="/beleg/{m["id"]}" style="color:#2563eb">'
-                    f'#{m["id"]}</a> · {m["belegart"]} · {m["anbieter"]} · {bet_s} · {geprueft_icon}</span>'
-                    f'<form method="post" action="/beleg/{bid2}/aus-gruppe-entfernen/{m["id"]}">'
-                    f'<button type="submit" class="btn btn-secondary btn-sm">Entfernen</button></form></div>')
-
-            verknuepfung_html = ""
-            if mitglieder_html:
-                verknuepfung_html += (
-                    f'<div style="font-size:11px;color:var(--muted);margin-bottom:8px">'
-                    f'Dieser Beleg gehört zu einer Gruppe von {len(gruppen_mitglieder)+1} Belegen. '
-                    f'Beim Senden an Habel werden alle geprüften Mitglieder automatisch zusammen '
-                    f'verschickt.</div>{mitglieder_html}')
-            if kandidaten_html:
-                verknuepfung_html += (f'<div style="font-size:11px;color:var(--muted);margin:10px 0 6px">'
-                                      f'Weiteren Beleg dieser Reise hinzufügen:</div>{kandidaten_html}')
-            if not verknuepfung_html:
-                verknuepfung_html = '<div style="font-size:11px;color:var(--muted);font-style:italic">Keine passenden Belege gefunden.</div>'
 
             pruef_pdf_link_html = (
                 f'<a href="/beleg/{bid2}/pruef-pdf" target="_blank" class="btn btn-secondary" '
@@ -741,12 +756,6 @@ def beleg_detail(bid: int, request: Request):
               </form>
               <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
               {dms_block_html}
-            </div>
-          </div>
-          <div class="card">
-            <div class="card-header"><span class="card-title">🔗 Verknüpfte Belege</span></div>
-            <div class="card-body">
-              {verknuepfung_html}
             </div>
           </div>"""
 
@@ -916,6 +925,7 @@ def beleg_detail(bid: int, request: Request):
             </div>
           </div>
 
+          {verknuepfung_karte_html}
           {pruef_karte_html}
         </div>
 
