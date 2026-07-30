@@ -550,6 +550,30 @@ async def beleg_neu_anonymisieren(bid: int) -> dict:
     return {"ok": True, "ma_anzahl": len(ma_namen)}
 
 
+async def erechnung_erkennen(original_pdf: bytes) -> dict:
+    """
+    Prüft, ob im PDF eine eingebettete eRechnungs-XML steckt (ZUGFeRD/Factur-X-
+    Format – üblich bei deutschen/europäischen eRechnungen). Liest die Datei
+    NUR aus, verändert sie nicht. Gibt {"ist_erechnung", "format", "xml_bytes"} zurück.
+    """
+    ZUGFERD_NAMEN = ("factur-x.xml", "zugferd-invoice.xml", "xrechnung.xml",
+                      "invoice.xml", "cii.xml", "order-x.xml")
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(original_pdf))
+        anhaenge = reader.attachments  # Mapping name -> [bytes, ...]
+        for name in anhaenge:
+            name_l = name.lower()
+            if name_l.endswith(".xml") or name_l in ZUGFERD_NAMEN:
+                versionen = list(anhaenge[name])
+                if versionen:
+                    fmt = "ZUGFeRD/Factur-X" if "factur" in name_l or "zugferd" in name_l or "cii" in name_l else "XRechnung (eingebettet)"
+                    return {"ist_erechnung": True, "format": fmt, "xml_bytes": versionen[0], "xml_name": name}
+    except Exception:
+        pass
+    return {"ist_erechnung": False, "format": None, "xml_bytes": None, "xml_name": None}
+
+
 async def beleg_verarbeiten(
     datei_bytes: bytes,
     dateiname: str,
@@ -569,14 +593,32 @@ async def beleg_verarbeiten(
     beleg_id_temp = str(uuid.uuid4())[:8]
 
     # 1. Zu PDF konvertieren
-    if content_type in ("image/jpeg", "image/jpg", "image/png", "image/heic"):
+    ist_eigenstaendige_xml = (
+        dateiname.lower().endswith(".xml")
+        or content_type in ("application/xml", "text/xml")
+    )
+    if ist_eigenstaendige_xml:
+        # Eigenständige XRechnung (reine XML-Datei, kein ZUGFeRD-PDF).
+        # Original-XML bleibt für die Archivierung unverändert erhalten;
+        # für die interne Ansicht/GPT-Analyse wird zusätzlich eine lesbare
+        # PDF-Wiedergabe erzeugt.
+        xml_text = datei_bytes.decode("utf-8", errors="ignore")
+        original_pdf = text_zu_pdf(xml_text, f"XRechnung: {dateiname}")
+        erechnung_info = {"ist_erechnung": True, "format": "XRechnung (eigenständig)",
+                           "xml_bytes": datei_bytes, "xml_name": dateiname}
+    elif content_type in ("image/jpeg", "image/jpg", "image/png", "image/heic"):
         original_pdf = bild_zu_pdf(datei_bytes, dateiname)
+        erechnung_info = {"ist_erechnung": False, "format": None, "xml_bytes": None, "xml_name": None}
     elif content_type == "application/pdf":
         original_pdf = datei_bytes
+        # 1b. eRechnung erkennen (ZUGFeRD/Factur-X eingebettete XML) – nur
+        # lesend, das Original-PDF bleibt unverändert.
+        erechnung_info = erechnung_erkennen(original_pdf)
     else:
         # Text/Mail → PDF
         text = datei_bytes.decode(errors="ignore")
         original_pdf = text_zu_pdf(text, dateiname)
+        erechnung_info = {"ist_erechnung": False, "format": None, "xml_bytes": None, "xml_name": None}
 
     # 2. Text aus PDF lesen
     rohtext = pdf_text_lesen(original_pdf)
@@ -648,6 +690,13 @@ async def beleg_verarbeiten(
     s3_anon     = s3_upload(f"{prefix}/anon.pdf", anon_pdf)
     s3_analyse  = s3_upload(f"{prefix}/analyse.pdf", analyse_pdf)
 
+    # eRechnung-XML unverändert (Byte-für-Byte identisch) zusätzlich sichern –
+    # wird NIE angefasst/umgeschrieben, nur gelesen und archiviert.
+    s3_erechnung_xml = None
+    if erechnung_info["ist_erechnung"] and erechnung_info["xml_bytes"]:
+        s3_erechnung_xml = s3_upload(f"{prefix}/erechnung.xml", erechnung_info["xml_bytes"],
+                                      content_type="application/xml")
+
     # 6. DB-Eintrag
     def pd(key):
         v = ki_result.get(key)
@@ -684,13 +733,13 @@ async def beleg_verarbeiten(
          hotel_checkout_datum, hotel_checkout_zeit, hotel_naechte,
          tanken_kraftstoff, tanken_menge, tanken_einheit,
          tanken_preis_einheit, tanken_tankstelle, tanken_kennzeichen,
-         status)
+         status, ist_erechnung, erechnung_format, s3_erechnung_xml)
         VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},{P},
-                {P},{P},{P},{P},{P},{P},{P})"""
+                {P},{P},{P},{P},{P},{P},{P},{P},{P},{P})"""
 
     vals = (
         reise_code, dateiname, s3_original, s3_anon, s3_analyse,
@@ -712,7 +761,7 @@ async def beleg_verarbeiten(
         ki_result.get("tanken_kraftstoff"), pn("tanken_menge"),
         ki_result.get("tanken_einheit"), pn("tanken_preis_pro_einheit"),
         ki_result.get("tanken_tankstelle"), ki_result.get("tanken_kennzeichen"),
-        status)
+        status, erechnung_info["ist_erechnung"], erechnung_info["format"], s3_erechnung_xml)
 
     if is_postgres():
         cur.execute(sql + " RETURNING id", vals)

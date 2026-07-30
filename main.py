@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 # ── Module importieren ────────────────────────────────────────────────────────
-from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schema, get_migrations, repair_legacy_columns
+from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schema, get_migrations, repair_legacy_columns, migriere_verknuepfungen_zu_gruppen
 from mod_vma import (VMA_SAETZE, IATA_TO_LAND, LAENDER_LISTE, vma_fuer_land,
                       importiere_aktuelle_saetze, vma_fuer_land_erweitert)
 from mod_anon import anonymisieren
@@ -43,7 +43,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.7-d"
+APP_VERSION  = "2.8-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -432,7 +432,7 @@ def beleg_upload_form():
             <div class="form-group">
               <label>Datei <span class="required">*</span></label>
               <input type="file" name="datei" required
-                     accept=".pdf,.jpg,.jpeg,.png,.heic,.webp"
+                     accept=".pdf,.jpg,.jpeg,.png,.heic,.webp,.xml"
                      style="width:100%;padding:8px;border:1px solid var(--border);
                             border-radius:var(--radius-s);background:white">
               <div class="form-hint">PDF, JPG, PNG, HEIC, WebP</div>
@@ -487,7 +487,7 @@ def beleg_detail(bid: int, request: Request):
             status, fehler, erstellt,
             kurs_eur, betrag_eur, kurs_datum, kurs_quelle,
             zahlungsart, geprueft, pruef_vermerk, geprueft_von, geprueft_am, dms_versendet_am,
-            verknuepft_mit_id
+            beleg_gruppe_id, ist_erechnung, erechnung_format, s3_erechnung_xml
             FROM belege WHERE id={P}""", (bid,))
         r = cur.fetchone()
         # Reisen für Zuordnung
@@ -525,7 +525,9 @@ def beleg_detail(bid: int, request: Request):
         zahlungsart=get(r,"zahlungsart",46); geprueft=bool(get(r,"geprueft",47))
         pruef_vermerk=get(r,"pruef_vermerk",48); geprueft_von=get(r,"geprueft_von",49)
         geprueft_am=get(r,"geprueft_am",50); dms_versendet_am=get(r,"dms_versendet_am",51)
-        verknuepft_mit_id=get(r,"verknuepft_mit_id",52)
+        gruppe_id=get(r,"beleg_gruppe_id",52)
+        ist_erechnung=bool(get(r,"ist_erechnung",53)); erechnung_format=get(r,"erechnung_format",54)
+        s3_erechnung_xml=get(r,"s3_erechnung_xml",55)
         zusammenfassung = f"{typ}: {vendor} – {betrag_brutto} {waehrung}" if vendor else ""
 
         # KI-JSON parsen
@@ -617,6 +619,21 @@ def beleg_detail(bid: int, request: Request):
                     return v[:16]
             return v.strftime("%d.%m.%Y, %H:%M Uhr")
 
+        erechnung_karte_html = ""
+        if ist_erechnung:
+            erechnung_karte_html = f"""<div class="card" style="border:1px solid #86efac;background:#f0fdf4">
+            <div class="card-body">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:18px">📄✓</span>
+                <div>
+                  <div style="font-weight:700;color:#166534;font-size:13px">eRechnung erkannt ({erechnung_format or 'strukturiertes Format'})</div>
+                  <div style="font-size:11px;color:#4b5f4f">Die eingebettete Rechnungsdatei wird unverändert mitgeführt und archiviert.</div>
+                </div>
+              </div>
+              {f'<a href="/beleg/{bid2}/erechnung-xml" target="_blank" class="btn btn-secondary" style="width:100%;text-align:center;display:block;margin-top:10px">⬇ eRechnung-XML herunterladen (Original, unverändert)</a>' if s3_erechnung_xml else ''}
+            </div>
+          </div>"""
+
         pruef_karte_html = ""
         if belegart in ("Rechnung", "Quittung"):
             aktueller_user = request.session.get("klarname") or request.session.get("kuerzel") or "–"
@@ -629,27 +646,29 @@ def beleg_detail(bid: int, request: Request):
                 pruef_status_html = ('<div class="alert alert-warn" style="font-size:12px">Noch nicht geprüft. '
                                       f'Wird gespeichert unter deinem Login: <b>{aktueller_user}</b></div>')
 
-            # Verknüpfter Beleg
+            # Gruppenmitglieder (beliebig viele Belege können zusammengefasst werden)
             verk_db = get_db(); verk_cur = verk_db.cursor()
             P2 = ph()
-            verk_info = None
-            if verknuepft_mit_id:
-                verk_cur.execute(f"SELECT id, belegart, anbieter, betrag_brutto, waehrung, geprueft "
-                                  f"FROM belege WHERE id={P2}", (verknuepft_mit_id,))
-                vr = verk_cur.fetchone()
-                if vr:
+            gruppen_mitglieder = []
+            if gruppe_id:
+                verk_cur.execute(f"""SELECT id, belegart, anbieter, betrag_brutto, waehrung, geprueft
+                                     FROM belege WHERE beleg_gruppe_id={P2} AND id!={P2}
+                                     ORDER BY id""", (gruppe_id, bid2))
+                for vr in verk_cur.fetchall():
                     gg = lambda k,i: vr[k] if hasattr(vr,'keys') else vr[i]
-                    verk_info = {"id": gg("id",0), "belegart": gg("belegart",1), "anbieter": gg("anbieter",2),
-                                 "betrag": gg("betrag_brutto",3), "waehrung": gg("waehrung",4) or "EUR",
-                                 "geprueft": bool(gg("geprueft",5))}
+                    gruppen_mitglieder.append({
+                        "id": gg("id",0), "belegart": gg("belegart",1) or "–", "anbieter": gg("anbieter",2) or "–",
+                        "betrag": gg("betrag_brutto",3), "waehrung": gg("waehrung",4) or "EUR",
+                        "geprueft": bool(gg("geprueft",5))})
+
+            # Kandidaten: Belege derselben Reise, die noch in keiner Gruppe sind
             kandidaten_html = ""
-            if not verknuepft_mit_id and rcode:
+            if rcode:
                 verk_cur.execute(f"""SELECT id, belegart, anbieter, betrag_brutto, waehrung FROM belege
-                                     WHERE reise_code={P2} AND id!={P2} AND verknuepft_mit_id IS NULL
+                                     WHERE reise_code={P2} AND id!={P2} AND beleg_gruppe_id IS NULL
                                      AND belegart IN ('Rechnung','Quittung','Buchungsbestaetigung')
                                      ORDER BY erstellt DESC LIMIT 8""", (rcode, bid2))
-                kand_rows = verk_cur.fetchall()
-                for kr in kand_rows:
+                for kr in verk_cur.fetchall():
                     kg = lambda k,i: kr[k] if hasattr(kr,'keys') else kr[i]
                     kid = kg("id",0); kart = kg("belegart",1) or "–"; kanb = kg("anbieter",2) or "–"
                     kbet = kg("betrag_brutto",3); kwae = kg("waehrung",4) or "EUR"
@@ -659,25 +678,32 @@ def beleg_detail(bid: int, request: Request):
                         f'style="display:flex;justify-content:space-between;align-items:center;'
                         f'padding:6px 0;border-bottom:1px solid var(--border)">'
                         f'<span style="font-size:12px">#{kid} · {kart} · {kanb} · {kbet_s}</span>'
-                        f'<button type="submit" class="btn btn-secondary btn-sm">Verknüpfen</button></form>')
+                        f'<button type="submit" class="btn btn-secondary btn-sm">+ Hinzufügen</button></form>')
             verk_cur.close(); verk_db.close()
 
-            if verk_info:
-                geprueft_icon = "✓" if verk_info["geprueft"] else "○ noch nicht geprüft"
-                bet_s = f'{float(verk_info["betrag"]):.2f} {verk_info["waehrung"]}' if verk_info["betrag"] else "–"
-                verknuepfung_html = (
+            mitglieder_html = ""
+            for m in gruppen_mitglieder:
+                geprueft_icon = "✓ geprüft" if m["geprueft"] else "○ noch nicht geprüft"
+                bet_s = f'{float(m["betrag"]):.2f} {m["waehrung"]}' if m["betrag"] else "–"
+                mitglieder_html += (
                     f'<div style="display:flex;justify-content:space-between;align-items:center;'
-                    f'background:var(--bg);border-radius:6px;padding:8px 10px">'
-                    f'<span style="font-size:12px"><a href="/beleg/{verk_info["id"]}" style="color:#2563eb">'
-                    f'#{verk_info["id"]}</a> · {verk_info["belegart"]} · {verk_info["anbieter"]} · {bet_s} · {geprueft_icon}</span>'
-                    f'<form method="post" action="/beleg/{bid2}/verknuepfung-loesen">'
-                    f'<button type="submit" class="btn btn-secondary btn-sm">Lösen</button></form></div>'
-                    f'<div style="font-size:11px;color:var(--muted);margin-top:6px">Beim Senden an Habel '
-                    f'werden beide Belege automatisch zusammen verschickt, sobald beide geprüft sind.</div>')
-            elif kandidaten_html:
-                verknuepfung_html = (f'<div style="font-size:11px;color:var(--muted);margin-bottom:6px">'
-                                      f'Mögliche passende Belege dieser Reise:</div>{kandidaten_html}')
-            else:
+                    f'background:var(--bg);border-radius:6px;padding:8px 10px;margin-bottom:6px">'
+                    f'<span style="font-size:12px"><a href="/beleg/{m["id"]}" style="color:#2563eb">'
+                    f'#{m["id"]}</a> · {m["belegart"]} · {m["anbieter"]} · {bet_s} · {geprueft_icon}</span>'
+                    f'<form method="post" action="/beleg/{bid2}/aus-gruppe-entfernen/{m["id"]}">'
+                    f'<button type="submit" class="btn btn-secondary btn-sm">Entfernen</button></form></div>')
+
+            verknuepfung_html = ""
+            if mitglieder_html:
+                verknuepfung_html += (
+                    f'<div style="font-size:11px;color:var(--muted);margin-bottom:8px">'
+                    f'Dieser Beleg gehört zu einer Gruppe von {len(gruppen_mitglieder)+1} Belegen. '
+                    f'Beim Senden an Habel werden alle geprüften Mitglieder automatisch zusammen '
+                    f'verschickt.</div>{mitglieder_html}')
+            if kandidaten_html:
+                verknuepfung_html += (f'<div style="font-size:11px;color:var(--muted);margin:10px 0 6px">'
+                                      f'Weiteren Beleg dieser Reise hinzufügen:</div>{kandidaten_html}')
+            if not verknuepfung_html:
                 verknuepfung_html = '<div style="font-size:11px;color:var(--muted);font-style:italic">Keine passenden Belege gefunden.</div>'
 
             pruef_pdf_link_html = (
@@ -816,6 +842,8 @@ def beleg_detail(bid: int, request: Request):
               {f'<div class="alert alert-err" style="margin-top:8px">{fehler}</div>' if fehler else ""}
             </div>
           </div>
+
+          {erechnung_karte_html}
 
           <div class="card">
             <div class="card-header"><span class="card-title">📎 Dokumente</span></div>
@@ -1037,28 +1065,64 @@ async def beleg_pruefen(bid: int, request: Request):
 
 @app.post("/beleg/{bid}/verknuepfen/{andere_id}")
 def beleg_verknuepfen(bid: int, andere_id: int):
-    """Verknüpft zwei Belege 1:1 (z.B. Buchungsbestätigung mit ihrer Rechnung)."""
+    """
+    Fügt zwei Belege zu einer gemeinsamen Gruppe zusammen (z.B. Buchungsbestätigung
+    + Rechnung, oder auch 3+ zusammengehörige Belege einer Buchung).
+    - Hat noch keiner der beiden eine Gruppe → neue Gruppe für beide anlegen.
+    - Hat einer schon eine Gruppe → der andere tritt dieser Gruppe bei.
+    - Haben beide schon (unterschiedliche) Gruppen → Gruppen werden zusammengeführt.
+    """
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
-        cur.execute(f"UPDATE belege SET verknuepft_mit_id={P} WHERE id={P}", (andere_id, bid))
-        cur.execute(f"UPDATE belege SET verknuepft_mit_id={P} WHERE id={P}", (bid, andere_id))
+        cur.execute(f"SELECT beleg_gruppe_id FROM belege WHERE id={P}", (bid,))
+        r1 = cur.fetchone()
+        cur.execute(f"SELECT beleg_gruppe_id FROM belege WHERE id={P}", (andere_id,))
+        r2 = cur.fetchone()
+        g1 = (r1[0] if isinstance(r1, tuple) else r1["beleg_gruppe_id"]) if r1 else None
+        g2 = (r2[0] if isinstance(r2, tuple) else r2["beleg_gruppe_id"]) if r2 else None
+
+        if g1 and g2 and g1 != g2:
+            # Beide Gruppen zusammenführen: alle Mitglieder von g2 nach g1 verschieben
+            cur.execute(f"UPDATE belege SET beleg_gruppe_id={P} WHERE beleg_gruppe_id={P}", (g1, g2))
+            ziel_gruppe = g1
+        elif g1:
+            ziel_gruppe = g1
+            cur.execute(f"UPDATE belege SET beleg_gruppe_id={P} WHERE id={P}", (ziel_gruppe, andere_id))
+        elif g2:
+            ziel_gruppe = g2
+            cur.execute(f"UPDATE belege SET beleg_gruppe_id={P} WHERE id={P}", (ziel_gruppe, bid))
+        else:
+            if is_postgres():
+                cur.execute("INSERT INTO beleg_gruppen DEFAULT VALUES RETURNING id")
+                ziel_gruppe = cur.fetchone()[0]
+            else:
+                cur.execute("INSERT INTO beleg_gruppen DEFAULT VALUES")
+                ziel_gruppe = cur.lastrowid
+            cur.execute(f"UPDATE belege SET beleg_gruppe_id={P} WHERE id={P}", (ziel_gruppe, bid))
+            cur.execute(f"UPDATE belege SET beleg_gruppe_id={P} WHERE id={P}", (ziel_gruppe, andere_id))
+
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
-@app.post("/beleg/{bid}/verknuepfung-loesen")
-def beleg_verknuepfung_loesen(bid: int):
+@app.post("/beleg/{bid}/aus-gruppe-entfernen/{ziel_id}")
+def beleg_aus_gruppe_entfernen(bid: int, ziel_id: int):
+    """Entfernt EIN Mitglied (ziel_id) aus der Gruppe – der Rest der Gruppe bleibt bestehen."""
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
-        cur.execute(f"SELECT verknuepft_mit_id FROM belege WHERE id={P}", (bid,))
+        cur.execute(f"UPDATE belege SET beleg_gruppe_id=NULL WHERE id={P}", (ziel_id,))
+        # Bleibt nur noch 1 Mitglied in der Gruppe übrig, Gruppe komplett auflösen
+        cur.execute(f"SELECT beleg_gruppe_id FROM belege WHERE id={P}", (bid,))
         row = cur.fetchone()
-        andere_id = (row[0] if isinstance(row, tuple) else row["verknuepft_mit_id"]) if row else None
-        cur.execute(f"UPDATE belege SET verknuepft_mit_id=NULL WHERE id={P}", (bid,))
-        if andere_id:
-            cur.execute(f"UPDATE belege SET verknuepft_mit_id=NULL WHERE id={P}", (andere_id,))
+        gid = (row[0] if isinstance(row, tuple) else row["beleg_gruppe_id"]) if row else None
+        if gid:
+            cur.execute(f"SELECT COUNT(*) FROM belege WHERE beleg_gruppe_id={P}", (gid,))
+            anzahl = cur.fetchone()[0]
+            if anzahl <= 1:
+                cur.execute(f"UPDATE belege SET beleg_gruppe_id=NULL WHERE beleg_gruppe_id={P}", (gid,))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
@@ -1067,14 +1131,15 @@ def beleg_verknuepfung_loesen(bid: int):
 @app.post("/beleg/{bid}/dms-senden")
 async def beleg_dms_senden(bid: int):
     """Schickt einen geprüften, reise-zugeordneten Umsatzbeleg per Mail an Habel.
-    Ist ein anderer Beleg verknüpft UND ebenfalls geprüft, wird er automatisch
-    als zweiter Anhang in derselben Mail mitgeschickt."""
+    Gehört der Beleg zu einer Gruppe (z.B. Buchungsbestätigung + Rechnung + weitere),
+    werden alle GEPRÜFTEN Gruppenmitglieder automatisch zusammen in einer Mail
+    verschickt."""
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
         cur.execute(f"""SELECT reise_code, dateiname, s3_original, anbieter, betrag_brutto,
                         waehrung, belegdatum, belegart, zahlungsart, pruef_vermerk,
-                        geprueft, geprueft_von, geprueft_am, verknuepft_mit_id
+                        geprueft, geprueft_von, geprueft_am, beleg_gruppe_id
                         FROM belege WHERE id={P}""", (bid,))
         r = cur.fetchone()
         if not r:
@@ -1086,22 +1151,30 @@ async def beleg_dms_senden(bid: int):
         belegdat = g("belegdatum",6); belegart_v = g("belegart",7)
         zahlungsart_v = g("zahlungsart",8) or "–"; vermerk = g("pruef_vermerk",9) or "–"
         geprueft_v = bool(g("geprueft",10)); geprueft_von_v = g("geprueft_von",11) or "–"
-        verk_id = g("verknuepft_mit_id",13)
+        gid = g("beleg_gruppe_id",13)
 
         weitere_anhaenge = []
+        mitversendete_ids = []
         verk_hinweis = ""
-        if verk_id:
-            cur.execute(f"SELECT dateiname, s3_original, belegart, geprueft FROM belege WHERE id={P}", (verk_id,))
-            vr = cur.fetchone()
-            if vr:
+        if gid:
+            cur.execute(f"""SELECT id, dateiname, s3_original, belegart, geprueft
+                            FROM belege WHERE beleg_gruppe_id={P} AND id!={P}""", (gid, bid))
+            gruppen_mitglieder = cur.fetchall()
+            geprueft_liste = []; offen_liste = []
+            for vr in gruppen_mitglieder:
                 vg = lambda k,i: vr[k] if hasattr(vr,'keys') else vr[i]
-                v_dateiname = vg("dateiname",0); v_s3o = vg("s3_original",1)
-                v_belegart = vg("belegart",2); v_geprueft = bool(vg("geprueft",3))
+                v_id = vg("id",0); v_dateiname = vg("dateiname",1); v_s3o = vg("s3_original",2)
+                v_belegart = vg("belegart",3); v_geprueft = bool(vg("geprueft",4))
                 if v_geprueft and v_s3o:
-                    weitere_anhaenge.append((pruef_pdf_fuer_beleg(verk_id), v_dateiname or f"beleg_{verk_id}.pdf"))
-                    verk_hinweis = f"\nVerknüpfter Beleg #{verk_id} ({v_belegart}) im Anhang mitgeschickt.\n"
+                    weitere_anhaenge.append((pruef_pdf_fuer_beleg(v_id), v_dateiname or f"beleg_{v_id}.pdf"))
+                    mitversendete_ids.append(v_id)
+                    geprueft_liste.append(f"#{v_id} ({v_belegart})")
                 else:
-                    verk_hinweis = f"\nHinweis: Verknüpfter Beleg #{verk_id} ist noch nicht geprüft – wird separat versendet, sobald geprüft.\n"
+                    offen_liste.append(f"#{v_id} ({v_belegart})")
+            if geprueft_liste:
+                verk_hinweis += f"\nGruppen-Belege im Anhang mitgeschickt: {', '.join(geprueft_liste)}\n"
+            if offen_liste:
+                verk_hinweis += f"\nHinweis: noch nicht geprüft, daher nicht mitgeschickt: {', '.join(offen_liste)}\n"
         cur.close(); db.close()
 
         if not geprueft_v or not rcode:
@@ -1129,16 +1202,12 @@ async def beleg_dms_senden(bid: int):
 
         P = ph()
         db = get_db(); cur = db.cursor()
-        if is_postgres():
-            cur.execute(f"UPDATE belege SET dms_versendet_am=NOW() WHERE id={P}", (bid,))
-        else:
-            cur.execute(f"UPDATE belege SET dms_versendet_am=datetime('now') WHERE id={P}", (bid,))
-        # Wurde der verknüpfte Beleg mitgeschickt, gilt er ebenfalls als versendet
-        if weitere_anhaenge and verk_id:
+        alle_ids = [bid] + mitversendete_ids
+        for versendete_id in alle_ids:
             if is_postgres():
-                cur.execute(f"UPDATE belege SET dms_versendet_am=NOW() WHERE id={P}", (verk_id,))
+                cur.execute(f"UPDATE belege SET dms_versendet_am=NOW() WHERE id={P}", (versendete_id,))
             else:
-                cur.execute(f"UPDATE belege SET dms_versendet_am=datetime('now') WHERE id={P}", (verk_id,))
+                cur.execute(f"UPDATE belege SET dms_versendet_am=datetime('now') WHERE id={P}", (versendete_id,))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
@@ -1219,6 +1288,29 @@ def pruef_pdf_fuer_beleg(bid: int) -> bytes:
                                         waehrung, belegdat)
     original = s3_download(s3o)
     return beleg_mit_pruefkopf(original, deckblatt)
+
+@app.get("/beleg/{bid}/erechnung-xml")
+def beleg_erechnung_xml(bid: int):
+    """Liefert die eingebettete eRechnung-XML unverändert im Original."""
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT s3_erechnung_xml, dateiname FROM belege WHERE id={P}", (bid,))
+        r = cur.fetchone()
+        cur.close(); db.close()
+        if not r:
+            return JSONResponse({"fehler": "Nicht gefunden"}, status_code=404)
+        g = lambda k,i: r[k] if hasattr(r,'keys') else r[i]
+        key = g("s3_erechnung_xml",0); dateiname = g("dateiname",1) or f"beleg_{bid}"
+        if not key:
+            return JSONResponse({"fehler": "Keine eRechnung-XML vorhanden"}, status_code=404)
+        from fastapi.responses import Response
+        data = s3_download(key)
+        xml_name = re.sub(r"\.pdf$", "", dateiname, flags=re.IGNORECASE) + ".xml"
+        return Response(content=data, media_type="application/xml",
+                        headers={"Content-Disposition": f"attachment; filename={xml_name}"})
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
 
 @app.get("/beleg/{bid}/pruef-pdf")
 def beleg_pruef_pdf(bid: int):
@@ -1371,7 +1463,7 @@ def belege_liste():
         db = get_db(); cur = db.cursor()
         cur.execute("""SELECT b.id, b.reise_code, b.transportart, b.anbieter,
             b.betrag_brutto, b.waehrung, b.belegdatum, b.status,
-            b.dateiname, b.pflichtfelder_ok, b.fehlende_felder
+            b.dateiname, b.pflichtfelder_ok, b.fehlende_felder, b.ist_erechnung
             FROM belege b ORDER BY b.erstellt DESC LIMIT 100""")
         rows = cur.fetchall()
         cur.close(); db.close()
@@ -1389,15 +1481,16 @@ def belege_liste():
             vendor=get(r,"anbieter",3); betrag=get(r,"betrag_brutto",4)
             waehrung=get(r,"waehrung",5); bd=get(r,"belegdatum",6)
             status=get(r,"status",7); datei=get(r,"dateiname",8)
-            pf_ok=get(r,"pflichtfelder_ok",9)
+            pf_ok=get(r,"pflichtfelder_ok",9); ist_erechnung_r=bool(get(r,"ist_erechnung",10))
             bc = typ_farben.get(typ or "","badge-gray")
             bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
             stat_b = ('<span class="badge badge-green">✓</span>' if status=="ok"
                       else '<span class="badge badge-red">✗</span>' if status=="fehler"
                       else '<span class="badge badge-amber">…</span>')
+            erechnung_badge = ' <span class="badge badge-green" title="eRechnung">📄✓</span>' if ist_erechnung_r else ""
             zeilen += (f'<tr>'
                 f'<td><a href="/beleg/{bid}" style="color:var(--blue);font-weight:600">#{bid}</a></td>'
-                f'<td><span class="badge {bc}">{typ or "?"}</span></td>'
+                f'<td><span class="badge {bc}">{typ or "?"}</span>{erechnung_badge}</td>'
                 f'<td style="font-weight:500">{vendor or datei[:30]}</td>'
                 f'<td style="font-weight:600;color:var(--green)">{bet_s}</td>'
                 f'<td>{fmt_date(bd)}</td>'
@@ -1585,20 +1678,24 @@ def reise_uebersicht(code: str):
             event_ort_von,event_ort_bis,hotel_name,hotel_checkin_datum,
             hotel_checkin_zeit,hotel_checkout_datum,hotel_checkout_zeit,
             hotel_naechte,s3_original,s3_anon,s3_analyse,ki_json,belegdatum,
-            belegart,verknuepft_mit_id
+            belegart,beleg_gruppe_id
             FROM belege WHERE reise_code={P}
             ORDER BY COALESCE(event_datum_von,belegdatum)""", (rcode,))
         belege = cur.fetchall()
         cur.close(); db.close()
 
-        # Verknüpfte Buchungsbestätigungen unterdrücken, wenn die zugehörige
-        # Rechnung/Quittung ebenfalls vorhanden ist (sonst doppelte Belege +
-        # doppelt gezählte Kosten in der Tages-Summe)
-        belegart_je_id = {g(b,"id",0): (g(b,"belegart",21) or "") for b in belege}
+        # Verknüpfte Buchungsbestätigungen unterdrücken, wenn in derselben Gruppe
+        # eine Rechnung/Quittung vorhanden ist (sonst doppelte Belege + doppelt
+        # gezählte Kosten in der Tages-Summe)
+        gruppen_arten = {}
+        for b in belege:
+            gid = g(b,"beleg_gruppe_id",22)
+            if gid:
+                gruppen_arten.setdefault(gid, set()).add(g(b,"belegart",21) or "")
         belege = [b for b in belege if not (
             (g(b,"belegart",21) or "") == "Buchungsbestaetigung"
-            and g(b,"verknuepft_mit_id",22)
-            and belegart_je_id.get(g(b,"verknuepft_mit_id",22)) in ("Rechnung", "Quittung")
+            and g(b,"beleg_gruppe_id",22)
+            and gruppen_arten.get(g(b,"beleg_gruppe_id",22), set()) & {"Rechnung", "Quittung"}
         )]
 
         # Reisedaten ermitteln
@@ -2412,6 +2509,7 @@ def init():
                 db.rollback()
         cur.close(); db.close()
         repair_legacy_columns()
+        migriere_verknuepfungen_zu_gruppen()
         return {"status": "ok", "version": APP_VERSION,
                 "db": "postgresql" if is_postgres() else "sqlite"}
     except Exception as e:
@@ -3353,7 +3451,7 @@ def reise_detail(code: str):
                         betrag_brutto, waehrung, belegdatum, hotel_checkin_zeit, ki_json,
                         event_datum_von, event_datum_bis, hotel_checkin_datum,
                         hotel_checkout_datum, hotel_checkout_zeit, event_zeit,
-                        belegart, verknuepft_mit_id
+                        belegart, beleg_gruppe_id
                         FROM belege WHERE reise_code = {P} ORDER BY belegdatum""", (rcode,))
         beleg_rows_tag = cur.fetchall()
 
@@ -3470,17 +3568,22 @@ def reise_detail(code: str):
             events_by_date.setdefault(d, []).append(
                 (zeit or "99:99", "beleg", bid, titel_txt, sub_txt, bet_s, bg, fg))
 
-        # Beleg-ID → Belegart, um verknüpfte Buchungsbestätigungen im Zeitstrahl
-        # zu unterdrücken (sonst doppelte Events + doppelt gezählte Kosten)
-        belegart_je_id = {get(b,"id",0): (get(b,"belegart",15) or "") for b in beleg_rows_tag}
+        # Gruppen-ID → vorhandene Belegarten in der Gruppe, um verknüpfte
+        # Buchungsbestätigungen im Zeitstrahl zu unterdrücken (sonst doppelte
+        # Events + doppelt gezählte Kosten)
+        gruppen_arten_tag = {}
+        for b in beleg_rows_tag:
+            gid = get(b,"beleg_gruppe_id",16)
+            if gid:
+                gruppen_arten_tag.setdefault(gid, set()).add(get(b,"belegart",15) or "")
 
         for b in beleg_rows_tag:
             bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
             belegart_b = get(b,"belegart",15) or ""
-            verknuepft_id = get(b,"verknuepft_mit_id",16)
-            if (belegart_b == "Buchungsbestaetigung" and verknuepft_id
-                    and belegart_je_id.get(verknuepft_id) in ("Rechnung", "Quittung")):
-                continue  # wird durch die verknüpfte Rechnung/Quittung repräsentiert
+            gruppe_b = get(b,"beleg_gruppe_id",16)
+            if (belegart_b == "Buchungsbestaetigung" and gruppe_b
+                    and gruppen_arten_tag.get(gruppe_b, set()) & {"Rechnung", "Quittung"}):
+                continue  # wird durch die verknüpfte Rechnung/Quittung in der Gruppe repräsentiert
 
             freitext = get(b,"transportart_freitext",2) or ""
             anbieter = get(b,"anbieter",3) or "–"

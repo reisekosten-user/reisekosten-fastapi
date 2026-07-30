@@ -110,8 +110,8 @@ def mail_body_text(msg) -> tuple:
                 fn_lower = fn.lower()
                 # Nicht-Beleg-Dateien überspringen
                 if fn_lower.endswith((".ics",".vcf",".emz",".wmz",".gif")): continue
-                # Nur echte Beleg-Dateien
-                if not fn_lower.endswith((".pdf",".jpg",".jpeg",".png",".heic",".webp")):
+                # Nur echte Beleg-Dateien (.xml = eigenständige XRechnung)
+                if not fn_lower.endswith((".pdf",".jpg",".jpeg",".png",".heic",".webp",".xml")):
                     continue
                 attachments.append((fn, payload, ct))
             elif ct == "text/plain" and not body:
@@ -205,7 +205,7 @@ async def fetch_mails() -> dict:
             # Regel: PDF/Bild-Anhänge vorhanden → nur Anhänge verarbeiten
             # Kein Anhang → Mail-Body als Beleg
             echte_anhaenge = [(fn, payload, ct) for fn, payload, ct in attachments
-                              if fn.lower().endswith((".pdf",".jpg",".jpeg",".png",".heic",".webp"))]
+                              if fn.lower().endswith((".pdf",".jpg",".jpeg",".png",".heic",".webp",".xml"))]
 
             if echte_anhaenge:
                 # Nur Anhänge verarbeiten – Body ist nur Benachrichtigung

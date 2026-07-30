@@ -197,6 +197,10 @@ def get_schema() -> list[str]:
                 notiz         TEXT,
                 erstellt      TIMESTAMP DEFAULT NOW()
             )""",
+            """CREATE TABLE IF NOT EXISTS beleg_gruppen (
+                id          SERIAL PRIMARY KEY,
+                erstellt_am TIMESTAMP DEFAULT NOW()
+            )""",
             """CREATE TABLE IF NOT EXISTS reise_zugang (
                 id                SERIAL PRIMARY KEY,
                 reise_code        TEXT NOT NULL REFERENCES reisen(code) ON DELETE CASCADE,
@@ -353,6 +357,10 @@ def get_schema() -> list[str]:
                 notiz         TEXT,
                 erstellt      TEXT DEFAULT (datetime('now'))
             )""",
+            """CREATE TABLE IF NOT EXISTS beleg_gruppen (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                erstellt_am TEXT DEFAULT (datetime('now'))
+            )""",
             """CREATE TABLE IF NOT EXISTS reise_zugang (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 reise_code        TEXT REFERENCES reisen(code) ON DELETE CASCADE,
@@ -421,6 +429,10 @@ def get_migrations() -> list[str]:
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS trennungspauschale NUMERIC(6,2) DEFAULT 0",
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS trennungspauschale_quelle TEXT DEFAULT 'auto'",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS verknuepft_mit_id INTEGER",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS beleg_gruppe_id INTEGER",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS ist_erechnung BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS erechnung_format TEXT",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS s3_erechnung_xml TEXT",
     ]
 
 def repair_legacy_columns():
@@ -452,4 +464,40 @@ def repair_legacy_columns():
             conn.commit()
         except Exception:
             conn.rollback()
+    cur.close(); conn.close()
+
+
+def migriere_verknuepfungen_zu_gruppen():
+    """
+    Wandelt alte 1:1-Verknüpfungen (verknuepft_mit_id) in das neue Gruppen-Modell
+    (beleg_gruppe_id) um, das auch 3+ Belege gemeinsam gruppieren kann.
+    Idempotent – kann gefahrlos mehrfach über /init laufen.
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    P = ph()
+    try:
+        cur.execute("SELECT id, verknuepft_mit_id FROM belege "
+                    "WHERE verknuepft_mit_id IS NOT NULL AND beleg_gruppe_id IS NULL")
+        paare = cur.fetchall()
+        for row in paare:
+            bid = row[0] if isinstance(row, tuple) else row["id"]
+            andere_id = row[1] if isinstance(row, tuple) else row["verknuepft_mit_id"]
+            # Erneut prüfen (könnte durch vorherige Iteration schon gruppiert sein)
+            cur.execute(f"SELECT beleg_gruppe_id FROM belege WHERE id={P}", (bid,))
+            r2 = cur.fetchone()
+            schon = (r2[0] if isinstance(r2, tuple) else r2["beleg_gruppe_id"]) if r2 else None
+            if schon:
+                continue
+            if is_postgres():
+                cur.execute("INSERT INTO beleg_gruppen DEFAULT VALUES RETURNING id")
+                gid = cur.fetchone()[0]
+            else:
+                cur.execute("INSERT INTO beleg_gruppen DEFAULT VALUES")
+                gid = cur.lastrowid
+            cur.execute(f"UPDATE belege SET beleg_gruppe_id={P} WHERE id={P}", (gid, bid))
+            cur.execute(f"UPDATE belege SET beleg_gruppe_id={P} WHERE id={P}", (gid, andere_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
     cur.close(); conn.close()
