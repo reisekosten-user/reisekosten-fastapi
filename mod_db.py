@@ -433,6 +433,9 @@ def get_migrations() -> list[str]:
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS ist_erechnung BOOLEAN DEFAULT FALSE",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS erechnung_format TEXT",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS s3_erechnung_xml TEXT",
+        "ALTER TABLE termine ADD COLUMN IF NOT EXISTS ort TEXT",
+        "ALTER TABLE termine ADD COLUMN IF NOT EXISTS ansprechpartner TEXT",
+        "ALTER TABLE termine ADD COLUMN IF NOT EXISTS telefon TEXT",
     ]
 
 def repair_legacy_columns():

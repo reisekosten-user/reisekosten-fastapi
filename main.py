@@ -43,7 +43,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.8-b"
+APP_VERSION  = "2.8-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3466,7 +3466,7 @@ def reise_detail(code: str):
         beleg_rows_tag = cur.fetchall()
 
         # Manuelle Termine für den Tagesverlauf
-        cur.execute(f"""SELECT id, datum, uhrzeit_von, uhrzeit_bis, titel, typ
+        cur.execute(f"""SELECT id, datum, uhrzeit_von, uhrzeit_bis, titel, typ, ort, ansprechpartner, telefon
                         FROM termine WHERE reise_code = {P} ORDER BY datum, uhrzeit_von""", (rcode,))
         termin_rows = cur.fetchall()
         cur.close(); db.close()
@@ -3538,7 +3538,7 @@ def reise_detail(code: str):
         # Belege und Termine nach Datum gruppieren
         TERMIN_ICON = {
             "termin": "🤝", "fahrt": "🚕", "mietwagen": "🚗",
-            "hotel": "🏨", "sonstiges": "📌",
+            "hotel": "🏨", "kundenbesuch": "🏢", "sonstiges": "📌",
         }
         BADGE_DETAIL = {
             "Flug": ("✈", "#dbeafe", "#1e40af"), "Hotel": ("🏨", "#dcfce7", "#166534"),
@@ -3672,9 +3672,14 @@ def reise_detail(code: str):
             for t in termine_je_tag.get(tag_datum, []):
                 tid = get(t,"id",0); von = get(t,"uhrzeit_von",2) or ""; bis = get(t,"uhrzeit_bis",3) or ""
                 titel_t = get(t,"titel",4); typ_t = get(t,"typ",5) or "termin"
+                ort_t = get(t,"ort",6) or ""; ansprech_t = get(t,"ansprechpartner",7) or ""; tel_t = get(t,"telefon",8) or ""
                 icon = TERMIN_ICON.get(typ_t, "📌")
                 zeit_txt = f"{von}–{bis}" if von and bis else (von or "")
-                eintraege.append((von or "99:99", "termin", tid, f"{icon} {titel_t}", "", zeit_txt, None, None))
+                sub_parts = [p for p in (ort_t,
+                             f"👤 {ansprech_t}" if ansprech_t else "",
+                             f"📞 {tel_t}" if tel_t else "") if p]
+                sub_t = " · ".join(sub_parts)
+                eintraege.append((von or "99:99", "termin", tid, f"{icon} {titel_t}", sub_t, zeit_txt, None, None))
 
             eintraege.sort(key=lambda x: x[0])
             if not eintraege:
@@ -4143,9 +4148,13 @@ def land_loeschen(code: str, lid: int):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 # ── Manuelle Termine ────────────────────────────────────────────────────────────
+TERMIN_ICON_MAP = {
+    "termin": "🤝", "fahrt": "🚕", "mietwagen": "🚗",
+    "hotel": "🏨", "kundenbesuch": "🏢", "sonstiges": "📌",
+}
 TERMIN_TYPEN = [
-    ("termin", "🤝 Termin"), ("fahrt", "🚕 Fahrt"), ("mietwagen", "🚗 Mietwagen"),
-    ("hotel", "🏨 Hotel"), ("sonstiges", "📌 Sonstiges"),
+    ("termin", "🤝 Termin"), ("kundenbesuch", "🏢 Kundenbesuch"), ("fahrt", "🚕 Fahrt/Taxi"),
+    ("mietwagen", "🚗 Mietwagen"), ("hotel", "🏨 Hotel"), ("sonstiges", "📌 Sonstiges"),
 ]
 
 @app.get("/reise/{code}/termin/neu", response_class=HTMLResponse)
@@ -4160,7 +4169,7 @@ def termin_neu_form(code: str, datum: str = ""):
           <div class="form-grid form-grid-2">
             <div class="form-group full">
               <label>Titel <span class="required">*</span></label>
-              <input type="text" name="titel" required placeholder="z.B. Kundentermin">
+              <input type="text" name="titel" required placeholder="z.B. Kundenbesuch bei Müller GmbH">
             </div>
             <div class="form-group">
               <label>Typ</label>
@@ -4177,6 +4186,18 @@ def termin_neu_form(code: str, datum: str = ""):
             <div class="form-group">
               <label>Uhrzeit bis</label>
               <input type="time" name="uhrzeit_bis">
+            </div>
+            <div class="form-group full">
+              <label>Ort / Adresse</label>
+              <input type="text" name="ort" placeholder="z.B. Musterstraße 1, 12345 Musterstadt">
+            </div>
+            <div class="form-group">
+              <label>Ansprechpartner</label>
+              <input type="text" name="ansprechpartner" placeholder="z.B. Frau Schmidt">
+            </div>
+            <div class="form-group">
+              <label>Telefon</label>
+              <input type="tel" name="telefon" placeholder="z.B. 0171 1234567">
             </div>
             <div class="form-group full">
               <label>Notiz</label>
@@ -4201,6 +4222,9 @@ async def termin_neu(code: str, request: Request):
     datum = (form.get("datum") or "").strip()
     von = (form.get("uhrzeit_von") or "").strip() or None
     bis = (form.get("uhrzeit_bis") or "").strip() or None
+    ort = (form.get("ort") or "").strip() or None
+    ansprechpartner = (form.get("ansprechpartner") or "").strip() or None
+    telefon = (form.get("telefon") or "").strip() or None
     notiz = (form.get("notiz") or "").strip() or None
     if not titel or not datum:
         return HTMLResponse(shell("Fehler",
@@ -4210,9 +4234,9 @@ async def termin_neu(code: str, request: Request):
         P = ph()
         db = get_db(); cur = db.cursor()
         cur.execute(
-            f"INSERT INTO termine (reise_code,datum,uhrzeit_von,uhrzeit_bis,titel,typ,notiz) "
-            f"VALUES ({P},{P},{P},{P},{P},{P},{P})",
-            (rcode, datum, von, bis, titel, typ, notiz))
+            f"INSERT INTO termine (reise_code,datum,uhrzeit_von,uhrzeit_bis,titel,typ,ort,ansprechpartner,telefon,notiz) "
+            f"VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P})",
+            (rcode, datum, von, bis, titel, typ, ort, ansprechpartner, telefon, notiz))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/reise/{rcode}", status_code=303)
     except Exception as e:
@@ -4224,7 +4248,8 @@ def termin_bearbeiten_form(code: str, tid: int):
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
-        cur.execute(f"SELECT id,datum,uhrzeit_von,uhrzeit_bis,titel,typ,notiz FROM termine WHERE id={P}", (tid,))
+        cur.execute(f"SELECT id,datum,uhrzeit_von,uhrzeit_bis,titel,typ,notiz,ort,ansprechpartner,telefon "
+                    f"FROM termine WHERE id={P}", (tid,))
         r = cur.fetchone()
         cur.close(); db.close()
         if not r:
@@ -4232,6 +4257,7 @@ def termin_bearbeiten_form(code: str, tid: int):
         g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
         datum_v = str(g("datum",1))[:10]; von_v = g("uhrzeit_von",2) or ""; bis_v = g("uhrzeit_bis",3) or ""
         titel_v = g("titel",4); typ_v = g("typ",5) or "termin"; notiz_v = g("notiz",6) or ""
+        ort_v = g("ort",7) or ""; ansprechpartner_v = g("ansprechpartner",8) or ""; telefon_v = g("telefon",9) or ""
         typ_opts = "".join(
             f'<option value="{v}"{" selected" if v==typ_v else ""}>{l}</option>' for v, l in TERMIN_TYPEN)
         content = f"""
@@ -4261,6 +4287,18 @@ def termin_bearbeiten_form(code: str, tid: int):
                   <input type="time" name="uhrzeit_bis" value="{bis_v}">
                 </div>
                 <div class="form-group full">
+                  <label>Ort / Adresse</label>
+                  <input type="text" name="ort" value="{ort_v}">
+                </div>
+                <div class="form-group">
+                  <label>Ansprechpartner</label>
+                  <input type="text" name="ansprechpartner" value="{ansprechpartner_v}">
+                </div>
+                <div class="form-group">
+                  <label>Telefon</label>
+                  <input type="tel" name="telefon" value="{telefon_v}">
+                </div>
+                <div class="form-group full">
                   <label>Notiz</label>
                   <input type="text" name="notiz" value="{notiz_v}">
                 </div>
@@ -4285,13 +4323,17 @@ async def termin_bearbeiten(code: str, tid: int, request: Request):
     datum = (form.get("datum") or "").strip()
     von = (form.get("uhrzeit_von") or "").strip() or None
     bis = (form.get("uhrzeit_bis") or "").strip() or None
+    ort = (form.get("ort") or "").strip() or None
+    ansprechpartner = (form.get("ansprechpartner") or "").strip() or None
+    telefon = (form.get("telefon") or "").strip() or None
     notiz = (form.get("notiz") or "").strip() or None
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
         cur.execute(
-            f"UPDATE termine SET titel={P},typ={P},datum={P},uhrzeit_von={P},uhrzeit_bis={P},notiz={P} WHERE id={P}",
-            (titel, typ, datum, von, bis, notiz, tid))
+            f"UPDATE termine SET titel={P},typ={P},datum={P},uhrzeit_von={P},uhrzeit_bis={P},"
+            f"ort={P},ansprechpartner={P},telefon={P},notiz={P} WHERE id={P}",
+            (titel, typ, datum, von, bis, ort, ansprechpartner, telefon, notiz, tid))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/reise/{rcode}", status_code=303)
     except Exception as e:
