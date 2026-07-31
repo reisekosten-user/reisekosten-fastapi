@@ -43,7 +43,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.8-c"
+APP_VERSION  = "2.8-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3020,6 +3020,25 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
           </div>
         </div>
         <div class="card" style="max-width:480px;margin-top:16px">
+          <div class="card-header"><span class="card-title">✏ Kürzel ändern</span></div>
+          <div class="card-body">
+            <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+              Ändert das Kürzel überall (Reisen, Portal-Zugänge, Login) – die
+              bisherige Historie bleibt erhalten. Aktive Portal-Links mit dem
+              alten Kürzel werden ungültig, neue müssten neu verschickt werden.</p>
+            <form method="post" action="/mitarbeiter/{k}/kuerzel-aendern"
+                  onsubmit="return confirm('Kürzel {k} wirklich ändern? Dies kann nicht rückgängig gemacht werden.')">
+              <div class="form-group">
+                <label>Neues Kürzel</label>
+                <input type="text" id="neues-kuerzel" name="neues_kuerzel" required
+                       maxlength="5" style="text-transform:uppercase" placeholder="z.B. RDI">
+              </div>
+              <button type="submit" class="btn btn-secondary" style="width:100%">Kürzel ändern</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="card" style="max-width:480px;margin-top:16px">
           <div class="card-header"><span class="card-title">🔒 Login-Passwort</span></div>
           <div class="card-body">
             <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
@@ -3039,6 +3058,65 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
           </div>
         </div>"""
         return HTMLResponse(shell(f"MA {k} bearbeiten", content, "mitarbeiter"))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.post("/mitarbeiter/{kuerzel}/kuerzel-aendern")
+async def mitarbeiter_kuerzel_aendern(kuerzel: str, request: Request):
+    """
+    Benennt ein Mitarbeiter-Kürzel sicher um: legt einen neuen Mitarbeiter-
+    Datensatz mit allen bisherigen Daten an, verschiebt alle Verweise
+    (Reisen, Portal-Zugänge, Reisetage) auf das neue Kürzel und löscht den
+    alten Datensatz. Läuft in einer Transaktion – entweder ganz oder gar nicht.
+    """
+    alt = kuerzel.strip().upper()
+    form = await request.form()
+    neu = (form.get("neues_kuerzel") or "").strip().upper()
+
+    if not re.match(r'^[A-Z]{1,5}$', neu):
+        return HTMLResponse(shell("Fehler",
+            '<div class="alert alert-err">Neues Kürzel: nur Buchstaben, 1–5 Zeichen.</div>'
+            f'<a href="/mitarbeiter/{alt}/bearbeiten" class="btn btn-secondary">Zurück</a>'))
+    if neu == alt:
+        return RedirectResponse(f"/mitarbeiter/{alt}/bearbeiten", status_code=303)
+
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+
+        cur.execute(f"SELECT id FROM mitarbeiter WHERE kuerzel={P}", (neu,))
+        if cur.fetchone():
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler",
+                f'<div class="alert alert-err">Kürzel {neu} ist bereits vergeben.</div>'
+                f'<a href="/mitarbeiter/{alt}/bearbeiten" class="btn btn-secondary">Zurück</a>'))
+
+        cur.execute(f"""SELECT klarname, email, email2, email3, rolle, aktiv, passwort_hash
+                        FROM mitarbeiter WHERE kuerzel={P}""", (alt,))
+        r = cur.fetchone()
+        if not r:
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Mitarbeiter nicht gefunden.</div>'))
+        g = lambda k,i: r[k] if hasattr(r,'keys') else r[i]
+
+        cur.execute(f"""INSERT INTO mitarbeiter
+            (kuerzel, klarname, email, email2, email3, rolle, aktiv, passwort_hash)
+            VALUES ({P},{P},{P},{P},{P},{P},{P},{P})""",
+            (neu, g("klarname",0), g("email",1), g("email2",2), g("email3",3),
+             g("rolle",4), g("aktiv",5), g("passwort_hash",6)))
+
+        cur.execute(f"UPDATE reise_mitarbeiter SET kuerzel={P} WHERE kuerzel={P}", (neu, alt))
+        cur.execute(f"UPDATE reise_zugang SET kuerzel={P} WHERE kuerzel={P}", (neu, alt))
+        cur.execute(f"UPDATE reisetage_person SET kuerzel={P} WHERE kuerzel={P}", (neu, alt))
+        cur.execute(f"DELETE FROM mitarbeiter WHERE kuerzel={P}", (alt,))
+
+        db.commit(); cur.close(); db.close()
+
+        # Falls der aktuell eingeloggte Nutzer selbst umbenannt wurde, Session nachziehen
+        if request.session.get("kuerzel") == alt:
+            request.session["kuerzel"] = neu
+
+        return RedirectResponse(f"/mitarbeiter/{neu}/bearbeiten", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
