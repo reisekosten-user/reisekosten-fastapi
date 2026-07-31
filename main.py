@@ -43,7 +43,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.8-d"
+APP_VERSION  = "2.8-e"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3084,7 +3084,7 @@ async def mitarbeiter_kuerzel_aendern(kuerzel: str, request: Request):
         P = ph()
         db = get_db(); cur = db.cursor()
 
-        cur.execute(f"SELECT id FROM mitarbeiter WHERE kuerzel={P}", (neu,))
+        cur.execute(f"SELECT kuerzel FROM mitarbeiter WHERE kuerzel={P}", (neu,))
         if cur.fetchone():
             cur.close(); db.close()
             return HTMLResponse(shell("Fehler",
