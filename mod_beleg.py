@@ -550,7 +550,7 @@ async def beleg_neu_anonymisieren(bid: int) -> dict:
     return {"ok": True, "ma_anzahl": len(ma_namen)}
 
 
-async def erechnung_erkennen(original_pdf: bytes) -> dict:
+def erechnung_erkennen(original_pdf: bytes) -> dict:
     """
     Prüft, ob im PDF eine eingebettete eRechnungs-XML steckt (ZUGFeRD/Factur-X-
     Format – üblich bei deutschen/europäischen eRechnungen). Liest die Datei
