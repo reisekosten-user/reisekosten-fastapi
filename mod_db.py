@@ -436,6 +436,10 @@ def get_migrations() -> list[str]:
         "ALTER TABLE termine ADD COLUMN IF NOT EXISTS ort TEXT",
         "ALTER TABLE termine ADD COLUMN IF NOT EXISTS ansprechpartner TEXT",
         "ALTER TABLE termine ADD COLUMN IF NOT EXISTS telefon TEXT",
+        "ALTER TABLE mitarbeiter ADD COLUMN IF NOT EXISTS ist_organisator BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE mitarbeiter ADD COLUMN IF NOT EXISTS ist_reisender BOOLEAN DEFAULT TRUE",
+        "UPDATE mitarbeiter SET ist_organisator=TRUE WHERE rolle='organisator'",
+        "UPDATE mitarbeiter SET ist_reisender=TRUE WHERE rolle='reisender' OR rolle IS NULL",
     ]
 
 def repair_legacy_columns():

@@ -62,3 +62,19 @@ def hat_bereits_passwoerter() -> bool:
 
 def pfad_ist_offen(pfad: str) -> bool:
     return any(pfad == p or pfad.startswith(p + "/") for p in OFFENE_PFADE)
+
+
+def ist_organisator(request) -> bool:
+    """Prüft, ob der aktuell eingeloggte Benutzer als Organisator angelegt ist."""
+    kuerzel = request.session.get("kuerzel")
+    if not kuerzel:
+        return False
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    cur.execute(f"SELECT ist_organisator FROM mitarbeiter WHERE kuerzel={P}", (kuerzel,))
+    row = cur.fetchone()
+    cur.close(); db.close()
+    if not row:
+        return False
+    val = row[0] if isinstance(row, tuple) else row["ist_organisator"]
+    return bool(val)

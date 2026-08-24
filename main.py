@@ -30,7 +30,7 @@ from mod_mail import fetch_mails, sende_dms_mail
 from mod_vma_tage import (vma_berechnen, land_fuer_tag,
                            fruehstueck_aus_beleg, vma_tage_generieren)
 from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
-                       hat_bereits_passwoerter, pfad_ist_offen)
+                       hat_bereits_passwoerter, pfad_ist_offen, ist_organisator)
 from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_token,
                          tage_sicherstellen, tage_laden, tag_speichern,
                          reisende_der_reise, zugaenge_der_reise, portal_mail_senden,
@@ -43,7 +43,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.8-f"
+APP_VERSION  = "2.9-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -471,6 +471,7 @@ async def beleg_upload(request: Request,
 @app.get("/beleg/{bid}", response_class=HTMLResponse)
 def beleg_detail(bid: int, request: Request):
     try:
+        benutzer_ist_organisator = ist_organisator(request)
         db = get_db(); cur = db.cursor()
         P = ph()
         cur.execute(f"""SELECT id, reise_code, transportart, dateiname,
@@ -769,7 +770,10 @@ def beleg_detail(bid: int, request: Request):
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
           <div class="card">
-            <div class="card-header"><span class="card-title">📊 KI-Analyse</span></div>
+            <div class="card-header">
+              <span class="card-title">📊 KI-Analyse</span>
+              {f'<a href="/beleg/{bid2}/daten-bearbeiten" class="btn btn-secondary btn-sm">✏ Daten nachtragen</a>' if benutzer_ist_organisator else ''}
+            </div>
             <div class="card-body">
               <dl style="display:grid;grid-template-columns:160px 1fr;gap:4px 12px">
                 <dt style="color:var(--muted);font-size:12px">Datei</dt>
@@ -945,6 +949,178 @@ def beleg_detail(bid: int, request: Request):
         return HTMLResponse(shell("Fehler",
             f'<div class="alert alert-err">{e}</div>'
             f'<pre style="font-size:11px">{traceback.format_exc()[:400]}</pre>'))
+
+@app.get("/beleg/{bid}/daten-bearbeiten", response_class=HTMLResponse)
+def beleg_daten_bearbeiten_form(bid: int, request: Request):
+    """Formular zum vollständigen Nachtragen/Korrigieren aller von der KI
+    erkannten Felder – nur für Organisatoren zugänglich."""
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren dürfen Beleg-Daten nachtragen.</div>'
+            f'<a href="/beleg/{bid}" class="btn btn-secondary">Zurück</a>'), status_code=403)
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"""SELECT transportart, transportart_freitext, anbieter, reisender, land_beleg,
+                        belegdatum, event_datum_von, event_datum_bis, event_ort_von, event_ort_bis,
+                        buchungscode, rechnungsnummer, event_zeit
+                        FROM belege WHERE id={P}""", (bid,))
+        r = cur.fetchone()
+        cur.close(); db.close()
+        if not r:
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Beleg nicht gefunden.</div>'))
+        g = lambda k,i: r[k] if hasattr(r,'keys') else r[i]
+        def v(x): return x if x else ""
+        transportart_v = g("transportart",0); freitext_v = v(g("transportart_freitext",1))
+        anbieter_v = v(g("anbieter",2)); reisender_v = v(g("reisender",3)); land_v = v(g("land_beleg",4))
+        belegdatum_v = str(g("belegdatum",5))[:10] if g("belegdatum",5) else ""
+        ev_von_v = str(g("event_datum_von",6))[:10] if g("event_datum_von",6) else ""
+        ev_bis_v = str(g("event_datum_bis",7))[:10] if g("event_datum_bis",7) else ""
+        ort_von_v = v(g("event_ort_von",8)); ort_bis_v = v(g("event_ort_bis",9))
+        buchungscode_v = v(g("buchungscode",10)); rechnr_v = v(g("rechnungsnummer",11))
+        event_zeit_v = v(g("event_zeit",12))
+
+        transportarten = ["Hotel","Flug","Bahn","Mietwagen","Taxi","Tanken","Verpflegung","Bewirtung","Sonstiges"]
+        typ_opts = "".join(f'<option value="{t}"{" selected" if t==transportart_v else ""}>{t}</option>' for t in transportarten)
+
+        content = f"""
+        <h1 class="page-title">Beleg-Daten nachtragen – #{bid}</h1>
+        <div class="alert alert-warn" style="margin-bottom:16px">
+          Nur für Organisatoren: Felder, die die KI nicht erkennen konnte, hier manuell ergänzen.
+        </div>
+        <div class="card" style="max-width:560px">
+          <div class="card-body">
+            <form method="post" action="/beleg/{bid}/daten-bearbeiten">
+              <div class="form-grid form-grid-2">
+                <div class="form-group">
+                  <label>Transportart</label>
+                  <select name="transportart"><option value="">– wählen –</option>{typ_opts}</select>
+                </div>
+                <div class="form-group">
+                  <label>Freitext (bei Sonstiges)</label>
+                  <input type="text" name="transportart_freitext" value="{freitext_v}">
+                </div>
+                <div class="form-group">
+                  <label>Anbieter</label>
+                  <input type="text" name="anbieter" value="{anbieter_v}">
+                </div>
+                <div class="form-group">
+                  <label>Reisender</label>
+                  <input type="text" name="reisender" value="{reisender_v}">
+                </div>
+                <div class="form-group">
+                  <label>Land (ISO-Code)</label>
+                  <input type="text" name="land_beleg" value="{land_v}" maxlength="2" placeholder="z.B. DE">
+                </div>
+                <div class="form-group">
+                  <label>Belegdatum</label>
+                  <input type="date" name="belegdatum" value="{belegdatum_v}">
+                </div>
+                <div class="form-group">
+                  <label>Event-Datum von</label>
+                  <input type="date" name="event_datum_von" value="{ev_von_v}">
+                </div>
+                <div class="form-group">
+                  <label>Event-Datum bis</label>
+                  <input type="date" name="event_datum_bis" value="{ev_bis_v}">
+                </div>
+                <div class="form-group">
+                  <label>Uhrzeit (bei Tanken/Maut etc.)</label>
+                  <input type="time" name="event_zeit" value="{event_zeit_v}">
+                </div>
+                <div class="form-group"></div>
+                <div class="form-group">
+                  <label>Strecke – von</label>
+                  <input type="text" name="event_ort_von" value="{ort_von_v}">
+                </div>
+                <div class="form-group">
+                  <label>Strecke – bis</label>
+                  <input type="text" name="event_ort_bis" value="{ort_bis_v}">
+                </div>
+                <div class="form-group">
+                  <label>Buchungscode</label>
+                  <input type="text" name="buchungscode" value="{buchungscode_v}">
+                </div>
+                <div class="form-group">
+                  <label>Rechnungsnummer</label>
+                  <input type="text" name="rechnungsnummer" value="{rechnr_v}">
+                </div>
+              </div>
+              <div class="form-hint" style="margin:8px 0">
+                Betrag, Belegart und Bezahlart werden weiterhin über die eigenen Felder im Beleg-Detail gepflegt.</div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Speichern</button>
+                <a href="/beleg/{bid}" class="btn btn-secondary">Abbrechen</a>
+              </div>
+            </form>
+          </div>
+        </div>"""
+        return HTMLResponse(shell(f"Beleg #{bid} – Daten nachtragen", content))
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.post("/beleg/{bid}/daten-bearbeiten")
+async def beleg_daten_bearbeiten(bid: int, request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren dürfen Beleg-Daten nachtragen.</div>'
+            f'<a href="/beleg/{bid}" class="btn btn-secondary">Zurück</a>'), status_code=403)
+    form = await request.form()
+    def s(name): return (form.get(name) or "").strip() or None
+
+    transportart = s("transportart")
+    transportart_freitext = s("transportart_freitext")
+    anbieter = s("anbieter")
+    reisender = s("reisender")
+    land_beleg = (s("land_beleg") or "").upper() or None
+    belegdatum = s("belegdatum")
+    event_datum_von = s("event_datum_von")
+    event_datum_bis = s("event_datum_bis")
+    event_zeit = s("event_zeit")
+    event_ort_von = s("event_ort_von")
+    event_ort_bis = s("event_ort_bis")
+    buchungscode = s("buchungscode")
+    rechnungsnummer = s("rechnungsnummer")
+
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"""UPDATE belege SET
+            transportart={P}, transportart_freitext={P}, anbieter={P}, reisender={P},
+            land_beleg={P}, belegdatum={P}, event_datum_von={P}, event_datum_bis={P},
+            event_zeit={P}, event_ort_von={P}, event_ort_bis={P},
+            buchungscode={P}, rechnungsnummer={P}
+            WHERE id={P}""",
+            (transportart, transportart_freitext, anbieter, reisender, land_beleg,
+             belegdatum, event_datum_von, event_datum_bis, event_zeit,
+             event_ort_von, event_ort_bis, buchungscode, rechnungsnummer, bid))
+
+        # Pflichtfelder neu bewerten (Betrag/Belegart/Bezahlart bleiben wie gepflegt)
+        cur.execute(f"""SELECT belegdatum, transportart, anbieter, betrag_brutto, waehrung,
+                        event_datum_von, belegart, zahlungsart FROM belege WHERE id={P}""", (bid,))
+        r = cur.fetchone()
+        if r:
+            g = lambda k,i: r[k] if hasattr(r,'keys') else r[i]
+            pflicht_werte = {
+                "belegdatum": g("belegdatum",0), "transportart": g("transportart",1),
+                "anbieter": g("anbieter",2), "betrag_brutto": g("betrag_brutto",3),
+                "waehrung": g("waehrung",4), "event_datum_von": g("event_datum_von",5),
+                "zahlungsart": g("zahlungsart",7),
+            }
+            pflicht = list(pflicht_werte.keys())
+            if g("belegart",6) == "Buchungsbestaetigung":
+                pflicht = [f for f in pflicht if f not in ("betrag_brutto","waehrung","zahlungsart")]
+            fehlend = [f for f in pflicht if not pflicht_werte.get(f)]
+            pflicht_ok = len(fehlend) == 0
+            status = "ok" if pflicht_ok else "fehlerhaft"
+            cur.execute(f"""UPDATE belege SET pflichtfelder_ok={P}, fehlende_felder={P}, status={P}
+                            WHERE id={P}""",
+                        (pflicht_ok, json.dumps(fehlend, ensure_ascii=False), status, bid))
+
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
 @app.get("/beleg/{bid}/betrag/bearbeiten", response_class=HTMLResponse)
 def beleg_betrag_bearbeiten_form(bid: int):
@@ -2797,10 +2973,11 @@ def mitarbeiter_liste():
     try:
         db = get_db(); cur = db.cursor()
         cur.execute("""SELECT m.kuerzel, m.klarname, m.email, m.email2, m.email3, m.rolle, m.aktiv,
-                       COUNT(rm.reise_code) as reise_count
+                       COUNT(rm.reise_code) as reise_count, m.ist_reisender, m.ist_organisator
                        FROM mitarbeiter m
                        LEFT JOIN reise_mitarbeiter rm ON rm.kuerzel = m.kuerzel
-                       GROUP BY m.kuerzel, m.klarname, m.email, m.email2, m.email3, m.rolle, m.aktiv
+                       GROUP BY m.kuerzel, m.klarname, m.email, m.email2, m.email3, m.rolle, m.aktiv,
+                                m.ist_reisender, m.ist_organisator
                        ORDER BY m.klarname""")
         rows = cur.fetchall()
         cur.close(); db.close()
@@ -2808,24 +2985,22 @@ def mitarbeiter_liste():
         def get(r, key, idx):
             return r[key] if hasattr(r, 'keys') else r[idx]
 
-        ROLLEN = {
-            "reisender": '<span class="badge badge-blue">✈ Reisender</span>',
-            "organisator": '<span class="badge badge-purple">📋 Organisator</span>',
-        }
-
         zeilen = ""
         for r in rows:
             kuerzel = get(r,"kuerzel",0)
             klarname = get(r,"klarname",1)
             email_liste = [get(r,"email",2), get(r,"email2",3), get(r,"email3",4)]
             email   = "<br>".join(e for e in email_liste if e) or "–"
-            rolle   = get(r,"rolle",5) or "reisender"
             aktiv   = get(r,"aktiv",6)
             rcnt    = get(r,"reise_count",7)
+            is_reisend = bool(get(r,"ist_reisender",8))
+            is_org = bool(get(r,"ist_organisator",9))
             aktiv_badge = ('<span class="badge badge-green">Aktiv</span>' if aktiv
                            else '<span class="badge badge-gray">Inaktiv</span>')
-            rolle_badge = ROLLEN.get(rolle,
-                f'<span class="badge badge-gray">{rolle}</span>')
+            rolle_badges = []
+            if is_reisend: rolle_badges.append('<span class="badge badge-blue">✈ Reisender</span>')
+            if is_org: rolle_badges.append('<span class="badge badge-purple">📋 Organisator</span>')
+            rolle_badge = " ".join(rolle_badges) or '<span class="badge badge-gray">–</span>'
             zeilen += f"""<tr>
                 <td class="td-mono" style="font-weight:700">{kuerzel}</td>
                 <td style="font-weight:500">{klarname}</td>
@@ -2895,13 +3070,17 @@ def mitarbeiter_neu_form():
               <label>E-Mail-Adresse 3</label>
               <input type="email" name="email3" placeholder="optional">
             </div>
-            <div class="form-group">
+            <div class="form-group full">
               <label>Rolle <span class="required">*</span></label>
-              <select name="rolle">
-                <option value="reisender">✈ Reisender</option>
-                <option value="organisator">📋 Organisator</option>
-              </select>
-              <div class="form-hint">Reisender = fährt selbst · Organisator = bucht für andere</div>
+              <div style="display:flex;gap:16px;margin-top:4px">
+                <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400">
+                  <input type="checkbox" name="ist_reisender" value="1" checked style="width:auto"> ✈ Reisender
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400">
+                  <input type="checkbox" name="ist_organisator" value="1" style="width:auto"> 📋 Organisator
+                </label>
+              </div>
+              <div class="form-hint">Reisender = fährt selbst · Organisator = bucht für andere und darf Beleg-Daten nachtragen. Beides gleichzeitig möglich.</div>
             </div>
           </div>
           <div class="form-actions">
@@ -2921,7 +3100,8 @@ async def mitarbeiter_neu(request: Request):
     email   = (form.get("email") or "").strip() or None
     email2  = (form.get("email2") or "").strip() or None
     email3  = (form.get("email3") or "").strip() or None
-    rolle   = (form.get("rolle") or "reisender").strip()
+    ist_reisender = bool(form.get("ist_reisender"))
+    ist_organisator = bool(form.get("ist_organisator"))
     if not kuerzel or not klarname:
         return HTMLResponse(shell("Fehler",
             '<div class="alert alert-err">Kürzel und Name sind Pflichtfelder.</div>'
@@ -2933,8 +3113,11 @@ async def mitarbeiter_neu(request: Request):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
-        cur.execute(f"INSERT INTO mitarbeiter (kuerzel, klarname, email, email2, email3, rolle) VALUES ({P},{P},{P},{P},{P},{P})",
-                    (kuerzel, klarname, email, email2, email3, rolle))
+        rolle_txt = "beides" if (ist_reisender and ist_organisator) else ("organisator" if ist_organisator else "reisender")
+        cur.execute(f"""INSERT INTO mitarbeiter
+            (kuerzel, klarname, email, email2, email3, rolle, ist_reisender, ist_organisator)
+            VALUES ({P},{P},{P},{P},{P},{P},{P},{P})""",
+                    (kuerzel, klarname, email, email2, email3, rolle_txt, ist_reisender, ist_organisator))
         db.commit(); cur.close(); db.close()
         return RedirectResponse("/mitarbeiter", status_code=303)
     except Exception as e:
@@ -2952,7 +3135,7 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
-        cur.execute(f"SELECT kuerzel, klarname, email, rolle, aktiv, email2, email3 FROM mitarbeiter WHERE kuerzel={P}",
+        cur.execute(f"SELECT kuerzel, klarname, email, rolle, aktiv, email2, email3, ist_reisender, ist_organisator FROM mitarbeiter WHERE kuerzel={P}",
                     (kuerzel.upper(),))
         r = cur.fetchone()
         cur.close(); db.close()
@@ -2962,10 +3145,11 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
         k = r[0] if isinstance(r, tuple) else r["kuerzel"]
         n = r[1] if isinstance(r, tuple) else r["klarname"]
         em = (r[2] if isinstance(r, tuple) else r.get("email","")) or ""
-        ro = (r[3] if isinstance(r, tuple) else r.get("rolle","reisender")) or "reisender"
         a = r[4] if isinstance(r, tuple) else r["aktiv"]
         em2 = (r[5] if isinstance(r, tuple) else r.get("email2","")) or ""
         em3 = (r[6] if isinstance(r, tuple) else r.get("email3","")) or ""
+        is_reisend = bool(r[7] if isinstance(r, tuple) else r.get("ist_reisender", True))
+        is_org = bool(r[8] if isinstance(r, tuple) else r.get("ist_organisator", False))
         aktiv_check = "checked" if a else ""
         content = f"""
         <h1 class="page-title">Mitarbeiter bearbeiten</h1>
@@ -2995,14 +3179,17 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
                   <label>E-Mail-Adresse 3</label>
                   <input type="email" name="email3" value="{em3}" placeholder="optional">
                 </div>
-                <div class="form-group">
+                <div class="form-group full">
                   <label>Rolle</label>
-                  <select name="rolle">
-                    <option value="reisender" {"selected" if ro=="reisender" else ""}>
-                      ✈ Reisender</option>
-                    <option value="organisator" {"selected" if ro=="organisator" else ""}>
-                      📋 Organisator</option>
-                  </select>
+                  <div style="display:flex;gap:16px;margin-top:4px">
+                    <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400">
+                      <input type="checkbox" name="ist_reisender" value="1" {"checked" if is_reisend else ""} style="width:auto"> ✈ Reisender
+                    </label>
+                    <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400">
+                      <input type="checkbox" name="ist_organisator" value="1" {"checked" if is_org else ""} style="width:auto"> 📋 Organisator
+                    </label>
+                  </div>
+                  <div class="form-hint">Organisator darf KI-Beleg-Daten nachtragen/korrigieren.</div>
                 </div>
                 <div class="form-group full">
                   <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -3145,7 +3332,8 @@ async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
     email    = (form.get("email") or "").strip() or None
     email2   = (form.get("email2") or "").strip() or None
     email3   = (form.get("email3") or "").strip() or None
-    rolle    = (form.get("rolle") or "reisender").strip()
+    ist_reisender = bool(form.get("ist_reisender"))
+    ist_organisator = bool(form.get("ist_organisator"))
     aktiv    = bool(form.get("aktiv"))
     if not klarname:
         return HTMLResponse(shell("Fehler",
@@ -3155,8 +3343,11 @@ async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
         P = ph()
         aktiv_val = True if is_postgres() else 1
         inaktiv_val = False if is_postgres() else 0
-        cur.execute(f"UPDATE mitarbeiter SET klarname={P}, email={P}, email2={P}, email3={P}, rolle={P}, aktiv={P} WHERE kuerzel={P}",
-                    (klarname, email, email2, email3, rolle, aktiv_val if aktiv else inaktiv_val, kuerzel.upper()))
+        rolle_txt = "beides" if (ist_reisender and ist_organisator) else ("organisator" if ist_organisator else "reisender")
+        cur.execute(f"""UPDATE mitarbeiter SET klarname={P}, email={P}, email2={P}, email3={P},
+                        rolle={P}, ist_reisender={P}, ist_organisator={P}, aktiv={P} WHERE kuerzel={P}""",
+                    (klarname, email, email2, email3, rolle_txt, ist_reisender, ist_organisator,
+                     aktiv_val if aktiv else inaktiv_val, kuerzel.upper()))
         db.commit(); cur.close(); db.close()
         return RedirectResponse("/mitarbeiter", status_code=303)
     except Exception as e:
