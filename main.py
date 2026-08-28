@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.1-c"
+APP_VERSION  = "3.1-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2655,17 +2655,37 @@ def aktuelle_position_ermitteln(reise_code: str, db) -> str | None:
     2. Aktuell eingechecktes Hotel.
     3. Rückfall: heutiger VMA-Tag (steuerliche Zuordnung).
     """
+def _datum_parsen(wert):
+    """Parst DD.MM.YYYY oder YYYY-MM-DD zu date, sonst None."""
+    if not wert: return None
+    try: return datetime.strptime(str(wert).strip(), "%d.%m.%Y").date()
+    except Exception:
+        try: return date.fromisoformat(str(wert)[:10])
+        except Exception: return None
+
+
+def aktuelle_position_ermitteln(reise_code: str, db) -> str | None:
+    """
+    Ermittelt den TATSÄCHLICHEN aktuellen Aufenthaltsort für die Kartenanzeige –
+    bewusst GETRENNT von der steuerlichen VMA-Länderzuordnung (vma_tage.land_code),
+    die am Abreisetag absichtlich den ABFLUGort zeigt (rechtlich korrekt für die
+    Verpflegungspauschale), nicht den tatsächlichen aktuellen Ort nach der Landung.
+
+    Prinzip: Aus ALLEN Belegen (Flug, Bahn, Hotel) werden Orts-Zeitpunkte
+    gesammelt – Ankunftszeit je Flug-/Bahnsegment, Check-in-Zeit je Hotel.
+    Das ZEITLICH JÜNGSTE Ereignis, das bereits stattgefunden hat, bestimmt
+    den aktuellen Ort. Rückfall, falls gar keine Zeitpunkte ermittelbar sind:
+    der heutige VMA-Tag (steuerliche Zuordnung).
+    """
     from mod_flugalert import jetzt_lokal
     P = ph()
     cur = db.cursor()
     jetzt = jetzt_lokal()
-    heute_s = date.today().isoformat()
+    kandidaten = []  # Liste von (datetime, land_code)
 
-    # 1. Letztes bereits gelandetes Flugsegment
+    # Flug- UND Bahn-Segmente: Ankunftszeitpunkt jedes bereits erfolgten Segments
     cur.execute(f"""SELECT ki_json FROM belege
-        WHERE reise_code={P} AND transportart='Flug' ORDER BY erstellt DESC""", (reise_code,))
-    bestes_datum = None
-    bestes_land = None
+        WHERE reise_code={P} AND transportart IN ('Flug','Bahn')""", (reise_code,))
     for row in cur.fetchall():
         ki_str = row[0] if isinstance(row, tuple) else row["ki_json"]
         if not ki_str: continue
@@ -2674,41 +2694,43 @@ def aktuelle_position_ermitteln(reise_code: str, db) -> str | None:
         except Exception:
             continue
         for s in segs:
-            an_dat = s.get("ankunft_datum"); an_zeit = s.get("ankunft_zeit") or "00:00"
-            if not an_dat: continue
-            d = None
-            try: d = datetime.strptime(an_dat, "%d.%m.%Y")
-            except Exception:
-                try: d = datetime.fromisoformat(an_dat[:10])
-                except Exception: pass
+            d = _datum_parsen(s.get("ankunft_datum"))
             if not d: continue
+            an_zeit = s.get("ankunft_zeit") or "00:00"
             try:
-                dt = datetime.strptime(f"{d.date().isoformat()} {an_zeit}", "%Y-%m-%d %H:%M")
+                dt = datetime.strptime(f"{d.isoformat()} {an_zeit}", "%Y-%m-%d %H:%M")
             except Exception:
                 continue
-            if dt <= jetzt and (bestes_datum is None or dt > bestes_datum):
-                nach_iata = s.get("nach_iata")
-                land = IATA_TO_LAND.get(nach_iata) if nach_iata else None
-                if land:
-                    bestes_datum = dt
-                    bestes_land = land
-    if bestes_land:
-        cur.close()
-        return bestes_land
+            if dt > jetzt: continue
+            nach_iata = s.get("nach_iata")
+            land = IATA_TO_LAND.get(nach_iata) if nach_iata else None
+            if land:
+                kandidaten.append((dt, land))
 
-    # 2. Aktuell eingechecktes Hotel
-    cur.execute(f"""SELECT land_beleg FROM belege
-        WHERE reise_code={P} AND transportart='Hotel'
-        AND hotel_checkin_datum<={P} AND hotel_checkout_datum>{P}""",
-        (reise_code, heute_s, heute_s))
-    row = cur.fetchone()
-    if row:
-        land = row[0] if isinstance(row, tuple) else row["land_beleg"]
-        if land:
-            cur.close()
-            return land
+    # Hotels: Check-in-Zeitpunkt als Orts-Signal (14 Uhr als üblicher Check-in,
+    # falls keine genaue Uhrzeit erkannt wurde)
+    cur.execute(f"""SELECT land_beleg, hotel_checkin_datum, hotel_checkin_zeit
+        FROM belege WHERE reise_code={P} AND transportart='Hotel'""", (reise_code,))
+    for row in cur.fetchall():
+        g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
+        land = g("land_beleg",0)
+        d = _datum_parsen(g("hotel_checkin_datum",1))
+        ci_zeit = g("hotel_checkin_zeit",2) or "14:00"
+        if not land or not d: continue
+        try:
+            dt = datetime.strptime(f"{d.isoformat()} {ci_zeit}", "%Y-%m-%d %H:%M")
+        except Exception:
+            continue
+        if dt > jetzt: continue
+        kandidaten.append((dt, land))
+
+    if kandidaten:
+        cur.close()
+        kandidaten.sort(key=lambda x: x[0])
+        return kandidaten[-1][1]
 
     # 3. Rückfall: heutiger VMA-Tag (steuerliche Zuordnung, nicht immer = aktueller Ort)
+    heute_s = date.today().isoformat()
     cur.execute(f"SELECT land_code FROM vma_tage WHERE reise_code={P} AND datum={P}",
                 (reise_code, heute_s))
     row = cur.fetchone()
