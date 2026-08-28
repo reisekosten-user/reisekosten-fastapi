@@ -1,0 +1,382 @@
+"""
+mod_flugalert.py – Flug-/Bahn-Statusüberwachung (Verspätung, Ausfall, Gate-Änderung)
+
+Datenquellen:
+  - Flüge: AeroDataBox (via RapidAPI oder API.market) – Env: AERODATABOX_API_KEY, AERODATABOX_HOST
+  - Bahn:  v6.db.transport.rest (kostenlose Community-Schnittstelle auf Basis der
+           offiziellen HAFAS-Auskunft der Deutschen Bahn, kein API-Key nötig)
+"""
+from __future__ import annotations
+import os, json, httpx
+from datetime import date, datetime, timedelta
+
+from mod_db import get_db, ph, is_postgres
+from mod_mail import sende_mail
+
+AERODATABOX_API_KEY = os.getenv("AERODATABOX_API_KEY", "")
+AERODATABOX_HOST = os.getenv("AERODATABOX_HOST", "aerodatabox.p.rapidapi.com")
+DB_TRANSPORT_REST_URL = "https://v6.db.transport.rest"
+
+CRON_SECRET = os.getenv("CRON_SECRET", "")
+
+
+# ── Konfiguration ──────────────────────────────────────────────────────────────
+
+def konfiguration_laden() -> dict:
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT intervall_24h_min, intervall_8h_min, intervall_4h_min, intervall_2h_min "
+                "FROM alert_konfiguration ORDER BY id LIMIT 1")
+    r = cur.fetchone()
+    cur.close(); db.close()
+    if not r:
+        return {"24h": 60, "8h": 10, "4h": 5, "2h": 1}
+    g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
+    return {"24h": g("intervall_24h_min", 0), "8h": g("intervall_8h_min", 1),
+            "4h": g("intervall_4h_min", 2), "2h": g("intervall_2h_min", 3)}
+
+
+def konfiguration_speichern(i24: int, i8: int, i4: int, i2: int):
+    db = get_db(); cur = db.cursor()
+    P = ph()
+    cur.execute("SELECT id FROM alert_konfiguration ORDER BY id LIMIT 1")
+    r = cur.fetchone()
+    if r:
+        gid = r[0] if isinstance(r, tuple) else r["id"]
+        if is_postgres():
+            cur.execute(f"""UPDATE alert_konfiguration SET
+                intervall_24h_min={P}, intervall_8h_min={P}, intervall_4h_min={P},
+                intervall_2h_min={P}, aktualisiert_am=NOW() WHERE id={P}""",
+                (i24, i8, i4, i2, gid))
+        else:
+            cur.execute(f"""UPDATE alert_konfiguration SET
+                intervall_24h_min={P}, intervall_8h_min={P}, intervall_4h_min={P},
+                intervall_2h_min={P}, aktualisiert_am=datetime('now') WHERE id={P}""",
+                (i24, i8, i4, i2, gid))
+    else:
+        cur.execute(f"""INSERT INTO alert_konfiguration
+            (intervall_24h_min, intervall_8h_min, intervall_4h_min, intervall_2h_min)
+            VALUES ({P},{P},{P},{P})""", (i24, i8, i4, i2))
+    db.commit(); cur.close(); db.close()
+
+
+def intervall_fuer(stunden_bis_abreise: float, konfig: dict) -> int | None:
+    """Gibt das passende Prüfintervall (Minuten) zurück, oder None wenn noch/nicht mehr zu prüfen."""
+    if stunden_bis_abreise < 0 or stunden_bis_abreise > 24:
+        return None
+    if stunden_bis_abreise <= 2:
+        return konfig["2h"]
+    if stunden_bis_abreise <= 4:
+        return konfig["4h"]
+    if stunden_bis_abreise <= 8:
+        return konfig["8h"]
+    return konfig["24h"]
+
+
+# ── Externe APIs ───────────────────────────────────────────────────────────────
+
+def flugstatus_abrufen(transport_nummer: str, abreise_datum: date) -> dict:
+    """Fragt AeroDataBox nach dem aktuellen Status eines Fluges ab."""
+    if not AERODATABOX_API_KEY:
+        return {"fehler": "AERODATABOX_API_KEY nicht konfiguriert"}
+    try:
+        nummer = transport_nummer.replace(" ", "")
+        url = f"https://{AERODATABOX_HOST}/flights/number/{nummer}/{abreise_datum.isoformat()}"
+        resp = httpx.get(url, headers={
+            "X-RapidAPI-Key": AERODATABOX_API_KEY,
+            "X-RapidAPI-Host": AERODATABOX_HOST,
+        }, timeout=20)
+        resp.raise_for_status()
+        daten = resp.json()
+        flug = daten[0] if isinstance(daten, list) and daten else daten
+        if not flug:
+            return {"fehler": "Kein Flug gefunden"}
+        abflug = flug.get("departure", {})
+        status = flug.get("status", "Unbekannt")
+        verspaetung = None
+        geplant = abflug.get("scheduledTime", {}).get("local")
+        revidiert = abflug.get("revisedTime", {}).get("local")
+        if geplant and revidiert:
+            try:
+                t1 = datetime.fromisoformat(geplant[:19])
+                t2 = datetime.fromisoformat(revidiert[:19])
+                verspaetung = int((t2 - t1).total_seconds() / 60)
+            except Exception:
+                pass
+        return {
+            "status": status,
+            "verspaetung_minuten": verspaetung,
+            "gate": abflug.get("gate"),
+            "terminal": abflug.get("terminal"),
+            "rohdaten": json.dumps(flug, ensure_ascii=False)[:4000],
+        }
+    except Exception as e:
+        return {"fehler": str(e)}
+
+
+def bahnstatus_abrufen(transport_nummer: str, von_ort: str, abreise_datum: date, abreise_zeit: str) -> dict:
+    """Fragt die kostenlose db.transport.rest-Schnittstelle nach dem Zugstatus ab."""
+    try:
+        # 1. Bahnhof suchen
+        resp = httpx.get(f"{DB_TRANSPORT_REST_URL}/locations",
+                          params={"query": von_ort, "results": 1}, timeout=20)
+        resp.raise_for_status()
+        orte = resp.json()
+        if not orte:
+            return {"fehler": f"Bahnhof '{von_ort}' nicht gefunden"}
+        stop_id = orte[0].get("id")
+
+        # 2. Abfahrten an diesem Bahnhof zur passenden Zeit abrufen
+        when = f"{abreise_datum.isoformat()}T{abreise_zeit or '00:00'}:00"
+        resp = httpx.get(f"{DB_TRANSPORT_REST_URL}/stops/{stop_id}/departures",
+                          params={"when": when, "duration": 120}, timeout=20)
+        resp.raise_for_status()
+        abfahrten = resp.json().get("departures", resp.json()) if isinstance(resp.json(), dict) else resp.json()
+
+        treffer = None
+        nummer_norm = transport_nummer.replace(" ", "").upper()
+        for a in abfahrten:
+            line_name = (a.get("line", {}).get("name") or "").replace(" ", "").upper()
+            if nummer_norm in line_name or line_name in nummer_norm:
+                treffer = a
+                break
+        if not treffer:
+            return {"fehler": f"Zug '{transport_nummer}' nicht in den Abfahrten gefunden"}
+
+        verspaetung = treffer.get("delay")
+        verspaetung_min = int(verspaetung / 60) if verspaetung else 0
+        status = "cancelled" if treffer.get("cancelled") else (
+            "delayed" if verspaetung_min and verspaetung_min > 0 else "on-time")
+        return {
+            "status": status,
+            "verspaetung_minuten": verspaetung_min,
+            "gate": None,
+            "terminal": treffer.get("platform"),
+            "rohdaten": json.dumps(treffer, ensure_ascii=False)[:4000],
+        }
+    except Exception as e:
+        return {"fehler": str(e)}
+
+
+# ── Segmente aus Belegen extrahieren ────────────────────────────────────────────
+
+def _to_d_ddmmyyyy(v):
+    if not v: return None
+    try: return datetime.strptime(str(v).strip(), "%d.%m.%Y").date()
+    except Exception: return None
+
+
+def ueberwachte_segmente_laden() -> list:
+    """
+    Liest alle Flug-/Bahn-Segmente aus Belegen mit Abreise in den nächsten 24h,
+    die noch nicht stattgefunden haben.
+    """
+    db = get_db(); cur = db.cursor()
+    P = ph()
+    heute = date.today()
+    in_2_tagen = heute + timedelta(days=2)
+    cur.execute(f"""SELECT id, reise_code, transportart, ki_json, event_datum_von
+                    FROM belege
+                    WHERE transportart IN ('Flug','Bahn')
+                    AND event_datum_von >= {P} AND event_datum_von <= {P}""",
+                (heute.isoformat(), in_2_tagen.isoformat()))
+    rows = cur.fetchall()
+    cur.close(); db.close()
+
+    jetzt = datetime.now()
+    segmente = []
+    for r in rows:
+        g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
+        bid = g("id", 0)
+        rcode = g("reise_code", 1)
+        typ = g("transportart", 2)
+        ki_str = g("ki_json", 3) or ""
+        try:
+            segs = json.loads(ki_str).get("segmente") or []
+        except Exception:
+            segs = []
+        for idx, s in enumerate(segs):
+            d_ab = _to_d_ddmmyyyy(s.get("abreise_datum"))
+            zeit_ab = s.get("abreise_zeit") or "00:00"
+            if not d_ab:
+                continue
+            try:
+                dt_ab = datetime.strptime(f"{d_ab.isoformat()} {zeit_ab}", "%Y-%m-%d %H:%M")
+            except Exception:
+                continue
+            stunden_bis = (dt_ab - jetzt).total_seconds() / 3600
+            if stunden_bis < -1 or stunden_bis > 24:
+                continue  # noch nicht relevant oder schon zu lange her
+            segmente.append({
+                "beleg_id": bid, "reise_code": rcode, "segment_index": idx,
+                "transport_typ": typ, "transport_nummer": s.get("transport_nummer") or "",
+                "von_ort": s.get("von_ort") or s.get("von_iata") or "",
+                "nach_ort": s.get("nach_ort") or s.get("nach_iata") or "",
+                "abreise_datum": d_ab, "abreise_zeit": zeit_ab,
+                "stunden_bis_abreise": stunden_bis,
+            })
+    return segmente
+
+
+def status_holen(beleg_id: int, segment_index: int) -> dict | None:
+    db = get_db(); cur = db.cursor()
+    P = ph()
+    cur.execute(f"SELECT letzter_check_am, status, verspaetung_minuten, gate, terminal "
+                f"FROM flug_status WHERE beleg_id={P} AND segment_index={P}", (beleg_id, segment_index))
+    r = cur.fetchone()
+    cur.close(); db.close()
+    if not r:
+        return None
+    g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
+    return {"letzter_check_am": g("letzter_check_am", 0), "status": g("status", 1),
+            "verspaetung_minuten": g("verspaetung_minuten", 2), "gate": g("gate", 3),
+            "terminal": g("terminal", 4)}
+
+
+def status_speichern(seg: dict, ergebnis: dict):
+    db = get_db(); cur = db.cursor()
+    P = ph()
+    jetzt_sql = "NOW()" if is_postgres() else "datetime('now')"
+    cur.execute(f"""SELECT id FROM flug_status WHERE beleg_id={P} AND segment_index={P}""",
+                (seg["beleg_id"], seg["segment_index"]))
+    vorhanden = cur.fetchone()
+    if vorhanden:
+        cur.execute(f"""UPDATE flug_status SET letzter_check_am={jetzt_sql}, status={P},
+            verspaetung_minuten={P}, gate={P}, terminal={P}, rohdaten={P}
+            WHERE beleg_id={P} AND segment_index={P}""",
+            (ergebnis.get("status"), ergebnis.get("verspaetung_minuten"),
+             ergebnis.get("gate"), ergebnis.get("terminal"), ergebnis.get("rohdaten"),
+             seg["beleg_id"], seg["segment_index"]))
+    else:
+        cur.execute(f"""INSERT INTO flug_status
+            (beleg_id, segment_index, transport_typ, transport_nummer, von_ort, nach_ort,
+             abreise_datum, abreise_zeit, letzter_check_am, status, verspaetung_minuten,
+             gate, terminal, rohdaten)
+            VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{jetzt_sql},{P},{P},{P},{P},{P})""",
+            (seg["beleg_id"], seg["segment_index"], seg["transport_typ"], seg["transport_nummer"],
+             seg["von_ort"], seg["nach_ort"], seg["abreise_datum"].isoformat(), seg["abreise_zeit"],
+             ergebnis.get("status"), ergebnis.get("verspaetung_minuten"),
+             ergebnis.get("gate"), ergebnis.get("terminal"), ergebnis.get("rohdaten")))
+    db.commit(); cur.close(); db.close()
+
+
+def alert_markieren(beleg_id: int, segment_index: int):
+    db = get_db(); cur = db.cursor()
+    P = ph()
+    jetzt_sql = "NOW()" if is_postgres() else "datetime('now')"
+    cur.execute(f"UPDATE flug_status SET alert_gesendet_am={jetzt_sql} "
+                f"WHERE beleg_id={P} AND segment_index={P}", (beleg_id, segment_index))
+    db.commit(); cur.close(); db.close()
+
+
+def relevante_aenderung(alt: dict | None, neu: dict) -> bool:
+    """Nur bei echten Änderungen (nicht bei jedem Check) alarmieren."""
+    if alt is None:
+        return neu.get("status") in ("cancelled", "delayed") or (neu.get("verspaetung_minuten") or 0) > 0
+    if alt.get("status") != neu.get("status"):
+        return True
+    alt_v = alt.get("verspaetung_minuten") or 0
+    neu_v = neu.get("verspaetung_minuten") or 0
+    if abs(neu_v - alt_v) >= 10:
+        return True
+    if alt.get("gate") != neu.get("gate") and neu.get("gate"):
+        return True
+    return False
+
+
+def reisende_und_organisatoren_mailadressen(reise_code: str) -> list:
+    db = get_db(); cur = db.cursor()
+    P = ph()
+    cur.execute(f"""SELECT DISTINCT m.email FROM reise_mitarbeiter rm
+                    JOIN mitarbeiter m ON m.kuerzel = rm.kuerzel
+                    WHERE rm.reise_code={P} AND m.email IS NOT NULL""", (reise_code,))
+    reisende_mails = [r[0] if isinstance(r, tuple) else r["email"] for r in cur.fetchall()]
+    cur.execute(f"""SELECT DISTINCT email FROM mitarbeiter WHERE ist_organisator={P} AND email IS NOT NULL""",
+                (True if is_postgres() else 1,))
+    org_mails = [r[0] if isinstance(r, tuple) else r["email"] for r in cur.fetchall()]
+    cur.close(); db.close()
+    return list(set(reisende_mails + org_mails))
+
+
+def cron_flug_alerts() -> dict:
+    """
+    Wird von einem externen Cron-Pinger regelmäßig (idealerweise minütlich)
+    aufgerufen. Prüft für jedes Flug-/Bahn-Segment, ob laut konfiguriertem
+    Intervall ein neuer Check fällig ist, ruft bei Bedarf die externe API auf
+    und verschickt bei relevanten Änderungen einen Alert.
+    """
+    konfig = konfiguration_laden()
+    segmente = ueberwachte_segmente_laden()
+    geprueft = 0
+    alerts_gesendet = 0
+    fehler = []
+
+    for seg in segmente:
+        intervall = intervall_fuer(seg["stunden_bis_abreise"], konfig)
+        if intervall is None:
+            continue
+        alt_status = status_holen(seg["beleg_id"], seg["segment_index"])
+        letzter_check = alt_status.get("letzter_check_am") if alt_status else None
+        if letzter_check:
+            if isinstance(letzter_check, str):
+                try:
+                    letzter_check = datetime.fromisoformat(letzter_check[:19])
+                except Exception:
+                    letzter_check = None
+            if letzter_check:
+                minuten_seit_check = (datetime.now() - letzter_check).total_seconds() / 60
+                if minuten_seit_check < intervall:
+                    continue  # noch nicht fällig
+
+        if seg["transport_typ"] == "Flug" and seg["transport_nummer"]:
+            ergebnis = flugstatus_abrufen(seg["transport_nummer"], seg["abreise_datum"])
+        elif seg["transport_typ"] == "Bahn" and seg["transport_nummer"]:
+            ergebnis = bahnstatus_abrufen(seg["transport_nummer"], seg["von_ort"],
+                                          seg["abreise_datum"], seg["abreise_zeit"])
+        else:
+            continue
+
+        if ergebnis.get("fehler"):
+            fehler.append(f"Beleg {seg['beleg_id']} Segment {seg['segment_index']}: {ergebnis['fehler']}")
+            continue
+
+        geprueft += 1
+        status_speichern(seg, ergebnis)
+
+        if relevante_aenderung(alt_status, ergebnis):
+            empfaenger = reisende_und_organisatoren_mailadressen(seg["reise_code"])
+            betreff = (f"⚠ {seg['transport_typ']} {seg['transport_nummer']} "
+                       f"({seg['von_ort']}→{seg['nach_ort']}): {ergebnis.get('status')}")
+            text = (f"Statusänderung bei {seg['transport_typ']} {seg['transport_nummer']}\n"
+                    f"Reise: {seg['reise_code']}\n"
+                    f"Strecke: {seg['von_ort']} → {seg['nach_ort']}\n"
+                    f"Geplante Abreise: {seg['abreise_datum'].strftime('%d.%m.%Y')} {seg['abreise_zeit']}\n"
+                    f"Status: {ergebnis.get('status')}\n"
+                    f"Verspätung: {ergebnis.get('verspaetung_minuten') or 0} Minuten\n"
+                    + (f"Gate: {ergebnis.get('gate')}\n" if ergebnis.get('gate') else "")
+                    + (f"Terminal/Gleis: {ergebnis.get('terminal')}\n" if ergebnis.get('terminal') else ""))
+            for empf in empfaenger:
+                sende_mail(empf, betreff, text)
+            alert_markieren(seg["beleg_id"], seg["segment_index"])
+            alerts_gesendet += 1
+
+    return {"geprueft": geprueft, "alerts_gesendet": alerts_gesendet, "fehler": fehler,
+            "segmente_im_fenster": len(segmente)}
+
+
+def offene_alerts_fuer_dashboard() -> list:
+    """Für die Dashboard-Anzeige: Segmente mit kürzlich gesendetem Alert."""
+    db = get_db(); cur = db.cursor()
+    cur.execute("""SELECT beleg_id, transport_typ, transport_nummer, von_ort, nach_ort,
+                   status, verspaetung_minuten, alert_gesendet_am
+                   FROM flug_status
+                   WHERE alert_gesendet_am IS NOT NULL
+                   ORDER BY alert_gesendet_am DESC LIMIT 5""")
+    rows = cur.fetchall()
+    cur.close(); db.close()
+    out = []
+    for r in rows:
+        g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
+        out.append({"beleg_id": g("beleg_id",0), "typ": g("transport_typ",1),
+                     "nummer": g("transport_nummer",2), "von": g("von_ort",3), "nach": g("nach_ort",4),
+                     "status": g("status",5), "verspaetung": g("verspaetung_minuten",6)})
+    return out

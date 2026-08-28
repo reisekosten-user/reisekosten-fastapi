@@ -231,6 +231,33 @@ def get_schema() -> list[str]:
                 notiz           TEXT,
                 UNIQUE(reise_code, kuerzel, datum)
             )""",
+            """CREATE TABLE IF NOT EXISTS alert_konfiguration (
+                id                  SERIAL PRIMARY KEY,
+                intervall_24h_min   INTEGER DEFAULT 60,
+                intervall_8h_min    INTEGER DEFAULT 10,
+                intervall_4h_min    INTEGER DEFAULT 5,
+                intervall_2h_min    INTEGER DEFAULT 1,
+                aktualisiert_am     TIMESTAMP DEFAULT NOW()
+            )""",
+            """CREATE TABLE IF NOT EXISTS flug_status (
+                id                  SERIAL PRIMARY KEY,
+                beleg_id            INTEGER NOT NULL REFERENCES belege(id) ON DELETE CASCADE,
+                segment_index       INTEGER NOT NULL,
+                transport_typ       TEXT,
+                transport_nummer    TEXT,
+                von_ort             TEXT,
+                nach_ort            TEXT,
+                abreise_datum       DATE,
+                abreise_zeit        TEXT,
+                letzter_check_am    TIMESTAMP,
+                status              TEXT,
+                verspaetung_minuten INTEGER,
+                gate                TEXT,
+                terminal            TEXT,
+                rohdaten            TEXT,
+                alert_gesendet_am   TIMESTAMP,
+                UNIQUE(beleg_id, segment_index)
+            )""",
         ]
     else:
         return [
@@ -391,6 +418,33 @@ def get_schema() -> list[str]:
                 notiz           TEXT,
                 UNIQUE(reise_code, kuerzel, datum)
             )""",
+            """CREATE TABLE IF NOT EXISTS alert_konfiguration (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                intervall_24h_min   INTEGER DEFAULT 60,
+                intervall_8h_min    INTEGER DEFAULT 10,
+                intervall_4h_min    INTEGER DEFAULT 5,
+                intervall_2h_min    INTEGER DEFAULT 1,
+                aktualisiert_am     TEXT DEFAULT (datetime('now'))
+            )""",
+            """CREATE TABLE IF NOT EXISTS flug_status (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                beleg_id            INTEGER REFERENCES belege(id) ON DELETE CASCADE,
+                segment_index       INTEGER NOT NULL,
+                transport_typ       TEXT,
+                transport_nummer    TEXT,
+                von_ort             TEXT,
+                nach_ort            TEXT,
+                abreise_datum       TEXT,
+                abreise_zeit        TEXT,
+                letzter_check_am    TEXT,
+                status              TEXT,
+                verspaetung_minuten INTEGER,
+                gate                TEXT,
+                terminal            TEXT,
+                rohdaten            TEXT,
+                alert_gesendet_am   TEXT,
+                UNIQUE(beleg_id, segment_index)
+            )""",
         ]
 
 def get_migrations() -> list[str]:
@@ -440,6 +494,8 @@ def get_migrations() -> list[str]:
         "ALTER TABLE mitarbeiter ADD COLUMN IF NOT EXISTS ist_reisender BOOLEAN DEFAULT TRUE",
         "UPDATE mitarbeiter SET ist_organisator=TRUE WHERE rolle='organisator'",
         "UPDATE mitarbeiter SET ist_reisender=TRUE WHERE rolle='reisender' OR rolle IS NULL",
+        """INSERT INTO alert_konfiguration (intervall_24h_min, intervall_8h_min, intervall_4h_min, intervall_2h_min)
+           SELECT 60, 10, 5, 1 WHERE NOT EXISTS (SELECT 1 FROM alert_konfiguration)""",
     ]
 
 def repair_legacy_columns():

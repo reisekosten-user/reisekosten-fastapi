@@ -35,6 +35,8 @@ from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_tok
                          tage_sicherstellen, tage_laden, tag_speichern,
                          reisende_der_reise, zugaenge_der_reise, portal_mail_senden,
                          cron_portal_mails, PORTAL_TAGE_VORHER)
+from mod_flugalert import (konfiguration_laden, konfiguration_speichern,
+                            cron_flug_alerts, offene_alerts_fuer_dashboard)
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 # ── Konfiguration ─────────────────────────────────────────────────────────────
@@ -43,7 +45,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.9-d"
+APP_VERSION  = "3.0-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2896,6 +2898,16 @@ def dashboard():
                     "sub": "Kurs nachtragen →"
                 })
         except: pass
+        try:
+            for a in offene_alerts_fuer_dashboard():
+                icon = "✈" if a["typ"] == "Flug" else "🚆"
+                verspaetung_txt = f' · +{a["verspaetung"]} Min' if a.get("verspaetung") else ""
+                alarme.append({
+                    "url": f"/beleg/{a['beleg_id']}",
+                    "text": f'{icon} {a["typ"]} {a["nummer"]} ({a["von"]}→{a["nach"]}): {a["status"]}{verspaetung_txt}',
+                    "sub": "Beleg öffnen →"
+                })
+        except: pass
         try: cur2.close()
         except: pass
 
@@ -2929,6 +2941,7 @@ def dashboard():
           <div style="display:flex;gap:8px">
             <a href="/mails-abrufen" class="btn btn-success">📬 Mails abrufen</a>
             <a href="/beleg/upload" class="btn btn-secondary">📎 Beleg hochladen</a>
+            <a href="/einstellungen/alerts" class="btn btn-secondary">✈ Alert-Einstellungen</a>
           </div>
         </div>
 
@@ -4873,6 +4886,123 @@ def cron_portal_mails_route(key: str = ""):
         return JSONResponse({"fehler": "Ungültiger oder fehlender Schlüssel"}, status_code=403)
     result = cron_portal_mails()
     return JSONResponse(result)
+
+
+@app.get("/cron/flug-alerts")
+def cron_flug_alerts_route(key: str = ""):
+    """
+    Für einen externen Cron-Pinger gedacht, der diese URL regelmäßig aufruft
+    (idealerweise minütlich – die Funktion selbst entscheidet anhand der
+    Konfiguration, welche Segmente gerade wirklich geprüft werden müssen).
+    """
+    if not CRON_SECRET or key != CRON_SECRET:
+        return JSONResponse({"fehler": "Ungültiger oder fehlender Schlüssel"}, status_code=403)
+    result = cron_flug_alerts()
+    return JSONResponse(result)
+
+
+@app.get("/einstellungen/alerts", response_class=HTMLResponse)
+def alert_einstellungen_form(request: Request, testergebnis: str = ""):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren dürfen diese Einstellungen ändern.</div>'), status_code=403)
+    k = konfiguration_laden()
+    testergebnis_html = ""
+    if testergebnis:
+        try:
+            r = json.loads(testergebnis)
+            fehler_html = ""
+            if r.get("fehler"):
+                fehler_html = "<ul style='margin:6px 0 0 18px;font-size:12px'>" + "".join(
+                    f"<li>{e}</li>" for e in r["fehler"]) + "</ul>"
+            testergebnis_html = f"""<div class="alert {'alert-warn' if r.get('fehler') else 'alert-ok'}" style="margin-bottom:16px">
+              <b>Testlauf abgeschlossen:</b> {r.get('segmente_im_fenster',0)} Segmente im 24h-Fenster gefunden,
+              {r.get('geprueft',0)} davon bei der API abgefragt, {r.get('alerts_gesendet',0)} Alert(s) verschickt.
+              {fehler_html}
+            </div>"""
+        except Exception:
+            testergebnis_html = f'<div class="alert alert-err">Testlauf-Ergebnis konnte nicht gelesen werden.</div>'
+    content = f"""
+    <h1 class="page-title">✈ Flug-/Bahn-Alerts – Einstellungen</h1>
+    {testergebnis_html}
+    <div class="alert alert-warn" style="margin-bottom:16px">
+      Ein externer Cron-Dienst (z.B. cron-job.org) muss regelmäßig
+      <code>/cron/flug-alerts?key=DEIN_CRON_SECRET</code> aufrufen – am besten minütlich,
+      damit die kürzeste Stufe (unter 2h vor Abreise) tatsächlich greifen kann. Wie oft
+      innerhalb dieses Rahmens wirklich bei der externen Flug-/Bahn-API nachgefragt wird,
+      steuern die Intervalle unten.
+    </div>
+    <div class="card" style="max-width:520px">
+      <div class="card-body">
+        <form method="post" action="/einstellungen/alerts">
+          <div class="form-grid form-grid-2">
+            <div class="form-group">
+              <label>Mehr als 8h bis 24h vor Abreise</label>
+              <input type="number" name="intervall_24h" value="{k['24h']}" min="1"> Minuten
+            </div>
+            <div class="form-group">
+              <label>4h bis 8h vor Abreise</label>
+              <input type="number" name="intervall_8h" value="{k['8h']}" min="1"> Minuten
+            </div>
+            <div class="form-group">
+              <label>2h bis 4h vor Abreise</label>
+              <input type="number" name="intervall_4h" value="{k['4h']}" min="1"> Minuten
+            </div>
+            <div class="form-group">
+              <label>Unter 2h vor Abreise</label>
+              <input type="number" name="intervall_2h" value="{k['2h']}" min="1"> Minuten
+            </div>
+          </div>
+          <div class="form-hint" style="margin:8px 0">
+            Für den Testserver z.B. alle Stufen auf 10 setzen. Im Produktivbetrieb empfohlen:
+            60 / 10 / 5 / 1 Minuten.
+          </div>
+          <button type="submit" class="btn btn-primary" style="width:100%">Speichern</button>
+        </form>
+      </div>
+    </div>
+    <div class="card" style="max-width:520px;margin-top:16px">
+      <div class="card-body">
+        <p style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          Führt den Prüflauf einmal sofort aus (wie es der Cron sonst regelmäßig tun würde) –
+          zum Testen, ohne auf den externen Cron-Dienst zu warten. Berücksichtigt weiterhin
+          die oben eingestellten Intervalle (ein Segment wird nur erneut geprüft, wenn genug
+          Zeit seit dem letzten Check vergangen ist).</p>
+        <form method="post" action="/einstellungen/alerts/testlauf">
+          <button type="submit" class="btn btn-secondary" style="width:100%">🧪 Jetzt testweise abrufen</button>
+        </form>
+      </div>
+    </div>"""
+    return HTMLResponse(shell("Alert-Einstellungen", content))
+
+
+@app.post("/einstellungen/alerts/testlauf")
+def alert_testlauf(request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren dürfen diese Einstellungen ändern.</div>'), status_code=403)
+    result = cron_flug_alerts()
+    import urllib.parse
+    return RedirectResponse(
+        f"/einstellungen/alerts?testergebnis={urllib.parse.quote(json.dumps(result))}",
+        status_code=303)
+
+
+@app.post("/einstellungen/alerts")
+async def alert_einstellungen_speichern(request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren dürfen diese Einstellungen ändern.</div>'), status_code=403)
+    form = await request.form()
+    try:
+        i24 = int(form.get("intervall_24h") or 60)
+        i8 = int(form.get("intervall_8h") or 10)
+        i4 = int(form.get("intervall_4h") or 5)
+        i2 = int(form.get("intervall_2h") or 1)
+        konfiguration_speichern(i24, i8, i4, i2)
+        return RedirectResponse("/einstellungen/alerts", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
 
 @app.post("/reise/{code}/zugang/{kuerzel}/senden")
