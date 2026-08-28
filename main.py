@@ -37,6 +37,7 @@ from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_tok
                          cron_portal_mails, PORTAL_TAGE_VORHER)
 from mod_flugalert import (konfiguration_laden, konfiguration_speichern,
                             cron_flug_alerts, offene_alerts_fuer_dashboard)
+from mod_geo import koordinaten_fuer_land
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 # ── Konfiguration ─────────────────────────────────────────────────────────────
@@ -45,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.1-a"
+APP_VERSION  = "3.1-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2499,7 +2500,8 @@ def dashboard():
             return f"""<div class="sektion-header">
               <span class="sektion-titel">{emoji} {titel_s}</span>
               <span class="sektion-count">{len(rows)}</span>
-              <div style="margin-left:auto">
+              <div style="margin-left:auto;display:flex;gap:8px">
+                {'<a href="/maps" class="btn btn-secondary btn-sm">🗺 Maps</a>' if typ == "aktiv" else ''}
                 <a href="/reisen/neu" class="btn btn-primary btn-sm">+ Neue Reise</a>
               </div>
             </div>
@@ -2638,6 +2640,105 @@ def dashboard():
         </div>
         <pre style="font-size:11px;color:var(--muted)">{traceback.format_exc()[:500]}</pre>
         """))
+
+
+@app.get("/maps", response_class=HTMLResponse)
+def dashboard_maps():
+    """Zeigt auf einer zoombaren Weltkarte, wo sich Reisende bei aktiven Reisen
+    heute laut VMA-Tagesverlauf aufhalten (Land-Ebene, aus vma_tage)."""
+    try:
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        today = date.today()
+
+        if is_postgres():
+            cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
+                STRING_AGG(DISTINCT m.klarname, ', ' ORDER BY m.klarname) as ma
+                FROM reisen r
+                LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
+                LEFT JOIN mitarbeiter m ON m.kuerzel = rm.kuerzel
+                WHERE r.abreise <= %s AND r.rueckkehr >= %s
+                GROUP BY r.code, r.titel, r.abreise, r.rueckkehr""", (today.isoformat(), today.isoformat()))
+        else:
+            cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
+                GROUP_CONCAT(DISTINCT m.klarname) as ma
+                FROM reisen r
+                LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
+                LEFT JOIN mitarbeiter m ON m.kuerzel = rm.kuerzel
+                WHERE r.abreise <= ? AND r.rueckkehr >= ?
+                GROUP BY r.code, r.titel, r.abreise, r.rueckkehr""", (today.isoformat(), today.isoformat()))
+        aktive_reisen = cur.fetchall()
+
+        def get(r,k,i): return r[k] if hasattr(r,'keys') else r[i]
+
+        marker = []
+        ohne_position = []
+        for r in aktive_reisen:
+            code = get(r,"code",0); titel = get(r,"titel",1); ma = get(r,"ma",4) or "–"
+            cur.execute(f"SELECT land_code, land_name FROM vma_tage WHERE reise_code={P} AND datum={P}",
+                        (code, today.isoformat()))
+            row = cur.fetchone()
+            land_code = (row[0] if isinstance(row,tuple) else row["land_code"]) if row else None
+            land_name = (row[1] if isinstance(row,tuple) else row["land_name"]) if row else None
+            koord = koordinaten_fuer_land(land_code) if land_code else None
+            if koord:
+                marker.append({
+                    "lat": koord[0], "lon": koord[1], "code": code, "titel": titel,
+                    "ma": ma, "land": land_name or land_code
+                })
+            else:
+                ohne_position.append({"code": code, "titel": titel, "ma": ma})
+        cur.close(); db.close()
+
+        marker_js = json.dumps(marker, ensure_ascii=False)
+        ohne_html = "".join(
+            f'<li><a href="/reise/{o["code"]}">{o["code"]} – {o["titel"]}</a> ({o["ma"]}) – '
+            f'noch kein Land für heute ermittelt (VMA berechnen?)</li>' for o in ohne_position)
+
+        content = f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+          <h1 class="page-title" style="margin:0">🗺 Reisende auf der Karte</h1>
+          <a href="/" class="btn btn-secondary">← Dashboard</a>
+        </div>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:12px">
+          Zeigt, in welchem Land sich zugeordnete Mitarbeiter bei aktuell laufenden Reisen
+          heute laut Tagesverlauf/VMA aufhalten. Positionsgenauigkeit: Land-Ebene (kein
+          exakter Standort).</p>
+        <div id="reise-map" style="height:70vh;border-radius:var(--radius,10px);
+                                    border:1px solid var(--border);overflow:hidden"></div>
+        {'<div class="alert alert-warn" style="margin-top:12px"><b>Ohne Standort:</b><ul style="margin:6px 0 0 18px">' + ohne_html + '</ul></div>' if ohne_html else ''}
+
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+        <script>
+        const marker = {marker_js};
+        const map = L.map('reise-map').setView([20, 10], 2);
+        L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+            attribution: '&copy; OpenStreetMap-Mitwirkende',
+            maxZoom: 18
+        }}).addTo(map);
+        const icon = L.divIcon({{
+            html: '<div style="background:#2563eb;color:white;border-radius:50%;width:14px;height:14px;border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,.4)"></div>',
+            className: '', iconSize: [14,14], iconAnchor: [7,7]
+        }});
+        const bounds = [];
+        marker.forEach(m => {{
+            const mk = L.marker([m.lat, m.lon], {{icon: icon}}).addTo(map);
+            mk.bindPopup(
+                '<b>' + m.code + '</b> – ' + m.titel + '<br>' +
+                '👤 ' + m.ma + '<br>🌍 ' + m.land
+            );
+            bounds.push([m.lat, m.lon]);
+        }});
+        if (bounds.length > 0) {{ map.fitBounds(bounds, {{padding: [40,40], maxZoom: 6}}); }}
+        </script>
+        """
+        return HTMLResponse(shell("Karte – Reisende", content, "start"))
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:500]}</pre>'))
 
 
 # ── Mitarbeiter ────────────────────────────────────────────────────────────────
