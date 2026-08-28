@@ -45,7 +45,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.0-f"
+APP_VERSION  = "3.0-g"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4932,10 +4932,35 @@ def alert_einstellungen_form(request: Request, testergebnis: str = ""):
                     zeilen = ('<div style="font-size:12px;color:var(--muted)">Kein einziger Flug-/Bahn-Beleg '
                                'im Datumsfenster (heute -2 bis +3 Tage) gefunden – prüfe, ob der Beleg als '
                                '"Flug" oder "Bahn" (Transportart) erkannt wurde und ein Belegdatum hat.</div>')
+
+                verarbeitung_zeilen = ""
+                for v in diag.get("verarbeitung", []):
+                    api_html = ""
+                    if v.get("api_antwort"):
+                        api_html = (f'<pre style="font-size:11px;background:var(--bg);padding:8px;'
+                                     f'border-radius:6px;margin-top:6px;white-space:pre-wrap">'
+                                     f'{json.dumps(v["api_antwort"], ensure_ascii=False, indent=2)[:1500]}</pre>')
+                    verarbeitung_zeilen += f"""<div style="padding:8px 0;border-bottom:1px solid var(--border);font-size:12px">
+                        <b>Beleg #{v['beleg_id']} · Segment {v['segment_index']} ({v['transport_nummer']})</b>
+                        – {v['stunden_bis_abreise']}h bis Abreise, Intervall: {v.get('intervall_minuten','–')} Min.<br>
+                        <span style="color:var(--muted)">Quelle: {v.get('quelle','–')}
+                        {' · API-Key gesetzt: ' + ('ja' if v.get('api_key_gesetzt') else 'NEIN') if 'api_key_gesetzt' in v else ''}
+                        {' · letzter Check: ' + str(v.get('letzter_check_am')) if v.get('letzter_check_am') else ' · noch nie geprüft'}</span><br>
+                        <b>→ {v.get('ergebnis','?')}</b>
+                        {api_html}
+                    </div>"""
+                if verarbeitung_zeilen:
+                    diagnose_html_verarbeitung = f"""<div class="card" style="margin-bottom:16px">
+                      <div class="card-header"><span class="card-title">⚙ Verarbeitung der Segmente im Fenster</span></div>
+                      <div class="card-body">{verarbeitung_zeilen}</div>
+                    </div>"""
+                else:
+                    diagnose_html_verarbeitung = ""
+
                 diagnose_html = f"""<div class="card" style="margin-bottom:16px">
                   <div class="card-header"><span class="card-title">🔍 Diagnose (aktuelle Zeit lokal: {diag.get('jetzt_lokal','?')})</span></div>
                   <div class="card-body">{zeilen}</div>
-                </div>"""
+                </div>{diagnose_html_verarbeitung}"""
             testergebnis_html = f"""<div class="alert {'alert-warn' if r.get('fehler') else 'alert-ok'}" style="margin-bottom:16px">
               <b>Testlauf abgeschlossen:</b> {r.get('segmente_im_fenster',0)} Segmente im 24h-Fenster gefunden,
               {r.get('geprueft',0)} davon bei der API abgefragt, {r.get('alerts_gesendet',0)} Alert(s) verschickt.

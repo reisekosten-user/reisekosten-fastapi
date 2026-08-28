@@ -362,6 +362,7 @@ def cron_flug_alerts(debug: bool = False) -> dict:
     konfig = konfiguration_laden()
     if debug:
         segmente, diag = ueberwachte_segmente_laden(debug=True)
+        diag["verarbeitung"] = []
     else:
         segmente = ueberwachte_segmente_laden()
         diag = None
@@ -370,11 +371,18 @@ def cron_flug_alerts(debug: bool = False) -> dict:
     fehler = []
 
     for seg in segmente:
+        schritt = {"beleg_id": seg["beleg_id"], "segment_index": seg["segment_index"],
+                   "transport_nummer": seg["transport_nummer"],
+                   "stunden_bis_abreise": round(seg["stunden_bis_abreise"], 2)}
         intervall = intervall_fuer(seg["stunden_bis_abreise"], konfig)
+        schritt["intervall_minuten"] = intervall
         if intervall is None:
+            schritt["ergebnis"] = "kein Intervall (außerhalb Fenster) – übersprungen"
+            if debug: diag["verarbeitung"].append(schritt)
             continue
         alt_status = status_holen(seg["beleg_id"], seg["segment_index"])
         letzter_check = alt_status.get("letzter_check_am") if alt_status else None
+        schritt["letzter_check_am"] = str(letzter_check) if letzter_check else None
         if letzter_check:
             if isinstance(letzter_check, str):
                 try:
@@ -382,24 +390,37 @@ def cron_flug_alerts(debug: bool = False) -> dict:
                 except Exception:
                     letzter_check = None
             if letzter_check:
-                minuten_seit_check = (datetime.now() - letzter_check).total_seconds() / 60
+                minuten_seit_check = (jetzt_lokal() - letzter_check).total_seconds() / 60
+                schritt["minuten_seit_letztem_check"] = round(minuten_seit_check, 1)
                 if minuten_seit_check < intervall:
-                    continue  # noch nicht fällig
+                    schritt["ergebnis"] = f"noch nicht fällig (erst in {intervall - minuten_seit_check:.1f} Min. wieder)"
+                    if debug: diag["verarbeitung"].append(schritt)
+                    continue
 
         if seg["transport_typ"] == "Flug" and seg["transport_nummer"]:
+            schritt["quelle"] = "AeroDataBox"
+            schritt["api_key_gesetzt"] = bool(AERODATABOX_API_KEY)
             ergebnis = flugstatus_abrufen(seg["transport_nummer"], seg["abreise_datum"])
         elif seg["transport_typ"] == "Bahn" and seg["transport_nummer"]:
+            schritt["quelle"] = "db.transport.rest"
             ergebnis = bahnstatus_abrufen(seg["transport_nummer"], seg["von_ort"],
                                           seg["abreise_datum"], seg["abreise_zeit"])
         else:
+            schritt["ergebnis"] = "keine Transportnummer – übersprungen"
+            if debug: diag["verarbeitung"].append(schritt)
             continue
+
+        schritt["api_antwort"] = ergebnis
 
         if ergebnis.get("fehler"):
             fehler.append(f"Beleg {seg['beleg_id']} Segment {seg['segment_index']}: {ergebnis['fehler']}")
+            schritt["ergebnis"] = f"API-Fehler: {ergebnis['fehler']}"
+            if debug: diag["verarbeitung"].append(schritt)
             continue
 
         geprueft += 1
         status_speichern(seg, ergebnis)
+        schritt["ergebnis"] = "erfolgreich geprüft"
 
         if relevante_aenderung(alt_status, ergebnis):
             empfaenger = reisende_und_organisatoren_mailadressen(seg["reise_code"])
@@ -417,6 +438,9 @@ def cron_flug_alerts(debug: bool = False) -> dict:
                 sende_mail(empf, betreff, text)
             alert_markieren(seg["beleg_id"], seg["segment_index"])
             alerts_gesendet += 1
+            schritt["alert_gesendet"] = True
+
+        if debug: diag["verarbeitung"].append(schritt)
 
     ergebnis = {"geprueft": geprueft, "alerts_gesendet": alerts_gesendet, "fehler": fehler,
                 "segmente_im_fenster": len(segmente)}
