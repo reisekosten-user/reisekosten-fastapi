@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.1-b"
+APP_VERSION  = "3.1-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2642,10 +2642,87 @@ def dashboard():
         """))
 
 
+def aktuelle_position_ermitteln(reise_code: str, db) -> str | None:
+    """
+    Ermittelt den TATSÄCHLICHEN aktuellen Aufenthaltsort für die Kartenanzeige –
+    bewusst GETRENNT von der steuerlichen VMA-Länderzuordnung (vma_tage.land_code),
+    die am Abreisetag absichtlich den ABFLUGort zeigt (rechtlich korrekt für die
+    Verpflegungspauschale), nicht den tatsächlichen aktuellen Ort nach der Landung.
+
+    Reihenfolge:
+    1. Ankunftsort des letzten bereits ERFOLGTEN Flugs (Ankunftszeit in der
+       Vergangenheit) – das ist der ehrlichste "wo ist er JETZT"-Indikator.
+    2. Aktuell eingechecktes Hotel.
+    3. Rückfall: heutiger VMA-Tag (steuerliche Zuordnung).
+    """
+    from mod_flugalert import jetzt_lokal
+    P = ph()
+    cur = db.cursor()
+    jetzt = jetzt_lokal()
+    heute_s = date.today().isoformat()
+
+    # 1. Letztes bereits gelandetes Flugsegment
+    cur.execute(f"""SELECT ki_json FROM belege
+        WHERE reise_code={P} AND transportart='Flug' ORDER BY erstellt DESC""", (reise_code,))
+    bestes_datum = None
+    bestes_land = None
+    for row in cur.fetchall():
+        ki_str = row[0] if isinstance(row, tuple) else row["ki_json"]
+        if not ki_str: continue
+        try:
+            segs = json.loads(ki_str).get("segmente") or []
+        except Exception:
+            continue
+        for s in segs:
+            an_dat = s.get("ankunft_datum"); an_zeit = s.get("ankunft_zeit") or "00:00"
+            if not an_dat: continue
+            d = None
+            try: d = datetime.strptime(an_dat, "%d.%m.%Y")
+            except Exception:
+                try: d = datetime.fromisoformat(an_dat[:10])
+                except Exception: pass
+            if not d: continue
+            try:
+                dt = datetime.strptime(f"{d.date().isoformat()} {an_zeit}", "%Y-%m-%d %H:%M")
+            except Exception:
+                continue
+            if dt <= jetzt and (bestes_datum is None or dt > bestes_datum):
+                nach_iata = s.get("nach_iata")
+                land = IATA_TO_LAND.get(nach_iata) if nach_iata else None
+                if land:
+                    bestes_datum = dt
+                    bestes_land = land
+    if bestes_land:
+        cur.close()
+        return bestes_land
+
+    # 2. Aktuell eingechecktes Hotel
+    cur.execute(f"""SELECT land_beleg FROM belege
+        WHERE reise_code={P} AND transportart='Hotel'
+        AND hotel_checkin_datum<={P} AND hotel_checkout_datum>{P}""",
+        (reise_code, heute_s, heute_s))
+    row = cur.fetchone()
+    if row:
+        land = row[0] if isinstance(row, tuple) else row["land_beleg"]
+        if land:
+            cur.close()
+            return land
+
+    # 3. Rückfall: heutiger VMA-Tag (steuerliche Zuordnung, nicht immer = aktueller Ort)
+    cur.execute(f"SELECT land_code FROM vma_tage WHERE reise_code={P} AND datum={P}",
+                (reise_code, heute_s))
+    row = cur.fetchone()
+    cur.close()
+    if row:
+        return row[0] if isinstance(row, tuple) else row["land_code"]
+    return None
+
+
 @app.get("/maps", response_class=HTMLResponse)
 def dashboard_maps():
     """Zeigt auf einer zoombaren Weltkarte, wo sich Reisende bei aktiven Reisen
-    heute laut VMA-Tagesverlauf aufhalten (Land-Ebene, aus vma_tage)."""
+    gerade tatsächlich aufhalten (Land-Ebene, aus dem letzten erfolgten Flug/Hotel –
+    NICHT aus der steuerlichen VMA-Zuordnung, die am Abreisetag absichtlich anders ist)."""
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
@@ -2675,11 +2752,8 @@ def dashboard_maps():
         ohne_position = []
         for r in aktive_reisen:
             code = get(r,"code",0); titel = get(r,"titel",1); ma = get(r,"ma",4) or "–"
-            cur.execute(f"SELECT land_code, land_name FROM vma_tage WHERE reise_code={P} AND datum={P}",
-                        (code, today.isoformat()))
-            row = cur.fetchone()
-            land_code = (row[0] if isinstance(row,tuple) else row["land_code"]) if row else None
-            land_name = (row[1] if isinstance(row,tuple) else row["land_name"]) if row else None
+            land_code = aktuelle_position_ermitteln(code, db)
+            land_name = VMA_SAETZE.get(land_code, {}).get("name", land_code) if land_code else None
             koord = koordinaten_fuer_land(land_code) if land_code else None
             if koord:
                 marker.append({
