@@ -6,7 +6,7 @@ import json
 from datetime import date, timedelta
 
 from mod_db import get_db, ph, is_postgres, fmt_date
-from mod_vma import VMA_SAETZE, IATA_TO_LAND
+from mod_vma import VMA_SAETZE, IATA_TO_LAND, STADT_ZU_LAND
 
 def vma_berechnen(voll: float, halb: float, ist_halb: bool,
                   frueh: bool, mittag: bool, abend: bool) -> tuple:
@@ -74,9 +74,14 @@ def land_fuer_letzten_tag(reise_code: str, datum: date, db, eintaegig: bool):
         # Letztes im Tagesverlauf besuchtes ausländisches Land
         land = None
         for s in segmente_heute:
-            for iata in (s.get("von_iata"), s.get("nach_iata")):
+            for ort_key, iata_key in (("von_ort","von_iata"), ("nach_ort","nach_iata")):
+                iata = s.get(iata_key)
                 if iata and iata in IATA_TO_LAND and IATA_TO_LAND[iata] != "DE":
                     land = IATA_TO_LAND[iata]
+                elif not iata:
+                    ort = (s.get(ort_key) or "").strip().lower()
+                    if ort in STADT_ZU_LAND and STADT_ZU_LAND[ort] != "DE":
+                        land = STADT_ZU_LAND[ort]
         return land
     else:
         # Abflugort der ersten Etappe des Tages = letzter Tätigkeitsort
@@ -84,6 +89,9 @@ def land_fuer_letzten_tag(reise_code: str, datum: date, db, eintaegig: bool):
         iata = erste_etappe.get("von_iata")
         if iata and iata in IATA_TO_LAND:
             return IATA_TO_LAND[iata]
+        von_ort = (erste_etappe.get("von_ort") or "").strip().lower()
+        if von_ort in STADT_ZU_LAND:
+            return STADT_ZU_LAND[von_ort]
         return None
 
 
@@ -135,6 +143,10 @@ def land_fuer_tag(reise_code: str, datum: date, db,
                     if nach_iata and nach_iata in IATA_TO_LAND:
                         letztes_iata = nach_iata
                         letztes_land = IATA_TO_LAND[nach_iata]
+                    elif not letztes_land:
+                        nach_ort = (s.get("nach_ort") or "").strip().lower()
+                        if nach_ort in STADT_ZU_LAND:
+                            letztes_land = STADT_ZU_LAND[nach_ort]
         except: pass
 
     if letztes_land:

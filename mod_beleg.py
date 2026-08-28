@@ -325,6 +325,12 @@ Bahn+Flug-Reisen (z.B. Zubringerzug zum Flughafen zählt als eigenes Segment).
 Ein Ticket mit z.B. 4 Teilstrecken (Zug, Flug, Flug, Zug) muss auch 4 Einträge
 in "segmente" ergeben, nicht nur den ersten.
 
+WICHTIG bei "von_iata"/"nach_iata": Fülle diese Felder IMMER, auch wenn auf dem
+Beleg nur der Stadt-/Flughafenname steht (z.B. "Mexico City", nicht "MEX") –
+leite den 3-stelligen IATA-Code dann aus deinem eigenen Wissen über den
+Hauptflughafen dieser Stadt ab (z.B. "Mexico City" -> "MEX", "Frankfurt" ->
+"FRA"). Nur wenn wirklich keine sinnvolle Zuordnung möglich ist, null setzen.
+
 Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
 Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfeld null ist.
 

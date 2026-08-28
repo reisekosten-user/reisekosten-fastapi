@@ -164,6 +164,35 @@ IATA_TO_LAND: dict[str, str] = {
     "TAS":"UZ",
 }
 
+# Sicherheitsnetz: falls die KI bei einem Flug-/Bahnsegment keinen IATA-Code,
+# sondern nur den Städtenamen erfasst hat (z.B. weil auf dem Beleg kein Code
+# gedruckt war). Deckt gängige Geschäftsreiseziele ab, keine Vollständigkeit
+# nötig – der Analyse-Prompt wurde zusätzlich geschärft, damit die KI künftig
+# selbst den IATA-Code aus eigenem Wissen ableitet.
+STADT_ZU_LAND: dict[str, str] = {
+    "mexico city": "MX", "méxico city": "MX", "ciudad de mexico": "MX",
+    "new york": "US", "los angeles": "US", "san francisco": "US", "chicago": "US",
+    "miami": "US", "boston": "US", "washington": "US", "atlanta": "US", "seattle": "US",
+    "london": "GB", "paris": "FR", "madrid": "ES", "barcelona": "ES", "rome": "IT",
+    "rom": "IT", "milan": "IT", "mailand": "IT", "amsterdam": "NL", "brussels": "BE",
+    "brüssel": "BE", "zurich": "CH", "zürich": "CH", "geneva": "CH", "genf": "CH",
+    "vienna": "AT", "wien": "AT", "warsaw": "PL", "warschau": "PL", "prague": "CZ",
+    "prag": "CZ", "budapest": "HU", "istanbul": "TR", "moscow": "RU", "moskau": "RU",
+    "dubai": "AE", "abu dhabi": "AE", "doha": "QA", "riyadh": "SA", "cairo": "EG",
+    "kairo": "EG", "johannesburg": "ZA", "cape town": "ZA", "kapstadt": "ZA",
+    "beijing": "CN", "peking": "CN", "shanghai": "CN", "hong kong": "HK",
+    "tokyo": "JP", "tokio": "JP", "osaka": "JP", "seoul": "KR", "singapore": "SG",
+    "singapur": "SG", "bangkok": "TH", "kuala lumpur": "MY", "jakarta": "ID",
+    "manila": "PH", "mumbai": "IN", "delhi": "IN", "new delhi": "IN", "bangalore": "IN",
+    "sydney": "AU", "melbourne": "AU", "auckland": "NZ", "toronto": "CA",
+    "vancouver": "CA", "montreal": "CA", "sao paulo": "BR", "são paulo": "BR",
+    "rio de janeiro": "BR", "buenos aires": "AR", "santiago": "CL", "lima": "PE",
+    "bogota": "CO", "bogotá": "CO", "cancun": "MX", "cancún": "MX",
+    "stockholm": "SE", "oslo": "NO", "copenhagen": "DK", "kopenhagen": "DK",
+    "helsinki": "FI", "dublin": "IE", "lisbon": "PT", "lissabon": "PT",
+    "athens": "GR", "athen": "GR",
+}
+
 # Länder-Dropdown für Formular
 LAENDER_LISTE = [
     ("DE","Deutschland"), ("FR","Frankreich"), ("CH","Schweiz"),

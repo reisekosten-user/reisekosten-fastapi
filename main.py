@@ -17,7 +17,7 @@ from starlette.middleware.sessions import SessionMiddleware
 # ── Module importieren ────────────────────────────────────────────────────────
 from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schema, get_migrations, repair_legacy_columns, migriere_verknuepfungen_zu_gruppen
 from mod_vma import (VMA_SAETZE, IATA_TO_LAND, LAENDER_LISTE, vma_fuer_land,
-                      importiere_aktuelle_saetze, vma_fuer_land_erweitert)
+                      importiere_aktuelle_saetze, vma_fuer_land_erweitert, STADT_ZU_LAND)
 from mod_anon import anonymisieren
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         lade_ma_daten, get_s3, s3_upload, s3_download,
@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.1-d"
+APP_VERSION  = "3.1-e"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2642,19 +2642,6 @@ def dashboard():
         """))
 
 
-def aktuelle_position_ermitteln(reise_code: str, db) -> str | None:
-    """
-    Ermittelt den TATSÄCHLICHEN aktuellen Aufenthaltsort für die Kartenanzeige –
-    bewusst GETRENNT von der steuerlichen VMA-Länderzuordnung (vma_tage.land_code),
-    die am Abreisetag absichtlich den ABFLUGort zeigt (rechtlich korrekt für die
-    Verpflegungspauschale), nicht den tatsächlichen aktuellen Ort nach der Landung.
-
-    Reihenfolge:
-    1. Ankunftsort des letzten bereits ERFOLGTEN Flugs (Ankunftszeit in der
-       Vergangenheit) – das ist der ehrlichste "wo ist er JETZT"-Indikator.
-    2. Aktuell eingechecktes Hotel.
-    3. Rückfall: heutiger VMA-Tag (steuerliche Zuordnung).
-    """
 def _datum_parsen(wert):
     """Parst DD.MM.YYYY oder YYYY-MM-DD zu date, sonst None."""
     if not wert: return None
@@ -2704,6 +2691,9 @@ def aktuelle_position_ermitteln(reise_code: str, db) -> str | None:
             if dt > jetzt: continue
             nach_iata = s.get("nach_iata")
             land = IATA_TO_LAND.get(nach_iata) if nach_iata else None
+            if not land:
+                nach_ort = (s.get("nach_ort") or "").strip().lower()
+                land = STADT_ZU_LAND.get(nach_ort)
             if land:
                 kandidaten.append((dt, land))
 
