@@ -45,7 +45,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.0-g"
+APP_VERSION  = "3.0-h"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4982,26 +4982,21 @@ def alert_einstellungen_form(request: Request, testergebnis: str = ""):
       <div class="card-body">
         <form method="post" action="/einstellungen/alerts">
           <div class="form-grid form-grid-2">
-            <div class="form-group">
-              <label>Mehr als 8h bis 24h vor Abreise</label>
-              <input type="number" name="intervall_24h" value="{k['24h']}" min="1"> Minuten
+            <div class="form-group full">
+              <label>Mehr als 4h vor Abflug – oder nach der geplanten Abflugzeit (z.B. bei Verspätung)</label>
+              <input type="number" name="intervall_fern" value="{k['fern']}" min="1"> Minuten
             </div>
             <div class="form-group">
-              <label>4h bis 8h vor Abreise</label>
-              <input type="number" name="intervall_8h" value="{k['8h']}" min="1"> Minuten
-            </div>
-            <div class="form-group">
-              <label>2h bis 4h vor Abreise</label>
+              <label>4h bis 1h vor Abflug</label>
               <input type="number" name="intervall_4h" value="{k['4h']}" min="1"> Minuten
             </div>
             <div class="form-group">
-              <label>Unter 2h vor Abreise</label>
-              <input type="number" name="intervall_2h" value="{k['2h']}" min="1"> Minuten
+              <label>Unter 1h vor Abflug</label>
+              <input type="number" name="intervall_1h" value="{k['1h']}" min="1"> Minuten
             </div>
           </div>
           <div class="form-hint" style="margin:8px 0">
-            Für den Testserver z.B. alle Stufen auf 10 setzen. Im Produktivbetrieb empfohlen:
-            60 / 10 / 5 / 1 Minuten.
+            Für den Testserver z.B. alle Stufen auf 10 setzen. Standard: 60 / 30 / 15 Minuten.
           </div>
           <button type="submit" class="btn btn-primary" style="width:100%">Speichern</button>
         </form>
@@ -5041,11 +5036,10 @@ async def alert_einstellungen_speichern(request: Request):
             '<div class="alert alert-err">Nur Organisatoren dürfen diese Einstellungen ändern.</div>'), status_code=403)
     form = await request.form()
     try:
-        i24 = int(form.get("intervall_24h") or 60)
-        i8 = int(form.get("intervall_8h") or 10)
-        i4 = int(form.get("intervall_4h") or 5)
-        i2 = int(form.get("intervall_2h") or 1)
-        konfiguration_speichern(i24, i8, i4, i2)
+        i_fern = int(form.get("intervall_fern") or 60)
+        i_4h = int(form.get("intervall_4h") or 30)
+        i_1h = int(form.get("intervall_1h") or 15)
+        konfiguration_speichern(i_fern, i_4h, i_1h)
         return RedirectResponse("/einstellungen/alerts", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))

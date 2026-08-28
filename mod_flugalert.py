@@ -34,21 +34,24 @@ def jetzt_lokal() -> datetime:
 
 
 # ── Konfiguration ──────────────────────────────────────────────────────────────
+# Drei Stufen: "fern" (mehr als 4h vor Abflug ODER nach der geplanten Abflugzeit,
+# z.B. bei Verspätung/Warten auf Bestätigung des tatsächlichen Abflugs),
+# "4h" (4h bis 1h vor Abflug), "1h" (unter 1h vor Abflug).
 
 def konfiguration_laden() -> dict:
     db = get_db(); cur = db.cursor()
-    cur.execute("SELECT intervall_24h_min, intervall_8h_min, intervall_4h_min, intervall_2h_min "
+    cur.execute("SELECT intervall_24h_min, intervall_4h_min, intervall_1h_min "
                 "FROM alert_konfiguration ORDER BY id LIMIT 1")
     r = cur.fetchone()
     cur.close(); db.close()
     if not r:
-        return {"24h": 60, "8h": 10, "4h": 5, "2h": 1}
+        return {"fern": 60, "4h": 30, "1h": 15}
     g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
-    return {"24h": g("intervall_24h_min", 0), "8h": g("intervall_8h_min", 1),
-            "4h": g("intervall_4h_min", 2), "2h": g("intervall_2h_min", 3)}
+    return {"fern": g("intervall_24h_min", 0), "4h": g("intervall_4h_min", 1),
+            "1h": g("intervall_1h_min", 2)}
 
 
-def konfiguration_speichern(i24: int, i8: int, i4: int, i2: int):
+def konfiguration_speichern(i_fern: int, i_4h: int, i_1h: int):
     db = get_db(); cur = db.cursor()
     P = ph()
     cur.execute("SELECT id FROM alert_konfiguration ORDER BY id LIMIT 1")
@@ -57,37 +60,38 @@ def konfiguration_speichern(i24: int, i8: int, i4: int, i2: int):
         gid = r[0] if isinstance(r, tuple) else r["id"]
         if is_postgres():
             cur.execute(f"""UPDATE alert_konfiguration SET
-                intervall_24h_min={P}, intervall_8h_min={P}, intervall_4h_min={P},
-                intervall_2h_min={P}, aktualisiert_am=NOW() WHERE id={P}""",
-                (i24, i8, i4, i2, gid))
+                intervall_24h_min={P}, intervall_4h_min={P},
+                intervall_1h_min={P}, aktualisiert_am=NOW() WHERE id={P}""",
+                (i_fern, i_4h, i_1h, gid))
         else:
             cur.execute(f"""UPDATE alert_konfiguration SET
-                intervall_24h_min={P}, intervall_8h_min={P}, intervall_4h_min={P},
-                intervall_2h_min={P}, aktualisiert_am=datetime('now') WHERE id={P}""",
-                (i24, i8, i4, i2, gid))
+                intervall_24h_min={P}, intervall_4h_min={P},
+                intervall_1h_min={P}, aktualisiert_am=datetime('now') WHERE id={P}""",
+                (i_fern, i_4h, i_1h, gid))
     else:
         cur.execute(f"""INSERT INTO alert_konfiguration
-            (intervall_24h_min, intervall_8h_min, intervall_4h_min, intervall_2h_min)
-            VALUES ({P},{P},{P},{P})""", (i24, i8, i4, i2))
+            (intervall_24h_min, intervall_4h_min, intervall_1h_min)
+            VALUES ({P},{P},{P})""", (i_fern, i_4h, i_1h))
     db.commit(); cur.close(); db.close()
 
 
 def intervall_fuer(stunden_bis_abreise: float, konfig: dict) -> int | None:
     """
     Gibt das passende Prüfintervall (Minuten) zurück, oder None wenn außerhalb
-    des Überwachungsfensters. Negative Werte (geplante Abreise liegt schon in
-    der Vergangenheit, z.B. bei Verspätung) werden wie "unter 2h" behandelt –
-    dort ist die höchste Prüffrequenz am wichtigsten.
+    des Überwachungsfensters (mehr als 24h vorher oder mehr als 24h nach der
+    geplanten Abreise).
+    - Unter 1h vor Abflug: höchste Frequenz (Stufe "1h")
+    - 1h bis 4h vor Abflug: mittlere Frequenz (Stufe "4h")
+    - Mehr als 4h vor Abflug ODER nach der geplanten Abflugzeit (z.B. bei
+      Verspätung, wo die geplante Zeit schon verstrichen ist): Stufe "fern"
     """
     if stunden_bis_abreise < -24 or stunden_bis_abreise > 24:
         return None
-    if stunden_bis_abreise <= 2:
-        return konfig["2h"]
-    if stunden_bis_abreise <= 4:
+    if 0 <= stunden_bis_abreise <= 1:
+        return konfig["1h"]
+    if 1 < stunden_bis_abreise <= 4:
         return konfig["4h"]
-    if stunden_bis_abreise <= 8:
-        return konfig["8h"]
-    return konfig["24h"]
+    return konfig["fern"]
 
 
 # ── Externe APIs ───────────────────────────────────────────────────────────────

@@ -235,8 +235,9 @@ def get_schema() -> list[str]:
                 id                  SERIAL PRIMARY KEY,
                 intervall_24h_min   INTEGER DEFAULT 60,
                 intervall_8h_min    INTEGER DEFAULT 10,
-                intervall_4h_min    INTEGER DEFAULT 5,
+                intervall_4h_min    INTEGER DEFAULT 30,
                 intervall_2h_min    INTEGER DEFAULT 1,
+                intervall_1h_min    INTEGER DEFAULT 15,
                 aktualisiert_am     TIMESTAMP DEFAULT NOW()
             )""",
             """CREATE TABLE IF NOT EXISTS flug_status (
@@ -422,8 +423,9 @@ def get_schema() -> list[str]:
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                 intervall_24h_min   INTEGER DEFAULT 60,
                 intervall_8h_min    INTEGER DEFAULT 10,
-                intervall_4h_min    INTEGER DEFAULT 5,
+                intervall_4h_min    INTEGER DEFAULT 30,
                 intervall_2h_min    INTEGER DEFAULT 1,
+                intervall_1h_min    INTEGER DEFAULT 15,
                 aktualisiert_am     TEXT DEFAULT (datetime('now'))
             )""",
             """CREATE TABLE IF NOT EXISTS flug_status (
@@ -496,6 +498,10 @@ def get_migrations() -> list[str]:
         "UPDATE mitarbeiter SET ist_reisender=TRUE WHERE rolle='reisender' OR rolle IS NULL",
         """INSERT INTO alert_konfiguration (intervall_24h_min, intervall_8h_min, intervall_4h_min, intervall_2h_min)
            SELECT 60, 10, 5, 1 WHERE NOT EXISTS (SELECT 1 FROM alert_konfiguration)""",
+        "ALTER TABLE alert_konfiguration ADD COLUMN IF NOT EXISTS intervall_1h_min INTEGER DEFAULT 15",
+        "UPDATE alert_konfiguration SET intervall_24h_min=60 WHERE intervall_24h_min IS NULL",
+        "UPDATE alert_konfiguration SET intervall_4h_min=30 WHERE intervall_4h_min=5",
+        "UPDATE alert_konfiguration SET intervall_1h_min=15 WHERE intervall_1h_min IS NULL",
     ]
 
 def repair_legacy_columns():
