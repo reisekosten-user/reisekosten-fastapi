@@ -43,7 +43,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.9-c"
+APP_VERSION  = "2.9-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2870,7 +2870,7 @@ def dashboard():
             })
         try:
             cur2.execute(
-                "SELECT COUNT(*) FROM belege WHERE pflichtfelder_ok = FALSE"
+                "SELECT id FROM belege WHERE pflichtfelder_ok = FALSE ORDER BY erstellt DESC"
                 if is_postgres() else
                 "SELECT id FROM belege WHERE pflichtfelder_ok = 0 ORDER BY erstellt DESC")
             fehler_ids = [row[0] for row in cur2.fetchall()]
