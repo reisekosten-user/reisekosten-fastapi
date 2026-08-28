@@ -43,7 +43,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "2.9-b"
+APP_VERSION  = "2.9-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2872,23 +2872,26 @@ def dashboard():
             cur2.execute(
                 "SELECT COUNT(*) FROM belege WHERE pflichtfelder_ok = FALSE"
                 if is_postgres() else
-                "SELECT COUNT(*) FROM belege WHERE pflichtfelder_ok = 0")
-            n_fehler = cur2.fetchone()[0]
+                "SELECT id FROM belege WHERE pflichtfelder_ok = 0 ORDER BY erstellt DESC")
+            fehler_ids = [row[0] for row in cur2.fetchall()]
+            n_fehler = len(fehler_ids)
             if n_fehler > 0:
                 alarme.append({
-                    "url": "/belege",
+                    "url": f"/beleg/{fehler_ids[0]}" if n_fehler == 1 else "/belege",
                     "text": f'⚠ {n_fehler} Beleg{"e" if n_fehler!=1 else ""} mit fehlenden Pflichtfeldern',
-                    "sub": "Zur Belegliste →"
+                    "sub": "Beleg öffnen →" if n_fehler == 1 else "Zur Belegliste →"
                 })
         except: pass
         try:
             cur2.execute(
-                """SELECT COUNT(*) FROM belege
-                   WHERE waehrung != 'EUR' AND (kurs_eur IS NULL OR kurs_eur = 0)""")
-            n_kurs = cur2.fetchone()[0]
+                """SELECT id FROM belege
+                   WHERE waehrung != 'EUR' AND (kurs_eur IS NULL OR kurs_eur = 0)
+                   ORDER BY erstellt DESC""")
+            kurs_ids = [row[0] for row in cur2.fetchall()]
+            n_kurs = len(kurs_ids)
             if n_kurs > 0:
                 alarme.append({
-                    "url": "/belege",
+                    "url": f"/beleg/{kurs_ids[0]}" if n_kurs == 1 else "/belege",
                     "text": f'💱 {n_kurs} Auslandsbeleg{"e" if n_kurs!=1 else ""} ohne Wechselkurs',
                     "sub": "Kurs nachtragen →"
                 })
