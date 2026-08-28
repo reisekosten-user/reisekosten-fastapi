@@ -242,10 +242,14 @@ def ueberwachte_segmente_laden(debug: bool = False):
                     f"Segment {idx}: Datum/Zeit nicht parsbar ({d_ab} {zeit_ab})")
                 continue
             stunden_bis = (dt_ab - jetzt).total_seconds() / 3600
-            if stunden_bis < -1 or stunden_bis > 24:
+            if stunden_bis < -6 or stunden_bis > 24:
+                # -6h Kulanz: bei Verspätungen liegt die GEPLANTE Abreise schon
+                # in der Vergangenheit, obwohl der Flug/Zug noch nicht losgefahren
+                # ist. Erst nach 6h ohne bestätigten Abflug gilt das Segment als
+                # abgeschlossen und wird nicht mehr überwacht.
                 beleg_diag["verworfen"].append(
                     f"Segment {idx} ({s.get('transport_nummer')}, {dt_ab}): "
-                    f"{stunden_bis:.1f}h bis Abreise – außerhalb -1h/+24h-Fenster")
+                    f"{stunden_bis:.1f}h bis Abreise – außerhalb -6h/+24h-Fenster")
                 continue
             beleg_diag["segmente_uebernommen"] += 1
             segmente.append({
