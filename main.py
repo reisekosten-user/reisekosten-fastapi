@@ -45,7 +45,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.0-i"
+APP_VERSION  = "3.1-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -1776,7 +1776,7 @@ async def vma_generieren(code: str):
         db = get_db()
         n = vma_tage_generieren(code.upper(), db)
         db.close()
-        return RedirectResponse(f"/reise/{code.upper()}/uebersicht", status_code=303)
+        return RedirectResponse(f"/reise/{code.upper()}", status_code=303)
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
 
@@ -1807,7 +1807,7 @@ async def vma_tag_speichern(code: str, vid: int, request: Request):
             (lcode, lname, voll, halb, ist_halb, frueh, mittag, abend,
              brutto, netto, notiz or None, vid))
         db.commit(); cur.close(); db.close()
-        ziel = request.headers.get("referer") or f"/reise/{code.upper()}/uebersicht"
+        ziel = request.headers.get("referer") or f"/reise/{code.upper()}"
         return RedirectResponse(ziel, status_code=303)
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
@@ -1832,350 +1832,10 @@ async def vma_trennungspauschale_speichern(code: str, vid: int, request: Request
         return JSONResponse({"fehler": str(e)}, status_code=500)
 
 @app.get("/reise/{code}/uebersicht", response_class=HTMLResponse)
-def reise_uebersicht(code: str):
-    """Reise-Übersicht: Timeline mit VMA pro Tag + Belegen."""
-    rcode = code.upper()
-    try:
-        db = get_db(); cur = db.cursor()
-        P = ph()
-
-        # Reise
-        cur.execute(f"SELECT code,titel,abreise,rueckkehr FROM reisen WHERE code={P}", (rcode,))
-        r = cur.fetchone()
-        if not r:
-            cur.close(); db.close()
-            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Nicht gefunden</div>'))
-        def g(row,k,i): return row[k] if hasattr(row,'keys') else row[i]
-        titel=g(r,"titel",1); ab=g(r,"abreise",2); zu=g(r,"rueckkehr",3)
-
-        # VMA-Tage
-        cur.execute(f"""SELECT id,datum,land_code,land_name,vma_satz_voll,vma_satz_halb,
-            ist_halber_satz,fruehstueck,mittagessen,abendessen,
-            vma_brutto,vma_netto,quelle,notiz
-            FROM vma_tage WHERE reise_code={P} ORDER BY datum""", (rcode,))
-        vma_rows = cur.fetchall()
-        vma_by_date = {}
-        for vr in vma_rows:
-            d = g(vr,"datum",1)
-            if isinstance(d, str): d = date.fromisoformat(d[:10])
-            vma_by_date[d] = vr
-
-        # Belege
-        cur.execute(f"""SELECT id,transportart,transportart_freitext,anbieter,
-            betrag_brutto,waehrung,event_datum_von,event_datum_bis,
-            event_ort_von,event_ort_bis,hotel_name,hotel_checkin_datum,
-            hotel_checkin_zeit,hotel_checkout_datum,hotel_checkout_zeit,
-            hotel_naechte,s3_original,s3_anon,s3_analyse,ki_json,belegdatum,
-            belegart,beleg_gruppe_id
-            FROM belege WHERE reise_code={P}
-            ORDER BY COALESCE(event_datum_von,belegdatum)""", (rcode,))
-        belege = cur.fetchall()
-        cur.close(); db.close()
-
-        # Verknüpfte Buchungsbestätigungen unterdrücken, wenn in derselben Gruppe
-        # eine Rechnung/Quittung vorhanden ist (sonst doppelte Belege + doppelt
-        # gezählte Kosten in der Tages-Summe)
-        gruppen_arten = {}
-        for b in belege:
-            gid = g(b,"beleg_gruppe_id",22)
-            if gid:
-                gruppen_arten.setdefault(gid, set()).add(g(b,"belegart",21) or "")
-        belege = [b for b in belege if not (
-            (g(b,"belegart",21) or "") == "Buchungsbestaetigung"
-            and g(b,"beleg_gruppe_id",22)
-            and gruppen_arten.get(g(b,"beleg_gruppe_id",22), set()) & {"Rechnung", "Quittung"}
-        )]
-
-        # Reisedaten ermitteln
-        if isinstance(ab, str): ab = date.fromisoformat(ab[:10])
-        if isinstance(zu, str): zu = date.fromisoformat(zu[:10])
-        tage_gesamt = (zu - ab).days + 1
-
-        # Belege nach Tag gruppieren
-        def beleg_datum(b):
-            ev = g(b,"event_datum_von",6)
-            bd = g(b,"belegdatum",20)
-            for v in [ev, bd]:
-                if v:
-                    if isinstance(v, date): return v
-                    try: return date.fromisoformat(str(v)[:10])
-                    except: pass
-            return None
-
-        belege_by_date = {}
-        for b in belege:
-            bd = beleg_datum(b)
-            if bd:
-                belege_by_date.setdefault(bd, []).append(b)
-            else:
-                belege_by_date.setdefault(None, []).append(b)
-
-        # Farben pro Transportart
-        BADGE = {
-            "Flug": '<span style="background:#dbeafe;color:#1e40af;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">✈ Flug</span>',
-            "Hotel": '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">🏨 Hotel</span>',
-            "Mietwagen": '<span style="background:#ede9fe;color:#5b21b6;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">🚗 Mietwagen</span>',
-            "Taxi": '<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">🚕 Taxi</span>',
-            "Bahn": '<span style="background:#e0e7ff;color:#3730a3;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">🚆 Bahn</span>',
-            "Tanken": '<span style="background:#f0fdf4;color:#14532d;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">⛽ Tanken</span>',
-            "Verpflegung": '<span style="background:#fff7ed;color:#9a3412;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">🍽 Verpflegung</span>',
-            "Bewirtung": '<span style="background:#fff7ed;color:#9a3412;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">🍽 Bewirtung</span>',
-            "Sonstiges": '<span style="background:#f1f5f9;color:#475569;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500">📄 Sonstiges</span>',
-        }
-
-        # VMA Gesamtsumme
-        vma_total = sum(
-            float(g(vr,"vma_netto",11) or 0) for vr in vma_rows)
-        kosten_total = sum(
-            float(g(b,"betrag_brutto",4) or 0) for b in belege)
-
-        # HTML generieren
-        rows_html = ""
-        wochentage = ["Mo","Di","Mi","Do","Fr","Sa","So"]
-        monate = ["Jan","Feb","Mär","Apr","Mai","Jun",
-                  "Jul","Aug","Sep","Okt","Nov","Dez"]
-
-        def cb(rcode, vid, lcode, ist_halb, name, checked, label, abzug_pct):
-            ch = "checked" if checked else ""
-            return (f'<label style="display:inline-flex;align-items:center;gap:4px;'
-                    f'cursor:pointer;font-size:12px;color:#374151;margin-right:10px">'
-                    f'<input type="checkbox" name="{name}" value="1" {ch} '
-                    f'onchange="this.form.submit()" style="width:auto;margin:0">'
-                    f'{label} <span style="color:#c81e1e;font-size:10px">-{abzug_pct}%</span>'
-                    f'</label>')
-
-        def beleg_zeile(b):
-            bid = g(b,"id",0); typ = g(b,"transportart",1) or "Sonstiges"
-            freitext = g(b,"transportart_freitext",2) or ""
-            anbieter = g(b,"anbieter",3) or "–"
-            betrag = g(b,"betrag_brutto",4)
-            waehrung = g(b,"waehrung",5) or "EUR"
-            ort_von = g(b,"event_ort_von",8) or ""
-            ort_bis = g(b,"event_ort_bis",9) or ""
-            hotel_name = g(b,"hotel_name",10) or ""
-            ci_dat = g(b,"hotel_checkin_datum",11)
-            ci_zeit = g(b,"hotel_checkin_zeit",12) or ""
-            co_dat = g(b,"hotel_checkout_datum",13)
-            co_zeit = g(b,"hotel_checkout_zeit",14) or ""
-            naechte = g(b,"hotel_naechte",15) or ""
-
-            seg_info = ""
-            ki_str = g(b,"ki_json",19) or ""
-            if ki_str:
-                try:
-                    ki = json.loads(ki_str)
-                    segs = ki.get("segmente") or []
-                    if segs:
-                        seg_parts = []
-                        for s in segs:
-                            fn = s.get("transport_nummer","") or ""
-                            tn = s.get("transport_name","") or ""
-                            vi = s.get("von_iata","") or ""
-                            ni = s.get("nach_iata","") or ""
-                            ab_z = s.get("abreise_zeit","") or ""
-                            an_z = s.get("ankunft_zeit","") or ""
-                            tz_ab = s.get("abreise_zeitzone","") or ""
-                            tz_an = s.get("ankunft_zeitzone","") or ""
-                            hin = s.get("hinweis","") or ""
-                            p = f"{tn} {fn}: {vi}→{ni} {ab_z}{' '+tz_ab if tz_ab else ''}–{an_z}{' '+tz_an if tz_an else ''}"
-                            if hin: p += f" ({hin})"
-                            seg_parts.append(p)
-                        seg_info = " · ".join(seg_parts)
-                except: pass
-
-            if not seg_info:
-                if hotel_name:
-                    ci_s = fmt_date(ci_dat) + (" " + ci_zeit if ci_zeit else "")
-                    co_s = fmt_date(co_dat) + (" " + co_zeit if co_zeit else "")
-                    seg_info = f"{hotel_name} · Check-in {ci_s} · Check-out {co_s}"
-                    if naechte: seg_info += f" · {naechte} Nächte"
-                elif ort_von or ort_bis:
-                    seg_info = f"{ort_von}" + (f" → {ort_bis}" if ort_bis else "")
-
-            badge = BADGE.get(typ, BADGE["Sonstiges"])
-            if freitext: badge = badge.replace("Sonstiges", f"Sonstiges – {freitext}")
-            bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
-
-            return (
-                f'<div style="display:flex;align-items:flex-start;justify-content:space-between;'
-                f'gap:8px;margin-bottom:6px">'
-                f'<div style="min-width:0">{badge}<br>'
-                f'<span style="font-size:12px;font-weight:600">{anbieter}</span>'
-                + (f'<br><span style="font-size:11px;color:#64748b">{seg_info}</span>' if seg_info else "")
-                + f'</div>'
-                f'<div style="text-align:right;white-space:nowrap">'
-                f'<div style="font-size:12px;font-weight:600">{bet_s}</div>'
-                f'<a href="/beleg/{bid}" style="font-size:11px;color:#2563eb;text-decoration:none">Detail</a>'
-                f'</div></div>')
-
-        QUELLE_LABEL = {
-            "Flug-Segment": "auto · Flug",
-            "Hotel-Beleg": "auto · Hotel",
-            "Manuell": "auto · Reise-Land",
-            "Standard": "auto · Standard",
-            "manuell": "✎ manuell",
-        }
-
-        for i in range(tage_gesamt):
-            tag = ab + timedelta(days=i)
-            wt = wochentage[tag.weekday()]
-            datum_s = f"{wt} {tag.day:02d}.{tag.month:02d}."
-            zeile_bg = "#fafbfe" if i % 2 == 1 else "#ffffff"
-
-            # Belege für diesen Tag
-            tages_belege = belege_by_date.get(tag, [])
-            tages_summe = sum(float(g(b,"betrag_brutto",4) or 0) for b in tages_belege)
-            belege_col = "".join(beleg_zeile(b) for b in tages_belege) or \
-                '<span style="font-size:11px;color:#94a3b8;font-style:italic">keine Belege</span>'
-
-            vr = vma_by_date.get(tag)
-            if vr:
-                vid = g(vr,"id",0)
-                lcode = g(vr,"land_code",2) or "DE"
-                lname = g(vr,"land_name",3) or "Deutschland"
-                voll = float(g(vr,"vma_satz_voll",4) or 0)
-                halb = float(g(vr,"vma_satz_halb",5) or 0)
-                ist_halb = bool(g(vr,"ist_halber_satz",6))
-                frueh = bool(g(vr,"fruehstueck",7))
-                mittag = bool(g(vr,"mittagessen",8))
-                abend = bool(g(vr,"abendessen",9))
-                vma_netto = float(g(vr,"vma_netto",11) or 0)
-                quelle = g(vr,"quelle",12) or "Standard"
-
-                basis_txt = f"{halb:.2f} €" if ist_halb else f"{voll:.2f} €"
-                halb_label = "½ Anreisetag" if i == 0 else ("½ Abreisetag" if i == tage_gesamt-1 else "½ Satz")
-                halb_badge = f'<span style="font-size:10px;background:#fef3c7;color:#92400e;padding:1px 7px;border-radius:10px">{halb_label}</span>' if ist_halb else ""
-                quelle_txt = QUELLE_LABEL.get(quelle, quelle)
-                quelle_color = "#7c3aed" if quelle == "manuell" else "#94a3b8"
-
-                zeile = (
-                    f'<tr style="background:{zeile_bg};border-bottom:1px solid #f3f4f6">'
-                    f'<td style="padding:10px 12px;vertical-align:top;white-space:nowrap">'
-                    f'<div style="font-weight:600;color:#0d1b2a">{datum_s}</div>{halb_badge}</td>'
-                    f'<td style="padding:10px 12px;vertical-align:top">'
-                    f'<div style="font-weight:500">🌍 {lname} ({lcode})</div>'
-                    f'<div style="font-size:11px;color:{quelle_color}">{quelle_txt}</div></td>'
-                    f'<td style="padding:10px 12px;vertical-align:top">'
-                    f'<form method="post" action="/reise/{rcode}/vma/{vid}/speichern">'
-                    f'<input type="hidden" name="land_code" value="{lcode}">'
-                    f'<input type="hidden" name="ist_halber_satz" value="{"1" if ist_halb else ""}">'
-                    f'{cb(rcode, vid, lcode, ist_halb, "fruehstueck", frueh, "Frühstück", 20)}'
-                    f'{cb(rcode, vid, lcode, ist_halb, "mittagessen", mittag, "Mittag", 40)}'
-                    f'{cb(rcode, vid, lcode, ist_halb, "abendessen", abend, "Abend", 40)}'
-                    f'</form></td>'
-                    f'<td style="padding:10px 12px;text-align:right;vertical-align:top;white-space:nowrap">'
-                    f'<div style="text-decoration:line-through;color:#94a3b8;font-size:11px">{basis_txt}</div>'
-                    f'<div style="font-weight:700;color:#047857">{vma_netto:.2f} €</div></td>'
-                    f'<td style="padding:10px 12px;vertical-align:top">{belege_col}'
-                    + (f'<div style="font-size:11px;color:#5a6a7a;margin-top:2px">Summe: {tages_summe:.2f} €</div>' if tages_belege else "")
-                    + '</td></tr>'
-                )
-            else:
-                zeile = (
-                    f'<tr style="background:{zeile_bg};border-bottom:1px solid #f3f4f6">'
-                    f'<td style="padding:10px 12px;vertical-align:top;white-space:nowrap">'
-                    f'<div style="font-weight:600;color:#0d1b2a">{datum_s}</div></td>'
-                    f'<td colspan="3" style="padding:10px 12px;font-size:12px;color:#94a3b8">'
-                    f'VMA nicht berechnet – '
-                    f'<a href="/reise/{rcode}/vma-generieren" style="color:#2563eb">Generieren</a></td>'
-                    f'<td style="padding:10px 12px;vertical-align:top">{belege_col}</td></tr>'
-                )
-
-            rows_html += zeile
-
-        # Belege außerhalb des Reisezeitraums (z.B. Datum nach Rückkehr)
-        tage_im_bereich = {ab + timedelta(days=i) for i in range(tage_gesamt)}
-        ausserhalb = {d: bs for d, bs in belege_by_date.items()
-                      if d is not None and d not in tage_im_bereich}
-        if ausserhalb:
-            anzahl_ausserhalb = sum(len(bs) for bs in ausserhalb.values())
-            rows_html += (
-                f'<tr><td colspan="5" style="padding:10px 12px;font-size:12px;'
-                f'color:#b45309;font-style:italic">'
-                f'⚠ Belege außerhalb des Reisezeitraums ({anzahl_ausserhalb})</td></tr>'
-            )
-            for d in sorted(ausserhalb.keys()):
-                tag_html = "".join(beleg_zeile(b) for b in ausserhalb[d])
-                rows_html += (
-                    f'<tr><td style="padding:10px 12px;vertical-align:top;white-space:nowrap">'
-                    f'<div style="font-weight:600;color:#0d1b2a">{fmt_date(d)}</div></td>'
-                    f'<td colspan="3" style="padding:10px 12px;font-size:12px;color:#94a3b8">'
-                    f'liegt nicht im Reisezeitraum ({fmt_date(ab)} – {fmt_date(zu)})</td>'
-                    f'<td style="padding:10px 12px;vertical-align:top">{tag_html}</td></tr>'
-                )
-
-        # Belege ohne Datum
-        undated = belege_by_date.get(None, [])
-        if undated:
-            undated_html = "".join(beleg_zeile(b) for b in undated)
-            rows_html += (
-                f'<tr><td colspan="5" style="padding:10px 12px;font-size:12px;'
-                f'color:#94a3b8;font-style:italic">Belege ohne Datum ({len(undated)})</td></tr>'
-                f'<tr><td colspan="5" style="padding:10px 12px">{undated_html}</td></tr>'
-            )
-
-        content = f"""
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;
-                    margin-bottom:20px;flex-wrap:wrap;gap:12px">
-          <div>
-            <div style="font-family:monospace;font-size:12px;color:#64748b">{rcode}</div>
-            <h1 class="page-title" style="margin:4px 0">{titel}</h1>
-            <div style="font-size:13px;color:#64748b">
-              📅 {fmt_date(ab)} – {fmt_date(zu)} &nbsp;·&nbsp;
-              {tage_gesamt} Tage
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <a href="/reise/{rcode}/vma-generieren" class="btn btn-success">
-              🔄 VMA neu berechnen</a>
-            <a href="/reise/{rcode}" class="btn btn-secondary">← Reise</a>
-          </div>
-        </div>
-
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">
-          <div class="card"><div class="card-body" style="text-align:center">
-            <div style="font-size:24px;font-weight:500;color:#059669">{vma_total:.2f} €</div>
-            <div style="font-size:12px;color:#64748b">VMA gesamt (netto)</div>
-          </div></div>
-          <div class="card"><div class="card-body" style="text-align:center">
-            <div style="font-size:24px;font-weight:500">{kosten_total:.2f} €</div>
-            <div style="font-size:12px;color:#64748b">Kosten aus Belegen</div>
-          </div></div>
-          <div class="card"><div class="card-body" style="text-align:center">
-            <div style="font-size:24px;font-weight:500">{len(belege)}</div>
-            <div style="font-size:12px;color:#64748b">Belege</div>
-          </div></div>
-        </div>
-
-        <div class="card" style="padding:0;overflow:hidden">
-          <table style="width:100%;border-collapse:collapse">
-            <thead>
-              <tr style="background:#f8fafc;border-bottom:1px solid #e2e8f0">
-                <th style="padding:10px 12px;font-size:11px;color:#64748b;
-                           text-align:left;width:120px">Tag</th>
-                <th style="padding:10px 12px;font-size:11px;color:#64748b;
-                           text-align:left;width:170px">Land / Satz</th>
-                <th style="padding:10px 12px;font-size:11px;color:#64748b;
-                           text-align:left;width:220px">Mahlzeiten</th>
-                <th style="padding:10px 12px;font-size:11px;color:#64748b;
-                           text-align:right;width:100px">VMA netto</th>
-                <th style="padding:10px 12px;font-size:11px;color:#64748b;
-                           text-align:left">Belege</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows_html}
-            </tbody>
-          </table>
-        </div>"""
-
-        return HTMLResponse(shell(f"Übersicht {rcode}", content, "reisen"))
-    except Exception as e:
-        import traceback
-        return HTMLResponse(shell("Fehler",
-            f'<div class="alert alert-err">{e}</div>'
-            f'<pre style="font-size:11px">{traceback.format_exc()[:500]}</pre>'))
-
+def reise_uebersicht_redirect(code: str):
+    """Die separate Tages-Übersicht wurde in die Reise-Detailseite integriert
+    (Tagesverlauf & VMA) – alte Links/Lesezeichen leiten hierher um."""
+    return RedirectResponse(f"/reise/{code.upper()}", status_code=301)
 
 
 # ── System-Routen ─────────────────────────────────────────────────────────────
@@ -2439,9 +2099,6 @@ def reise_abschluss(code: str):
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <a href="/reise/{rcode}/abschluss/pdf" class="btn btn-primary">
               📄 PDF-Export
-            </a>
-            <a href="/reise/{rcode}/uebersicht" class="btn btn-secondary">
-              📋 Übersicht
             </a>
             <a href="/reise/{rcode}" class="btn btn-secondary">← Reise</a>
           </div>
@@ -2802,11 +2459,11 @@ def dashboard():
             tage = (zu-ab).days+1 if ab and zu else "?"
             if typ=="aktiv":
                 badge = '<span class="badge badge-green">● Aktiv</span>'
-                link_extra = f'<a href="/reise/{code}/uebersicht" style="font-size:11px;color:var(--muted);margin-left:8px">Übersicht</a>'
+                link_extra = f'<a href="/reise/{code}" style="font-size:11px;color:var(--muted);margin-left:8px">Details</a>'
             elif typ=="geplant":
                 delta = (ab-today).days if ab else 0
                 badge = f'<span class="badge badge-blue">in {delta} Tagen</span>'
-                link_extra = f'<a href="/reise/{code}/uebersicht" style="font-size:11px;color:var(--muted);margin-left:8px">Übersicht</a>'
+                link_extra = f'<a href="/reise/{code}" style="font-size:11px;color:var(--muted);margin-left:8px">Details</a>'
             else:
                 badge = '<span class="badge badge-gray">Abgeschlossen</span>'
                 link_extra = f'<a href="/reise/{code}/abschluss" style="font-size:11px;color:var(--muted);margin-left:8px">Abschluss</a>'
@@ -3872,6 +3529,20 @@ def reise_detail(code: str):
             if gid:
                 gruppen_arten_tag.setdefault(gid, set()).add(get(b,"belegart",15) or "")
 
+        # Gesamtkosten der Reise (ohne unterdrückte Buchungsbestätigungen, damit
+        # nicht doppelt gezählt wird)
+        beleg_kosten_gesamt = 0.0
+        beleg_anzahl_gesamt = 0
+        for b in beleg_rows_tag:
+            belegart_k = get(b,"belegart",15) or ""
+            gruppe_k = get(b,"beleg_gruppe_id",16)
+            if (belegart_k == "Buchungsbestaetigung" and gruppe_k
+                    and gruppen_arten_tag.get(gruppe_k, set()) & {"Rechnung", "Quittung"}):
+                continue
+            beleg_anzahl_gesamt += 1
+            bk = get(b,"betrag_brutto",4)
+            if bk: beleg_kosten_gesamt += float(bk)
+
         for b in beleg_rows_tag:
             bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
             belegart_b = get(b,"belegart",15) or ""
@@ -4104,10 +3775,25 @@ def reise_detail(code: str):
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <a href="/reise/{rcode}/abschluss" class="btn btn-primary">🧾 Abschluss</a>
-            <a href="/reise/{rcode}/uebersicht" class="btn btn-secondary">📋 Übersicht</a>
+            <a href="/reise/{rcode}/vma-generieren" class="btn btn-secondary">🔄 VMA neu berechnen</a>
             <a href="/reise/{rcode}/bearbeiten" class="btn btn-secondary">✏ Bearbeiten</a>
             <a href="/reise/{rcode}/land/neu" class="btn btn-secondary">🌍 + Land</a>
           </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:22px;font-weight:600;color:var(--green)">{(vma_tage_summe + trennung_summe):.2f} €</div>
+            <div style="font-size:12px;color:var(--muted)">VMA + Trennungspauschale</div>
+          </div></div>
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:22px;font-weight:600">{beleg_kosten_gesamt:.2f} €</div>
+            <div style="font-size:12px;color:var(--muted)">Kosten aus Belegen</div>
+          </div></div>
+          <div class="card"><div class="card-body" style="text-align:center">
+            <div style="font-size:22px;font-weight:600">{beleg_anzahl_gesamt}</div>
+            <div style="font-size:12px;color:var(--muted)">Belege</div>
+          </div></div>
         </div>
 
         {'<div style="font-size:12px;color:var(--muted);margin-bottom:16px">🌍 ' + laender_kompakt + '</div>' if laender_kompakt else ''}

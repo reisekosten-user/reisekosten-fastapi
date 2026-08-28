@@ -84,6 +84,7 @@ def tage_sicherstellen(reise_code: str, kuerzel: str) -> None:
     ab = _to_date(r[0] if isinstance(r, tuple) else r["abreise"])
     zu = _to_date(r[1] if isinstance(r, tuple) else r["rueckkehr"])
     tage = (zu - ab).days + 1
+    eintaegig = (tage == 1)
 
     for i in range(tage):
         tag = ab + timedelta(days=i)
@@ -91,7 +92,8 @@ def tage_sicherstellen(reise_code: str, kuerzel: str) -> None:
                     (reise_code, kuerzel, tag.isoformat()))
         if cur.fetchone():
             continue
-        lcode, lname, quelle, override = land_fuer_tag(reise_code, tag, db)
+        ist_letzter_tag = (i == tage - 1)
+        lcode, lname, quelle, override = land_fuer_tag(reise_code, tag, db, ist_letzter_tag, eintaegig)
         if override:
             voll, halb = override["voll"], override["halb"]
         else:

@@ -25,19 +25,93 @@ def vma_berechnen(voll: float, halb: float, ist_halb: bool,
     netto = max(0.0, basis - abzug)
     return round(brutto, 2), round(netto, 2)
 
-def land_fuer_tag(reise_code: str, datum: date, db) -> tuple:
+def land_fuer_letzten_tag(reise_code: str, datum: date, db, eintaegig: bool):
     """
-    Ermittelt das Land für einen Tag aus:
-    1. Flug-Segmenten (Ankunftsland des letzten Segments des Tages)
+    Ermittelt das Land für den ABREISETAG nach der korrekten gesetzlichen Regel
+    (§ 9 Abs. 4a EStG, BMF-Schreiben v. 5.12.2025): Hier zählt NICHT der
+    Ankunftsort der Heimreise (der ist ja meist Deutschland), sondern:
+
+    - Bei mehrtägigen Reisen: der letzte tatsächliche Tätigkeitsort VOR der
+      Heimreise = Abflugort der ERSTEN Etappe des Tages. Zwischenlandungen/
+      Umstiege auf dem Rückweg zählen nicht als Tätigkeitsort.
+    - Bei eintägigen Reisen (Hin- und Rückreise am selben Tag): das zuletzt im
+      Tagesverlauf besuchte AUSLÄNDISCHE Land (auch hier zählt ein reiner
+      Umstieg nicht als Tätigkeitsort, wird hier vereinfachend über den
+      letzten fremden Flughafen im chronologischen Verlauf angenähert).
+
+    Gibt den Ländercode zurück, oder None wenn nicht ermittelbar (dann greift
+    die normale Logik in land_fuer_tag als Rückfall).
+    """
+    cur = db.cursor()
+    P = ph()
+    datum_s = datum.isoformat()
+    datum_de = datum.strftime("%d.%m.%Y")
+
+    cur.execute(f"""SELECT ki_json FROM belege
+        WHERE reise_code={P} AND transportart='Flug'
+        AND (event_datum_von={P} OR event_datum_bis={P})""",
+        (reise_code, datum_s, datum_s))
+
+    segmente_heute = []
+    for row in cur.fetchall():
+        ki_str = row[0] if isinstance(row, tuple) else row["ki_json"]
+        if not ki_str: continue
+        try:
+            segs = json.loads(ki_str).get("segmente") or []
+            for s in segs:
+                ab_dat = s.get("abreise_datum", "") or ""
+                if ab_dat == datum_s or ab_dat == datum_de:
+                    segmente_heute.append(s)
+        except: pass
+    cur.close()
+
+    if not segmente_heute:
+        return None
+
+    segmente_heute.sort(key=lambda s: s.get("abreise_zeit") or "")
+
+    if eintaegig:
+        # Letztes im Tagesverlauf besuchtes ausländisches Land
+        land = None
+        for s in segmente_heute:
+            for iata in (s.get("von_iata"), s.get("nach_iata")):
+                if iata and iata in IATA_TO_LAND and IATA_TO_LAND[iata] != "DE":
+                    land = IATA_TO_LAND[iata]
+        return land
+    else:
+        # Abflugort der ersten Etappe des Tages = letzter Tätigkeitsort
+        erste_etappe = segmente_heute[0]
+        iata = erste_etappe.get("von_iata")
+        if iata and iata in IATA_TO_LAND:
+            return IATA_TO_LAND[iata]
+        return None
+
+
+def land_fuer_tag(reise_code: str, datum: date, db,
+                   ist_letzter_tag: bool = False, eintaegig: bool = False) -> tuple:
+    """
+    Ermittelt das Land für einen Tag. Reihenfolge:
+    0. Sonderregel Abreisetag/eintägige Reise: letzter tatsächlicher
+       Tätigkeitsort (siehe land_fuer_letzten_tag) – NICHT der Ankunftsort
+       der Heimreise, der wäre bei einer Rückreise nach Deutschland meist
+       falsch (würde fälschlich den Inlandssatz auslösen).
+    1. Flug-Segmenten (Ankunftsland des letzten an diesem Tag ankommenden Segments)
     2. Hotel-Belegen (Land des Hotels an diesem Tag)
     3. Reise-Länder-Tabelle (manuell hinterlegt, inkl. Orts-/Städte-Sonderfälle)
     Gibt (land_code, land_name, quelle, override) zurück.
     override ist None oder {"voll": x, "halb": y} – wenn gesetzt, hat der beim
     manuellen Land-Eintrag hinterlegte Satz Vorrang vor dem Standard-Satz.
     """
-    cur = db.cursor()
     P = ph()
     datum_s = datum.isoformat()
+
+    if ist_letzter_tag:
+        sonderfall_land = land_fuer_letzten_tag(reise_code, datum, db, eintaegig)
+        if sonderfall_land:
+            lname = VMA_SAETZE.get(sonderfall_land, {}).get("name", sonderfall_land)
+            return sonderfall_land, lname, "Letzter Tätigkeitsort (Abreise)", None
+
+    cur = db.cursor()
 
     # 1. Flug-Segmente: letztes Segment das an diesem Tag ankommt
     cur.execute(f"""SELECT ki_json FROM belege
@@ -150,11 +224,13 @@ def vma_tage_generieren(reise_code: str, db) -> int:
     if isinstance(zu, str): zu = date.fromisoformat(zu[:10])
 
     tage = (zu - ab).days + 1
+    eintaegig = (tage == 1)
     count = 0
 
     for i in range(tage):
         tag = ab + timedelta(days=i)
         ist_halb = (i == 0 or i == tage - 1)
+        ist_letzter_tag = (i == tage - 1)
 
         # Manuell geänderte Einträge nicht überschreiben
         cur.execute(f"""SELECT id, quelle, trennungspauschale_quelle, trennungspauschale
@@ -170,7 +246,7 @@ def vma_tage_generieren(reise_code: str, db) -> int:
             if q == "manuell":
                 continue  # Manuell → nicht anfassen
 
-        lcode, lname, quelle, override = land_fuer_tag(reise_code, tag, db)
+        lcode, lname, quelle, override = land_fuer_tag(reise_code, tag, db, ist_letzter_tag, eintaegig)
         if override:
             voll = override["voll"]; halb = override["halb"]
         else:
