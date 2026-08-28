@@ -73,8 +73,13 @@ def konfiguration_speichern(i24: int, i8: int, i4: int, i2: int):
 
 
 def intervall_fuer(stunden_bis_abreise: float, konfig: dict) -> int | None:
-    """Gibt das passende Prüfintervall (Minuten) zurück, oder None wenn noch/nicht mehr zu prüfen."""
-    if stunden_bis_abreise < 0 or stunden_bis_abreise > 24:
+    """
+    Gibt das passende Prüfintervall (Minuten) zurück, oder None wenn außerhalb
+    des Überwachungsfensters. Negative Werte (geplante Abreise liegt schon in
+    der Vergangenheit, z.B. bei Verspätung) werden wie "unter 2h" behandelt –
+    dort ist die höchste Prüffrequenz am wichtigsten.
+    """
+    if stunden_bis_abreise < -24 or stunden_bis_abreise > 24:
         return None
     if stunden_bis_abreise <= 2:
         return konfig["2h"]
@@ -242,14 +247,14 @@ def ueberwachte_segmente_laden(debug: bool = False):
                     f"Segment {idx}: Datum/Zeit nicht parsbar ({d_ab} {zeit_ab})")
                 continue
             stunden_bis = (dt_ab - jetzt).total_seconds() / 3600
-            if stunden_bis < -6 or stunden_bis > 24:
-                # -6h Kulanz: bei Verspätungen liegt die GEPLANTE Abreise schon
+            if stunden_bis < -24 or stunden_bis > 24:
+                # -24h Kulanz: bei Verspätungen liegt die GEPLANTE Abreise schon
                 # in der Vergangenheit, obwohl der Flug/Zug noch nicht losgefahren
-                # ist. Erst nach 6h ohne bestätigten Abflug gilt das Segment als
+                # ist. Erst nach 24h ohne bestätigten Abflug gilt das Segment als
                 # abgeschlossen und wird nicht mehr überwacht.
                 beleg_diag["verworfen"].append(
                     f"Segment {idx} ({s.get('transport_nummer')}, {dt_ab}): "
-                    f"{stunden_bis:.1f}h bis Abreise – außerhalb -6h/+24h-Fenster")
+                    f"{stunden_bis:.1f}h bis Abreise – außerhalb -24h/+24h-Fenster")
                 continue
             beleg_diag["segmente_uebernommen"] += 1
             segmente.append({
