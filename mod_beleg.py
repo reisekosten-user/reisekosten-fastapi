@@ -206,14 +206,22 @@ async def gpt_analyse_bild(bild_bytes: bytes, content_type: str,
 
     b64 = base64.b64encode(bild_bytes).decode()
 
-    prompt = """Analysiere dieses Foto eines Reisebelegs und fülle ALLE erkennbaren Felder aus.
+    heute_str = date.today().strftime("%d.%m.%Y")
+    prompt = f"""Analysiere dieses Foto eines Reisebelegs und fülle ALLE erkennbaren Felder aus.
 Antworte NUR mit einem validen JSON-Objekt – kein Text davor oder danach.
 Nicht erkennbare Felder = null.
+
+Heutiges Datum (zur Orientierung, falls auf dem Beleg KEIN Jahr angegeben ist,
+z.B. nur "27 August, Donnerstag"): {heute_str}. Ermittle das Jahr in diesem Fall
+über den Wochentag (welches Jahr passt zum genannten Wochentag+Datum, möglichst
+nahe am heutigen Datum, i.d.R. nicht länger als 12 Monate in der Vergangenheit
+oder Zukunft). Rate NIE ein Jahr ohne Anhaltspunkt – nutze immer den Wochentag,
+falls dieser angegeben ist.
 
 Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
 Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
 
-{
+""" + """{
   "belegdatum": "DD.MM.YYYY",
   "belegart": "Rechnung|Quittung|Sonstiges",
   "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Sonstiges",
@@ -299,9 +307,17 @@ async def gpt_analyse(rohtext: str, dateiname: str = "") -> dict:
                 "pflichtfelder_ok": False,
                 "fehlende_pflichtfelder": ["Kein Text"]}
 
-    prompt = """Analysiere diesen Reisebeleg und fülle ALLE erkennbaren Felder aus.
+    heute_str = date.today().strftime("%d.%m.%Y")
+    prompt = f"""Analysiere diesen Reisebeleg und fülle ALLE erkennbaren Felder aus.
 Antworte NUR mit einem validen JSON-Objekt – kein Text davor oder danach.
 Nicht erkennbare Felder = null.
+
+Heutiges Datum (zur Orientierung, falls auf dem Beleg KEIN Jahr angegeben ist,
+z.B. bei manchen Booking.com-Bestätigungen nur "27 August, Donnerstag"): {heute_str}.
+Ermittle das Jahr in diesem Fall über den genannten Wochentag (welches Jahr passt
+zum Wochentag+Datum, möglichst nahe am heutigen Datum, i.d.R. nicht länger als
+12 Monate in Vergangenheit/Zukunft). Rate NIE ein Jahr ohne Anhaltspunkt – nutze
+immer den Wochentag, falls dieser angegeben ist.
 
 WICHTIG bei "segmente": Erfasse WIRKLICH JEDE einzelne Teilstrecke als eigenes
 Segment – Hinflug UND Rückflug, alle Zwischenstopps/Umstiege, auch kombinierte
@@ -313,7 +329,7 @@ Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, even
 Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfeld null ist.
 
 JSON-Format:
-{
+""" + """{
   "belegdatum": "DD.MM.YYYY",
   "belegart": "Rechnung|Buchungsbestaetigung|Quittung|Sonstiges",
   "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Sonstiges",
