@@ -45,7 +45,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.0-c"
+APP_VERSION  = "3.0-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4915,11 +4915,32 @@ def alert_einstellungen_form(request: Request, testergebnis: str = ""):
             if r.get("fehler"):
                 fehler_html = "<ul style='margin:6px 0 0 18px;font-size:12px'>" + "".join(
                     f"<li>{e}</li>" for e in r["fehler"]) + "</ul>"
+            diagnose_html = ""
+            diag = r.get("diagnose")
+            if diag:
+                zeilen = ""
+                for b in diag.get("belege_details", []):
+                    verworfen_html = ("<ul style='margin:4px 0 0 18px'>" + "".join(
+                        f"<li>{v}</li>" for v in b["verworfen"]) + "</ul>") if b["verworfen"] else ""
+                    zeilen += f"""<div style="padding:8px 0;border-bottom:1px solid var(--border);font-size:12px">
+                        <a href="/beleg/{b['beleg_id']}" style="font-weight:600">Beleg #{b['beleg_id']}</a>
+                        – KI-JSON vorhanden: {'ja' if b['hat_ki_json'] else 'nein'},
+                        Segmente im Beleg: {b['segmente_roh']}, davon im Zeitfenster übernommen: {b['segmente_uebernommen']}
+                        {verworfen_html}
+                    </div>"""
+                if not zeilen:
+                    zeilen = ('<div style="font-size:12px;color:var(--muted)">Kein einziger Flug-/Bahn-Beleg '
+                               'im Datumsfenster (heute -2 bis +3 Tage) gefunden – prüfe, ob der Beleg als '
+                               '"Flug" oder "Bahn" (Transportart) erkannt wurde und ein Belegdatum hat.</div>')
+                diagnose_html = f"""<div class="card" style="margin-bottom:16px">
+                  <div class="card-header"><span class="card-title">🔍 Diagnose (aktuelle Zeit lokal: {diag.get('jetzt_lokal','?')})</span></div>
+                  <div class="card-body">{zeilen}</div>
+                </div>"""
             testergebnis_html = f"""<div class="alert {'alert-warn' if r.get('fehler') else 'alert-ok'}" style="margin-bottom:16px">
               <b>Testlauf abgeschlossen:</b> {r.get('segmente_im_fenster',0)} Segmente im 24h-Fenster gefunden,
               {r.get('geprueft',0)} davon bei der API abgefragt, {r.get('alerts_gesendet',0)} Alert(s) verschickt.
               {fehler_html}
-            </div>"""
+            </div>{diagnose_html}"""
         except Exception:
             testergebnis_html = f'<div class="alert alert-err">Testlauf-Ergebnis konnte nicht gelesen werden.</div>'
     content = f"""
@@ -4981,7 +5002,7 @@ def alert_testlauf(request: Request):
     if not ist_organisator(request):
         return HTMLResponse(shell("Kein Zugriff",
             '<div class="alert alert-err">Nur Organisatoren dürfen diese Einstellungen ändern.</div>'), status_code=403)
-    result = cron_flug_alerts()
+    result = cron_flug_alerts(debug=True)
     import urllib.parse
     return RedirectResponse(
         f"/einstellungen/alerts?testergebnis={urllib.parse.quote(json.dumps(result))}",

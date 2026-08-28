@@ -178,7 +178,7 @@ def _to_d_ddmmyyyy(v):
     except Exception: return None
 
 
-def ueberwachte_segmente_laden() -> list:
+def ueberwachte_segmente_laden(debug: bool = False):
     """
     Liest alle Flug-/Bahn-Segmente aus Belegen mit Abreise in den nächsten 24h,
     die noch nicht (lange) stattgefunden haben. Filtert bewusst NICHT scharf über
@@ -187,6 +187,10 @@ def ueberwachte_segmente_laden() -> list:
     Datum eines einzelnen Segments abweichen. Stattdessen wird ein großzügiges
     Fenster geladen und die genaue Filterung anhand der echten Segment-Daten
     (aus dem KI-JSON) vorgenommen.
+    Mit debug=True wird zusätzlich ein Diagnose-Dict zurückgegeben (zweites
+    Rückgabeelement), das zeigt, wie viele Belege/Segmente gefunden, aber
+    aus welchem Grund verworfen wurden – hilfreich, wenn "0 gefunden" gemeldet
+    wird, obwohl ein Beleg eigentlich vorhanden sein sollte.
     """
     db = get_db(); cur = db.cursor()
     P = ph()
@@ -206,28 +210,44 @@ def ueberwachte_segmente_laden() -> list:
 
     jetzt = jetzt_lokal()
     segmente = []
+    diag = {
+        "jetzt_lokal": jetzt.isoformat(),
+        "belege_gefunden": len(rows),
+        "belege_details": [],
+    }
     for r in rows:
         g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
         bid = g("id", 0)
         rcode = g("reise_code", 1)
         typ = g("transportart", 2)
         ki_str = g("ki_json", 3) or ""
+        beleg_diag = {"beleg_id": bid, "hat_ki_json": bool(ki_str), "segmente_roh": 0,
+                      "segmente_uebernommen": 0, "verworfen": []}
         try:
             segs = json.loads(ki_str).get("segmente") or []
         except Exception:
             segs = []
+        beleg_diag["segmente_roh"] = len(segs)
         for idx, s in enumerate(segs):
             d_ab = _to_d_ddmmyyyy(s.get("abreise_datum"))
             zeit_ab = s.get("abreise_zeit") or "00:00"
             if not d_ab:
+                beleg_diag["verworfen"].append(
+                    f"Segment {idx}: kein/ungültiges abreise_datum ('{s.get('abreise_datum')}')")
                 continue
             try:
                 dt_ab = datetime.strptime(f"{d_ab.isoformat()} {zeit_ab}", "%Y-%m-%d %H:%M")
             except Exception:
+                beleg_diag["verworfen"].append(
+                    f"Segment {idx}: Datum/Zeit nicht parsbar ({d_ab} {zeit_ab})")
                 continue
             stunden_bis = (dt_ab - jetzt).total_seconds() / 3600
             if stunden_bis < -1 or stunden_bis > 24:
-                continue  # noch nicht relevant oder schon zu lange her
+                beleg_diag["verworfen"].append(
+                    f"Segment {idx} ({s.get('transport_nummer')}, {dt_ab}): "
+                    f"{stunden_bis:.1f}h bis Abreise – außerhalb -1h/+24h-Fenster")
+                continue
+            beleg_diag["segmente_uebernommen"] += 1
             segmente.append({
                 "beleg_id": bid, "reise_code": rcode, "segment_index": idx,
                 "transport_typ": typ, "transport_nummer": s.get("transport_nummer") or "",
@@ -236,6 +256,10 @@ def ueberwachte_segmente_laden() -> list:
                 "abreise_datum": d_ab, "abreise_zeit": zeit_ab,
                 "stunden_bis_abreise": stunden_bis,
             })
+        diag["belege_details"].append(beleg_diag)
+
+    if debug:
+        return segmente, diag
     return segmente
 
 
@@ -319,7 +343,7 @@ def reisende_und_organisatoren_mailadressen(reise_code: str) -> list:
     return list(set(reisende_mails + org_mails))
 
 
-def cron_flug_alerts() -> dict:
+def cron_flug_alerts(debug: bool = False) -> dict:
     """
     Wird von einem externen Cron-Pinger regelmäßig (idealerweise minütlich)
     aufgerufen. Prüft für jedes Flug-/Bahn-Segment, ob laut konfiguriertem
@@ -327,7 +351,11 @@ def cron_flug_alerts() -> dict:
     und verschickt bei relevanten Änderungen einen Alert.
     """
     konfig = konfiguration_laden()
-    segmente = ueberwachte_segmente_laden()
+    if debug:
+        segmente, diag = ueberwachte_segmente_laden(debug=True)
+    else:
+        segmente = ueberwachte_segmente_laden()
+        diag = None
     geprueft = 0
     alerts_gesendet = 0
     fehler = []
@@ -381,8 +409,11 @@ def cron_flug_alerts() -> dict:
             alert_markieren(seg["beleg_id"], seg["segment_index"])
             alerts_gesendet += 1
 
-    return {"geprueft": geprueft, "alerts_gesendet": alerts_gesendet, "fehler": fehler,
-            "segmente_im_fenster": len(segmente)}
+    ergebnis = {"geprueft": geprueft, "alerts_gesendet": alerts_gesendet, "fehler": fehler,
+                "segmente_im_fenster": len(segmente)}
+    if debug:
+        ergebnis["diagnose"] = diag
+    return ergebnis
 
 
 def offene_alerts_fuer_dashboard() -> list:
