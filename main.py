@@ -45,7 +45,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.0-h"
+APP_VERSION  = "3.0-i"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4974,7 +4974,7 @@ def alert_einstellungen_form(request: Request, testergebnis: str = ""):
     <div class="alert alert-warn" style="margin-bottom:16px">
       Ein externer Cron-Dienst (z.B. cron-job.org) muss regelmäßig
       <code>/cron/flug-alerts?key=DEIN_CRON_SECRET</code> aufrufen – am besten minütlich,
-      damit die kürzeste Stufe (unter 2h vor Abreise) tatsächlich greifen kann. Wie oft
+      damit die kürzeste Stufe (unter 1h vor Abflug) tatsächlich greifen kann. Wie oft
       innerhalb dieses Rahmens wirklich bei der externen Flug-/Bahn-API nachgefragt wird,
       steuern die Intervalle unten.
     </div>
