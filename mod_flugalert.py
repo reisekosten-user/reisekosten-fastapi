@@ -9,6 +9,7 @@ Datenquellen:
 from __future__ import annotations
 import os, json, httpx
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from mod_db import get_db, ph, is_postgres
 from mod_mail import sende_mail
@@ -18,6 +19,18 @@ AERODATABOX_HOST = os.getenv("AERODATABOX_HOST", "aerodatabox.p.rapidapi.com")
 DB_TRANSPORT_REST_URL = "https://v6.db.transport.rest"
 
 CRON_SECRET = os.getenv("CRON_SECRET", "")
+
+BERLIN_TZ = ZoneInfo("Europe/Berlin")
+
+
+def jetzt_lokal() -> datetime:
+    """
+    Aktuelle Zeit in Europe/Berlin, als naives datetime (ohne tzinfo) – damit sie
+    direkt mit den auf Belegen gedruckten lokalen Uhrzeiten vergleichbar ist.
+    Render-Server laufen meist in UTC; ohne diese Umrechnung würde "Stunden bis
+    Abreise" um 1-2 Stunden falsch berechnet.
+    """
+    return datetime.now(BERLIN_TZ).replace(tzinfo=None)
 
 
 # ── Konfiguration ──────────────────────────────────────────────────────────────
@@ -168,21 +181,30 @@ def _to_d_ddmmyyyy(v):
 def ueberwachte_segmente_laden() -> list:
     """
     Liest alle Flug-/Bahn-Segmente aus Belegen mit Abreise in den nächsten 24h,
-    die noch nicht stattgefunden haben.
+    die noch nicht (lange) stattgefunden haben. Filtert bewusst NICHT scharf über
+    das Top-Level-Feld event_datum_von in der SQL-Abfrage – bei mehrteiligen
+    Tickets (Hin-/Rückflug, mehrere Segmente) kann dieses Feld vom tatsächlichen
+    Datum eines einzelnen Segments abweichen. Stattdessen wird ein großzügiges
+    Fenster geladen und die genaue Filterung anhand der echten Segment-Daten
+    (aus dem KI-JSON) vorgenommen.
     """
     db = get_db(); cur = db.cursor()
     P = ph()
     heute = date.today()
-    in_2_tagen = heute + timedelta(days=2)
+    fenster_von = heute - timedelta(days=2)
+    fenster_bis = heute + timedelta(days=3)
     cur.execute(f"""SELECT id, reise_code, transportart, ki_json, event_datum_von
                     FROM belege
                     WHERE transportart IN ('Flug','Bahn')
-                    AND event_datum_von >= {P} AND event_datum_von <= {P}""",
-                (heute.isoformat(), in_2_tagen.isoformat()))
+                    AND (
+                        (event_datum_von >= {P} AND event_datum_von <= {P})
+                        OR event_datum_von IS NULL
+                    )""",
+                (fenster_von.isoformat(), fenster_bis.isoformat()))
     rows = cur.fetchall()
     cur.close(); db.close()
 
-    jetzt = datetime.now()
+    jetzt = jetzt_lokal()
     segmente = []
     for r in rows:
         g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
