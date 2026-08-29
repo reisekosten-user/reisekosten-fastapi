@@ -292,17 +292,26 @@ def status_holen(beleg_id: int, segment_index: int) -> dict | None:
 
 
 def status_speichern(seg: dict, ergebnis: dict):
+    """
+    Speichert Zeitstempel EXPLIZIT als Python-Wert (jetzt_lokal(), Europe/Berlin) –
+    NICHT über die DB-Funktion NOW()/datetime('now'). Die lief in UTC, während
+    der spätere Vergleich in cron_flug_alerts() mit jetzt_lokal() (Berlin, im
+    Sommer UTC+2) rechnet. Diese ~2h-Differenz führte dazu, dass jedes Segment
+    bei JEDEM minütlichen Cron-Aufruf als "längst fällig" galt und die externe
+    API faktisch bei jedem Tick erneut abgefragt wurde – Ursache der massiven
+    Anfragenflut.
+    """
     db = get_db(); cur = db.cursor()
     P = ph()
-    jetzt_sql = "NOW()" if is_postgres() else "datetime('now')"
+    jetzt = jetzt_lokal().isoformat()
     cur.execute(f"""SELECT id FROM flug_status WHERE beleg_id={P} AND segment_index={P}""",
                 (seg["beleg_id"], seg["segment_index"]))
     vorhanden = cur.fetchone()
     if vorhanden:
-        cur.execute(f"""UPDATE flug_status SET letzter_check_am={jetzt_sql}, status={P},
+        cur.execute(f"""UPDATE flug_status SET letzter_check_am={P}, status={P},
             verspaetung_minuten={P}, gate={P}, terminal={P}, rohdaten={P}
             WHERE beleg_id={P} AND segment_index={P}""",
-            (ergebnis.get("status"), ergebnis.get("verspaetung_minuten"),
+            (jetzt, ergebnis.get("status"), ergebnis.get("verspaetung_minuten"),
              ergebnis.get("gate"), ergebnis.get("terminal"), ergebnis.get("rohdaten"),
              seg["beleg_id"], seg["segment_index"]))
     else:
@@ -310,10 +319,10 @@ def status_speichern(seg: dict, ergebnis: dict):
             (beleg_id, segment_index, transport_typ, transport_nummer, von_ort, nach_ort,
              abreise_datum, abreise_zeit, letzter_check_am, status, verspaetung_minuten,
              gate, terminal, rohdaten)
-            VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{jetzt_sql},{P},{P},{P},{P},{P})""",
+            VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})""",
             (seg["beleg_id"], seg["segment_index"], seg["transport_typ"], seg["transport_nummer"],
              seg["von_ort"], seg["nach_ort"], seg["abreise_datum"].isoformat(), seg["abreise_zeit"],
-             ergebnis.get("status"), ergebnis.get("verspaetung_minuten"),
+             jetzt, ergebnis.get("status"), ergebnis.get("verspaetung_minuten"),
              ergebnis.get("gate"), ergebnis.get("terminal"), ergebnis.get("rohdaten")))
     db.commit(); cur.close(); db.close()
 
@@ -321,9 +330,9 @@ def status_speichern(seg: dict, ergebnis: dict):
 def alert_markieren(beleg_id: int, segment_index: int):
     db = get_db(); cur = db.cursor()
     P = ph()
-    jetzt_sql = "NOW()" if is_postgres() else "datetime('now')"
-    cur.execute(f"UPDATE flug_status SET alert_gesendet_am={jetzt_sql} "
-                f"WHERE beleg_id={P} AND segment_index={P}", (beleg_id, segment_index))
+    jetzt = jetzt_lokal().isoformat()
+    cur.execute(f"UPDATE flug_status SET alert_gesendet_am={P} "
+                f"WHERE beleg_id={P} AND segment_index={P}", (jetzt, beleg_id, segment_index))
     db.commit(); cur.close(); db.close()
 
 
