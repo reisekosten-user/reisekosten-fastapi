@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.2-a"
+APP_VERSION  = "3.2-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2762,13 +2762,34 @@ def aktuelle_position_ermitteln(reise_code: str, db) -> dict | None:
     if kandidaten:
         kandidaten.sort(key=lambda x: x[0])
         dt, koord, land, ort_name = kandidaten[-1]
+
+        # Zusatz-Kontext: woher gerade gekommen (das Segment, das zu diesem
+        # Ort geführt hat) und wohin als nächstes (nächste bevorstehende
+        # Abreise ab diesem Ort) – für die "Zwischenstopp"-Ansicht auf der Karte
+        herkunft = None
+        naechste_etappe = None
+        for s in segmente:
+            if s["dt_an"] == dt and s["von_koord"] and s["nach_koord"]:
+                herkunft = {"von_koord": s["von_koord"], "von_name": s["von_ort"] or s["von_iata"],
+                            "transport_typ": s["typ"],
+                            "label": f'{s["transport_nummer"]} {s["von_iata"] or s["von_ort"]} → {s["nach_iata"] or s["nach_ort"]}'.strip()}
+        kommende = [s for s in segmente if s["dt_ab"] > jetzt and s["von_koord"] and s["nach_koord"]]
+        if kommende:
+            kommende.sort(key=lambda s: s["dt_ab"])
+            s = kommende[0]
+            naechste_etappe = {"nach_koord": s["nach_koord"], "nach_name": s["nach_ort"] or s["nach_iata"],
+                                "transport_typ": s["typ"], "dt_ab": s["dt_ab"],
+                                "label": f'{s["transport_nummer"]} {s["von_iata"] or s["von_ort"]} → {s["nach_iata"] or s["nach_ort"]}'.strip()}
+
         if koord:
             return {"status": "am_ort", "lat": koord[0], "lon": koord[1],
-                    "land": land, "ort_name": ort_name}
+                    "land": land, "ort_name": ort_name,
+                    "herkunft": herkunft, "naechste_etappe": naechste_etappe}
         land_koord = koordinaten_fuer_land(land)
         if land_koord:
             return {"status": "am_ort", "lat": land_koord[0], "lon": land_koord[1],
-                    "land": land, "ort_name": ort_name or land}
+                    "land": land, "ort_name": ort_name or land,
+                    "herkunft": herkunft, "naechste_etappe": naechste_etappe}
 
     # 3. Rückfall: heutiger VMA-Tag (steuerliche Zuordnung, nicht immer = aktueller Ort)
     heute_s = date.today().isoformat()
@@ -2819,6 +2840,7 @@ def dashboard_maps():
 
         marker = []
         strecken = []
+        kontext_strecken = []
         ohne_position = []
         for r in aktive_reisen:
             code = get(r,"code",0); titel = get(r,"titel",1); ma = get(r,"ma",4) or "–"
@@ -2839,10 +2861,26 @@ def dashboard_maps():
                     "lat": pos["lat"], "lon": pos["lon"], "code": code, "titel": titel,
                     "ma": ma, "land": pos.get("ort_name") or pos.get("land")
                 })
+                herkunft = pos.get("herkunft")
+                if herkunft:
+                    icon = "✈" if herkunft["transport_typ"] == "Flug" else "🚆"
+                    kontext_strecken.append({
+                        "von": [pos["lat"], pos["lon"]], "nach": herkunft["von_koord"],
+                        "label": "Gerade gelandet: " + herkunft["label"], "icon": icon,
+                    })
+                naechste = pos.get("naechste_etappe")
+                if naechste:
+                    icon = "✈" if naechste["transport_typ"] == "Flug" else "🚆"
+                    kontext_strecken.append({
+                        "von": [pos["lat"], pos["lon"]], "nach": naechste["nach_koord"],
+                        "label": "Als nächstes: " + naechste["label"] + " (ab " +
+                                 naechste["dt_ab"].strftime("%H:%M") + " Uhr)", "icon": icon,
+                    })
         cur.close(); db.close()
 
         marker_js = json.dumps(marker, ensure_ascii=False)
         strecken_js = json.dumps(strecken, ensure_ascii=False)
+        kontext_strecken_js = json.dumps(kontext_strecken, ensure_ascii=False)
         ohne_html = "".join(
             f'<li><a href="/reise/{o["code"]}">{o["code"]} – {o["titel"]}</a> ({o["ma"]}) – '
             f'noch kein Ort ermittelbar (Belege/VMA prüfen)</li>' for o in ohne_position)
@@ -2866,6 +2904,7 @@ def dashboard_maps():
         <script>
         const marker = {marker_js};
         const strecken = {strecken_js};
+        const kontextStrecken = {kontext_strecken_js};
         const map = L.map('reise-map').setView([20, 10], 2);
         L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
             attribution: '&copy; OpenStreetMap-Mitwirkende',
@@ -2911,6 +2950,18 @@ def dashboard_maps():
                 Math.round(s.fortschritt*100) + '%)'
             );
             bounds.push(s.von, s.nach);
+        }});
+
+        kontextStrecken.forEach(k => {{
+            L.polyline([k.von, k.nach], {{
+                color: '#94a3b8', weight: 2, dashArray: '4, 6', opacity: 0.6
+            }}).addTo(map);
+            const kontextIcon = L.divIcon({{
+                html: '<div style="font-size:16px;opacity:0.85">' + k.icon + '</div>',
+                className: '', iconSize: [20,20], iconAnchor: [10,10]
+            }});
+            L.marker(k.nach, {{icon: kontextIcon}}).addTo(map).bindPopup(k.label);
+            bounds.push(k.von, k.nach);
         }});
 
         if (bounds.length > 0) {{ map.fitBounds(bounds, {{padding: [40,40], maxZoom: 6}}); }}
