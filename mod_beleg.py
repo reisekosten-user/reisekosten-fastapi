@@ -331,6 +331,12 @@ leite den 3-stelligen IATA-Code dann aus deinem eigenen Wissen über den
 Hauptflughafen dieser Stadt ab (z.B. "Mexico City" -> "MEX", "Frankfurt" ->
 "FRA"). Nur wenn wirklich keine sinnvolle Zuordnung möglich ist, null setzen.
 
+WICHTIG bei "von_lat"/"von_lon"/"nach_lat"/"nach_lon": Gib IMMER die
+ungefähren geografischen Koordinaten (Dezimalgrad) des jeweiligen Flughafens/
+Bahnhofs aus deinem eigenen Wissen an, unabhängig davon, ob sie auf dem Beleg
+stehen (stehen dort normalerweise nicht). Genauigkeit auf 2-3 Nachkommastellen
+reicht. Nur bei völlig unbekanntem/nicht zuordenbarem Ort null setzen.
+
 Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
 Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfeld null ist.
 
@@ -380,8 +386,12 @@ JSON-Format:
       "ankunft_terminal": "z.B. Terminal 2 (falls angegeben, sonst null)",
       "von_ort": "Stadtname z.B. Frankfurt",
       "von_iata": "FRA",
+      "von_lat": 50.0333,
+      "von_lon": 8.5706,
       "nach_ort": "Stadtname z.B. Lyon",
       "nach_iata": "LYS",
+      "nach_lat": 45.7256,
+      "nach_lon": 5.0811,
       "transport_name": "Lufthansa|Swiss|ITA Airways|DB",
       "transport_nummer": "LH3463|AZ123|ICE123",
       "klasse": "Economy|Business|1.Klasse",

@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.1-e"
+APP_VERSION  = "3.2-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2651,82 +2651,139 @@ def _datum_parsen(wert):
         except Exception: return None
 
 
-def aktuelle_position_ermitteln(reise_code: str, db) -> str | None:
+def aktuelle_position_ermitteln(reise_code: str, db) -> dict | None:
     """
-    Ermittelt den TATSÄCHLICHEN aktuellen Aufenthaltsort für die Kartenanzeige –
-    bewusst GETRENNT von der steuerlichen VMA-Länderzuordnung (vma_tage.land_code),
-    die am Abreisetag absichtlich den ABFLUGort zeigt (rechtlich korrekt für die
-    Verpflegungspauschale), nicht den tatsächlichen aktuellen Ort nach der Landung.
+    Ermittelt den TATSÄCHLICHEN aktuellen Aufenthaltsort/-status für die
+    Kartenanzeige – bewusst GETRENNT von der steuerlichen VMA-Länderzuordnung
+    (vma_tage.land_code), die am Abreisetag absichtlich den ABFLUGort zeigt
+    (rechtlich korrekt für die Verpflegungspauschale), nicht den tatsächlichen
+    aktuellen Ort.
 
-    Prinzip: Aus ALLEN Belegen (Flug, Bahn, Hotel) werden Orts-Zeitpunkte
-    gesammelt – Ankunftszeit je Flug-/Bahnsegment, Check-in-Zeit je Hotel.
-    Das ZEITLICH JÜNGSTE Ereignis, das bereits stattgefunden hat, bestimmt
-    den aktuellen Ort. Rückfall, falls gar keine Zeitpunkte ermittelbar sind:
-    der heutige VMA-Tag (steuerliche Zuordnung).
+    Nutzt die Flughafen-/Bahnhof-Koordinaten, die die KI beim Analysieren des
+    Belegs direkt mitliefert (von_lat/von_lon/nach_lat/nach_lon je Segment –
+    aus ihrem eigenen Wissen abgeleitet, keine lokale Nachschlagetabelle nötig).
+
+    Gibt eines von zwei Ergebnistypen zurück:
+    - {"status": "unterwegs", "von_iata":.., "nach_iata":.., "von_koord":(lat,lon),
+       "nach_koord":(lat,lon), "fortschritt": 0..1, "transport_typ":.., "label":..}
+      wenn JETZT zwischen Abflug- und Ankunftszeit eines Segments liegt.
+    - {"status": "am_ort", "lat":.., "lon":.., "land":.., "ort_name":..}
+      für den zuletzt erreichten Ort (Segment-Koordinaten bevorzugt, sonst
+      Länder-Zentroid als Rückfall für alte Belege ohne Koordinatenfelder).
+    - None, wenn gar nichts ermittelbar ist.
     """
     from mod_flugalert import jetzt_lokal
+    from mod_geo import koordinaten_fuer_land
     P = ph()
     cur = db.cursor()
     jetzt = jetzt_lokal()
-    kandidaten = []  # Liste von (datetime, land_code)
 
-    # Flug- UND Bahn-Segmente: Ankunftszeitpunkt jedes bereits erfolgten Segments
-    cur.execute(f"""SELECT ki_json FROM belege
+    def _koord(s, praefix):
+        lat, lon = s.get(f"{praefix}_lat"), s.get(f"{praefix}_lon")
+        try:
+            return (float(lat), float(lon)) if lat is not None and lon is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    # Alle Flug-/Bahnsegmente mit geparsten Ab-/Ankunftszeitpunkten sammeln
+    cur.execute(f"""SELECT ki_json, transportart FROM belege
         WHERE reise_code={P} AND transportart IN ('Flug','Bahn')""", (reise_code,))
+    segmente = []
     for row in cur.fetchall():
         ki_str = row[0] if isinstance(row, tuple) else row["ki_json"]
+        typ = row[1] if isinstance(row, tuple) else row["transportart"]
         if not ki_str: continue
         try:
             segs = json.loads(ki_str).get("segmente") or []
         except Exception:
             continue
         for s in segs:
-            d = _datum_parsen(s.get("ankunft_datum"))
-            if not d: continue
+            d_ab = _datum_parsen(s.get("abreise_datum"))
+            d_an = _datum_parsen(s.get("ankunft_datum"))
+            if not d_ab or not d_an: continue
+            ab_zeit = s.get("abreise_zeit") or "00:00"
             an_zeit = s.get("ankunft_zeit") or "00:00"
             try:
-                dt = datetime.strptime(f"{d.isoformat()} {an_zeit}", "%Y-%m-%d %H:%M")
+                dt_ab = datetime.strptime(f"{d_ab.isoformat()} {ab_zeit}", "%Y-%m-%d %H:%M")
+                dt_an = datetime.strptime(f"{d_an.isoformat()} {an_zeit}", "%Y-%m-%d %H:%M")
             except Exception:
                 continue
-            if dt > jetzt: continue
-            nach_iata = s.get("nach_iata")
-            land = IATA_TO_LAND.get(nach_iata) if nach_iata else None
-            if not land:
-                nach_ort = (s.get("nach_ort") or "").strip().lower()
-                land = STADT_ZU_LAND.get(nach_ort)
-            if land:
-                kandidaten.append((dt, land))
+            segmente.append({
+                "typ": typ, "dt_ab": dt_ab, "dt_an": dt_an,
+                "von_iata": s.get("von_iata"), "nach_iata": s.get("nach_iata"),
+                "von_ort": s.get("von_ort"), "nach_ort": s.get("nach_ort"),
+                "von_koord": _koord(s, "von"), "nach_koord": _koord(s, "nach"),
+                "transport_nummer": s.get("transport_nummer") or "",
+            })
 
-    # Hotels: Check-in-Zeitpunkt als Orts-Signal (14 Uhr als üblicher Check-in,
-    # falls keine genaue Uhrzeit erkannt wurde)
-    cur.execute(f"""SELECT land_beleg, hotel_checkin_datum, hotel_checkin_zeit
+    # 1. UNTERWEGS? – ein Segment, dessen Ab-/Ankunftszeit JETZT einschließt
+    for s in segmente:
+        if s["dt_ab"] <= jetzt <= s["dt_an"] and s["von_koord"] and s["nach_koord"]:
+            dauer = (s["dt_an"] - s["dt_ab"]).total_seconds()
+            fortschritt = ((jetzt - s["dt_ab"]).total_seconds() / dauer) if dauer > 0 else 0.5
+            fortschritt = max(0.0, min(1.0, fortschritt))
+            cur.close()
+            return {
+                "status": "unterwegs",
+                "von_iata": s["von_iata"], "nach_iata": s["nach_iata"],
+                "von_koord": s["von_koord"], "nach_koord": s["nach_koord"],
+                "von_name": s["von_ort"] or s["von_iata"], "nach_name": s["nach_ort"] or s["nach_iata"],
+                "fortschritt": fortschritt, "transport_typ": s["typ"],
+                "label": f'{s["transport_nummer"]} {s["von_iata"] or s["von_ort"]} → {s["nach_iata"] or s["nach_ort"]}'.strip(),
+            }
+
+    # 2. AM ORT: zeitlich jüngstes bereits erreichtes Ziel (Segment-Ankunft oder Hotel-Check-in)
+    kandidaten = []  # (datetime, koord_oder_None, land_code, ort_name)
+    for s in segmente:
+        if s["dt_an"] > jetzt: continue
+        land = IATA_TO_LAND.get(s["nach_iata"]) if s["nach_iata"] else None
+        if not land:
+            land = STADT_ZU_LAND.get((s["nach_ort"] or "").strip().lower())
+        if land or s["nach_koord"]:
+            kandidaten.append((s["dt_an"], s["nach_koord"], land, s["nach_ort"] or s["nach_iata"]))
+
+    cur.execute(f"""SELECT land_beleg, hotel_checkin_datum, hotel_checkin_zeit, hotel_name
         FROM belege WHERE reise_code={P} AND transportart='Hotel'""", (reise_code,))
     for row in cur.fetchall():
         g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
         land = g("land_beleg",0)
         d = _datum_parsen(g("hotel_checkin_datum",1))
         ci_zeit = g("hotel_checkin_zeit",2) or "14:00"
+        hotel_name = g("hotel_name",3)
         if not land or not d: continue
         try:
             dt = datetime.strptime(f"{d.isoformat()} {ci_zeit}", "%Y-%m-%d %H:%M")
         except Exception:
             continue
         if dt > jetzt: continue
-        kandidaten.append((dt, land))
+        kandidaten.append((dt, None, land, hotel_name))
+    cur.close()
 
     if kandidaten:
-        cur.close()
         kandidaten.sort(key=lambda x: x[0])
-        return kandidaten[-1][1]
+        dt, koord, land, ort_name = kandidaten[-1]
+        if koord:
+            return {"status": "am_ort", "lat": koord[0], "lon": koord[1],
+                    "land": land, "ort_name": ort_name}
+        land_koord = koordinaten_fuer_land(land)
+        if land_koord:
+            return {"status": "am_ort", "lat": land_koord[0], "lon": land_koord[1],
+                    "land": land, "ort_name": ort_name or land}
 
     # 3. Rückfall: heutiger VMA-Tag (steuerliche Zuordnung, nicht immer = aktueller Ort)
     heute_s = date.today().isoformat()
-    cur.execute(f"SELECT land_code FROM vma_tage WHERE reise_code={P} AND datum={P}",
+    cur = db.cursor()
+    cur.execute(f"SELECT land_code, land_name FROM vma_tage WHERE reise_code={P} AND datum={P}",
                 (reise_code, heute_s))
     row = cur.fetchone()
     cur.close()
     if row:
-        return row[0] if isinstance(row, tuple) else row["land_code"]
+        land = row[0] if isinstance(row, tuple) else row["land_code"]
+        lname = row[1] if isinstance(row, tuple) else row["land_name"]
+        land_koord = koordinaten_fuer_land(land)
+        if land_koord:
+            return {"status": "am_ort", "lat": land_koord[0], "lon": land_koord[1],
+                    "land": land, "ort_name": lname}
     return None
 
 
@@ -2761,25 +2818,34 @@ def dashboard_maps():
         def get(r,k,i): return r[k] if hasattr(r,'keys') else r[i]
 
         marker = []
+        strecken = []
         ohne_position = []
         for r in aktive_reisen:
             code = get(r,"code",0); titel = get(r,"titel",1); ma = get(r,"ma",4) or "–"
-            land_code = aktuelle_position_ermitteln(code, db)
-            land_name = VMA_SAETZE.get(land_code, {}).get("name", land_code) if land_code else None
-            koord = koordinaten_fuer_land(land_code) if land_code else None
-            if koord:
-                marker.append({
-                    "lat": koord[0], "lon": koord[1], "code": code, "titel": titel,
-                    "ma": ma, "land": land_name or land_code
+            pos = aktuelle_position_ermitteln(code, db)
+            if not pos:
+                ohne_position.append({"code": code, "titel": titel, "ma": ma})
+            elif pos["status"] == "unterwegs":
+                icon = "✈" if pos["transport_typ"] == "Flug" else "🚆"
+                strecken.append({
+                    "von": pos["von_koord"], "nach": pos["nach_koord"],
+                    "von_iata": pos["von_iata"], "nach_iata": pos["nach_iata"],
+                    "von_name": pos["von_name"], "nach_name": pos["nach_name"],
+                    "fortschritt": pos["fortschritt"], "icon": icon,
+                    "code": code, "titel": titel, "ma": ma, "label": pos["label"],
                 })
             else:
-                ohne_position.append({"code": code, "titel": titel, "ma": ma})
+                marker.append({
+                    "lat": pos["lat"], "lon": pos["lon"], "code": code, "titel": titel,
+                    "ma": ma, "land": pos.get("ort_name") or pos.get("land")
+                })
         cur.close(); db.close()
 
         marker_js = json.dumps(marker, ensure_ascii=False)
+        strecken_js = json.dumps(strecken, ensure_ascii=False)
         ohne_html = "".join(
             f'<li><a href="/reise/{o["code"]}">{o["code"]} – {o["titel"]}</a> ({o["ma"]}) – '
-            f'noch kein Land für heute ermittelt (VMA berechnen?)</li>' for o in ohne_position)
+            f'noch kein Ort ermittelbar (Belege/VMA prüfen)</li>' for o in ohne_position)
 
         content = f"""
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
@@ -2787,9 +2853,10 @@ def dashboard_maps():
           <a href="/" class="btn btn-secondary">← Dashboard</a>
         </div>
         <p style="font-size:13px;color:var(--muted);margin-bottom:12px">
-          Zeigt, in welchem Land sich zugeordnete Mitarbeiter bei aktuell laufenden Reisen
-          heute laut Tagesverlauf/VMA aufhalten. Positionsgenauigkeit: Land-Ebene (kein
-          exakter Standort).</p>
+          Zeigt, wo sich zugeordnete Mitarbeiter bei aktuell laufenden Reisen befinden –
+          am Boden (letzter erreichter Ort) oder unterwegs (gestrichelte Linie zwischen
+          Start- und Zielflughafen/-bahnhof, Position anteilig zur verstrichenen Reisezeit
+          geschätzt). Kein Live-GPS, sondern aus Belegdaten abgeleitet.</p>
         <div id="reise-map" style="height:70vh;border-radius:var(--radius,10px);
                                     border:1px solid var(--border);overflow:hidden"></div>
         {'<div class="alert alert-warn" style="margin-top:12px"><b>Ohne Standort:</b><ul style="margin:6px 0 0 18px">' + ohne_html + '</ul></div>' if ohne_html else ''}
@@ -2798,24 +2865,54 @@ def dashboard_maps():
         <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
         <script>
         const marker = {marker_js};
+        const strecken = {strecken_js};
         const map = L.map('reise-map').setView([20, 10], 2);
         L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
             attribution: '&copy; OpenStreetMap-Mitwirkende',
             maxZoom: 18
         }}).addTo(map);
-        const icon = L.divIcon({{
+        const ortIcon = L.divIcon({{
             html: '<div style="background:#2563eb;color:white;border-radius:50%;width:14px;height:14px;border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,.4)"></div>',
             className: '', iconSize: [14,14], iconAnchor: [7,7]
         }});
+        const flughafenIcon = L.divIcon({{
+            html: '<div style="background:white;border:2px solid #64748b;border-radius:50%;width:9px;height:9px"></div>',
+            className: '', iconSize: [9,9], iconAnchor: [4,4]
+        }});
         const bounds = [];
+
         marker.forEach(m => {{
-            const mk = L.marker([m.lat, m.lon], {{icon: icon}}).addTo(map);
+            const mk = L.marker([m.lat, m.lon], {{icon: ortIcon}}).addTo(map);
             mk.bindPopup(
                 '<b>' + m.code + '</b> – ' + m.titel + '<br>' +
-                '👤 ' + m.ma + '<br>🌍 ' + m.land
+                '👤 ' + m.ma + '<br>📍 ' + m.land
             );
             bounds.push([m.lat, m.lon]);
         }});
+
+        strecken.forEach(s => {{
+            L.polyline([s.von, s.nach], {{
+                color: '#2563eb', weight: 2, dashArray: '6, 8', opacity: 0.8
+            }}).addTo(map);
+            L.marker(s.von, {{icon: flughafenIcon}}).addTo(map)
+                .bindPopup('<b>' + s.von_iata + '</b> – ' + s.von_name);
+            L.marker(s.nach, {{icon: flughafenIcon}}).addTo(map)
+                .bindPopup('<b>' + s.nach_iata + '</b> – ' + s.nach_name);
+            // Aktuelle Position anteilig entlang der Strecke interpolieren
+            const lat = s.von[0] + (s.nach[0] - s.von[0]) * s.fortschritt;
+            const lon = s.von[1] + (s.nach[1] - s.von[1]) * s.fortschritt;
+            const unterwegsIcon = L.divIcon({{
+                html: '<div style="font-size:20px;transform:rotate(0deg)">' + s.icon + '</div>',
+                className: '', iconSize: [24,24], iconAnchor: [12,12]
+            }});
+            L.marker([lat, lon], {{icon: unterwegsIcon}}).addTo(map).bindPopup(
+                '<b>' + s.code + '</b> – ' + s.titel + '<br>' +
+                '👤 ' + s.ma + '<br>' + s.icon + ' ' + s.label + ' (unterwegs, ' +
+                Math.round(s.fortschritt*100) + '%)'
+            );
+            bounds.push(s.von, s.nach);
+        }});
+
         if (bounds.length > 0) {{ map.fitBounds(bounds, {{padding: [40,40], maxZoom: 6}}); }}
         </script>
         """
