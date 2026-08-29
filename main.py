@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.2-b"
+APP_VERSION  = "3.2-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2708,8 +2708,12 @@ def aktuelle_position_ermitteln(reise_code: str, db) -> dict | None:
                 dt_an = datetime.strptime(f"{d_an.isoformat()} {an_zeit}", "%Y-%m-%d %H:%M")
             except Exception:
                 continue
+            typ_segment = typ
+            kombi_text = f'{s.get("transport_name","")} {s.get("hinweis","")}'.lower()
+            if any(k in kombi_text for k in ("bahn", "train", "zug", "sncf", "ice", "tgv", "railjet")):
+                typ_segment = "Bahn"
             segmente.append({
-                "typ": typ, "dt_ab": dt_ab, "dt_an": dt_an,
+                "typ": typ_segment, "dt_ab": dt_ab, "dt_an": dt_an,
                 "von_iata": s.get("von_iata"), "nach_iata": s.get("nach_iata"),
                 "von_ort": s.get("von_ort"), "nach_ort": s.get("nach_ort"),
                 "von_koord": _koord(s, "von"), "nach_koord": _koord(s, "nach"),
@@ -2820,7 +2824,8 @@ def dashboard_maps():
 
         if is_postgres():
             cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
-                STRING_AGG(DISTINCT m.klarname, ', ' ORDER BY m.klarname) as ma
+                STRING_AGG(DISTINCT m.klarname, ', ' ORDER BY m.klarname) as ma,
+                STRING_AGG(DISTINCT m.kuerzel, ', ' ORDER BY m.kuerzel) as kuerzel
                 FROM reisen r
                 LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
                 LEFT JOIN mitarbeiter m ON m.kuerzel = rm.kuerzel
@@ -2828,7 +2833,8 @@ def dashboard_maps():
                 GROUP BY r.code, r.titel, r.abreise, r.rueckkehr""", (today.isoformat(), today.isoformat()))
         else:
             cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
-                GROUP_CONCAT(DISTINCT m.klarname) as ma
+                GROUP_CONCAT(DISTINCT m.klarname) as ma,
+                GROUP_CONCAT(DISTINCT m.kuerzel) as kuerzel
                 FROM reisen r
                 LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
                 LEFT JOIN mitarbeiter m ON m.kuerzel = rm.kuerzel
@@ -2844,6 +2850,7 @@ def dashboard_maps():
         ohne_position = []
         for r in aktive_reisen:
             code = get(r,"code",0); titel = get(r,"titel",1); ma = get(r,"ma",4) or "–"
+            kuerzel = get(r,"kuerzel",5) or "?"
             pos = aktuelle_position_ermitteln(code, db)
             if not pos:
                 ohne_position.append({"code": code, "titel": titel, "ma": ma})
@@ -2853,13 +2860,13 @@ def dashboard_maps():
                     "von": pos["von_koord"], "nach": pos["nach_koord"],
                     "von_iata": pos["von_iata"], "nach_iata": pos["nach_iata"],
                     "von_name": pos["von_name"], "nach_name": pos["nach_name"],
-                    "fortschritt": pos["fortschritt"], "icon": icon,
+                    "fortschritt": pos["fortschritt"], "icon": icon, "kuerzel": kuerzel,
                     "code": code, "titel": titel, "ma": ma, "label": pos["label"],
                 })
             else:
                 marker.append({
                     "lat": pos["lat"], "lon": pos["lon"], "code": code, "titel": titel,
-                    "ma": ma, "land": pos.get("ort_name") or pos.get("land")
+                    "ma": ma, "land": pos.get("ort_name") or pos.get("land"), "kuerzel": kuerzel
                 })
                 herkunft = pos.get("herkunft")
                 if herkunft:
@@ -2910,10 +2917,19 @@ def dashboard_maps():
             attribution: '&copy; OpenStreetMap-Mitwirkende',
             maxZoom: 18
         }}).addTo(map);
-        const ortIcon = L.divIcon({{
-            html: '<div style="background:#2563eb;color:white;border-radius:50%;width:14px;height:14px;border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,.4)"></div>',
-            className: '', iconSize: [14,14], iconAnchor: [7,7]
-        }});
+        function personIcon(kuerzel) {{
+            return L.divIcon({{
+                html: '<div style="position:relative;width:30px;height:36px">' +
+                      '<div style="font-size:26px;line-height:26px;text-align:center;' +
+                      'filter:drop-shadow(0 1px 2px rgba(0,0,0,.4))">🧍</div>' +
+                      '<div style="position:absolute;top:-6px;left:50%;transform:translateX(-50%);' +
+                      'background:#2563eb;color:white;font-size:10px;font-weight:700;' +
+                      'padding:1px 5px;border-radius:8px;border:1.5px solid white;' +
+                      'white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.4)">' + kuerzel + '</div>' +
+                      '</div>',
+                className: '', iconSize: [30,36], iconAnchor: [15,30]
+            }});
+        }}
         const flughafenIcon = L.divIcon({{
             html: '<div style="background:white;border:2px solid #64748b;border-radius:50%;width:9px;height:9px"></div>',
             className: '', iconSize: [9,9], iconAnchor: [4,4]
@@ -2921,7 +2937,7 @@ def dashboard_maps():
         const bounds = [];
 
         marker.forEach(m => {{
-            const mk = L.marker([m.lat, m.lon], {{icon: ortIcon}}).addTo(map);
+            const mk = L.marker([m.lat, m.lon], {{icon: personIcon(m.kuerzel)}}).addTo(map);
             mk.bindPopup(
                 '<b>' + m.code + '</b> – ' + m.titel + '<br>' +
                 '👤 ' + m.ma + '<br>📍 ' + m.land
@@ -2940,11 +2956,7 @@ def dashboard_maps():
             // Aktuelle Position anteilig entlang der Strecke interpolieren
             const lat = s.von[0] + (s.nach[0] - s.von[0]) * s.fortschritt;
             const lon = s.von[1] + (s.nach[1] - s.von[1]) * s.fortschritt;
-            const unterwegsIcon = L.divIcon({{
-                html: '<div style="font-size:20px;transform:rotate(0deg)">' + s.icon + '</div>',
-                className: '', iconSize: [24,24], iconAnchor: [12,12]
-            }});
-            L.marker([lat, lon], {{icon: unterwegsIcon}}).addTo(map).bindPopup(
+            L.marker([lat, lon], {{icon: personIcon(s.kuerzel)}}).addTo(map).bindPopup(
                 '<b>' + s.code + '</b> – ' + s.titel + '<br>' +
                 '👤 ' + s.ma + '<br>' + s.icon + ' ' + s.label + ' (unterwegs, ' +
                 Math.round(s.fortschritt*100) + '%)'
@@ -2954,7 +2966,7 @@ def dashboard_maps():
 
         kontextStrecken.forEach(k => {{
             L.polyline([k.von, k.nach], {{
-                color: '#94a3b8', weight: 2, dashArray: '4, 6', opacity: 0.6
+                color: '#2563eb', weight: 2, dashArray: '4, 6', opacity: 0.5
             }}).addTo(map);
             const kontextIcon = L.divIcon({{
                 html: '<div style="font-size:16px;opacity:0.85">' + k.icon + '</div>',

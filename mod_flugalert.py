@@ -454,13 +454,17 @@ def cron_flug_alerts(debug: bool = False) -> dict:
 
 
 def offene_alerts_fuer_dashboard() -> list:
-    """Für die Dashboard-Anzeige: Segmente mit kürzlich gesendetem Alert."""
+    """Für die Dashboard-Anzeige: Segmente mit kürzlich gesendetem Alert
+    (nur die letzten 24 Stunden – danach verschwindet der Hinweis automatisch,
+    auch ohne manuelles Wegklicken)."""
     db = get_db(); cur = db.cursor()
-    cur.execute("""SELECT beleg_id, transport_typ, transport_nummer, von_ort, nach_ort,
+    grenze = (jetzt_lokal() - timedelta(hours=24)).isoformat()
+    P = ph()
+    cur.execute(f"""SELECT beleg_id, transport_typ, transport_nummer, von_ort, nach_ort,
                    status, verspaetung_minuten, alert_gesendet_am
                    FROM flug_status
-                   WHERE alert_gesendet_am IS NOT NULL
-                   ORDER BY alert_gesendet_am DESC LIMIT 5""")
+                   WHERE alert_gesendet_am IS NOT NULL AND alert_gesendet_am >= {P}
+                   ORDER BY alert_gesendet_am DESC LIMIT 5""", (grenze,))
     rows = cur.fetchall()
     cur.close(); db.close()
     out = []
