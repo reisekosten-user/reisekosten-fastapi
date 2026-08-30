@@ -365,12 +365,21 @@ def reisende_und_organisatoren_mailadressen(reise_code: str) -> list:
     return list(set(reisende_mails + org_mails))
 
 
+TERMINAL_STATUS_SCHLUESSELWOERTER = ("arriv", "cancel", "divert", "land")
+
 def cron_flug_alerts(debug: bool = False) -> dict:
     """
     Wird von einem externen Cron-Pinger regelmäßig (idealerweise minütlich)
     aufgerufen. Prüft für jedes Flug-/Bahn-Segment, ob laut konfiguriertem
     Intervall ein neuer Check fällig ist, ruft bei Bedarf die externe API auf
     und verschickt bei relevanten Änderungen einen Alert.
+
+    Sparmaßnahme: Ist der zuletzt bekannte Status bereits ein Endzustand
+    (angekommen/gelandet/storniert/umgeleitet), wird das Segment NICHT mehr
+    weiter abgefragt, auch wenn es laut Zeitfenster noch "fällig" wäre – ein
+    bereits gelandeter Flug ändert seinen Status praktisch nie mehr. Das
+    reduziert die Anzahl der externen API-Aufrufe erheblich, v.a. weil ein
+    Segment sonst bis zu 24h nach der geplanten Abreise im Kulanzfenster bleibt.
     """
     konfig = konfiguration_laden()
     if debug:
@@ -394,6 +403,13 @@ def cron_flug_alerts(debug: bool = False) -> dict:
             if debug: diag["verarbeitung"].append(schritt)
             continue
         alt_status = status_holen(seg["beleg_id"], seg["segment_index"])
+
+        alter_status_text = (alt_status.get("status") or "").lower() if alt_status else ""
+        if alter_status_text and any(k in alter_status_text for k in TERMINAL_STATUS_SCHLUESSELWOERTER):
+            schritt["ergebnis"] = f"Status bereits final ('{alt_status.get('status')}') – keine weitere Abfrage nötig"
+            if debug: diag["verarbeitung"].append(schritt)
+            continue
+
         letzter_check = alt_status.get("letzter_check_am") if alt_status else None
         schritt["letzter_check_am"] = str(letzter_check) if letzter_check else None
         if letzter_check:

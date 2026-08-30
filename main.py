@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.2-d"
+APP_VERSION  = "3.2-e"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2452,6 +2452,10 @@ def dashboard():
                 aktiv.append(r)
             else:
                 abgeschlossen.append(r)
+
+        # Geplante Reisen: die nächste zuerst, die am weitesten entfernte zuletzt
+        # (alle_reisen kommt insgesamt DESC sortiert, für "geplant" wollen wir ASC)
+        geplant.sort(key=lambda r: to_date(get(r,"abreise",2)) or date.max)
 
         def reise_zeile(r, typ=""):
             code=get(r,"code",0); titel=get(r,"titel",1)
