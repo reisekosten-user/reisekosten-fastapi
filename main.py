@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.3-c"
+APP_VERSION  = "3.3-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -1927,7 +1927,7 @@ def reise_abschluss(code: str):
             anbieter,rechnungsnummer,belegdatum,
             betrag_brutto,betrag_netto,betrag_mwst,waehrung,
             land_beleg,betrag_eur,kurs_eur,kurs_datum,kurs_quelle,
-            s3_original,status
+            s3_original,status,beleg_gruppe_id
             FROM belege WHERE reise_code={P}
             ORDER BY belegdatum NULLS LAST, id""", (rcode,))
         belege = cur.fetchall()
@@ -1939,8 +1939,17 @@ def reise_abschluss(code: str):
 
         # Belege kategorisieren
         rechnungen = []      # Rechnung/Quittung/Receipt
-        bestaetigung = []    # Nur Buchungsbestätigung
+        bestaetigung = []    # Nur Buchungsbestätigung OHNE verknüpfte Rechnung (= fehlt noch echt)
+        vorlaeufig = []      # Buchungsbestätigung OHNE verknüpfte Rechnung, aber MIT Betrag
+                              # -> zählt vorläufig mit, damit kein Geld in der Summe fehlt
         kurs_fehlt = []      # Auslandsbelege ohne Kurs
+
+        # Gruppen-Zugehörigkeit ermitteln: welche Belegarten stecken in derselben Gruppe?
+        gruppen_arten_abschluss = {}
+        for b in belege:
+            gid = g(b,"beleg_gruppe_id",18)
+            if gid:
+                gruppen_arten_abschluss.setdefault(gid, set()).add((g(b,"belegart",1) or "").lower())
 
         RECHNUNG_ARTEN = {"rechnung","quittung","receipt"}
         for b in belege:
@@ -1951,12 +1960,23 @@ def reise_abschluss(code: str):
                 rechnungen.append(b)
                 if waehrung != "EUR" and not g(b,"kurs_eur",13):
                     kurs_fehlt.append(b)
+                continue
+
+            gid = g(b,"beleg_gruppe_id",18)
+            gruppe_hat_rechnung = bool(gid and gruppen_arten_abschluss.get(gid, set()) & RECHNUNG_ARTEN)
+            if gruppe_hat_rechnung:
+                continue  # wird durch die verknüpfte Rechnung in der Gruppe bereits gezählt
+            betrag = g(b,"betrag_brutto",7)
+            if betrag:
+                vorlaeufig.append(b)
+                if waehrung != "EUR" and not g(b,"kurs_eur",13):
+                    kurs_fehlt.append(b)
             else:
                 bestaetigung.append(b)
 
         kosten_eur = sum(
             float(g(b,"betrag_eur",12) or g(b,"betrag_brutto",7) or 0)
-            for b in rechnungen
+            for b in (rechnungen + vorlaeufig)
             if (g(b,"waehrung",10) or "EUR") == "EUR" or g(b,"betrag_eur",12))
 
         # Wochentage
@@ -2008,8 +2028,10 @@ def reise_abschluss(code: str):
         # ── Kosten-Tabelle ────────────────────────────────────────────────────
         kosten_html = ""
         summen = {}  # pro Transportart
-        for b in rechnungen:
+        vorlaeufig_ids = {g(b,"id",0) for b in vorlaeufig}
+        for b in rechnungen + vorlaeufig:
             bid2=g(b,"id",0); art=g(b,"belegart",1) or "–"
+            ist_vorlaeufig = bid2 in vorlaeufig_ids
             typ=g(b,"transportart",2) or "Sonstiges"
             freitext=g(b,"transportart_freitext",3) or ""
             anbieter=g(b,"anbieter",4) or "–"
@@ -2021,6 +2043,8 @@ def reise_abschluss(code: str):
             betrag_eur_b=g(b,"betrag_eur",12); kurs=g(b,"kurs_eur",13)
 
             typ_label = typ + (f" – {freitext}" if freitext else "")
+            if ist_vorlaeufig:
+                typ_label += ' <span style="color:#c2410c;font-weight:600">· vorläufig</span>'
 
             # Betrag-Spalte
             if waehrung == "EUR":
@@ -2039,10 +2063,13 @@ def reise_abschluss(code: str):
                     bet_s += f' <span style="color:#ef4444">⚠ Kurs fehlt</span>'
                     eur_val = 0
                 mwst_s = "Auslandsbeleg – Vorsteuer nicht abzugsfähig"
+            if ist_vorlaeufig:
+                mwst_s = ('<span style="color:#c2410c">Nur Buchungsbestätigung, noch keine Rechnung – '
+                           'Betrag wird vorläufig mitgerechnet</span>')
 
             summen[typ] = summen.get(typ, 0) + eur_val
 
-            kosten_html += f"""<tr>
+            kosten_html += f"""<tr{' style="background:#fff7ed"' if ist_vorlaeufig else ''}>
                 <td>{fdat(bd)}</td>
                 <td><span style="font-size:11px;background:#f1f5f9;padding:1px 6px;
                     border-radius:4px">{typ_label}</span></td>
@@ -2080,10 +2107,10 @@ def reise_abschluss(code: str):
                           f'<a href="/beleg/{bid2}" style="color:var(--blue)">'
                           f'Beleg #{bid2}</a> ' 
                           f'<span style="color:#ef4444;font-size:11px">'
-                          f'⚠ Keine Rechnung vorhanden</span></li>')
+                          f'⚠ Keine Rechnung, kein Betrag erkannt</span></li>')
             best_html = f"""
             <div class="alert alert-warn" style="margin-top:16px">
-              <b>⚠ Nur Buchungsbestätigung vorhanden – keine Rechnung:</b>
+              <b>⚠ Nur Buchungsbestätigung ohne erkennbaren Betrag – fehlt in der Kostensumme:</b>
               <ul style="margin-top:8px;padding-left:16px">{items}</ul>
             </div>"""
 
@@ -2240,7 +2267,8 @@ def reise_abschluss_pdf(code: str):
             FROM vma_tage WHERE reise_code={P} ORDER BY datum""", (rcode,))
         vma_rows = cur.fetchall()
 
-        cur.execute(f"""SELECT id,belegart,anbieter,belegdatum,betrag_brutto,waehrung,betrag_eur
+        cur.execute(f"""SELECT id,belegart,anbieter,belegdatum,betrag_brutto,waehrung,betrag_eur,
+            beleg_gruppe_id
             FROM belege WHERE reise_code={P} ORDER BY belegdatum""", (rcode,))
         belege = cur.fetchall()
         cur.close(); db.close()
@@ -2248,8 +2276,28 @@ def reise_abschluss_pdf(code: str):
         vma_total_netto = sum(float(g(v,"vma_netto",9) or 0) for v in vma_rows)
         trennung_total = sum(float(g(v,"trennungspauschale",10) or 0) for v in vma_rows)
 
+        # Gleiche Logik wie /abschluss (HTML): Buchungsbestätigungen mit Betrag,
+        # die nicht mit einer echten Rechnung/Quittung verknüpft sind, zählen
+        # vorläufig mit – sonst würde z.B. eine erst als Buchungsbestätigung
+        # vorliegende Hotelrechnung stillschweigend in der Summe fehlen.
         RECHNUNG_ARTEN = {"rechnung","quittung","receipt"}
-        rechnungen = [b for b in belege if any(x in (g(b,"belegart",1) or "").lower() for x in RECHNUNG_ARTEN)]
+        gruppen_arten_pdf = {}
+        for b in belege:
+            gid = g(b,"beleg_gruppe_id",7)
+            if gid:
+                gruppen_arten_pdf.setdefault(gid, set()).add((g(b,"belegart",1) or "").lower())
+
+        rechnungen = []
+        for b in belege:
+            art = (g(b,"belegart",1) or "").lower()
+            if any(x in art for x in RECHNUNG_ARTEN):
+                rechnungen.append(b)
+                continue
+            gid = g(b,"beleg_gruppe_id",7)
+            gruppe_hat_rechnung = bool(gid and gruppen_arten_pdf.get(gid, set()) & RECHNUNG_ARTEN)
+            if not gruppe_hat_rechnung and g(b,"betrag_brutto",4):
+                rechnungen.append(b)  # vorläufig mitgezählt
+
         kosten_eur = sum(float(g(b,"betrag_eur",6) or g(b,"betrag_brutto",4) or 0) for b in rechnungen)
 
         from reportlab.lib.pagesizes import A4
