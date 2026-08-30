@@ -484,6 +484,7 @@ def get_migrations() -> list[str]:
         "ALTER TABLE mitarbeiter ADD COLUMN IF NOT EXISTS passwort_hash TEXT",
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS trennungspauschale NUMERIC(6,2) DEFAULT 0",
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS trennungspauschale_quelle TEXT DEFAULT 'auto'",
+        "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS tatsaechliche_uhrzeit TEXT",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS verknuepft_mit_id INTEGER",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS beleg_gruppe_id INTEGER",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS ist_erechnung BOOLEAN DEFAULT FALSE",

@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.3-a"
+APP_VERSION  = "3.3-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -1826,6 +1826,26 @@ async def vma_trennungspauschale_speichern(code: str, vid: int, request: Request
         db = get_db(); cur = db.cursor()
         cur.execute(f"""UPDATE vma_tage SET trennungspauschale={P},
                         trennungspauschale_quelle='manuell' WHERE id={P}""", (wert, vid))
+        db.commit(); cur.close(); db.close()
+        ziel = request.headers.get("referer") or f"/reise/{code.upper()}"
+        return RedirectResponse(ziel, status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
+@app.post("/reise/{code}/vma/{vid}/tatsaechliche-zeit")
+async def vma_tatsaechliche_zeit_speichern(code: str, vid: int, request: Request):
+    """
+    Speichert die tatsächliche Uhrzeit des Reiseantritts (erster Reisetag) bzw.
+    der Reisebeendigung (letzter Reisetag) – kann vom Abflug/Ankunft abweichen,
+    z.B. wenn der Mitarbeiter schon vor dem Flug losfährt oder nach der
+    Zugankunft noch mit dem eigenen Auto nach Hause fährt.
+    """
+    form = await request.form()
+    uhrzeit = (form.get("tatsaechliche_uhrzeit") or "").strip() or None
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"UPDATE vma_tage SET tatsaechliche_uhrzeit={P} WHERE id={P}", (uhrzeit, vid))
         db.commit(); cur.close(); db.close()
         ziel = request.headers.get("referer") or f"/reise/{code.upper()}"
         return RedirectResponse(ziel, status_code=303)
@@ -3745,7 +3765,7 @@ def reise_detail(code: str):
         # VMA je Tag
         cur.execute(f"""SELECT id, datum, land_code, land_name, ist_halber_satz,
                         fruehstueck, mittagessen, abendessen, vma_netto, vma_satz_voll, vma_satz_halb,
-                        trennungspauschale, trennungspauschale_quelle
+                        trennungspauschale, trennungspauschale_quelle, tatsaechliche_uhrzeit
                         FROM vma_tage WHERE reise_code = {P} ORDER BY datum""", (rcode,))
         vma_tage_rows = cur.fetchall()
 
@@ -4055,8 +4075,12 @@ def reise_detail(code: str):
             abend = bool(get(vt,"abendessen",7))
             netto = float(get(vt,"vma_netto",8) or 0)
             trennung = float(get(vt,"trennungspauschale",11) or 0)
+            tatsaechliche_zeit = get(vt,"tatsaechliche_uhrzeit",13) or ""
             vma_tage_summe += netto
             trennung_summe += trennung
+
+            ist_erster_tag = (i == 0)
+            ist_letzter_tag_schleife = (i == len(vma_tage_rows) - 1)
 
             wt = wochentage[vd.weekday()] if vd else "–"
             datum_txt = f"{wt} {vd.day:02d}.{vd.month:02d}.{vd.year}" if vd else "–"
@@ -4064,6 +4088,20 @@ def reise_detail(code: str):
                            'padding:1px 7px;border-radius:10px">½ Satz</span>') if ist_halb else ""
             trenn_badge = (f'<div style="font-size:12px;color:#7c3aed;font-weight:600;margin-top:2px">'
                             f'+ {trennung:.2f} EUR Trennungspauschale</div>') if trennung else ""
+
+            tatsaechliche_zeit_html = ""
+            if ist_erster_tag or ist_letzter_tag_schleife:
+                label = "Reiseantritt (tatsächlich)" if ist_erster_tag else "Reiseende (tatsächlich)"
+                hinweis = ("z.B. schon losgefahren, bevor der Flug startet" if ist_erster_tag
+                           else "z.B. noch Heimfahrt nach der Ankunft")
+                tatsaechliche_zeit_html = (
+                    f'<form method="post" action="/reise/{rcode}/vma/{vid}/tatsaechliche-zeit" '
+                    f'style="display:inline-flex;align-items:center;gap:6px;margin-left:10px">'
+                    f'<span style="font-size:11px;color:var(--muted)">{label}:</span>'
+                    f'<input type="time" name="tatsaechliche_uhrzeit" value="{tatsaechliche_zeit}" '
+                    f'onchange="this.form.submit()" title="{hinweis}" '
+                    f'style="font-size:11px;padding:2px 6px;border:1px solid var(--border);border-radius:4px">'
+                    f'</form>')
 
             tage_blocks += f"""<div style="border-bottom:1px solid var(--border)">
               <div style="padding:12px 16px;background:var(--bg)">
@@ -4088,6 +4126,7 @@ def reise_detail(code: str):
                   {cb(rcode, vid, "abendessen", abend, "Abend", 40)}
                 </form>
                 {trenn_select(rcode, vid, trennung) if vd and vd.weekday() in (5,6) else ""}
+                {tatsaechliche_zeit_html}
               </div>
               {tagesablauf_html(vd, rcode)}
             </div>"""
