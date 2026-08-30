@@ -35,7 +35,7 @@ from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_tok
                          tage_sicherstellen, tage_laden, tag_speichern,
                          reisende_der_reise, zugaenge_der_reise, portal_mail_senden,
                          cron_portal_mails, PORTAL_TAGE_VORHER)
-from mod_flugalert import (konfiguration_laden, konfiguration_speichern,
+from mod_flugalert import (konfiguration_laden,
                             cron_flug_alerts, offene_alerts_fuer_dashboard)
 from mod_geo import koordinaten_fuer_land
 CRON_SECRET = os.getenv("CRON_SECRET", "")
@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.2-e"
+APP_VERSION  = "3.3-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4977,10 +4977,12 @@ def alert_einstellungen_form(request: Request, testergebnis: str = ""):
                         api_html = (f'<pre style="font-size:11px;background:var(--bg);padding:8px;'
                                      f'border-radius:6px;margin-top:6px;white-space:pre-wrap">'
                                      f'{json.dumps(v["api_antwort"], ensure_ascii=False, indent=2)[:1500]}</pre>')
+                    checkpoints_txt = ", ".join(v.get("checkpoints") or []) or "–"
                     verarbeitung_zeilen += f"""<div style="padding:8px 0;border-bottom:1px solid var(--border);font-size:12px">
                         <b>Beleg #{v['beleg_id']} · Segment {v['segment_index']} ({v['transport_nummer']})</b>
-                        – {v['stunden_bis_abreise']}h bis Abreise, Intervall: {v.get('intervall_minuten','–')} Min.<br>
-                        <span style="color:var(--muted)">Quelle: {v.get('quelle','–')}
+                        – {v['stunden_bis_abreise']}h bis Abreise<br>
+                        <span style="color:var(--muted)">Checkpoints: {checkpoints_txt}<br>
+                        Quelle: {v.get('quelle','–')}
                         {' · API-Key gesetzt: ' + ('ja' if v.get('api_key_gesetzt') else 'NEIN') if 'api_key_gesetzt' in v else ''}
                         {' · letzter Check: ' + str(v.get('letzter_check_am')) if v.get('letzter_check_am') else ' · noch nie geprüft'}</span><br>
                         <b>→ {v.get('ergebnis','?')}</b>
@@ -5011,41 +5013,37 @@ def alert_einstellungen_form(request: Request, testergebnis: str = ""):
     <div class="alert alert-warn" style="margin-bottom:16px">
       Ein externer Cron-Dienst (z.B. cron-job.org) muss regelmäßig
       <code>/cron/flug-alerts?key=DEIN_CRON_SECRET</code> aufrufen – am besten minütlich,
-      damit die kürzeste Stufe (unter 1h vor Abflug) tatsächlich greifen kann. Wie oft
-      innerhalb dieses Rahmens wirklich bei der externen Flug-/Bahn-API nachgefragt wird,
-      steuern die Intervalle unten.
+      damit die feinste Stufe (15 Min. vor Abflug) tatsächlich greifen kann. Wie oft dabei
+      wirklich bei der externen Flug-/Bahn-API nachgefragt wird, steuert NICHT ein
+      laufendes Intervall, sondern feste Checkpoints (siehe unten).
     </div>
-    <div class="card" style="max-width:520px">
+    <div class="card" style="max-width:560px">
+      <div class="card-header"><span class="card-title">📅 Fester Prüfplan (nicht editierbar)</span></div>
       <div class="card-body">
-        <form method="post" action="/einstellungen/alerts">
-          <div class="form-grid form-grid-2">
-            <div class="form-group full">
-              <label>Mehr als 4h vor Abflug – oder nach der geplanten Abflugzeit (z.B. bei Verspätung)</label>
-              <input type="number" name="intervall_fern" value="{k['fern']}" min="1"> Minuten
-            </div>
-            <div class="form-group">
-              <label>4h bis 1h vor Abflug</label>
-              <input type="number" name="intervall_4h" value="{k['4h']}" min="1"> Minuten
-            </div>
-            <div class="form-group">
-              <label>Unter 1h vor Abflug</label>
-              <input type="number" name="intervall_1h" value="{k['1h']}" min="1"> Minuten
-            </div>
-          </div>
-          <div class="form-hint" style="margin:8px 0">
-            Für den Testserver z.B. alle Stufen auf 10 setzen. Standard: 60 / 30 / 15 Minuten.
-          </div>
-          <button type="submit" class="btn btn-primary" style="width:100%">Speichern</button>
-        </form>
+        <table style="width:100%;font-size:13px">
+          <tr><td style="padding:4px 0"><b>Vor der geplanten Abreise</b></td>
+              <td style="text-align:right">4h · 3h · 2h · 1h · 30 Min · 15 Min</td></tr>
+          <tr><td style="padding:4px 0">Bei erkannter Verspätung zusätzlich</td>
+              <td style="text-align:right">15 Min vor der neuen erwarteten Abreise</td></tr>
+          <tr><td style="padding:4px 0">Während des Fluges/der Zugfahrt</td>
+              <td style="text-align:right">kein Check</td></tr>
+          <tr><td style="padding:4px 0">Vor der erwarteten Landung/Ankunft</td>
+              <td style="text-align:right">30 Min vorher</td></tr>
+          <tr><td style="padding:4px 0">Nach der Ankunft</td>
+              <td style="text-align:right">kein Check mehr</td></tr>
+        </table>
+        <hr style="border:none;border-top:1px solid var(--border);margin:12px 0">
+        <p style="font-size:12px;color:var(--muted);margin:0">
+          Bei einer Verspätung ab <b>{k['verspaetung_alarm_ab_min']} Minuten</b> (oder Stornierung/
+          Umleitung) geht sofort eine Mail an alle zugeordneten Reisenden dieser Reise
+          <b>und</b> alle Organisatoren – unabhängig vom nächsten Checkpoint.</p>
       </div>
     </div>
-    <div class="card" style="max-width:520px;margin-top:16px">
+    <div class="card" style="max-width:560px;margin-top:16px">
       <div class="card-body">
         <p style="font-size:12px;color:var(--muted);margin-bottom:10px">
           Führt den Prüflauf einmal sofort aus (wie es der Cron sonst regelmäßig tun würde) –
-          zum Testen, ohne auf den externen Cron-Dienst zu warten. Berücksichtigt weiterhin
-          die oben eingestellten Intervalle (ein Segment wird nur erneut geprüft, wenn genug
-          Zeit seit dem letzten Check vergangen ist).</p>
+          zum Testen, ohne auf den externen Cron-Dienst zu warten.</p>
         <form method="post" action="/einstellungen/alerts/testlauf">
           <button type="submit" class="btn btn-secondary" style="width:100%">🧪 Jetzt testweise abrufen</button>
         </form>
@@ -5065,21 +5063,6 @@ def alert_testlauf(request: Request):
         f"/einstellungen/alerts?testergebnis={urllib.parse.quote(json.dumps(result))}",
         status_code=303)
 
-
-@app.post("/einstellungen/alerts")
-async def alert_einstellungen_speichern(request: Request):
-    if not ist_organisator(request):
-        return HTMLResponse(shell("Kein Zugriff",
-            '<div class="alert alert-err">Nur Organisatoren dürfen diese Einstellungen ändern.</div>'), status_code=403)
-    form = await request.form()
-    try:
-        i_fern = int(form.get("intervall_fern") or 60)
-        i_4h = int(form.get("intervall_4h") or 30)
-        i_1h = int(form.get("intervall_1h") or 15)
-        konfiguration_speichern(i_fern, i_4h, i_1h)
-        return RedirectResponse("/einstellungen/alerts", status_code=303)
-    except Exception as e:
-        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
 
 @app.post("/reise/{code}/zugang/{kuerzel}/senden")

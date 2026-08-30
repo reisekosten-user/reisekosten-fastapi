@@ -33,65 +33,61 @@ def jetzt_lokal() -> datetime:
     return datetime.now(BERLIN_TZ).replace(tzinfo=None)
 
 
-# ── Konfiguration ──────────────────────────────────────────────────────────────
-# Drei Stufen: "fern" (mehr als 4h vor Abflug ODER nach der geplanten Abflugzeit,
-# z.B. bei Verspätung/Warten auf Bestätigung des tatsächlichen Abflugs),
-# "4h" (4h bis 1h vor Abflug), "1h" (unter 1h vor Abflug).
+# ── Checkpoint-Schema ──────────────────────────────────────────────────────────
+# Statt eines laufenden Intervalls werden feste Zeitpunkte relativ zur
+# GEPLANTEN Abreise/Ankunft geprüft:
+#   4h / 3h / 2h / 1h / 30min / 15min VOR der geplanten Abreise
+#   + bei erkannter Verspätung zusätzlich 15min VOR der NEUEN erwarteten Abreise
+#   + WÄHREND des Flugs (zwischen Abreise und Ankunft-30min): kein Check
+#   + 30min VOR der erwarteten Landung (inkl. bekannter Verspätung)
+#   + nach der Landung: kein Check mehr
+
+CHECKPOINTS_VOR_ABREISE = [timedelta(hours=4), timedelta(hours=3), timedelta(hours=2),
+                           timedelta(hours=1), timedelta(minutes=30), timedelta(minutes=15)]
+CHECKPOINT_VOR_ANKUNFT = timedelta(minutes=30)
+VERSPAETUNGS_ALARM_SCHWELLE_MIN = 15
+
+
+def _checkpoints_fuer_segment(seg: dict, alt_status: dict | None) -> list:
+    """Berechnet alle relevanten Prüf-Zeitpunkte für ein Segment."""
+    dt_ab = seg["dt_ab"]; dt_an = seg["dt_an"]
+    bekannte_verspaetung = (alt_status.get("verspaetung_minuten") or 0) if alt_status else 0
+
+    punkte = [dt_ab - td for td in CHECKPOINTS_VOR_ABREISE]
+
+    if bekannte_verspaetung > 0:
+        neue_abreise = dt_ab + timedelta(minutes=bekannte_verspaetung)
+        punkte.append(neue_abreise - timedelta(minutes=15))
+
+    erwartete_ankunft = dt_an + timedelta(minutes=bekannte_verspaetung)
+    punkte.append(erwartete_ankunft - CHECKPOINT_VOR_ANKUNFT)
+
+    return sorted(punkte)
+
+
+def segment_check_faellig(seg: dict, jetzt: datetime, alt_status: dict | None) -> bool:
+    """
+    True, wenn JETZT mindestens ein Checkpoint erreicht wurde, der noch nicht
+    (also seit diesem Checkpoint-Zeitpunkt) geprüft wurde. Punkte zwischen
+    Abreise und Ankunft-30min existieren bewusst nicht -> während des Flugs
+    finden automatisch keine Checks statt.
+    """
+    letzter_check = alt_status.get("letzter_check_am") if alt_status else None
+    if isinstance(letzter_check, str):
+        try: letzter_check = datetime.fromisoformat(letzter_check[:19])
+        except Exception: letzter_check = None
+    for p in _checkpoints_fuer_segment(seg, alt_status):
+        if p <= jetzt and (letzter_check is None or letzter_check < p):
+            return True
+    return False
+
+
+# ── Konfiguration (nur noch informativ – Zeitpunkte oben sind fest codiert) ────
 
 def konfiguration_laden() -> dict:
-    db = get_db(); cur = db.cursor()
-    cur.execute("SELECT intervall_24h_min, intervall_4h_min, intervall_1h_min "
-                "FROM alert_konfiguration ORDER BY id LIMIT 1")
-    r = cur.fetchone()
-    cur.close(); db.close()
-    if not r:
-        return {"fern": 60, "4h": 30, "1h": 15}
-    g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
-    return {"fern": g("intervall_24h_min", 0), "4h": g("intervall_4h_min", 1),
-            "1h": g("intervall_1h_min", 2)}
-
-
-def konfiguration_speichern(i_fern: int, i_4h: int, i_1h: int):
-    db = get_db(); cur = db.cursor()
-    P = ph()
-    cur.execute("SELECT id FROM alert_konfiguration ORDER BY id LIMIT 1")
-    r = cur.fetchone()
-    if r:
-        gid = r[0] if isinstance(r, tuple) else r["id"]
-        if is_postgres():
-            cur.execute(f"""UPDATE alert_konfiguration SET
-                intervall_24h_min={P}, intervall_4h_min={P},
-                intervall_1h_min={P}, aktualisiert_am=NOW() WHERE id={P}""",
-                (i_fern, i_4h, i_1h, gid))
-        else:
-            cur.execute(f"""UPDATE alert_konfiguration SET
-                intervall_24h_min={P}, intervall_4h_min={P},
-                intervall_1h_min={P}, aktualisiert_am=datetime('now') WHERE id={P}""",
-                (i_fern, i_4h, i_1h, gid))
-    else:
-        cur.execute(f"""INSERT INTO alert_konfiguration
-            (intervall_24h_min, intervall_4h_min, intervall_1h_min)
-            VALUES ({P},{P},{P})""", (i_fern, i_4h, i_1h))
-    db.commit(); cur.close(); db.close()
-
-
-def intervall_fuer(stunden_bis_abreise: float, konfig: dict) -> int | None:
-    """
-    Gibt das passende Prüfintervall (Minuten) zurück, oder None wenn außerhalb
-    des Überwachungsfensters (mehr als 24h vorher oder mehr als 24h nach der
-    geplanten Abreise).
-    - Unter 1h vor Abflug: höchste Frequenz (Stufe "1h")
-    - 1h bis 4h vor Abflug: mittlere Frequenz (Stufe "4h")
-    - Mehr als 4h vor Abflug ODER nach der geplanten Abflugzeit (z.B. bei
-      Verspätung, wo die geplante Zeit schon verstrichen ist): Stufe "fern"
-    """
-    if stunden_bis_abreise < -24 or stunden_bis_abreise > 24:
-        return None
-    if 0 <= stunden_bis_abreise <= 1:
-        return konfig["1h"]
-    if 1 < stunden_bis_abreise <= 4:
-        return konfig["4h"]
-    return konfig["fern"]
+    """Für die Anzeige auf der Einstellungsseite – das Schema selbst ist fest."""
+    return {"checkpoints": ["4h", "3h", "2h", "1h", "30min", "15min"],
+            "verspaetung_alarm_ab_min": VERSPAETUNGS_ALARM_SCHWELLE_MIN}
 
 
 # ── Externe APIs ───────────────────────────────────────────────────────────────
@@ -260,6 +256,21 @@ def ueberwachte_segmente_laden(debug: bool = False):
                     f"Segment {idx} ({s.get('transport_nummer')}, {dt_ab}): "
                     f"{stunden_bis:.1f}h bis Abreise – außerhalb -24h/+24h-Fenster")
                 continue
+
+            # Ankunftszeit parsen (für den Lande-Checkpoint 30min vor Landung
+            # nötig) – falls nicht vorhanden/parsbar, wird als grobe Näherung
+            # 2h nach Abreise angenommen, damit der Checkpoint trotzdem existiert.
+            d_an = _to_d_ddmmyyyy(s.get("ankunft_datum"))
+            zeit_an = s.get("ankunft_zeit") or "00:00"
+            dt_an = None
+            if d_an:
+                try:
+                    dt_an = datetime.strptime(f"{d_an.isoformat()} {zeit_an}", "%Y-%m-%d %H:%M")
+                except Exception:
+                    dt_an = None
+            if not dt_an or dt_an <= dt_ab:
+                dt_an = dt_ab + timedelta(hours=2)
+
             beleg_diag["segmente_uebernommen"] += 1
             segmente.append({
                 "beleg_id": bid, "reise_code": rcode, "segment_index": idx,
@@ -268,6 +279,7 @@ def ueberwachte_segmente_laden(debug: bool = False):
                 "nach_ort": s.get("nach_ort") or s.get("nach_iata") or "",
                 "abreise_datum": d_ab, "abreise_zeit": zeit_ab,
                 "stunden_bis_abreise": stunden_bis,
+                "dt_ab": dt_ab, "dt_an": dt_an,
             })
         diag["belege_details"].append(beleg_diag)
 
@@ -337,16 +349,22 @@ def alert_markieren(beleg_id: int, segment_index: int):
 
 
 def relevante_aenderung(alt: dict | None, neu: dict) -> bool:
-    """Nur bei echten Änderungen (nicht bei jedem Check) alarmieren."""
-    if alt is None:
-        return neu.get("status") in ("cancelled", "delayed") or (neu.get("verspaetung_minuten") or 0) > 0
-    if alt.get("status") != neu.get("status"):
+    """
+    Alarmiert sofort bei:
+    - Stornierung/Umleitung
+    - Verspätung > 15 Minuten, sobald diese Schwelle erstmals erreicht/
+      überschritten wird (nicht bei jedem weiteren Check erneut, außer die
+      Verspätung wächst nochmal um mind. 15 Minuten weiter)
+    """
+    neu_status = (neu.get("status") or "").lower()
+    if any(k in neu_status for k in ("cancel", "divert")):
         return True
-    alt_v = alt.get("verspaetung_minuten") or 0
     neu_v = neu.get("verspaetung_minuten") or 0
-    if abs(neu_v - alt_v) >= 10:
+    alt_v = (alt.get("verspaetung_minuten") or 0) if alt else 0
+    if neu_v >= VERSPAETUNGS_ALARM_SCHWELLE_MIN and (
+            alt is None or alt_v < VERSPAETUNGS_ALARM_SCHWELLE_MIN or neu_v - alt_v >= 15):
         return True
-    if alt.get("gate") != neu.get("gate") and neu.get("gate"):
+    if alt and alt.get("gate") != neu.get("gate") and neu.get("gate"):
         return True
     return False
 
@@ -371,17 +389,16 @@ def cron_flug_alerts(debug: bool = False) -> dict:
     """
     Wird von einem externen Cron-Pinger regelmäßig (idealerweise minütlich)
     aufgerufen. Prüft für jedes Flug-/Bahn-Segment, ob laut konfiguriertem
-    Intervall ein neuer Check fällig ist, ruft bei Bedarf die externe API auf
-    und verschickt bei relevanten Änderungen einen Alert.
+    Prüft für jedes Flug-/Bahn-Segment anhand fester Checkpoints (siehe
+    segment_check_faellig), ob JETZT ein Check fällig ist, ruft bei Bedarf die
+    externe API auf und verschickt bei relevanten Änderungen (Verspätung
+    >= 15 Min., Stornierung, Umleitung) sofort einen Alert.
 
     Sparmaßnahme: Ist der zuletzt bekannte Status bereits ein Endzustand
     (angekommen/gelandet/storniert/umgeleitet), wird das Segment NICHT mehr
-    weiter abgefragt, auch wenn es laut Zeitfenster noch "fällig" wäre – ein
-    bereits gelandeter Flug ändert seinen Status praktisch nie mehr. Das
-    reduziert die Anzahl der externen API-Aufrufe erheblich, v.a. weil ein
-    Segment sonst bis zu 24h nach der geplanten Abreise im Kulanzfenster bleibt.
+    weiter abgefragt – ein bereits gelandeter Flug ändert seinen Status
+    praktisch nie mehr.
     """
-    konfig = konfiguration_laden()
     if debug:
         segmente, diag = ueberwachte_segmente_laden(debug=True)
         diag["verarbeitung"] = []
@@ -396,12 +413,6 @@ def cron_flug_alerts(debug: bool = False) -> dict:
         schritt = {"beleg_id": seg["beleg_id"], "segment_index": seg["segment_index"],
                    "transport_nummer": seg["transport_nummer"],
                    "stunden_bis_abreise": round(seg["stunden_bis_abreise"], 2)}
-        intervall = intervall_fuer(seg["stunden_bis_abreise"], konfig)
-        schritt["intervall_minuten"] = intervall
-        if intervall is None:
-            schritt["ergebnis"] = "kein Intervall (außerhalb Fenster) – übersprungen"
-            if debug: diag["verarbeitung"].append(schritt)
-            continue
         alt_status = status_holen(seg["beleg_id"], seg["segment_index"])
 
         alter_status_text = (alt_status.get("status") or "").lower() if alt_status else ""
@@ -410,21 +421,14 @@ def cron_flug_alerts(debug: bool = False) -> dict:
             if debug: diag["verarbeitung"].append(schritt)
             continue
 
-        letzter_check = alt_status.get("letzter_check_am") if alt_status else None
-        schritt["letzter_check_am"] = str(letzter_check) if letzter_check else None
-        if letzter_check:
-            if isinstance(letzter_check, str):
-                try:
-                    letzter_check = datetime.fromisoformat(letzter_check[:19])
-                except Exception:
-                    letzter_check = None
-            if letzter_check:
-                minuten_seit_check = (jetzt_lokal() - letzter_check).total_seconds() / 60
-                schritt["minuten_seit_letztem_check"] = round(minuten_seit_check, 1)
-                if minuten_seit_check < intervall:
-                    schritt["ergebnis"] = f"noch nicht fällig (erst in {intervall - minuten_seit_check:.1f} Min. wieder)"
-                    if debug: diag["verarbeitung"].append(schritt)
-                    continue
+        naechste_checkpoints = [p.strftime("%d.%m. %H:%M") for p in _checkpoints_fuer_segment(seg, alt_status)]
+        schritt["checkpoints"] = naechste_checkpoints
+        schritt["letzter_check_am"] = str(alt_status.get("letzter_check_am")) if alt_status else None
+
+        if not segment_check_faellig(seg, jetzt_lokal(), alt_status):
+            schritt["ergebnis"] = "kein Checkpoint erreicht – übersprungen"
+            if debug: diag["verarbeitung"].append(schritt)
+            continue
 
         if seg["transport_typ"] == "Flug" and seg["transport_nummer"]:
             schritt["quelle"] = "AeroDataBox"
