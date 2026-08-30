@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.3-b"
+APP_VERSION  = "3.3-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2212,6 +2212,144 @@ def reise_abschluss(code: str):
         return HTMLResponse(shell("Fehler",
             f'<div class="alert alert-err">{e}</div>'
             f'<pre style="font-size:11px">{traceback.format_exc()[:500]}</pre>'))
+
+
+@app.get("/reise/{code}/abschluss/pdf")
+def reise_abschluss_pdf(code: str):
+    """Erzeugt den Abschlussbericht (VMA + Kosten) als PDF zum Download/Öffnen."""
+    rcode = code.upper()
+    try:
+        db = get_db(); cur = db.cursor()
+        P = ph()
+
+        cur.execute(f"SELECT code,titel,abreise,rueckkehr FROM reisen WHERE code={P}", (rcode,))
+        r = cur.fetchone()
+        if not r:
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden</div>'))
+        def g(row,k,i): return row[k] if hasattr(row,'keys') else row[i]
+        titel = g(r,"titel",1); ab = g(r,"abreise",2); zu = g(r,"rueckkehr",3)
+
+        cur.execute(f"""SELECT m.kuerzel, m.klarname FROM mitarbeiter m
+            JOIN reise_mitarbeiter rm ON rm.kuerzel=m.kuerzel
+            WHERE rm.reise_code={P} ORDER BY m.klarname""", (rcode,))
+        ma_rows = cur.fetchall()
+
+        cur.execute(f"""SELECT datum,land_code,land_name,vma_satz_voll,vma_satz_halb,
+            ist_halber_satz,fruehstueck,mittagessen,abendessen,vma_netto,trennungspauschale
+            FROM vma_tage WHERE reise_code={P} ORDER BY datum""", (rcode,))
+        vma_rows = cur.fetchall()
+
+        cur.execute(f"""SELECT id,belegart,anbieter,belegdatum,betrag_brutto,waehrung,betrag_eur
+            FROM belege WHERE reise_code={P} ORDER BY belegdatum""", (rcode,))
+        belege = cur.fetchall()
+        cur.close(); db.close()
+
+        vma_total_netto = sum(float(g(v,"vma_netto",9) or 0) for v in vma_rows)
+        trennung_total = sum(float(g(v,"trennungspauschale",10) or 0) for v in vma_rows)
+
+        RECHNUNG_ARTEN = {"rechnung","quittung","receipt"}
+        rechnungen = [b for b in belege if any(x in (g(b,"belegart",1) or "").lower() for x in RECHNUNG_ARTEN)]
+        kosten_eur = sum(float(g(b,"betrag_eur",6) or g(b,"betrag_brutto",4) or 0) for b in rechnungen)
+
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.lib import colors
+
+        def esc(s):
+            return (str(s) if s is not None else "–").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+        def tbl_style(fusszeile=True):
+            style = [
+                ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f1f5f9")),
+                ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+                ("FONTSIZE",(0,0),(-1,-1),9),
+                ("LINEBELOW",(0,0),(-1,0),0.5,colors.HexColor("#cbd5e1")),
+                ("ALIGN",(2,0),(-1,-1),"RIGHT"),
+                ("BOTTOMPADDING",(0,0),(-1,-1),4), ("TOPPADDING",(0,0),(-1,-1),4),
+            ]
+            if fusszeile:
+                style += [("LINEABOVE",(0,-1),(-1,-1),1,colors.HexColor("#94a3b8")),
+                          ("FONTNAME",(0,-1),(-1,-1),"Helvetica-Bold")]
+            return TableStyle(style)
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=A4,
+            leftMargin=20*mm, rightMargin=20*mm, topMargin=20*mm, bottomMargin=20*mm)
+        styles = getSampleStyleSheet()
+        story = []
+
+        ma_namen = ", ".join(g(m,"klarname",1) for m in ma_rows) or "–"
+        story.append(Paragraph(f"Reisekostenabrechnung {esc(rcode)}", styles["Title"]))
+        story.append(Paragraph(esc(titel), styles["Heading2"]))
+        story.append(Spacer(1, 4*mm))
+        story.append(Paragraph(f"Zeitraum: {fmt_date(ab)} – {fmt_date(zu)}", styles["Normal"]))
+        story.append(Paragraph(f"Reisende: {esc(ma_namen)}", styles["Normal"]))
+        story.append(Spacer(1, 8*mm))
+
+        story.append(Paragraph("Verpflegungsmehraufwand", styles["Heading2"]))
+        vma_daten = [["Datum","Land","Satz","Abzüge","Netto","Trennung"]]
+        for v in vma_rows:
+            dat = g(v,"datum",0)
+            if isinstance(dat,str): dat = date.fromisoformat(dat[:10])
+            lcode = g(v,"land_code",1) or "–"
+            voll = float(g(v,"vma_satz_voll",3) or 0); halb = float(g(v,"vma_satz_halb",4) or 0)
+            ist_halb = bool(g(v,"ist_halber_satz",5))
+            frueh = bool(g(v,"fruehstueck",6)); mitt = bool(g(v,"mittagessen",7)); abend = bool(g(v,"abendessen",8))
+            netto = float(g(v,"vma_netto",9) or 0)
+            trenn = float(g(v,"trennungspauschale",10) or 0)
+            abz = [x for x, ok in (("F",frueh),("M",mitt),("A",abend)) if ok]
+            vma_daten.append([
+                dat.strftime("%d.%m.%Y") if dat else "–", esc(lcode),
+                f"{'½ ' if ist_halb else ''}{(halb if ist_halb else voll):.2f} €",
+                "/".join(abz) if abz else "–", f"{netto:.2f} €",
+                f"{trenn:.2f} €" if trenn else "–"
+            ])
+        vma_daten.append(["", "", "", "Gesamt:", f"{vma_total_netto:.2f} €", f"{trennung_total:.2f} €"])
+        vma_tbl = Table(vma_daten, colWidths=[25*mm,15*mm,25*mm,20*mm,25*mm,25*mm])
+        vma_tbl.setStyle(tbl_style())
+        story.append(vma_tbl)
+        story.append(Spacer(1, 8*mm))
+
+        story.append(Paragraph("Kosten (Rechnungen/Quittungen)", styles["Heading2"]))
+        if rechnungen:
+            kosten_daten = [["Datum","Anbieter","Betrag"]]
+            for b in rechnungen:
+                bd = g(b,"belegdatum",3)
+                if isinstance(bd,str):
+                    try: bd = date.fromisoformat(bd[:10])
+                    except Exception: bd = None
+                betrag = g(b,"betrag_brutto",4); waehrung = g(b,"waehrung",5) or "EUR"
+                betrag_eur = g(b,"betrag_eur",6)
+                bet_txt = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
+                if waehrung != "EUR" and betrag_eur:
+                    bet_txt += f" ({float(betrag_eur):.2f} €)"
+                kosten_daten.append([bd.strftime("%d.%m.%Y") if bd else "–",
+                                      esc(g(b,"anbieter",2) or "–"), bet_txt])
+            kosten_daten.append(["", "Gesamt:", f"{kosten_eur:.2f} €"])
+            kosten_tbl = Table(kosten_daten, colWidths=[30*mm,80*mm,50*mm])
+            kosten_tbl.setStyle(tbl_style())
+            story.append(kosten_tbl)
+        else:
+            story.append(Paragraph("Keine Rechnungen/Quittungen erfasst.", styles["Normal"]))
+
+        story.append(Spacer(1, 10*mm))
+        gesamt = vma_total_netto + trennung_total + kosten_eur
+        story.append(Paragraph(f"<b>Gesamt zur Abrechnung: {gesamt:.2f} €</b>", styles["Heading2"]))
+
+        doc.build(story)
+        pdf_bytes = buf.getvalue()
+
+        from fastapi.responses import Response
+        return Response(content=pdf_bytes, media_type="application/pdf",
+                        headers={"Content-Disposition": f"inline; filename=Abschluss_{rcode}.pdf"})
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:800]}</pre>'))
 
 
 @app.get("/test-openai")
