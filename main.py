@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.3-d"
+APP_VERSION  = "3.3-e"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2268,7 +2268,7 @@ def reise_abschluss_pdf(code: str):
         vma_rows = cur.fetchall()
 
         cur.execute(f"""SELECT id,belegart,anbieter,belegdatum,betrag_brutto,waehrung,betrag_eur,
-            beleg_gruppe_id
+            beleg_gruppe_id,s3_original,dateiname
             FROM belege WHERE reise_code={P} ORDER BY belegdatum""", (rcode,))
         belege = cur.fetchall()
         cur.close(); db.close()
@@ -2387,8 +2387,44 @@ def reise_abschluss_pdf(code: str):
         gesamt = vma_total_netto + trennung_total + kosten_eur
         story.append(Paragraph(f"<b>Gesamt zur Abrechnung: {gesamt:.2f} €</b>", styles["Heading2"]))
 
+        # Anlagenverzeichnis für die im Folgenden angehängten Original-Belege
+        anhaenge = [b for b in rechnungen if g(b,"s3_original",8)]
+        ohne_original = [b for b in rechnungen if not g(b,"s3_original",8)]
+        if anhaenge or ohne_original:
+            story.append(Spacer(1, 10*mm))
+            story.append(Paragraph("Anlagen: Original-Belege", styles["Heading2"]))
+            anlagen_daten = [["Nr.", "Anbieter", "Betrag", "Seite folgt"]]
+            for idx, b in enumerate(anhaenge, start=1):
+                brutto = g(b,"betrag_brutto",4); waehrung = g(b,"waehrung",5) or "EUR"
+                bet_s = f"{float(brutto):.2f} {waehrung}" if brutto else "–"
+                anlagen_daten.append([str(idx), esc(g(b,"anbieter",2) or "–"), bet_s, "ja"])
+            for b in ohne_original:
+                brutto = g(b,"betrag_brutto",4); waehrung = g(b,"waehrung",5) or "EUR"
+                bet_s = f"{float(brutto):.2f} {waehrung}" if brutto else "–"
+                anlagen_daten.append(["–", esc(g(b,"anbieter",2) or "–"), bet_s, "kein Original vorhanden"])
+            anlagen_tbl = Table(anlagen_daten, colWidths=[15*mm,80*mm,35*mm,40*mm])
+            anlagen_tbl.setStyle(tbl_style(fusszeile=False))
+            story.append(anlagen_tbl)
+
         doc.build(story)
-        pdf_bytes = buf.getvalue()
+        report_bytes = buf.getvalue()
+
+        # Original-Belege als Anhang anfügen (jeweils alle Seiten des Originals)
+        import pypdf
+        writer = pypdf.PdfWriter()
+        for seite in pypdf.PdfReader(io.BytesIO(report_bytes)).pages:
+            writer.add_page(seite)
+        anhang_fehler = []
+        for b in anhaenge:
+            try:
+                original_bytes = s3_download(g(b,"s3_original",8))
+                for seite in pypdf.PdfReader(io.BytesIO(original_bytes)).pages:
+                    writer.add_page(seite)
+            except Exception as e:
+                anhang_fehler.append(f'Beleg #{g(b,"id",0)}: {e}')
+        out = io.BytesIO()
+        writer.write(out)
+        pdf_bytes = out.getvalue()
 
         from fastapi.responses import Response
         return Response(content=pdf_bytes, media_type="application/pdf",
