@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.4-a"
+APP_VERSION  = "3.4-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -647,7 +647,10 @@ def beleg_detail(bid: int, request: Request):
         kreditkarte_dropdown_html = ""
         if zahlungsart == "Kreditkarte":
             kk_opts = '<option value="">– Karte wählen –</option>'
-            for m in ma_kreditkarte_rows:
+            ma_kreditkarte_sortiert = sorted(
+                ma_kreditkarte_rows,
+                key=lambda m: (get(m,"kreditkarten_typ",2) != "firma", get(m,"klarname",1)))
+            for m in ma_kreditkarte_sortiert:
                 mk = get(m,"kuerzel",0); mn = get(m,"klarname",1)
                 mtyp = get(m,"kreditkarten_typ",2) or "privat"
                 label_typ = "Privatkreditkarte" if mtyp == "privat" else "Firmenkreditkarte"
