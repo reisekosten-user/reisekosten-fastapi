@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.3-e"
+APP_VERSION  = "3.3-f"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2897,7 +2897,7 @@ def _datum_parsen(wert):
         except Exception: return None
 
 
-def aktuelle_position_ermitteln(reise_code: str, db) -> dict | None:
+def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
     """
     Ermittelt den TATSÄCHLICHEN aktuellen Aufenthaltsort/-status für die
     Kartenanzeige – bewusst GETRENNT von der steuerlichen VMA-Länderzuordnung
@@ -2917,12 +2917,20 @@ def aktuelle_position_ermitteln(reise_code: str, db) -> dict | None:
       für den zuletzt erreichten Ort (Segment-Koordinaten bevorzugt, sonst
       Länder-Zentroid als Rückfall für alte Belege ohne Koordinatenfelder).
     - None, wenn gar nichts ermittelbar ist.
+
+    Mit debug=True wird zusätzlich (result, diagnose_liste) zurückgegeben –
+    ein Eintrag pro Segment mit Rohdaten und Grund für Aufnahme/Ausschluss,
+    um genau nachvollziehen zu können, welches Segment warum als "aktuell" galt.
     """
     from mod_flugalert import jetzt_lokal
     from mod_geo import koordinaten_fuer_land
     P = ph()
     cur = db.cursor()
     jetzt = jetzt_lokal()
+    diag = [] if debug else None
+
+    def _ret(ergebnis):
+        return (ergebnis, diag) if debug else ergebnis
 
     def _koord(s, praefix):
         lat, lon = s.get(f"{praefix}_lat"), s.get(f"{praefix}_lon")
@@ -2932,32 +2940,52 @@ def aktuelle_position_ermitteln(reise_code: str, db) -> dict | None:
             return None
 
     # Alle Flug-/Bahnsegmente mit geparsten Ab-/Ankunftszeitpunkten sammeln
-    cur.execute(f"""SELECT ki_json, transportart FROM belege
+    cur.execute(f"""SELECT id, ki_json, transportart FROM belege
         WHERE reise_code={P} AND transportart IN ('Flug','Bahn')""", (reise_code,))
     segmente = []
     for row in cur.fetchall():
-        ki_str = row[0] if isinstance(row, tuple) else row["ki_json"]
-        typ = row[1] if isinstance(row, tuple) else row["transportart"]
+        bid_diag = row[0] if isinstance(row, tuple) else row["id"]
+        ki_str = row[1] if isinstance(row, tuple) else row["ki_json"]
+        typ = row[2] if isinstance(row, tuple) else row["transportart"]
         if not ki_str: continue
         try:
             segs = json.loads(ki_str).get("segmente") or []
         except Exception:
             continue
-        for s in segs:
+        for idx_diag, s in enumerate(segs):
             d_ab = _datum_parsen(s.get("abreise_datum"))
             d_an = _datum_parsen(s.get("ankunft_datum"))
-            if not d_ab or not d_an: continue
+            if debug:
+                eintrag = {"beleg_id": bid_diag, "segment_index": idx_diag,
+                           "von_ort": s.get("von_ort"), "nach_ort": s.get("nach_ort"),
+                           "abreise_datum_roh": s.get("abreise_datum"), "abreise_zeit_roh": s.get("abreise_zeit"),
+                           "ankunft_datum_roh": s.get("ankunft_datum"), "ankunft_zeit_roh": s.get("ankunft_zeit"),
+                           "von_lat": s.get("von_lat"), "von_lon": s.get("von_lon"),
+                           "nach_lat": s.get("nach_lat"), "nach_lon": s.get("nach_lon")}
+            if not d_ab or not d_an:
+                if debug:
+                    eintrag["status"] = f"ÜBERSPRUNGEN – Datum nicht parsbar (abreise_datum={s.get('abreise_datum')!r}, ankunft_datum={s.get('ankunft_datum')!r})"
+                    diag.append(eintrag)
+                continue
             ab_zeit = s.get("abreise_zeit") or "00:00"
             an_zeit = s.get("ankunft_zeit") or "00:00"
             try:
                 dt_ab = datetime.strptime(f"{d_ab.isoformat()} {ab_zeit}", "%Y-%m-%d %H:%M")
                 dt_an = datetime.strptime(f"{d_an.isoformat()} {an_zeit}", "%Y-%m-%d %H:%M")
             except Exception:
+                if debug:
+                    eintrag["status"] = f"ÜBERSPRUNGEN – Uhrzeit nicht parsbar (abreise_zeit={ab_zeit!r}, ankunft_zeit={an_zeit!r})"
+                    diag.append(eintrag)
                 continue
             typ_segment = typ
             kombi_text = f'{s.get("transport_name","")} {s.get("hinweis","")}'.lower()
             if any(k in kombi_text for k in ("bahn", "train", "zug", "sncf", "ice", "tgv", "railjet")):
                 typ_segment = "Bahn"
+            if debug:
+                eintrag["dt_ab"] = dt_ab.isoformat(); eintrag["dt_an"] = dt_an.isoformat()
+                eintrag["typ_erkannt"] = typ_segment
+                eintrag["status"] = "übernommen"
+                diag.append(eintrag)
             segmente.append({
                 "typ": typ_segment, "dt_ab": dt_ab, "dt_an": dt_an,
                 "von_iata": s.get("von_iata"), "nach_iata": s.get("nach_iata"),
@@ -2973,14 +3001,14 @@ def aktuelle_position_ermitteln(reise_code: str, db) -> dict | None:
             fortschritt = ((jetzt - s["dt_ab"]).total_seconds() / dauer) if dauer > 0 else 0.5
             fortschritt = max(0.0, min(1.0, fortschritt))
             cur.close()
-            return {
+            return _ret({
                 "status": "unterwegs",
                 "von_iata": s["von_iata"], "nach_iata": s["nach_iata"],
                 "von_koord": s["von_koord"], "nach_koord": s["nach_koord"],
                 "von_name": s["von_ort"] or s["von_iata"], "nach_name": s["nach_ort"] or s["nach_iata"],
                 "fortschritt": fortschritt, "transport_typ": s["typ"],
                 "label": f'{s["transport_nummer"]} {s["von_iata"] or s["von_ort"]} → {s["nach_iata"] or s["nach_ort"]}'.strip(),
-            }
+            })
 
     # 2. AM ORT: zeitlich jüngstes bereits erreichtes Ziel (Segment-Ankunft oder Hotel-Check-in)
     kandidaten = []  # (datetime, koord_oder_None, land_code, ort_name)
@@ -3032,14 +3060,14 @@ def aktuelle_position_ermitteln(reise_code: str, db) -> dict | None:
                                 "label": f'{s["transport_nummer"]} {s["von_iata"] or s["von_ort"]} → {s["nach_iata"] or s["nach_ort"]}'.strip()}
 
         if koord:
-            return {"status": "am_ort", "lat": koord[0], "lon": koord[1],
+            return _ret({"status": "am_ort", "lat": koord[0], "lon": koord[1],
                     "land": land, "ort_name": ort_name,
-                    "herkunft": herkunft, "naechste_etappe": naechste_etappe}
+                    "herkunft": herkunft, "naechste_etappe": naechste_etappe})
         land_koord = koordinaten_fuer_land(land)
         if land_koord:
-            return {"status": "am_ort", "lat": land_koord[0], "lon": land_koord[1],
+            return _ret({"status": "am_ort", "lat": land_koord[0], "lon": land_koord[1],
                     "land": land, "ort_name": ort_name or land,
-                    "herkunft": herkunft, "naechste_etappe": naechste_etappe}
+                    "herkunft": herkunft, "naechste_etappe": naechste_etappe})
 
     # 3. Rückfall: heutiger VMA-Tag (steuerliche Zuordnung, nicht immer = aktueller Ort)
     heute_s = date.today().isoformat()
@@ -3053,16 +3081,18 @@ def aktuelle_position_ermitteln(reise_code: str, db) -> dict | None:
         lname = row[1] if isinstance(row, tuple) else row["land_name"]
         land_koord = koordinaten_fuer_land(land)
         if land_koord:
-            return {"status": "am_ort", "lat": land_koord[0], "lon": land_koord[1],
-                    "land": land, "ort_name": lname}
-    return None
+            return _ret({"status": "am_ort", "lat": land_koord[0], "lon": land_koord[1],
+                    "land": land, "ort_name": lname})
+    return _ret(None)
 
 
 @app.get("/maps", response_class=HTMLResponse)
-def dashboard_maps():
+def dashboard_maps(debug: str = ""):
     """Zeigt auf einer zoombaren Weltkarte, wo sich Reisende bei aktiven Reisen
     gerade tatsächlich aufhalten (Land-Ebene, aus dem letzten erfolgten Flug/Hotel –
-    NICHT aus der steuerlichen VMA-Zuordnung, die am Abreisetag absichtlich anders ist)."""
+    NICHT aus der steuerlichen VMA-Zuordnung, die am Abreisetag absichtlich anders ist).
+    Mit ?debug=1 wird zusätzlich eine Diagnose-Karte pro Segment angezeigt."""
+    debug_an = debug in ("1", "true", "ja")
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
@@ -3094,10 +3124,17 @@ def dashboard_maps():
         strecken = []
         kontext_strecken = []
         ohne_position = []
+        alle_diagnosen = []
         for r in aktive_reisen:
             code = get(r,"code",0); titel = get(r,"titel",1); ma = get(r,"ma",4) or "–"
             kuerzel = get(r,"kuerzel",5) or "?"
-            pos = aktuelle_position_ermitteln(code, db)
+            if debug_an:
+                pos, seg_diag = aktuelle_position_ermitteln(code, db, debug=True)
+                alle_diagnosen.append({"code": code, "titel": titel,
+                                        "jetzt_lokal": None, "segmente": seg_diag,
+                                        "ergebnis": pos})
+            else:
+                pos = aktuelle_position_ermitteln(code, db)
             if not pos:
                 ohne_position.append({"code": code, "titel": titel, "ma": ma})
             elif pos["status"] == "unterwegs":
@@ -3131,6 +3168,35 @@ def dashboard_maps():
                     })
         cur.close(); db.close()
 
+        from mod_flugalert import jetzt_lokal as _jetzt_lokal_fuer_debug
+        jetzt_anzeige = _jetzt_lokal_fuer_debug().isoformat()
+
+        debug_html = ""
+        if debug_an:
+            karten = ""
+            for d in alle_diagnosen:
+                seg_zeilen = ""
+                for s in d["segmente"]:
+                    farbe = "#059669" if s["status"] == "übernommen" else "#dc2626"
+                    seg_zeilen += f"""<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:11px">
+                        <b>Beleg #{s['beleg_id']} · Segment {s['segment_index']}</b>: {s.get('von_ort')} → {s.get('nach_ort')}<br>
+                        Abreise roh: {s.get('abreise_datum_roh')!r} {s.get('abreise_zeit_roh')!r} ·
+                        Ankunft roh: {s.get('ankunft_datum_roh')!r} {s.get('ankunft_zeit_roh')!r}<br>
+                        {'Geparst: ' + s.get('dt_ab','?') + ' → ' + s.get('dt_an','?') + '<br>' if 'dt_ab' in s else ''}
+                        Koordinaten: von=({s.get('von_lat')},{s.get('von_lon')}) nach=({s.get('nach_lat')},{s.get('nach_lon')})<br>
+                        <span style="color:{farbe};font-weight:600">→ {s['status']}</span>
+                    </div>"""
+                ergebnis_txt = json.dumps(d["ergebnis"], ensure_ascii=False, default=str, indent=2) if d["ergebnis"] else "None"
+                karten += f"""<div class="card" style="margin-bottom:12px">
+                  <div class="card-header"><span class="card-title">{d['code']} – {d['titel']}</span></div>
+                  <div class="card-body">
+                    {seg_zeilen or '<div style="font-size:12px;color:var(--muted)">Keine Flug-/Bahnsegmente gefunden</div>'}
+                    <pre style="font-size:11px;background:var(--bg);padding:8px;border-radius:6px;margin-top:8px;white-space:pre-wrap">Endergebnis: {ergebnis_txt}</pre>
+                  </div>
+                </div>"""
+            debug_html = f"""<div class="alert alert-warn" style="margin-bottom:12px">
+              🔍 Debug-Modus aktiv – aktuelle Zeit lokal: {jetzt_anzeige}</div>{karten}"""
+
         marker_js = json.dumps(marker, ensure_ascii=False)
         strecken_js = json.dumps(strecken, ensure_ascii=False)
         kontext_strecken_js = json.dumps(kontext_strecken, ensure_ascii=False)
@@ -3147,7 +3213,9 @@ def dashboard_maps():
           Zeigt, wo sich zugeordnete Mitarbeiter bei aktuell laufenden Reisen befinden –
           am Boden (letzter erreichter Ort) oder unterwegs (gestrichelte Linie zwischen
           Start- und Zielflughafen/-bahnhof, Position anteilig zur verstrichenen Reisezeit
-          geschätzt). Kein Live-GPS, sondern aus Belegdaten abgeleitet.</p>
+          geschätzt). Kein Live-GPS, sondern aus Belegdaten abgeleitet.
+          {'' if debug_an else '<a href="/maps?debug=1" style="color:var(--blue)">🔍 Diagnose anzeigen</a>'}</p>
+        {debug_html}
         <div id="reise-map" style="height:70vh;border-radius:var(--radius,10px);
                                     border:1px solid var(--border);overflow:hidden"></div>
         {'<div class="alert alert-warn" style="margin-top:12px"><b>Ohne Standort:</b><ul style="margin:6px 0 0 18px">' + ohne_html + '</ul></div>' if ohne_html else ''}
