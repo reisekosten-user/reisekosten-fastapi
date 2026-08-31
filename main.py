@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.5-c"
+APP_VERSION  = "3.5-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2782,7 +2782,8 @@ def todo_liste_laden() -> list:
     Konsolidierte Aufgabenliste für Organisatoren: alles, was noch offen ist,
     bis eine Reise final abgerechnet werden kann. Zeigt IMMER alle Belege/
     Reisen (nicht auf einzelne Mitarbeiter gefiltert) – nur für Organisatoren
-    gedacht.
+    gedacht. Alle Zeilen verlinken auf die zentrale /todo-Seite (dort als
+    anklickbare Tabelle statt pauschal zur ganzen Belegliste).
     """
     db = get_db(); cur = db.cursor()
     P = ph()
@@ -2791,52 +2792,52 @@ def todo_liste_laden() -> list:
 
     try:
         # 1. Betrag final noch nicht bestätigt (Fremdwährung, nur Schätzung vorhanden)
-        cur.execute(f"""SELECT COUNT(*), MIN(id) FROM belege
+        cur.execute(f"""SELECT COUNT(*) FROM belege
             WHERE waehrung != 'EUR' AND betrag_eur_final IS NULL AND betrag_brutto IS NOT NULL""")
-        n, erster_id = cur.fetchone()
+        n = cur.fetchone()[0]
         if n:
             aufgaben.append({"icon": "💶", "prio": "warn",
                 "text": f'Betrag final noch nicht bestätigt ({n} Beleg{"e" if n!=1 else ""})',
                 "sub": "Fremdwährung, nur KI-Schätzung vorhanden",
-                "url": f"/beleg/{erster_id}" if n == 1 else "/belege"})
+                "url": "/todo"})
     except Exception: pass
 
     try:
         # 2. Belege noch nicht geprüft, obwohl die Reise bereits zurück ist
-        cur.execute(f"""SELECT COUNT(*), MIN(b.id) FROM belege b
+        cur.execute(f"""SELECT COUNT(*) FROM belege b
             JOIN reisen r ON r.code = b.reise_code
             WHERE b.belegart IN ('Rechnung','Quittung') AND b.geprueft = {'FALSE' if is_postgres() else '0'}
             AND r.rueckkehr < {P}""", (today,))
-        n, erster_id = cur.fetchone()
+        n = cur.fetchone()[0]
         if n:
             aufgaben.append({"icon": "✅", "prio": "danger",
                 "text": f'Belege noch nicht geprüft ({n})',
                 "sub": "Reise bereits abgeschlossen",
-                "url": f"/beleg/{erster_id}" if n == 1 else "/belege"})
+                "url": "/todo"})
     except Exception: pass
 
     try:
         # 3. Geprüfte Belege, die noch nicht an Habel gesendet wurden
-        cur.execute(f"""SELECT COUNT(*), MIN(id) FROM belege
+        cur.execute(f"""SELECT COUNT(*) FROM belege
             WHERE geprueft = {'TRUE' if is_postgres() else '1'} AND dms_versendet_am IS NULL""")
-        n, erster_id = cur.fetchone()
+        n = cur.fetchone()[0]
         if n:
             aufgaben.append({"icon": "📤", "prio": "info",
                 "text": f'Geprüfte Belege noch nicht an Habel gesendet ({n})',
                 "sub": "",
-                "url": f"/beleg/{erster_id}" if n == 1 else "/belege"})
+                "url": "/todo"})
     except Exception: pass
 
     try:
         # 4. Fehlende Pflichtfelder
-        cur.execute(f"""SELECT COUNT(*), MIN(id) FROM belege
+        cur.execute(f"""SELECT COUNT(*) FROM belege
             WHERE pflichtfelder_ok = {'FALSE' if is_postgres() else '0'}""")
-        n, erster_id = cur.fetchone()
+        n = cur.fetchone()[0]
         if n:
             aufgaben.append({"icon": "⚠", "prio": "danger",
                 "text": f'Pflichtfelder fehlen ({n})',
                 "sub": "",
-                "url": f"/beleg/{erster_id}" if n == 1 else "/belege"})
+                "url": "/todo"})
     except Exception: pass
 
     try:
@@ -2850,18 +2851,170 @@ def todo_liste_laden() -> list:
             )""", (today,))
         rows = cur.fetchall()
         if rows:
-            erste = rows[0]
-            erster_code = erste[0] if isinstance(erste, tuple) else erste["code"]
             aufgaben.append({"icon": "🧾", "prio": "info",
                 "text": f'Reisen abgeschlossen, aber noch nicht final abgerechnet ({len(rows)})',
                 "sub": "Rückkehr liegt bereits zurück",
-                "url": f"/reise/{erster_code}/abschluss" if len(rows) == 1 else "/reisen"})
+                "url": "/todo"})
     except Exception: pass
 
     cur.close(); db.close()
     return aufgaben
 
+
+def todo_belege_laden() -> list:
+    """
+    Liefert JEDEN betroffenen Beleg genau einmal, mit ALLEN auf ihn
+    zutreffenden Problemen als Liste – für die anklickbare Tabelle auf /todo.
+    """
+    db = get_db(); cur = db.cursor()
+    P = ph()
+    today = date.today().isoformat()
+
+    cur.execute(f"""SELECT b.id, b.reise_code, b.anbieter, b.betrag_brutto, b.waehrung,
+            b.belegdatum, b.betrag_eur_final, b.geprueft, b.dms_versendet_am,
+            b.pflichtfelder_ok, b.belegart, r.rueckkehr
+        FROM belege b LEFT JOIN reisen r ON r.code = b.reise_code
+        ORDER BY b.erstellt DESC""")
+    rows = cur.fetchall()
+    cur.close(); db.close()
+
+    def g(row, k, i): return row[k] if hasattr(row, 'keys') else row[i]
+
+    ergebnis = []
+    for r in rows:
+        probleme = []
+        waehrung = g(r,"waehrung",4) or "EUR"
+        betrag_brutto = g(r,"betrag_brutto",3)
+        betrag_eur_final = g(r,"betrag_eur_final",6)
+        geprueft = bool(g(r,"geprueft",7))
+        dms_versendet = g(r,"dms_versendet_am",8)
+        pflicht_ok = g(r,"pflichtfelder_ok",9)
+        belegart = g(r,"belegart",10) or ""
+        rueckkehr = g(r,"rueckkehr",11)
+
+        if waehrung != "EUR" and betrag_eur_final is None and betrag_brutto is not None:
+            probleme.append("💶 Betrag final offen")
+        if belegart in ("Rechnung", "Quittung"):
+            rueckkehr_d = rueckkehr
+            if isinstance(rueckkehr_d, str):
+                try: rueckkehr_d = date.fromisoformat(rueckkehr_d[:10])
+                except Exception: rueckkehr_d = None
+            if not geprueft and rueckkehr_d and rueckkehr_d < date.today():
+                probleme.append("✅ Nicht geprüft")
+            if geprueft and not dms_versendet:
+                probleme.append("📤 Nicht an Habel gesendet")
+        if pflicht_ok is False or pflicht_ok == 0:
+            probleme.append("⚠ Pflichtfelder fehlen")
+
+        if probleme:
+            ergebnis.append({
+                "id": g(r,"id",0), "reise_code": g(r,"reise_code",1) or "–",
+                "anbieter": g(r,"anbieter",2) or "–", "betrag": betrag_brutto,
+                "waehrung": waehrung, "belegdatum": g(r,"belegdatum",5),
+                "probleme": probleme,
+            })
+    return ergebnis
+
+
+def todo_reisen_laden() -> list:
+    """Reisen, die zurück, aber noch nicht final abgerechnet sind (für /todo)."""
+    db = get_db(); cur = db.cursor()
+    P = ph()
+    today = date.today().isoformat()
+    cur.execute(f"""SELECT DISTINCT r.code, r.titel, r.rueckkehr FROM reisen r
+        WHERE r.rueckkehr < {P} AND EXISTS (
+            SELECT 1 FROM belege b WHERE b.reise_code = r.code
+            AND b.belegart IN ('Rechnung','Quittung')
+            AND (b.geprueft = {'FALSE' if is_postgres() else '0'} OR b.dms_versendet_am IS NULL)
+        ) ORDER BY r.rueckkehr DESC""", (today,))
+    rows = cur.fetchall()
+    cur.close(); db.close()
+    return rows
+
+
+
 # ── Dashboard + Mitarbeiter ───────────────────────────────────────────────────
+@app.get("/todo", response_class=HTMLResponse)
+def todo_seite(request: Request):
+    """Zentrale ToDo-Seite für Organisatoren: jeder betroffene Beleg als eigene
+    Zeile mit allen zutreffenden Problemen, direkt anklickbar."""
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren haben Zugriff auf die ToDo-Liste.</div>'), status_code=403)
+    try:
+        belege = todo_belege_laden()
+        reisen = todo_reisen_laden()
+
+        def get(r, k, i): return r[k] if hasattr(r, 'keys') else r[i]
+
+        beleg_zeilen = ""
+        for b in belege:
+            bet_s = f"{float(b['betrag']):.2f} {b['waehrung']}" if b['betrag'] else "–"
+            probleme_html = " ".join(
+                f'<span style="font-size:11px;background:var(--bg);color:var(--muted);'
+                f'padding:2px 8px;border-radius:10px;white-space:nowrap">{p}</span>'
+                for p in b["probleme"])
+            beleg_zeilen += f"""<tr>
+                <td><a href="/beleg/{b['id']}" style="color:var(--blue);font-weight:600;
+                    text-decoration:none">#{b['id']}</a></td>
+                <td style="font-family:monospace;font-size:12px;color:var(--blue)">{b['reise_code']}</td>
+                <td>{b['anbieter']}</td>
+                <td style="text-align:right;font-family:monospace">{bet_s}</td>
+                <td>{fmt_date(b['belegdatum'])}</td>
+                <td><div style="display:flex;gap:4px;flex-wrap:wrap">{probleme_html}</div></td>
+            </tr>"""
+
+        reisen_zeilen = ""
+        for r in reisen:
+            code = get(r,"code",0); titel = get(r,"titel",1); rueckkehr = get(r,"rueckkehr",2)
+            reisen_zeilen += f"""<tr>
+                <td><a href="/reise/{code}/abschluss" style="color:var(--blue);font-weight:600;
+                    text-decoration:none">{code}</a></td>
+                <td>{titel}</td>
+                <td>{fmt_date(rueckkehr)}</td>
+                <td><a href="/reise/{code}/abschluss" class="btn btn-secondary btn-sm">Abschluss ansehen</a></td>
+            </tr>"""
+
+        content = f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+          <h1 class="page-title" style="margin:0">📋 Offene Aufgaben</h1>
+          <a href="/" class="btn btn-secondary">← Dashboard</a>
+        </div>
+
+        <div class="card" style="margin-bottom:20px">
+          <div class="card-header"><span class="card-title">Belege mit offenen Punkten ({len(belege)})</span></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th>Beleg</th><th>Reise</th><th>Anbieter</th><th style="text-align:right">Betrag</th>
+                <th>Datum</th><th>Probleme</th>
+              </tr></thead>
+              <tbody>
+                {beleg_zeilen or '<tr><td colspan="6" class="empty-state">Keine offenen Belege 🎉</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><span class="card-title">Reisen abgeschlossen, aber noch nicht final abgerechnet ({len(reisen)})</span></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Reise</th><th>Titel</th><th>Rückkehr</th><th></th></tr></thead>
+              <tbody>
+                {reisen_zeilen or '<tr><td colspan="4" class="empty-state">Keine offenen Reisen 🎉</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>"""
+        return HTMLResponse(shell("Offene Aufgaben", content, "start"))
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:800]}</pre>'))
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     try:
