@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.3-g"
+APP_VERSION  = "3.4-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -491,12 +491,16 @@ def beleg_detail(bid: int, request: Request):
             status, fehler, erstellt,
             kurs_eur, betrag_eur, kurs_datum, kurs_quelle,
             zahlungsart, geprueft, pruef_vermerk, geprueft_von, geprueft_am, dms_versendet_am,
-            beleg_gruppe_id, ist_erechnung, erechnung_format, s3_erechnung_xml
+            beleg_gruppe_id, ist_erechnung, erechnung_format, s3_erechnung_xml, kreditkarte_karte
             FROM belege WHERE id={P}""", (bid,))
         r = cur.fetchone()
         # Reisen für Zuordnung
         cur.execute("SELECT code,titel FROM reisen ORDER BY abreise DESC")
         reisen = cur.fetchall()
+        # Mitarbeiter für Kreditkarten-Auswahl (nur bei Bezahlart "Kreditkarte" genutzt)
+        cur.execute("SELECT kuerzel, klarname, kreditkarten_typ FROM mitarbeiter WHERE aktiv=" +
+                    ("TRUE" if is_postgres() else "1") + " ORDER BY klarname")
+        ma_kreditkarte_rows = cur.fetchall()
         cur.close(); db.close()
         if not r:
             return HTMLResponse(shell("Fehler",'<div class="alert alert-err">Beleg nicht gefunden.</div>'))
@@ -532,6 +536,7 @@ def beleg_detail(bid: int, request: Request):
         gruppe_id=get(r,"beleg_gruppe_id",52)
         ist_erechnung=bool(get(r,"ist_erechnung",53)); erechnung_format=get(r,"erechnung_format",54)
         s3_erechnung_xml=get(r,"s3_erechnung_xml",55)
+        kreditkarte_karte=get(r,"kreditkarte_karte",56)
         zusammenfassung = f"{typ}: {vendor} – {betrag_brutto} {waehrung}" if vendor else ""
 
         # KI-JSON parsen
@@ -637,6 +642,28 @@ def beleg_detail(bid: int, request: Request):
               {f'<a href="/beleg/{bid2}/erechnung-xml" target="_blank" class="btn btn-secondary" style="width:100%;text-align:center;display:block;margin-top:10px">⬇ eRechnung-XML herunterladen (Original, unverändert)</a>' if s3_erechnung_xml else ''}
             </div>
           </div>"""
+
+        # Kreditkarten-Auswahl: nur relevant, wenn Bezahlart = Kreditkarte
+        kreditkarte_dropdown_html = ""
+        if zahlungsart == "Kreditkarte":
+            kk_opts = '<option value="">– Karte wählen –</option>'
+            for m in ma_kreditkarte_rows:
+                mk = get(m,"kuerzel",0); mn = get(m,"klarname",1)
+                mtyp = get(m,"kreditkarten_typ",2) or "privat"
+                label_typ = "Privatkreditkarte" if mtyp == "privat" else "Firmenkreditkarte"
+                wert = f"{label_typ}-{mk}"
+                sel = " selected" if wert == kreditkarte_karte else ""
+                kk_opts += f'<option value="{wert}"{sel}>{mk} – {mn} ({label_typ})</option>'
+            kreditkarte_dropdown_html = f"""
+                <form method="post" action="/beleg/{bid2}/kreditkarte" style="margin-top:6px">
+                  <label style="font-size:11px;color:var(--muted)">Welche Karte?</label><br>
+                  <select name="kreditkarte_karte" onchange="this.form.submit()"
+                          style="padding:4px 8px;font-size:12px;border:1px solid var(--border);
+                                 border-radius:6px;background:white;margin-top:2px">
+                    {kk_opts}
+                  </select>
+                </form>
+                {f'<div style="font-size:12px;color:var(--muted);margin-top:4px">💳 {kreditkarte_karte}</div>' if kreditkarte_karte else ''}"""
 
         # Verknüpfung: unabhängig von der Belegart – jeder Beleg jeder Art kann
         # mit jedem anderen Beleg derselben Reise zu einer Gruppe zusammengefasst
@@ -829,6 +856,7 @@ def beleg_detail(bid: int, request: Request):
                     </select>
                   </form>
                   {'' if zahlungsart or belegart == 'Buchungsbestaetigung' else '<span style="font-size:11px;color:#b45309;margin-left:6px">⚠ bitte nachtragen</span>'}
+                  {kreditkarte_dropdown_html}
                 </dd>
                 {f'<dt style="color:var(--muted);font-size:12px">Netto</dt><dd>{float(betrag_netto):.2f} {waehrung}</dd>' if betrag_netto else ""}
                 {f'<dt style="color:var(--muted);font-size:12px">{"MwSt." if land == "DE" else "VAT"}</dt><dd>{float(betrag_mwst):.2f} {waehrung}</dd>' if betrag_mwst else ""}
@@ -1411,6 +1439,21 @@ async def beleg_zahlungsart_speichern(bid: int, request: Request):
         db = get_db(); cur = db.cursor()
         P = ph()
         cur.execute(f"UPDATE belege SET zahlungsart={P} WHERE id={P}", (zahlungsart, bid))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
+@app.post("/beleg/{bid}/kreditkarte")
+async def beleg_kreditkarte_speichern(bid: int, request: Request):
+    """Speichert, welche Kreditkarte (Privat-/Firmenkreditkarte + Mitarbeiterkürzel)
+    für die Zahlung genutzt wurde – nur relevant, wenn Bezahlart = Kreditkarte."""
+    form = await request.form()
+    kreditkarte_karte = (form.get("kreditkarte_karte") or "").strip() or None
+    try:
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(f"UPDATE belege SET kreditkarte_karte={P} WHERE id={P}", (kreditkarte_karte, bid))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
@@ -3430,6 +3473,14 @@ def mitarbeiter_neu_form():
               </div>
               <div class="form-hint">Reisender = fährt selbst · Organisator = bucht für andere und darf Beleg-Daten nachtragen. Beides gleichzeitig möglich.</div>
             </div>
+            <div class="form-group full">
+              <label>Kreditkartentyp</label>
+              <select name="kreditkarten_typ">
+                <option value="privat" selected>💳 Privatkreditkarte</option>
+                <option value="firma">🏢 Firmenkreditkarte</option>
+              </select>
+              <div class="form-hint">Standard: Privatkreditkarte (die meisten zahlen mit eigener Karte). Wird bei "Kreditkarte" als Bezahlart automatisch als "Privatkreditkarte-{Kürzel}" bzw. "Firmenkreditkarte-{Kürzel}" hinterlegt.</div>
+            </div>
           </div>
           <div class="form-actions">
             <button type="submit" class="btn btn-primary">Anlegen</button>
@@ -3450,6 +3501,7 @@ async def mitarbeiter_neu(request: Request):
     email3  = (form.get("email3") or "").strip() or None
     ist_reisender = bool(form.get("ist_reisender"))
     ist_organisator = bool(form.get("ist_organisator"))
+    kreditkarten_typ = (form.get("kreditkarten_typ") or "privat").strip()
     if not kuerzel or not klarname:
         return HTMLResponse(shell("Fehler",
             '<div class="alert alert-err">Kürzel und Name sind Pflichtfelder.</div>'
@@ -3463,9 +3515,9 @@ async def mitarbeiter_neu(request: Request):
         P = ph()
         rolle_txt = "beides" if (ist_reisender and ist_organisator) else ("organisator" if ist_organisator else "reisender")
         cur.execute(f"""INSERT INTO mitarbeiter
-            (kuerzel, klarname, email, email2, email3, rolle, ist_reisender, ist_organisator)
-            VALUES ({P},{P},{P},{P},{P},{P},{P},{P})""",
-                    (kuerzel, klarname, email, email2, email3, rolle_txt, ist_reisender, ist_organisator))
+            (kuerzel, klarname, email, email2, email3, rolle, ist_reisender, ist_organisator, kreditkarten_typ)
+            VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P})""",
+                    (kuerzel, klarname, email, email2, email3, rolle_txt, ist_reisender, ist_organisator, kreditkarten_typ))
         db.commit(); cur.close(); db.close()
         return RedirectResponse("/mitarbeiter", status_code=303)
     except Exception as e:
@@ -3483,7 +3535,7 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
-        cur.execute(f"SELECT kuerzel, klarname, email, rolle, aktiv, email2, email3, ist_reisender, ist_organisator FROM mitarbeiter WHERE kuerzel={P}",
+        cur.execute(f"SELECT kuerzel, klarname, email, rolle, aktiv, email2, email3, ist_reisender, ist_organisator, kreditkarten_typ FROM mitarbeiter WHERE kuerzel={P}",
                     (kuerzel.upper(),))
         r = cur.fetchone()
         cur.close(); db.close()
@@ -3498,6 +3550,7 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
         em3 = (r[6] if isinstance(r, tuple) else r.get("email3","")) or ""
         is_reisend = bool(r[7] if isinstance(r, tuple) else r.get("ist_reisender", True))
         is_org = bool(r[8] if isinstance(r, tuple) else r.get("ist_organisator", False))
+        kk_typ = (r[9] if isinstance(r, tuple) else r.get("kreditkarten_typ")) or "privat"
         aktiv_check = "checked" if a else ""
         content = f"""
         <h1 class="page-title">Mitarbeiter bearbeiten</h1>
@@ -3538,6 +3591,14 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
                     </label>
                   </div>
                   <div class="form-hint">Organisator darf KI-Beleg-Daten nachtragen/korrigieren.</div>
+                </div>
+                <div class="form-group full">
+                  <label>Kreditkartentyp</label>
+                  <select name="kreditkarten_typ">
+                    <option value="privat"{" selected" if kk_typ=="privat" else ""}>💳 Privatkreditkarte</option>
+                    <option value="firma"{" selected" if kk_typ=="firma" else ""}>🏢 Firmenkreditkarte</option>
+                  </select>
+                  <div class="form-hint">Wird bei Belegen mit Bezahlart "Kreditkarte" automatisch als "Privatkreditkarte-{k}" bzw. "Firmenkreditkarte-{k}" angeboten.</div>
                 </div>
                 <div class="form-group full">
                   <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -3682,6 +3743,7 @@ async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
     email3   = (form.get("email3") or "").strip() or None
     ist_reisender = bool(form.get("ist_reisender"))
     ist_organisator = bool(form.get("ist_organisator"))
+    kreditkarten_typ = (form.get("kreditkarten_typ") or "privat").strip()
     aktiv    = bool(form.get("aktiv"))
     if not klarname:
         return HTMLResponse(shell("Fehler",
@@ -3693,9 +3755,10 @@ async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
         inaktiv_val = False if is_postgres() else 0
         rolle_txt = "beides" if (ist_reisender and ist_organisator) else ("organisator" if ist_organisator else "reisender")
         cur.execute(f"""UPDATE mitarbeiter SET klarname={P}, email={P}, email2={P}, email3={P},
-                        rolle={P}, ist_reisender={P}, ist_organisator={P}, aktiv={P} WHERE kuerzel={P}""",
+                        rolle={P}, ist_reisender={P}, ist_organisator={P}, kreditkarten_typ={P},
+                        aktiv={P} WHERE kuerzel={P}""",
                     (klarname, email, email2, email3, rolle_txt, ist_reisender, ist_organisator,
-                     aktiv_val if aktiv else inaktiv_val, kuerzel.upper()))
+                     kreditkarten_typ, aktiv_val if aktiv else inaktiv_val, kuerzel.upper()))
         db.commit(); cur.close(); db.close()
         return RedirectResponse("/mitarbeiter", status_code=303)
     except Exception as e:
