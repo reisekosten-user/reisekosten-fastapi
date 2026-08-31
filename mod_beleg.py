@@ -337,6 +337,15 @@ Bahnhofs aus deinem eigenen Wissen an, unabhängig davon, ob sie auf dem Beleg
 stehen (stehen dort normalerweise nicht). Genauigkeit auf 2-3 Nachkommastellen
 reicht. Nur bei völlig unbekanntem/nicht zuordenbarem Ort null setzen.
 
+WICHTIG bei "ankunft_zeit"/"ankunft_datum": Steht die Ankunftszeit nicht
+explizit auf dem Beleg, SCHÄTZE sie aus deinem eigenen Wissen über die
+typische Reisedauer dieser Strecke (z.B. Kurzstreckenflug Frankfurt-Bukarest
+~2 Std., Zug Nürnberg-Frankfurt ~2 Std.) und rechne sie zur Abreisezeit hinzu.
+Setze ankunft_zeit NUR dann auf null, wenn wirklich überhaupt keine plausible
+Schätzung möglich ist – lass es NIEMALS einfach leer, obwohl eine Schätzung
+möglich wäre, und setze es NIE gleich der Abreisezeit oder auf 00:00, wenn
+das nicht wirklich die Ankunftszeit ist.
+
 Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
 Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfeld null ist.
 

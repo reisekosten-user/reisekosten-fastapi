@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.3-f"
+APP_VERSION  = "3.3-g"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2968,15 +2968,29 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                     diag.append(eintrag)
                 continue
             ab_zeit = s.get("abreise_zeit") or "00:00"
-            an_zeit = s.get("ankunft_zeit") or "00:00"
+            an_zeit_roh = s.get("ankunft_zeit")
             try:
                 dt_ab = datetime.strptime(f"{d_ab.isoformat()} {ab_zeit}", "%Y-%m-%d %H:%M")
-                dt_an = datetime.strptime(f"{d_an.isoformat()} {an_zeit}", "%Y-%m-%d %H:%M")
             except Exception:
                 if debug:
-                    eintrag["status"] = f"ÜBERSPRUNGEN – Uhrzeit nicht parsbar (abreise_zeit={ab_zeit!r}, ankunft_zeit={an_zeit!r})"
+                    eintrag["status"] = f"ÜBERSPRUNGEN – Abreisezeit nicht parsbar (abreise_zeit={ab_zeit!r})"
                     diag.append(eintrag)
                 continue
+            if an_zeit_roh:
+                try:
+                    dt_an = datetime.strptime(f"{d_an.isoformat()} {an_zeit_roh}", "%Y-%m-%d %H:%M")
+                except Exception:
+                    dt_an = None
+            else:
+                dt_an = None
+            if dt_an is None or dt_an <= dt_ab:
+                # Ankunftszeit fehlt oder wurde als "00:00" fehlinterpretiert
+                # (läge dann VOR dem Abflug!) -> sichere Schätzung: Abflug + 2h,
+                # statt fälschlich Mitternacht anzunehmen (das hätte die ganze
+                # zeitliche Reihenfolge der Segmente durcheinandergebracht).
+                dt_an = dt_ab + timedelta(hours=2)
+                if debug:
+                    eintrag["ankunft_geschaetzt"] = True
             typ_segment = typ
             kombi_text = f'{s.get("transport_name","")} {s.get("hinweis","")}'.lower()
             if any(k in kombi_text for k in ("bahn", "train", "zug", "sncf", "ice", "tgv", "railjet")):
