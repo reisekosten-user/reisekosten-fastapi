@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.6-a"
+APP_VERSION  = "3.6-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3468,15 +3468,21 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
 
         # Zusatz-Kontext: woher gerade gekommen (das Segment, das zu diesem
         # Ort geführt hat) und wohin als nächstes (nächste bevorstehende
-        # Abreise ab diesem Ort) – für die "Zwischenstopp"-Ansicht auf der Karte
+        # Abreise ab diesem Ort) – für die "Zwischenstopp"-Ansicht auf der Karte.
+        # Bewusst nur innerhalb von 24h vor/nach JETZT: bei einem mehrtägigen
+        # Aufenthalt (z.B. Ankunft heute, Rückflug erst in 10 Tagen) sähen
+        # beide Kontextlinien sonst wie eine durchgehend aktive Strecke aus,
+        # obwohl der Rückflug noch gar nicht ansteht.
+        KONTEXT_FENSTER = timedelta(hours=24)
         herkunft = None
         naechste_etappe = None
         for s in segmente:
-            if s["dt_an"] == dt and s["von_koord"] and s["nach_koord"]:
+            if s["dt_an"] == dt and s["von_koord"] and s["nach_koord"] and (jetzt - dt) <= KONTEXT_FENSTER:
                 herkunft = {"von_koord": s["von_koord"], "von_name": s["von_ort"] or s["von_iata"],
                             "transport_typ": s["typ"],
                             "label": f'{s["transport_nummer"]} {s["von_iata"] or s["von_ort"]} → {s["nach_iata"] or s["nach_ort"]}'.strip()}
-        kommende = [s for s in segmente if s["dt_ab"] > jetzt and s["von_koord"] and s["nach_koord"]]
+        kommende = [s for s in segmente if s["dt_ab"] > jetzt and s["von_koord"] and s["nach_koord"]
+                    and (s["dt_ab"] - jetzt) <= KONTEXT_FENSTER]
         if kommende:
             kommende.sort(key=lambda s: s["dt_ab"])
             s = kommende[0]
