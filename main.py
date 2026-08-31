@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.6-b"
+APP_VERSION  = "3.6-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3553,7 +3553,6 @@ def dashboard_maps(debug: str = ""):
 
         marker = []
         strecken = []
-        kontext_strecken = []
         ohne_position = []
         alle_diagnosen = []
         for r in aktive_reisen:
@@ -3578,25 +3577,20 @@ def dashboard_maps(debug: str = ""):
                     "code": code, "titel": titel, "ma": ma, "label": pos["label"],
                 })
             else:
-                marker.append({
-                    "lat": pos["lat"], "lon": pos["lon"], "code": code, "titel": titel,
-                    "ma": ma, "land": pos.get("ort_name") or pos.get("land"), "kuerzel": kuerzel
-                })
+                popup_zusatz = []
                 herkunft = pos.get("herkunft")
                 if herkunft:
                     icon = "✈" if herkunft["transport_typ"] == "Flug" else "🚆"
-                    kontext_strecken.append({
-                        "von": [pos["lat"], pos["lon"]], "nach": herkunft["von_koord"],
-                        "label": "Gerade gelandet: " + herkunft["label"], "icon": icon,
-                    })
+                    popup_zusatz.append(f'{icon} Gerade gelandet: {herkunft["label"]}')
                 naechste = pos.get("naechste_etappe")
                 if naechste:
                     icon = "✈" if naechste["transport_typ"] == "Flug" else "🚆"
-                    kontext_strecken.append({
-                        "von": [pos["lat"], pos["lon"]], "nach": naechste["nach_koord"],
-                        "label": "Als nächstes: " + naechste["label"] + " (ab " +
-                                 naechste["dt_ab_anzeige"] + " Ortszeit)", "icon": icon,
-                    })
+                    popup_zusatz.append(f'{icon} Als nächstes: {naechste["label"]} (ab {naechste["dt_ab_anzeige"]} Ortszeit)')
+                marker.append({
+                    "lat": pos["lat"], "lon": pos["lon"], "code": code, "titel": titel,
+                    "ma": ma, "land": pos.get("ort_name") or pos.get("land"), "kuerzel": kuerzel,
+                    "zusatz": popup_zusatz,
+                })
         cur.close(); db.close()
 
         from mod_flugalert import jetzt_lokal as _jetzt_lokal_fuer_debug
@@ -3630,7 +3624,6 @@ def dashboard_maps(debug: str = ""):
 
         marker_js = json.dumps(marker, ensure_ascii=False)
         strecken_js = json.dumps(strecken, ensure_ascii=False)
-        kontext_strecken_js = json.dumps(kontext_strecken, ensure_ascii=False)
         ohne_html = "".join(
             f'<li><a href="/reise/{o["code"]}">{o["code"]} – {o["titel"]}</a> ({o["ma"]}) – '
             f'noch kein Ort ermittelbar (Belege/VMA prüfen)</li>' for o in ohne_position)
@@ -3656,7 +3649,6 @@ def dashboard_maps(debug: str = ""):
         <script>
         const marker = {marker_js};
         const strecken = {strecken_js};
-        const kontextStrecken = {kontext_strecken_js};
         const map = L.map('reise-map').setView([20, 10], 2);
         L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
             attribution: '&copy; OpenStreetMap-Mitwirkende',
@@ -3683,10 +3675,9 @@ def dashboard_maps(debug: str = ""):
 
         marker.forEach(m => {{
             const mk = L.marker([m.lat, m.lon], {{icon: personIcon(m.kuerzel)}}).addTo(map);
-            mk.bindPopup(
-                '<b>' + m.code + '</b> – ' + m.titel + '<br>' +
-                '👤 ' + m.ma + '<br>📍 ' + m.land
-            );
+            let popup = '<b>' + m.code + '</b> – ' + m.titel + '<br>👤 ' + m.ma + '<br>📍 Aktuell in: ' + m.land;
+            (m.zusatz || []).forEach(z => {{ popup += '<br><span style="font-size:12px;color:#64748b">' + z + '</span>'; }});
+            mk.bindPopup(popup);
             bounds.push([m.lat, m.lon]);
         }});
 
@@ -3707,18 +3698,6 @@ def dashboard_maps(debug: str = ""):
                 Math.round(s.fortschritt*100) + '%)'
             );
             bounds.push(s.von, s.nach);
-        }});
-
-        kontextStrecken.forEach(k => {{
-            L.polyline([k.von, k.nach], {{
-                color: '#2563eb', weight: 2, dashArray: '4, 6', opacity: 0.5
-            }}).addTo(map);
-            const kontextIcon = L.divIcon({{
-                html: '<div style="font-size:16px;opacity:0.85">' + k.icon + '</div>',
-                className: '', iconSize: [20,20], iconAnchor: [10,10]
-            }});
-            L.marker(k.nach, {{icon: kontextIcon}}).addTo(map).bindPopup(k.label);
-            bounds.push(k.von, k.nach);
         }});
 
         if (bounds.length > 0) {{ map.fitBounds(bounds, {{padding: [40,40], maxZoom: 6}}); }}
