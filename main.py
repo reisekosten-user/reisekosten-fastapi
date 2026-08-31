@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.4-b"
+APP_VERSION  = "3.4-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2125,6 +2125,8 @@ def reise_abschluss(code: str):
                     {bet_s}</td>
                 <td style="font-size:11px;color:#64748b">{mwst_s}</td>
                 <td>
+                  <a href="/beleg/{bid2}" style="color:var(--blue);font-weight:600;
+                     text-decoration:none;margin-right:8px">#{bid2}</a>
                   <a href="/beleg/{bid2}/pdf/original" target="_blank"
                      class="btn btn-secondary btn-sm">PDF</a>
                 </td>
@@ -2262,7 +2264,7 @@ def reise_abschluss(code: str):
               <thead><tr>
                 <th>Datum</th><th>Art</th><th>Anbieter</th>
                 <th>Rechnungsnr.</th><th style="text-align:right">Betrag</th>
-                <th>MwSt-Hinweis</th><th>PDF</th>
+                <th>MwSt-Hinweis</th><th>Beleg</th>
               </tr></thead>
               <tbody>
                 {kosten_html or '<tr><td colspan="7" class="empty-state">Keine Rechnungen vorhanden</td></tr>'}
