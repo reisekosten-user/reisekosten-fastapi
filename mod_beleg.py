@@ -218,6 +218,11 @@ nahe am heutigen Datum, i.d.R. nicht länger als 12 Monate in der Vergangenheit
 oder Zukunft). Rate NIE ein Jahr ohne Anhaltspunkt – nutze immer den Wochentag,
 falls dieser angegeben ist.
 
+WICHTIG bei "betrag_eur_geschaetzt"/"kurs_geschaetzt": Ist "waehrung" NICHT "EUR",
+schätze den Euro-Gegenwert von "betrag_brutto" anhand des dir bekannten
+ungefähren Wechselkurses zum Datum von "belegdatum" (historischer Tageskurs,
+aus deinem eigenen Wissen). Bei "waehrung"="EUR" beide Felder null lassen.
+
 Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
 Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
 
@@ -235,6 +240,8 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
   "betrag_netto": null,
   "betrag_mwst": null,
   "waehrung": "EUR",
+  "betrag_eur_geschaetzt": "nur bei waehrung != EUR: geschätzter Euro-Gegenwert zum Kurs des Belegdatums, sonst null",
+  "kurs_geschaetzt": "nur bei waehrung != EUR: verwendeter Wechselkurs (1 EUR = X Fremdwährung), sonst null",
   "zahlungsart": "Kreditkarte|Bar|Ueberweisung|PayPal|Unbekannt (PayPal erkennbar an 'PayPal' im Text, z.B. 'Diese Zahlung wurde ueber PayPal getaetigt' – PayPal gilt als eigene Kategorie, auch wenn im Hintergrund eine Kreditkarte hinterlegt ist; sonst Kreditkarte erkennbar an Visa/Mastercard/Amex, maskierter Kartennummer wie xxxx1234, 'bar bezahlt'/cash, oder Ueberweisungshinweisen)",
   "event_datum_von": "DD.MM.YYYY",
   "event_datum_bis": "DD.MM.YYYY",
@@ -346,6 +353,14 @@ Schätzung möglich ist – lass es NIEMALS einfach leer, obwohl eine Schätzung
 möglich wäre, und setze es NIE gleich der Abreisezeit oder auf 00:00, wenn
 das nicht wirklich die Ankunftszeit ist.
 
+WICHTIG bei "betrag_eur_geschaetzt"/"kurs_geschaetzt": Ist "waehrung" NICHT "EUR",
+schätze den Euro-Gegenwert von "betrag_brutto" anhand des dir bekannten
+ungefähren Wechselkurses zum Datum von "belegdatum" (historischer Tageskurs,
+aus deinem eigenen Wissen – keine Live-Abfrage nötig). Das ist eine grobe
+Arbeitsgrundlage, keine exakte Buchung; der Organisator kann sie später anhand
+der echten Kreditkartenabrechnung überschreiben. Bei "waehrung"="EUR" beide
+Felder null lassen.
+
 Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
 Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfeld null ist.
 
@@ -364,6 +379,8 @@ JSON-Format:
   "betrag_netto": 89.33,
   "betrag_mwst": 17.87,
   "waehrung": "EUR",
+  "betrag_eur_geschaetzt": "nur bei waehrung != EUR: geschätzter Euro-Gegenwert zum Kurs des Belegdatums, sonst null",
+  "kurs_geschaetzt": "nur bei waehrung != EUR: verwendeter Wechselkurs (1 EUR = X Fremdwährung), sonst null",
   "zahlungsart": "Kreditkarte|Bar|Ueberweisung|PayPal|Unbekannt (PayPal erkennbar an 'PayPal' im Text, z.B. 'Diese Zahlung wurde ueber PayPal getaetigt' – PayPal gilt als eigene Kategorie, auch wenn im Hintergrund eine Kreditkarte hinterlegt ist; sonst Kreditkarte erkennbar an Visa/Mastercard/Amex, maskierter Kartennummer wie xxxx1234, 'bar bezahlt'/cash, oder Ueberweisungshinweisen; bei Reisebuero-Buchungen meist Ueberweisung)",
   "event_datum_von": "DD.MM.YYYY",
   "event_datum_bis": "DD.MM.YYYY",
@@ -518,8 +535,26 @@ async def beleg_neu_analysieren(bid: int) -> dict:
     pflicht_ok = bool(ki_result.get("pflichtfelder_ok", False))
     fehlend_str = json.dumps(ki_result.get("fehlende_pflichtfelder", []), ensure_ascii=False)
     status = "ok" if pflicht_ok else "fehlerhaft"
+    waehrung_ki = ki_result.get("waehrung", "EUR") or "EUR"
+    betrag_eur_geschaetzt = pn("betrag_eur_geschaetzt") if waehrung_ki != "EUR" else None
+    kurs_geschaetzt = pn("kurs_geschaetzt") if waehrung_ki != "EUR" else None
 
     db = get_db(); cur = db.cursor()
+    # Bisherige Kurs-Quelle prüfen: eine manuell/per EZB gepflegte Schätzung
+    # wird durch die Neuanalyse nicht überschrieben, nur eine vorherige
+    # KI-Schätzung oder ein noch leerer Wert.
+    cur.execute(f"SELECT kurs_quelle FROM belege WHERE id={P}", (bid,))
+    row_kurs = cur.fetchone()
+    alte_kurs_quelle = (row_kurs[0] if isinstance(row_kurs, tuple) else row_kurs["kurs_quelle"]) if row_kurs else None
+    kurs_ueberschreibbar = alte_kurs_quelle in (None, "KI-geschätzt")
+
+    kurs_update_sql = ""
+    kurs_update_vals = ()
+    if betrag_eur_geschaetzt is not None and kurs_ueberschreibbar:
+        kurs_update_sql = f", betrag_eur={P}, kurs_eur={P}, kurs_datum={P}, kurs_quelle={P}"
+        kurs_update_vals = (betrag_eur_geschaetzt, kurs_geschaetzt,
+                            pd("belegdatum"), "KI-geschätzt")
+
     cur.execute(f"""UPDATE belege SET
         ki_json={P}, pflichtfelder_ok={P}, fehlende_felder={P},
         belegdatum={P}, belegart={P}, transportart={P}, transportart_freitext={P},
@@ -531,7 +566,7 @@ async def beleg_neu_analysieren(bid: int) -> dict:
         hotel_checkout_datum={P}, hotel_checkout_zeit={P}, hotel_naechte={P},
         tanken_kraftstoff={P}, tanken_menge={P}, tanken_einheit={P},
         tanken_preis_einheit={P}, tanken_tankstelle={P}, tanken_kennzeichen={P},
-        status={P}
+        status={P}{kurs_update_sql}
         WHERE id={P}""", (
         ki_json_str, pflicht_ok, fehlend_str,
         pd("belegdatum"), ki_result.get("belegart"),
@@ -540,7 +575,7 @@ async def beleg_neu_analysieren(bid: int) -> dict:
         ki_result.get("buchungscode"), ki_result.get("reisender"),
         ki_result.get("land_beleg"),
         pn("betrag_brutto"), pn("betrag_netto"), pn("betrag_mwst"),
-        ki_result.get("waehrung","EUR"), ki_result.get("zahlungsart"),
+        waehrung_ki, ki_result.get("zahlungsart"),
         pd("event_datum_von"), pd("event_datum_bis"), ki_result.get("event_zeit"),
         ki_result.get("event_ort_von"), ki_result.get("event_ort_bis"),
         ki_result.get("hotel_name"), pd("hotel_checkin_datum"),
@@ -550,7 +585,7 @@ async def beleg_neu_analysieren(bid: int) -> dict:
         ki_result.get("tanken_kraftstoff"), pn("tanken_menge"),
         ki_result.get("tanken_einheit"), pn("tanken_preis_pro_einheit"),
         ki_result.get("tanken_tankstelle"), ki_result.get("tanken_kennzeichen"),
-        status, bid))
+        status) + kurs_update_vals + (bid,))
     db.commit(); cur.close(); db.close()
     return {"ok": True}
 
@@ -760,6 +795,13 @@ async def beleg_verarbeiten(
                        f"{ki_result.get('betrag_brutto','?')} "
                        f"{ki_result.get('waehrung','EUR')}")
 
+    # Von der KI geschätzter Euro-Gegenwert bei Fremdwährungsbelegen – nur als
+    # Arbeitsgrundlage, der Organisator kann ihn später anhand der echten
+    # Kreditkartenabrechnung überschreiben (betrag_eur_final, siehe main.py).
+    waehrung_ki = ki_result.get("waehrung", "EUR") or "EUR"
+    betrag_eur_geschaetzt = pn("betrag_eur_geschaetzt") if waehrung_ki != "EUR" else None
+    kurs_geschaetzt = pn("kurs_geschaetzt") if waehrung_ki != "EUR" else None
+
     P = ph()
     db = get_db(); cur = db.cursor()
     sql = f"""INSERT INTO belege
@@ -774,13 +816,15 @@ async def beleg_verarbeiten(
          hotel_checkout_datum, hotel_checkout_zeit, hotel_naechte,
          tanken_kraftstoff, tanken_menge, tanken_einheit,
          tanken_preis_einheit, tanken_tankstelle, tanken_kennzeichen,
-         status, ist_erechnung, erechnung_format, s3_erechnung_xml)
+         status, ist_erechnung, erechnung_format, s3_erechnung_xml,
+         betrag_eur, kurs_eur, kurs_datum, kurs_quelle)
         VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},{P},
-                {P},{P},{P},{P},{P},{P},{P},{P},{P},{P})"""
+                {P},{P},{P},{P},{P},{P},{P},{P},{P},{P},
+                {P},{P},{P},{P})"""
 
     vals = (
         reise_code, dateiname, s3_original, s3_anon, s3_analyse,
@@ -792,7 +836,7 @@ async def beleg_verarbeiten(
         ki_result.get("buchungscode"), ki_result.get("reisender"),
         ki_result.get("land_beleg"),
         pn("betrag_brutto"), pn("betrag_netto"), pn("betrag_mwst"),
-        ki_result.get("waehrung","EUR"), ki_result.get("zahlungsart"),
+        waehrung_ki, ki_result.get("zahlungsart"),
         pd("event_datum_von"), pd("event_datum_bis"), ki_result.get("event_zeit"),
         ki_result.get("event_ort_von"), ki_result.get("event_ort_bis"),
         ki_result.get("hotel_name"), pd("hotel_checkin_datum"),
@@ -802,7 +846,10 @@ async def beleg_verarbeiten(
         ki_result.get("tanken_kraftstoff"), pn("tanken_menge"),
         ki_result.get("tanken_einheit"), pn("tanken_preis_pro_einheit"),
         ki_result.get("tanken_tankstelle"), ki_result.get("tanken_kennzeichen"),
-        status, erechnung_info["ist_erechnung"], erechnung_info["format"], s3_erechnung_xml)
+        status, erechnung_info["ist_erechnung"], erechnung_info["format"], s3_erechnung_xml,
+        betrag_eur_geschaetzt, kurs_geschaetzt,
+        pd("belegdatum") if betrag_eur_geschaetzt else None,
+        "KI-geschätzt" if betrag_eur_geschaetzt else None)
 
     if is_postgres():
         cur.execute(sql + " RETURNING id", vals)

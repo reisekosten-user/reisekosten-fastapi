@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.4-c"
+APP_VERSION  = "3.5-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -345,6 +345,25 @@ def shell(title: str, content: str, page: str = "") -> str:
 </body>
 </html>"""
 
+def gesamtbetrag_berechnen(betrag_brutto, waehrung, betrag_eur_geschaetzt,
+                            betrag_eur_final, nebenkosten_eur) -> float:
+    """
+    Einheitliche Eurobetrag-Logik für einen Beleg:
+    1. Betrag Beleg final (manuell, gemäß Abrechnung) hat Vorrang, falls gesetzt.
+    2. Sonst der von der KI geschätzte Euro-Gegenwert (bei Fremdwährung).
+    3. Sonst der Bruttobetrag selbst, falls bereits in EUR.
+    4. Nebenkosten (z.B. Kreditkartengebühr) werden immer addiert.
+    """
+    if betrag_eur_final is not None:
+        basis = float(betrag_eur_final)
+    elif betrag_eur_geschaetzt is not None:
+        basis = float(betrag_eur_geschaetzt)
+    elif (waehrung or "EUR") == "EUR" and betrag_brutto is not None:
+        basis = float(betrag_brutto)
+    else:
+        basis = 0.0
+    return basis + float(nebenkosten_eur or 0)
+
 # ── FastAPI App ────────────────────────────────────────────────────────────────
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 
@@ -491,7 +510,8 @@ def beleg_detail(bid: int, request: Request):
             status, fehler, erstellt,
             kurs_eur, betrag_eur, kurs_datum, kurs_quelle,
             zahlungsart, geprueft, pruef_vermerk, geprueft_von, geprueft_am, dms_versendet_am,
-            beleg_gruppe_id, ist_erechnung, erechnung_format, s3_erechnung_xml, kreditkarte_karte
+            beleg_gruppe_id, ist_erechnung, erechnung_format, s3_erechnung_xml, kreditkarte_karte,
+            betrag_eur_final, nebenkosten_eur, nebenkosten_beschreibung
             FROM belege WHERE id={P}""", (bid,))
         r = cur.fetchone()
         # Reisen für Zuordnung
@@ -537,6 +557,9 @@ def beleg_detail(bid: int, request: Request):
         ist_erechnung=bool(get(r,"ist_erechnung",53)); erechnung_format=get(r,"erechnung_format",54)
         s3_erechnung_xml=get(r,"s3_erechnung_xml",55)
         kreditkarte_karte=get(r,"kreditkarte_karte",56)
+        betrag_eur_final=get(r,"betrag_eur_final",57)
+        nebenkosten_eur=get(r,"nebenkosten_eur",58)
+        nebenkosten_beschreibung=get(r,"nebenkosten_beschreibung",59)
         zusammenfassung = f"{typ}: {vendor} – {betrag_brutto} {waehrung}" if vendor else ""
 
         # KI-JSON parsen
@@ -873,7 +896,7 @@ def beleg_detail(bid: int, request: Request):
                 <dd style="font-family:monospace">{buchungscode or "–"}</dd>
                 <dt style="color:var(--muted);font-size:12px">Rechnungsnr.</dt>
                 <dd style="font-family:monospace">{rechnr or "–"}</dd>
-                {f'<dt style="color:var(--muted);font-size:12px">EUR-Betrag</dt><dd style="font-weight:600;color:var(--green)">{float(betrag_eur):.2f} EUR</dd>' if betrag_eur else ('<dt style="color:var(--amber);font-size:12px">EUR-Betrag</dt><dd style="color:var(--amber);font-size:12px">⚠ Kurs fehlt – bitte nachtragen</dd>' if waehrung and waehrung != "EUR" else "")}
+                {f'<dt style="color:var(--muted);font-size:12px">Betrag in Euro (geschätzt)</dt><dd style="font-weight:600;color:var(--green)">{float(betrag_eur):.2f} EUR</dd>' if betrag_eur else ('<dt style="color:var(--amber);font-size:12px">Betrag in Euro (geschätzt)</dt><dd style="color:var(--amber);font-size:12px">⚠ Kurs fehlt – bitte nachtragen</dd>' if waehrung and waehrung != "EUR" else "")}
                 {f'<dt style="color:var(--muted);font-size:12px">Kurs</dt><dd style="font-family:monospace">{kurs_eur} ({kurs_datum or ""} {kurs_quelle or ""})</dd>' if kurs_eur else ""}
                 {f'<dt style="color:var(--muted);font-size:12px">Hotel</dt><dd style="font-weight:600">{hotel_name}</dd>' if hotel_name else ""}
                 {f'<dt style="color:var(--muted);font-size:12px">Check-in</dt><dd>{fmt_date(hotel_ci_dat)} {hotel_ci_zeit or ""}</dd>' if hotel_ci_dat else ""}
@@ -960,6 +983,44 @@ def beleg_detail(bid: int, request: Request):
                   💱 Kurs speichern
                 </button>
               </form>'''}
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header"><span class="card-title">💰 Eurobetrag – Endabrechnung</span></div>
+            <div class="card-body">
+              <p style="font-size:12px;color:var(--muted);margin-bottom:10px">
+                Der geschätzte Euro-Betrag oben dient als Arbeitsgrundlage. Sobald die echte
+                Abrechnung vorliegt (z.B. Kreditkartenbeleg), hier den tatsächlichen Betrag
+                eintragen – das hat Vorrang vor der Schätzung.</p>
+              <form method="post" action="/beleg/{bid2}/gesamtbetrag">
+                <div class="form-grid form-grid-2" style="gap:8px">
+                  <div class="form-group" style="margin:0">
+                    <label>Betrag Beleg – final, in EUR (gemäß Abrechnung)</label>
+                    <input type="number" step="0.01" name="betrag_eur_final"
+                           value="{betrag_eur_final if betrag_eur_final is not None else ''}"
+                           placeholder="z.B. 47.30" class="inp">
+                  </div>
+                  <div class="form-group" style="margin:0">
+                    <label>Nebenkosten Beleg, in EUR (z.B. Kreditkartengebühr)</label>
+                    <input type="number" step="0.01" name="nebenkosten_eur"
+                           value="{nebenkosten_eur if nebenkosten_eur is not None else ''}"
+                           placeholder="z.B. 1.20" class="inp">
+                  </div>
+                  <div class="form-group full" style="margin:0">
+                    <label>Bezeichnung Nebenkosten</label>
+                    <input type="text" name="nebenkosten_beschreibung" class="inp"
+                           value="{nebenkosten_beschreibung or ''}" placeholder="Kreditkartengebühr">
+                  </div>
+                </div>
+                <div style="margin-top:10px;padding:10px;background:var(--green-l,#f0fdf4);
+                            border-radius:var(--radius-s);font-size:14px;font-weight:700;color:var(--green)">
+                  Gesamtbetrag: {gesamtbetrag_berechnen(betrag_brutto, waehrung, betrag_eur, betrag_eur_final, nebenkosten_eur):.2f} EUR
+                </div>
+                <button type="submit" class="btn btn-success" style="margin-top:8px;width:100%">
+                  Speichern
+                </button>
+              </form>
             </div>
           </div>
 
@@ -1930,6 +1991,29 @@ async def beleg_kurs_speichern(bid: int, request: Request):
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
 
+@app.post("/beleg/{bid}/gesamtbetrag")
+async def beleg_gesamtbetrag_speichern(bid: int, request: Request):
+    """Speichert den finalen Euro-Betrag (gemäß Abrechnung) und Nebenkosten
+    (z.B. Kreditkartengebühr) – hat Vorrang vor dem KI-geschätzten Euro-Betrag."""
+    form = await request.form()
+    try:
+        def parse_num(feld):
+            v = (form.get(feld) or "").strip()
+            return float(v) if v else None
+        betrag_eur_final = parse_num("betrag_eur_final")
+        nebenkosten_eur = parse_num("nebenkosten_eur")
+        nebenkosten_beschreibung = (form.get("nebenkosten_beschreibung") or "").strip() or None
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"""UPDATE belege SET
+            betrag_eur_final={P}, nebenkosten_eur={P}, nebenkosten_beschreibung={P}
+            WHERE id={P}""",
+            (betrag_eur_final, nebenkosten_eur, nebenkosten_beschreibung, bid))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
 
 @app.get("/reise/{code}/abschluss", response_class=HTMLResponse)
 def reise_abschluss(code: str):
@@ -1973,7 +2057,8 @@ def reise_abschluss(code: str):
             anbieter,rechnungsnummer,belegdatum,
             betrag_brutto,betrag_netto,betrag_mwst,waehrung,
             land_beleg,betrag_eur,kurs_eur,kurs_datum,kurs_quelle,
-            s3_original,status,beleg_gruppe_id
+            s3_original,status,beleg_gruppe_id,betrag_eur_final,nebenkosten_eur,
+            nebenkosten_beschreibung
             FROM belege WHERE reise_code={P}
             ORDER BY belegdatum NULLS LAST, id""", (rcode,))
         belege = cur.fetchall()
@@ -2021,9 +2106,9 @@ def reise_abschluss(code: str):
                 bestaetigung.append(b)
 
         kosten_eur = sum(
-            float(g(b,"betrag_eur",12) or g(b,"betrag_brutto",7) or 0)
-            for b in (rechnungen + vorlaeufig)
-            if (g(b,"waehrung",10) or "EUR") == "EUR" or g(b,"betrag_eur",12))
+            gesamtbetrag_berechnen(g(b,"betrag_brutto",7), g(b,"waehrung",10), g(b,"betrag_eur",12),
+                                    g(b,"betrag_eur_final",19), g(b,"nebenkosten_eur",20))
+            for b in (rechnungen + vorlaeufig))
 
         # Wochentage
         wt = ["Mo","Di","Mi","Do","Fr","Sa","So"]
@@ -2087,10 +2172,14 @@ def reise_abschluss(code: str):
             mwst=g(b,"betrag_mwst",9); waehrung=g(b,"waehrung",10) or "EUR"
             land=g(b,"land_beleg",11) or ""
             betrag_eur_b=g(b,"betrag_eur",12); kurs=g(b,"kurs_eur",13)
+            betrag_eur_final_b=g(b,"betrag_eur_final",19); nebenkosten_b=g(b,"nebenkosten_eur",20)
+            nebenkosten_besch_b=g(b,"nebenkosten_beschreibung",21)
 
             typ_label = typ + (f" – {freitext}" if freitext else "")
             if ist_vorlaeufig:
                 typ_label += ' <span style="color:#c2410c;font-weight:600">· vorläufig</span>'
+
+            eur_val = gesamtbetrag_berechnen(brutto, waehrung, betrag_eur_b, betrag_eur_final_b, nebenkosten_b)
 
             # Betrag-Spalte
             if waehrung == "EUR":
@@ -2099,16 +2188,17 @@ def reise_abschluss(code: str):
                           if mwst and land == "DE" else
                           "VAT: nicht abzugsfähig (Ausland)" if mwst and land != "DE"
                           else "")
-                eur_val = float(brutto) if brutto else 0
             else:
                 bet_s = f"{float(brutto):.2f} {waehrung}" if brutto else "–"
-                if betrag_eur_b:
-                    bet_s += f" = {float(betrag_eur_b):.2f} EUR (Kurs: {kurs})"
-                    eur_val = float(betrag_eur_b)
+                if betrag_eur_final_b:
+                    bet_s += f" = {float(betrag_eur_final_b):.2f} EUR (final)"
+                elif betrag_eur_b:
+                    bet_s += f" ≈ {float(betrag_eur_b):.2f} EUR (geschätzt, Kurs: {kurs})"
                 else:
                     bet_s += f' <span style="color:#ef4444">⚠ Kurs fehlt</span>'
-                    eur_val = 0
                 mwst_s = "Auslandsbeleg – Vorsteuer nicht abzugsfähig"
+            if nebenkosten_b:
+                bet_s += f'<br><span style="font-size:10px;color:#64748b">+ {float(nebenkosten_b):.2f} EUR {nebenkosten_besch_b or "Nebenkosten"}</span>'
             if ist_vorlaeufig:
                 mwst_s = ('<span style="color:#c2410c">Nur Buchungsbestätigung, noch keine Rechnung – '
                            'Betrag wird vorläufig mitgerechnet</span>')
@@ -2316,7 +2406,7 @@ def reise_abschluss_pdf(code: str):
         vma_rows = cur.fetchall()
 
         cur.execute(f"""SELECT id,belegart,anbieter,belegdatum,betrag_brutto,waehrung,betrag_eur,
-            beleg_gruppe_id,s3_original,dateiname
+            beleg_gruppe_id,s3_original,dateiname,betrag_eur_final,nebenkosten_eur
             FROM belege WHERE reise_code={P} ORDER BY belegdatum""", (rcode,))
         belege = cur.fetchall()
         cur.close(); db.close()
@@ -2346,7 +2436,10 @@ def reise_abschluss_pdf(code: str):
             if not gruppe_hat_rechnung and g(b,"betrag_brutto",4):
                 rechnungen.append(b)  # vorläufig mitgezählt
 
-        kosten_eur = sum(float(g(b,"betrag_eur",6) or g(b,"betrag_brutto",4) or 0) for b in rechnungen)
+        kosten_eur = sum(
+            gesamtbetrag_berechnen(g(b,"betrag_brutto",4), g(b,"waehrung",5), g(b,"betrag_eur",6),
+                                    g(b,"betrag_eur_final",10), g(b,"nebenkosten_eur",11))
+            for b in rechnungen)
 
         from reportlab.lib.pagesizes import A4
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -2684,9 +2777,93 @@ def version():
 
 # ── Dashboard ──────────────────────────────────────────────────────────────────
 
+def todo_liste_laden() -> list:
+    """
+    Konsolidierte Aufgabenliste für Organisatoren: alles, was noch offen ist,
+    bis eine Reise final abgerechnet werden kann. Zeigt IMMER alle Belege/
+    Reisen (nicht auf einzelne Mitarbeiter gefiltert) – nur für Organisatoren
+    gedacht.
+    """
+    db = get_db(); cur = db.cursor()
+    P = ph()
+    today = date.today().isoformat()
+    aufgaben = []
+
+    try:
+        # 1. Betrag final noch nicht bestätigt (Fremdwährung, nur Schätzung vorhanden)
+        cur.execute(f"""SELECT COUNT(*), MIN(id) FROM belege
+            WHERE waehrung != 'EUR' AND betrag_eur_final IS NULL AND betrag_brutto IS NOT NULL""")
+        n, erster_id = cur.fetchone()
+        if n:
+            aufgaben.append({"icon": "💶", "prio": "warn",
+                "text": f'Betrag final noch nicht bestätigt ({n} Beleg{"e" if n!=1 else ""})',
+                "sub": "Fremdwährung, nur KI-Schätzung vorhanden",
+                "url": f"/beleg/{erster_id}" if n == 1 else "/belege"})
+    except Exception: pass
+
+    try:
+        # 2. Belege noch nicht geprüft, obwohl die Reise bereits zurück ist
+        cur.execute(f"""SELECT COUNT(*), MIN(b.id) FROM belege b
+            JOIN reisen r ON r.code = b.reise_code
+            WHERE b.belegart IN ('Rechnung','Quittung') AND b.geprueft = {'FALSE' if is_postgres() else '0'}
+            AND r.rueckkehr < {P}""", (today,))
+        n, erster_id = cur.fetchone()
+        if n:
+            aufgaben.append({"icon": "✅", "prio": "danger",
+                "text": f'Belege noch nicht geprüft ({n})',
+                "sub": "Reise bereits abgeschlossen",
+                "url": f"/beleg/{erster_id}" if n == 1 else "/belege"})
+    except Exception: pass
+
+    try:
+        # 3. Geprüfte Belege, die noch nicht an Habel gesendet wurden
+        cur.execute(f"""SELECT COUNT(*), MIN(id) FROM belege
+            WHERE geprueft = {'TRUE' if is_postgres() else '1'} AND dms_versendet_am IS NULL""")
+        n, erster_id = cur.fetchone()
+        if n:
+            aufgaben.append({"icon": "📤", "prio": "info",
+                "text": f'Geprüfte Belege noch nicht an Habel gesendet ({n})',
+                "sub": "",
+                "url": f"/beleg/{erster_id}" if n == 1 else "/belege"})
+    except Exception: pass
+
+    try:
+        # 4. Fehlende Pflichtfelder
+        cur.execute(f"""SELECT COUNT(*), MIN(id) FROM belege
+            WHERE pflichtfelder_ok = {'FALSE' if is_postgres() else '0'}""")
+        n, erster_id = cur.fetchone()
+        if n:
+            aufgaben.append({"icon": "⚠", "prio": "danger",
+                "text": f'Pflichtfelder fehlen ({n})',
+                "sub": "",
+                "url": f"/beleg/{erster_id}" if n == 1 else "/belege"})
+    except Exception: pass
+
+    try:
+        # 5. Reisen abgeschlossen (Rückkehr liegt bereits zurück), aber noch
+        # mindestens ein Rechnungs-/Quittungsbeleg ungeprüft oder ungesendet
+        cur.execute(f"""SELECT DISTINCT r.code, r.titel FROM reisen r
+            WHERE r.rueckkehr < {P} AND EXISTS (
+                SELECT 1 FROM belege b WHERE b.reise_code = r.code
+                AND b.belegart IN ('Rechnung','Quittung')
+                AND (b.geprueft = {'FALSE' if is_postgres() else '0'} OR b.dms_versendet_am IS NULL)
+            )""", (today,))
+        rows = cur.fetchall()
+        if rows:
+            erste = rows[0]
+            erster_code = erste[0] if isinstance(erste, tuple) else erste["code"]
+            aufgaben.append({"icon": "🧾", "prio": "info",
+                "text": f'Reisen abgeschlossen, aber noch nicht final abgerechnet ({len(rows)})',
+                "sub": "Rückkehr liegt bereits zurück",
+                "url": f"/reise/{erster_code}/abschluss" if len(rows) == 1 else "/reisen"})
+    except Exception: pass
+
+    cur.close(); db.close()
+    return aufgaben
+
 # ── Dashboard + Mitarbeiter ───────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
-def dashboard():
+def dashboard(request: Request):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
@@ -2887,6 +3064,43 @@ def dashboard():
                 f'font-size:13px;color:#065f46;font-weight:500">'
                 f'✅ Alles in Ordnung – keine offenen Aktionen</div>')
 
+        # ToDo-Liste – nur für Organisatoren: konsolidierter Überblick über alles,
+        # was bis zur finalen Abrechnung noch offen ist (nicht auf den einzelnen
+        # Mitarbeiter gefiltert)
+        todo_html = ""
+        if ist_organisator(request):
+            todo_items = todo_liste_laden()
+            PRIO_FARBEN = {
+                "danger": ("#991b1b", "#ef4444"),
+                "warn": ("#92400e", "#d97706"),
+                "info": ("#334155", "#64748b"),
+            }
+            if todo_items:
+                zeilen = ""
+                for t in todo_items:
+                    fg, sub_fg = PRIO_FARBEN.get(t["prio"], PRIO_FARBEN["info"])
+                    zeilen += (
+                        f'<a href="{t["url"]}" style="display:flex;align-items:center;gap:10px;'
+                        f'padding:10px 16px;text-decoration:none;color:{fg};'
+                        f'border-bottom:1px solid var(--border)">'
+                        f'<span style="font-size:16px">{t["icon"]}</span>'
+                        f'<span style="flex:1;font-weight:600;font-size:13px">{t["text"]}</span>'
+                        f'<span style="font-size:12px;color:{sub_fg}">{t["sub"]}</span>'
+                        f'</a>')
+                todo_html = (
+                    f'<div style="background:var(--white);border:1px solid var(--border);'
+                    f'border-radius:var(--radius);margin-bottom:20px;overflow:hidden">'
+                    f'<div style="padding:8px 16px;background:var(--bg);font-size:11px;'
+                    f'font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">'
+                    f'📋 Offene Aufgaben (Organisator) ({len(todo_items)})</div>'
+                    f'{zeilen}</div>')
+            else:
+                todo_html = (
+                    f'<div style="background:var(--green-l);border:1px solid #6ee7b7;'
+                    f'border-radius:var(--radius);padding:10px 16px;margin-bottom:20px;'
+                    f'font-size:13px;color:#065f46;font-weight:500">'
+                    f'✅ Keine offenen Aufgaben – alles final abgerechnet</div>')
+
         content = f"""
         <div style="display:flex;align-items:center;justify-content:space-between;
                     margin-bottom:20px">
@@ -2898,6 +3112,7 @@ def dashboard():
           </div>
         </div>
 
+        {todo_html}
         {warn_html}
 
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px">
@@ -4146,7 +4361,7 @@ def reise_detail(code: str):
                         betrag_brutto, waehrung, belegdatum, hotel_checkin_zeit, ki_json,
                         event_datum_von, event_datum_bis, hotel_checkin_datum,
                         hotel_checkout_datum, hotel_checkout_zeit, event_zeit,
-                        belegart, beleg_gruppe_id
+                        belegart, beleg_gruppe_id, betrag_eur, betrag_eur_final, nebenkosten_eur
                         FROM belege WHERE reise_code = {P} ORDER BY belegdatum""", (rcode,))
         beleg_rows_tag = cur.fetchall()
 
@@ -4283,8 +4498,9 @@ def reise_detail(code: str):
                     and gruppen_arten_tag.get(gruppe_k, set()) & {"Rechnung", "Quittung"}):
                 continue
             beleg_anzahl_gesamt += 1
-            bk = get(b,"betrag_brutto",4)
-            if bk: beleg_kosten_gesamt += float(bk)
+            beleg_kosten_gesamt += gesamtbetrag_berechnen(
+                get(b,"betrag_brutto",4), get(b,"waehrung",5), get(b,"betrag_eur",17),
+                get(b,"betrag_eur_final",18), get(b,"nebenkosten_eur",19))
 
         for b in beleg_rows_tag:
             bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
