@@ -46,36 +46,53 @@ CHECKPOINTS_VOR_ABREISE = [timedelta(hours=4), timedelta(hours=3), timedelta(hou
                            timedelta(hours=1), timedelta(minutes=30), timedelta(minutes=15)]
 CHECKPOINT_VOR_ANKUNFT = timedelta(minutes=30)
 VERSPAETUNGS_ALARM_SCHWELLE_MIN = 15
+MINDESTABSTAND_MINUTEN = 10  # harte Sperre, siehe segment_check_faellig
 
 
 def _checkpoints_fuer_segment(seg: dict, alt_status: dict | None) -> list:
-    """Berechnet alle relevanten Prüf-Zeitpunkte für ein Segment."""
+    """Berechnet die STATISCHEN Prüf-Zeitpunkte für ein Segment (nur für die
+    Diagnose-Anzeige – die eigentliche Fällig-Logik inkl. Verspätungsfall steht
+    in segment_check_faellig)."""
     dt_ab = seg["dt_ab"]; dt_an = seg["dt_an"]
-    bekannte_verspaetung = (alt_status.get("verspaetung_minuten") or 0) if alt_status else 0
-
     punkte = [dt_ab - td for td in CHECKPOINTS_VOR_ABREISE]
-
-    if bekannte_verspaetung > 0:
-        neue_abreise = dt_ab + timedelta(minutes=bekannte_verspaetung)
-        punkte.append(neue_abreise - timedelta(minutes=15))
-
-    erwartete_ankunft = dt_an + timedelta(minutes=bekannte_verspaetung)
-    punkte.append(erwartete_ankunft - CHECKPOINT_VOR_ANKUNFT)
-
+    punkte.append(dt_an - CHECKPOINT_VOR_ANKUNFT)
     return sorted(punkte)
 
 
 def segment_check_faellig(seg: dict, jetzt: datetime, alt_status: dict | None) -> bool:
     """
-    True, wenn JETZT mindestens ein Checkpoint erreicht wurde, der noch nicht
-    (also seit diesem Checkpoint-Zeitpunkt) geprüft wurde. Punkte zwischen
-    Abreise und Ankunft-30min existieren bewusst nicht -> während des Flugs
-    finden automatisch keine Checks statt.
+    True, wenn ein Check fällig ist.
+
+    - Ist bereits eine Verspätung bekannt (Flug/Zug sollte laut Plan schon
+      losgefahren sein, hat sich aber verzögert): einfach alle
+      MINDESTABSTAND_MINUTEN erneut nachsehen, bis sich der Status ändert
+      (z.B. Ankunft bestätigt). KEIN rechnerisch verschobener Einzel-
+      Checkpoint mehr – der hätte sich mit jeder neu gemeldeten Verspätung
+      ein Stück nach vorn verschoben und wäre dadurch nach JEDEM Check sofort
+      wieder "fällig" gewesen (führte zum Minutentakt-Bug).
+    - Sonst: feste Checkpoints vor der geplanten Abreise (4h/3h/2h/1h/30/15min)
+      und 30 Min vor der geplanten Landung, jeweils mit demselben
+      Mindestabstand zum letzten Check.
+    - Punkte zwischen Abreise und Ankunft-30min existieren bewusst nicht ->
+      während des Flugs finden automatisch keine Checks statt.
     """
     letzter_check = alt_status.get("letzter_check_am") if alt_status else None
     if isinstance(letzter_check, str):
         try: letzter_check = datetime.fromisoformat(letzter_check[:19])
         except Exception: letzter_check = None
+
+    minuten_seit_check = None
+    if letzter_check is not None:
+        minuten_seit_check = (jetzt - letzter_check).total_seconds() / 60
+        if minuten_seit_check < MINDESTABSTAND_MINUTEN:
+            return False
+
+    bekannte_verspaetung = (alt_status.get("verspaetung_minuten") or 0) if alt_status else 0
+    if bekannte_verspaetung > 0:
+        # Bereits verspätet und mindestens MINDESTABSTAND_MINUTEN seit dem
+        # letzten Check vergangen (oder noch nie geprüft) -> einfach erneut nachsehen.
+        return True
+
     for p in _checkpoints_fuer_segment(seg, alt_status):
         if p <= jetzt and (letzter_check is None or letzter_check < p):
             return True
