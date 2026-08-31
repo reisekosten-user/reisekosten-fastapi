@@ -6,7 +6,7 @@ Modulare Struktur – Einstiegspunkt
 from __future__ import annotations
 import os, re, json, io, base64
 import httpx
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import FastAPI, Request, Form, UploadFile, File
@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.5-d"
+APP_VERSION  = "3.6-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3340,9 +3340,10 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
     """
     from mod_flugalert import jetzt_lokal
     from mod_geo import koordinaten_fuer_land
+    from mod_zeit import segment_zeit_zu_utc
     P = ph()
     cur = db.cursor()
-    jetzt = jetzt_lokal()
+    jetzt = datetime.now(timezone.utc)
     diag = [] if debug else None
 
     def _ret(ergebnis):
@@ -3385,20 +3386,13 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                 continue
             ab_zeit = s.get("abreise_zeit") or "00:00"
             an_zeit_roh = s.get("ankunft_zeit")
-            try:
-                dt_ab = datetime.strptime(f"{d_ab.isoformat()} {ab_zeit}", "%Y-%m-%d %H:%M")
-            except Exception:
+            dt_ab = segment_zeit_zu_utc(d_ab, ab_zeit, s.get("abreise_utc_offset"))
+            if dt_ab is None:
                 if debug:
                     eintrag["status"] = f"ÜBERSPRUNGEN – Abreisezeit nicht parsbar (abreise_zeit={ab_zeit!r})"
                     diag.append(eintrag)
                 continue
-            if an_zeit_roh:
-                try:
-                    dt_an = datetime.strptime(f"{d_an.isoformat()} {an_zeit_roh}", "%Y-%m-%d %H:%M")
-                except Exception:
-                    dt_an = None
-            else:
-                dt_an = None
+            dt_an = segment_zeit_zu_utc(d_an, an_zeit_roh, s.get("ankunft_utc_offset")) if an_zeit_roh else None
             if dt_an is None or dt_an <= dt_ab:
                 # Ankunftszeit fehlt oder wurde als "00:00" fehlinterpretiert
                 # (läge dann VOR dem Abflug!) -> sichere Schätzung: Abflug + 2h,
@@ -3418,6 +3412,7 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                 diag.append(eintrag)
             segmente.append({
                 "typ": typ_segment, "dt_ab": dt_ab, "dt_an": dt_an,
+                "dt_ab_anzeige": f"{d_ab.strftime('%d.%m.') if d_ab else ''} {ab_zeit}".strip(),
                 "von_iata": s.get("von_iata"), "nach_iata": s.get("nach_iata"),
                 "von_ort": s.get("von_ort"), "nach_ort": s.get("nach_ort"),
                 "von_koord": _koord(s, "von"), "nach_koord": _koord(s, "nach"),
@@ -3459,11 +3454,11 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         ci_zeit = g("hotel_checkin_zeit",2) or "14:00"
         hotel_name = g("hotel_name",3)
         if not land or not d: continue
-        try:
-            dt = datetime.strptime(f"{d.isoformat()} {ci_zeit}", "%Y-%m-%d %H:%M")
-        except Exception:
-            continue
-        if dt > jetzt: continue
+        # Hotels haben kein UTC-Offset-Feld im Schema -> Rückfall auf MESZ
+        # (segment_zeit_zu_utc's Standard), damit der Vergleich mit den jetzt
+        # UTC-bewussten Flug-/Bahnzeiten trotzdem konsistent bleibt.
+        dt = segment_zeit_zu_utc(d, ci_zeit, None)
+        if dt is None or dt > jetzt: continue
         kandidaten.append((dt, None, land, hotel_name))
     cur.close()
 
@@ -3486,7 +3481,7 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
             kommende.sort(key=lambda s: s["dt_ab"])
             s = kommende[0]
             naechste_etappe = {"nach_koord": s["nach_koord"], "nach_name": s["nach_ort"] or s["nach_iata"],
-                                "transport_typ": s["typ"], "dt_ab": s["dt_ab"],
+                                "transport_typ": s["typ"], "dt_ab": s["dt_ab"], "dt_ab_anzeige": s["dt_ab_anzeige"],
                                 "label": f'{s["transport_nummer"]} {s["von_iata"] or s["von_ort"]} → {s["nach_iata"] or s["nach_ort"]}'.strip()}
 
         if koord:
@@ -3594,7 +3589,7 @@ def dashboard_maps(debug: str = ""):
                     kontext_strecken.append({
                         "von": [pos["lat"], pos["lon"]], "nach": naechste["nach_koord"],
                         "label": "Als nächstes: " + naechste["label"] + " (ab " +
-                                 naechste["dt_ab"].strftime("%H:%M") + " Uhr)", "icon": icon,
+                                 naechste["dt_ab_anzeige"] + " Ortszeit)", "icon": icon,
                     })
         cur.close(); db.close()
 

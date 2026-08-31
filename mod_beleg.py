@@ -361,6 +361,15 @@ Arbeitsgrundlage, keine exakte Buchung; der Organisator kann sie später anhand
 der echten Kreditkartenabrechnung überschreiben. Bei "waehrung"="EUR" beide
 Felder null lassen.
 
+WICHTIG bei "abreise_utc_offset"/"ankunft_utc_offset": Zeiten auf Reisebelegen
+stehen IMMER in der ORTSZEIT des jeweiligen Ortes – die Abreisezeit in der
+Zeitzone des Abflugorts, die Ankunftszeit in der Zeitzone des Zielorts (diese
+können unterschiedlich sein, z.B. Frankfurt MESZ +02:00, Bukarest EEST
++03:00). Gib IMMER den UTC-Offset an, der an diesem konkreten Datum an diesem
+Ort gilt (inkl. Sommer-/Winterzeit, aus deinem eigenen Wissen abgeleitet),
+im Format "+02:00"/"-05:00". Das ist wichtig für die korrekte Berechnung,
+wann ein Flug/Zug tatsächlich ankommt.
+
 Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
 Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfeld null ist.
 
@@ -405,10 +414,12 @@ JSON-Format:
       "abreise_datum": "DD.MM.YYYY",
       "abreise_zeit": "HH:MM",
       "abreise_zeitzone": "MEZ|UTC|EST|CR|GMT",
+      "abreise_utc_offset": "+02:00",
       "abreise_terminal": "z.B. Terminal 1 (falls angegeben, sonst null)",
       "ankunft_datum": "DD.MM.YYYY",
       "ankunft_zeit": "HH:MM",
       "ankunft_zeitzone": "MEZ|UTC|EST|CR|GMT",
+      "ankunft_utc_offset": "+03:00",
       "ankunft_terminal": "z.B. Terminal 2 (falls angegeben, sonst null)",
       "von_ort": "Stadtname z.B. Frankfurt",
       "von_iata": "FRA",
