@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.6-c"
+APP_VERSION  = "3.6-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3436,14 +3436,16 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
             })
 
     # 2. AM ORT: zeitlich jüngstes bereits erreichtes Ziel (Segment-Ankunft oder Hotel-Check-in)
-    kandidaten = []  # (datetime, koord_oder_None, land_code, ort_name)
+    kandidaten = []  # (datetime, koord_oder_None, land_code, ort_name, typ, detail)
     for s in segmente:
         if s["dt_an"] > jetzt: continue
         land = IATA_TO_LAND.get(s["nach_iata"]) if s["nach_iata"] else None
         if not land:
             land = STADT_ZU_LAND.get((s["nach_ort"] or "").strip().lower())
         if land or s["nach_koord"]:
-            kandidaten.append((s["dt_an"], s["nach_koord"], land, s["nach_ort"] or s["nach_iata"]))
+            detail = f'{s["von_iata"] or s["von_ort"] or "?"}-{s["nach_iata"] or s["nach_ort"] or "?"}'
+            kandidaten.append((s["dt_an"], s["nach_koord"], land, s["nach_ort"] or s["nach_iata"],
+                                s["typ"], detail))
 
     cur.execute(f"""SELECT land_beleg, hotel_checkin_datum, hotel_checkin_zeit, hotel_name
         FROM belege WHERE reise_code={P} AND transportart='Hotel'""", (reise_code,))
@@ -3459,36 +3461,44 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         # UTC-bewussten Flug-/Bahnzeiten trotzdem konsistent bleibt.
         dt = segment_zeit_zu_utc(d, ci_zeit, None)
         if dt is None or dt > jetzt: continue
-        kandidaten.append((dt, None, land, hotel_name))
+        kandidaten.append((dt, None, land, hotel_name, "Hotel", hotel_name or "–"))
     cur.close()
 
     if kandidaten:
         kandidaten.sort(key=lambda x: x[0])
-        dt, koord, land, ort_name = kandidaten[-1]
+        dt, koord, land, ort_name, letzter_typ, letztes_detail = kandidaten[-1]
 
-        # Zusatz-Kontext: woher gerade gekommen (das Segment, das zu diesem
-        # Ort geführt hat) und wohin als nächstes (nächste bevorstehende
-        # Abreise ab diesem Ort) – für die "Zwischenstopp"-Ansicht auf der Karte.
-        # Bewusst nur innerhalb von 24h vor/nach JETZT: bei einem mehrtägigen
-        # Aufenthalt (z.B. Ankunft heute, Rückflug erst in 10 Tagen) sähen
-        # beide Kontextlinien sonst wie eine durchgehend aktive Strecke aus,
-        # obwohl der Rückflug noch gar nicht ansteht.
-        KONTEXT_FENSTER = timedelta(hours=24)
-        herkunft = None
-        naechste_etappe = None
+        # "Zuletzt": direkt aus dem gewonnenen Kandidaten (deckt jetzt auch den
+        # Fall ab, dass der aktuelle Ort per Hotel-Check-in erreicht wurde,
+        # nicht nur per Flug/Bahn – das fehlte vorher komplett).
+        herkunft = {"typ": letzter_typ, "detail": letztes_detail, "datum": dt}
+
+        # "Als nächstes": frühestes künftiges Ereignis – Flug-/Bahnabreise ODER
+        # ein noch bevorstehender Hotel-Check-in, je nachdem was zuerst kommt.
+        kommende_kandidaten = []
         for s in segmente:
-            if s["dt_an"] == dt and s["von_koord"] and s["nach_koord"] and (jetzt - dt) <= KONTEXT_FENSTER:
-                herkunft = {"von_koord": s["von_koord"], "von_name": s["von_ort"] or s["von_iata"],
-                            "transport_typ": s["typ"],
-                            "label": f'{s["transport_nummer"]} {s["von_iata"] or s["von_ort"]} → {s["nach_iata"] or s["nach_ort"]}'.strip()}
-        kommende = [s for s in segmente if s["dt_ab"] > jetzt and s["von_koord"] and s["nach_koord"]
-                    and (s["dt_ab"] - jetzt) <= KONTEXT_FENSTER]
-        if kommende:
-            kommende.sort(key=lambda s: s["dt_ab"])
-            s = kommende[0]
-            naechste_etappe = {"nach_koord": s["nach_koord"], "nach_name": s["nach_ort"] or s["nach_iata"],
-                                "transport_typ": s["typ"], "dt_ab": s["dt_ab"], "dt_ab_anzeige": s["dt_ab_anzeige"],
-                                "label": f'{s["transport_nummer"]} {s["von_iata"] or s["von_ort"]} → {s["nach_iata"] or s["nach_ort"]}'.strip()}
+            if s["dt_ab"] > jetzt and s["von_koord"] and s["nach_koord"]:
+                detail = f'{s["von_iata"] or s["von_ort"] or "?"}-{s["nach_iata"] or s["nach_ort"] or "?"}'
+                kommende_kandidaten.append((s["dt_ab"], s["typ"], detail))
+        cur2 = db.cursor()
+        cur2.execute(f"""SELECT hotel_checkin_datum, hotel_checkin_zeit, hotel_name
+            FROM belege WHERE reise_code={P} AND transportart='Hotel'""", (reise_code,))
+        for row in cur2.fetchall():
+            g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
+            d = _datum_parsen(g("hotel_checkin_datum",0))
+            ci_zeit = g("hotel_checkin_zeit",1) or "14:00"
+            hotel_name = g("hotel_name",2)
+            if not d: continue
+            dt_hotel = segment_zeit_zu_utc(d, ci_zeit, None)
+            if dt_hotel and dt_hotel > jetzt:
+                kommende_kandidaten.append((dt_hotel, "Hotel", hotel_name or "–"))
+        cur2.close()
+
+        naechste_etappe = None
+        if kommende_kandidaten:
+            kommende_kandidaten.sort(key=lambda x: x[0])
+            naechste_etappe = {"typ": kommende_kandidaten[0][1], "detail": kommende_kandidaten[0][2],
+                                "datum": kommende_kandidaten[0][0]}
 
         if koord:
             return _ret({"status": "am_ort", "lat": koord[0], "lon": koord[1],
@@ -3577,15 +3587,20 @@ def dashboard_maps(debug: str = ""):
                     "code": code, "titel": titel, "ma": ma, "label": pos["label"],
                 })
             else:
+                TYP_ICON = {"Flug": "✈", "Bahn": "🚆", "Hotel": "🏨"}
+
+                def format_zeile(praefix, info):
+                    icon = TYP_ICON.get(info["typ"], "📍")
+                    datum_txt = info["datum"].strftime("%d.%m.%Y") if info.get("datum") else "?"
+                    return f'{praefix}: {datum_txt} {icon} {info["typ"]} · {info["detail"]}'
+
                 popup_zusatz = []
                 herkunft = pos.get("herkunft")
                 if herkunft:
-                    icon = "✈" if herkunft["transport_typ"] == "Flug" else "🚆"
-                    popup_zusatz.append(f'{icon} Gerade gelandet: {herkunft["label"]}')
+                    popup_zusatz.append(format_zeile("Last", herkunft))
                 naechste = pos.get("naechste_etappe")
                 if naechste:
-                    icon = "✈" if naechste["transport_typ"] == "Flug" else "🚆"
-                    popup_zusatz.append(f'{icon} Als nächstes: {naechste["label"]} (ab {naechste["dt_ab_anzeige"]} Ortszeit)')
+                    popup_zusatz.append(format_zeile("Next", naechste))
                 marker.append({
                     "lat": pos["lat"], "lon": pos["lon"], "code": code, "titel": titel,
                     "ma": ma, "land": pos.get("ort_name") or pos.get("land"), "kuerzel": kuerzel,
