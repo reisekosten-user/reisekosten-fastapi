@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from mod_db import get_db, ph, is_postgres
 from mod_mail import sende_mail
+from mod_zeit import segment_zeit_zu_utc
 
 AERODATABOX_API_KEY = os.getenv("AERODATABOX_API_KEY", "")
 AERODATABOX_HOST = os.getenv("AERODATABOX_HOST", "aerodatabox.p.rapidapi.com")
@@ -257,12 +258,19 @@ def ueberwachte_segmente_laden(debug: bool = False):
                 beleg_diag["verworfen"].append(
                     f"Segment {idx}: kein/ungültiges abreise_datum ('{s.get('abreise_datum')}')")
                 continue
-            try:
-                dt_ab = datetime.strptime(f"{d_ab.isoformat()} {zeit_ab}", "%Y-%m-%d %H:%M")
-            except Exception:
+            # WICHTIG: abreise_zeit steht in der ORTSZEIT des Abflugorts (z.B.
+            # PDT in Los Angeles), NICHT in Berliner Zeit! Naives Parsen hätte
+            # bei einem LAX-Abflug einen Fehler von 9 Stunden erzeugt (PDT =
+            # UTC-7, Berlin = UTC+2) – deshalb über den echten UTC-Offset der
+            # KI umrechnen, dann auf Berlin-äquivalente naive Zeit bringen
+            # (damit der Rest der Datei unverändert in Berlin-Zeit weiterrechnen
+            # kann).
+            dt_ab_utc = segment_zeit_zu_utc(d_ab, zeit_ab, s.get("abreise_utc_offset"))
+            if dt_ab_utc is None:
                 beleg_diag["verworfen"].append(
                     f"Segment {idx}: Datum/Zeit nicht parsbar ({d_ab} {zeit_ab})")
                 continue
+            dt_ab = dt_ab_utc.astimezone(BERLIN_TZ).replace(tzinfo=None)
             stunden_bis = (dt_ab - jetzt).total_seconds() / 3600
             if stunden_bis < -24 or stunden_bis > 24:
                 # -24h Kulanz: bei Verspätungen liegt die GEPLANTE Abreise schon
@@ -275,16 +283,17 @@ def ueberwachte_segmente_laden(debug: bool = False):
                 continue
 
             # Ankunftszeit parsen (für den Lande-Checkpoint 30min vor Landung
-            # nötig) – falls nicht vorhanden/parsbar, wird als grobe Näherung
-            # 2h nach Abreise angenommen, damit der Checkpoint trotzdem existiert.
+            # nötig) – ebenfalls über den echten UTC-Offset des Zielorts, aus
+            # demselben Grund wie oben. Falls nicht vorhanden/parsbar, wird als
+            # grobe Näherung 2h nach Abreise angenommen, damit der Checkpoint
+            # trotzdem existiert.
             d_an = _to_d_ddmmyyyy(s.get("ankunft_datum"))
             zeit_an = s.get("ankunft_zeit") or "00:00"
             dt_an = None
             if d_an:
-                try:
-                    dt_an = datetime.strptime(f"{d_an.isoformat()} {zeit_an}", "%Y-%m-%d %H:%M")
-                except Exception:
-                    dt_an = None
+                dt_an_utc = segment_zeit_zu_utc(d_an, zeit_an, s.get("ankunft_utc_offset"))
+                if dt_an_utc is not None:
+                    dt_an = dt_an_utc.astimezone(BERLIN_TZ).replace(tzinfo=None)
             if not dt_an or dt_an <= dt_ab:
                 dt_an = dt_ab + timedelta(hours=2)
 
