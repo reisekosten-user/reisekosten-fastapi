@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.6-d"
+APP_VERSION  = "3.6-f"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2770,6 +2770,17 @@ def init_reset(confirm: str = ""):
     except Exception as e:
         return {"status": "fehler", "detail": str(e)}
 
+@app.get("/health")
+def health():
+    """
+    Bewusst extrem leichter, öffentlicher Endpunkt OHNE Datenbankzugriff –
+    gedacht zum reinen "Wach halten" des Servers (Render-Free-Tier schläft
+    nach 15 Min. ganz ohne Traffic ein). Unabhängig von der Flug-/Bahn-Alert-
+    Logik, damit die App auch wach bleibt, falls jener Cron-Job mal ausfällt
+    oder deaktiviert wird.
+    """
+    return {"status": "ok"}
+
 @app.get("/version")
 def version():
     return {"version": APP_VERSION,
@@ -3413,6 +3424,7 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
             segmente.append({
                 "typ": typ_segment, "dt_ab": dt_ab, "dt_an": dt_an,
                 "dt_ab_anzeige": f"{d_ab.strftime('%d.%m.') if d_ab else ''} {ab_zeit}".strip(),
+                "dt_an_anzeige": f"{d_an.strftime('%d.%m.') if d_an else ''} {an_zeit_roh}".strip() if an_zeit_roh else "",
                 "von_iata": s.get("von_iata"), "nach_iata": s.get("nach_iata"),
                 "von_ort": s.get("von_ort"), "nach_ort": s.get("nach_ort"),
                 "von_koord": _koord(s, "von"), "nach_koord": _koord(s, "nach"),
@@ -3436,7 +3448,7 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
             })
 
     # 2. AM ORT: zeitlich jüngstes bereits erreichtes Ziel (Segment-Ankunft oder Hotel-Check-in)
-    kandidaten = []  # (datetime, koord_oder_None, land_code, ort_name, typ, detail)
+    kandidaten = []  # (datetime, koord_oder_None, land_code, ort_name, typ, detail, zeit_lokal)
     for s in segmente:
         if s["dt_an"] > jetzt: continue
         land = IATA_TO_LAND.get(s["nach_iata"]) if s["nach_iata"] else None
@@ -3445,7 +3457,7 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         if land or s["nach_koord"]:
             detail = f'{s["von_iata"] or s["von_ort"] or "?"}-{s["nach_iata"] or s["nach_ort"] or "?"}'
             kandidaten.append((s["dt_an"], s["nach_koord"], land, s["nach_ort"] or s["nach_iata"],
-                                s["typ"], detail))
+                                s["typ"], detail, s["dt_an_anzeige"]))
 
     cur.execute(f"""SELECT land_beleg, hotel_checkin_datum, hotel_checkin_zeit, hotel_name
         FROM belege WHERE reise_code={P} AND transportart='Hotel'""", (reise_code,))
@@ -3461,17 +3473,18 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         # UTC-bewussten Flug-/Bahnzeiten trotzdem konsistent bleibt.
         dt = segment_zeit_zu_utc(d, ci_zeit, None)
         if dt is None or dt > jetzt: continue
-        kandidaten.append((dt, None, land, hotel_name, "Hotel", hotel_name or "–"))
+        zeit_lokal = f"{d.strftime('%d.%m.')} {ci_zeit}"
+        kandidaten.append((dt, None, land, hotel_name, "Hotel", hotel_name or "–", zeit_lokal))
     cur.close()
 
     if kandidaten:
         kandidaten.sort(key=lambda x: x[0])
-        dt, koord, land, ort_name, letzter_typ, letztes_detail = kandidaten[-1]
+        dt, koord, land, ort_name, letzter_typ, letztes_detail, letzte_zeit_lokal = kandidaten[-1]
 
         # "Zuletzt": direkt aus dem gewonnenen Kandidaten (deckt jetzt auch den
         # Fall ab, dass der aktuelle Ort per Hotel-Check-in erreicht wurde,
         # nicht nur per Flug/Bahn – das fehlte vorher komplett).
-        herkunft = {"typ": letzter_typ, "detail": letztes_detail, "datum": dt}
+        herkunft = {"typ": letzter_typ, "detail": letztes_detail, "datum": dt, "zeit_lokal": letzte_zeit_lokal}
 
         # "Als nächstes": frühestes künftiges Ereignis – Flug-/Bahnabreise ODER
         # ein noch bevorstehender Hotel-Check-in, je nachdem was zuerst kommt.
@@ -3479,7 +3492,7 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         for s in segmente:
             if s["dt_ab"] > jetzt and s["von_koord"] and s["nach_koord"]:
                 detail = f'{s["von_iata"] or s["von_ort"] or "?"}-{s["nach_iata"] or s["nach_ort"] or "?"}'
-                kommende_kandidaten.append((s["dt_ab"], s["typ"], detail))
+                kommende_kandidaten.append((s["dt_ab"], s["typ"], detail, s["dt_ab_anzeige"]))
         cur2 = db.cursor()
         cur2.execute(f"""SELECT hotel_checkin_datum, hotel_checkin_zeit, hotel_name
             FROM belege WHERE reise_code={P} AND transportart='Hotel'""", (reise_code,))
@@ -3491,14 +3504,14 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
             if not d: continue
             dt_hotel = segment_zeit_zu_utc(d, ci_zeit, None)
             if dt_hotel and dt_hotel > jetzt:
-                kommende_kandidaten.append((dt_hotel, "Hotel", hotel_name or "–"))
+                kommende_kandidaten.append((dt_hotel, "Hotel", hotel_name or "–", f"{d.strftime('%d.%m.')} {ci_zeit}"))
         cur2.close()
 
         naechste_etappe = None
         if kommende_kandidaten:
             kommende_kandidaten.sort(key=lambda x: x[0])
             naechste_etappe = {"typ": kommende_kandidaten[0][1], "detail": kommende_kandidaten[0][2],
-                                "datum": kommende_kandidaten[0][0]}
+                                "datum": kommende_kandidaten[0][0], "zeit_lokal": kommende_kandidaten[0][3]}
 
         if koord:
             return _ret({"status": "am_ort", "lat": koord[0], "lon": koord[1],
@@ -3587,12 +3600,17 @@ def dashboard_maps(debug: str = ""):
                     "code": code, "titel": titel, "ma": ma, "label": pos["label"],
                 })
             else:
+                from zoneinfo import ZoneInfo
+                BERLIN = ZoneInfo("Europe/Berlin")
                 TYP_ICON = {"Flug": "✈", "Bahn": "🚆", "Hotel": "🏨"}
 
                 def format_zeile(praefix, info):
                     icon = TYP_ICON.get(info["typ"], "📍")
-                    datum_txt = info["datum"].strftime("%d.%m.%Y") if info.get("datum") else "?"
-                    return f'{praefix}: {datum_txt} {icon} {info["typ"]} · {info["detail"]}'
+                    zeit_lokal = info.get("zeit_lokal") or "?"
+                    zeit_de = info["datum"].astimezone(BERLIN).strftime("%d.%m. %H:%M") if info.get("datum") else "?"
+                    zeit_txt = (f"{zeit_lokal} Ortszeit / {zeit_de} DE-Zeit"
+                                if zeit_lokal != zeit_de else f"{zeit_lokal} Uhr")
+                    return f'{praefix}: {icon} {info["typ"]} · {info["detail"]} · {zeit_txt}'
 
                 popup_zusatz = []
                 herkunft = pos.get("herkunft")
