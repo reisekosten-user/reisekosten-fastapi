@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.6-j"
+APP_VERSION  = "3.6-k"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3706,6 +3706,31 @@ def dashboard_maps(debug: str = ""):
         }});
         const bounds = [];
 
+        // Großkreis-Interpolation (Slerp auf der Kugel) – die Erde ist keine
+        // Scheibe, daher folgt die kürzeste Flugstrecke zwischen zwei Punkten
+        // einer gekrümmten Linie, keiner Geraden auf der flachen Karte.
+        function greatCirclePoint(lat1, lon1, lat2, lon2, f) {{
+            const toRad = d => d * Math.PI / 180, toDeg = r => r * 180 / Math.PI;
+            const p1 = toRad(lat1), l1 = toRad(lon1), p2 = toRad(lat2), l2 = toRad(lon2);
+            const delta = Math.acos(Math.min(1, Math.max(-1,
+                Math.sin(p1)*Math.sin(p2) + Math.cos(p1)*Math.cos(p2)*Math.cos(l2-l1))));
+            if (delta < 1e-9) return [lat1, lon1];
+            const A = Math.sin((1-f)*delta) / Math.sin(delta);
+            const B = Math.sin(f*delta) / Math.sin(delta);
+            const x = A*Math.cos(p1)*Math.cos(l1) + B*Math.cos(p2)*Math.cos(l2);
+            const y = A*Math.cos(p1)*Math.sin(l1) + B*Math.cos(p2)*Math.sin(l2);
+            const z = A*Math.sin(p1) + B*Math.sin(p2);
+            return [toDeg(Math.atan2(z, Math.sqrt(x*x+y*y))), toDeg(Math.atan2(y, x))];
+        }}
+        function greatCirclePath(von, nach, teile) {{
+            teile = teile || 64;
+            const pts = [];
+            for (let i = 0; i <= teile; i++) {{
+                pts.push(greatCirclePoint(von[0], von[1], nach[0], nach[1], i/teile));
+            }}
+            return pts;
+        }}
+
         marker.forEach(m => {{
             const mk = L.marker([m.lat, m.lon], {{icon: personIcon(m.kuerzel)}}).addTo(map);
             let popup = '<b>' + m.code + '</b> – ' + m.titel + '<br>👤 ' + m.ma + '<br>📍 Aktuell in: ' + m.land;
@@ -3715,16 +3740,17 @@ def dashboard_maps(debug: str = ""):
         }});
 
         strecken.forEach(s => {{
-            L.polyline([s.von, s.nach], {{
+            L.polyline(greatCirclePath(s.von, s.nach), {{
                 color: '#2563eb', weight: 2, dashArray: '6, 8', opacity: 0.8
             }}).addTo(map);
             L.marker(s.von, {{icon: flughafenIcon}}).addTo(map)
                 .bindPopup('<b>' + s.von_iata + '</b> – ' + s.von_name);
             L.marker(s.nach, {{icon: flughafenIcon}}).addTo(map)
                 .bindPopup('<b>' + s.nach_iata + '</b> – ' + s.nach_name);
-            // Aktuelle Position anteilig entlang der Strecke interpolieren
-            const lat = s.von[0] + (s.nach[0] - s.von[0]) * s.fortschritt;
-            const lon = s.von[1] + (s.nach[1] - s.von[1]) * s.fortschritt;
+            // Aktuelle Position anteilig ENTLANG DES GROSSKREISES interpolieren
+            // (nicht linear – das würde bei langen Strecken sichtbar von der
+            // gezeichneten gekrümmten Linie abweichen)
+            const [lat, lon] = greatCirclePoint(s.von[0], s.von[1], s.nach[0], s.nach[1], s.fortschritt);
             L.marker([lat, lon], {{icon: personIcon(s.kuerzel)}}).addTo(map).bindPopup(
                 '<b>' + s.code + '</b> – ' + s.titel + '<br>' +
                 '👤 ' + s.ma + '<br>' + s.icon + ' ' + s.label + ' (unterwegs, ' +
