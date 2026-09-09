@@ -442,7 +442,19 @@ def cron_flug_alerts(debug: bool = False) -> dict:
         alt_status = status_holen(seg["beleg_id"], seg["segment_index"])
 
         alter_status_text = (alt_status.get("status") or "").lower() if alt_status else ""
-        if alter_status_text and any(k in alter_status_text for k in TERMINAL_STATUS_SCHLUESSELWOERTER):
+        ist_terminal_status = alter_status_text and any(k in alter_status_text for k in TERMINAL_STATUS_SCHLUESSELWOERTER)
+        # Sicherheitsprüfung: Einem gespeicherten Endstatus nur vertrauen, wenn
+        # der geplante Abflug laut AKTUELLER Berechnung auch wirklich schon
+        # vergangen ist. Ohne das würde ein einmal fälschlich gespeicherter
+        # Status (z.B. durch einen zwischenzeitlich behobenen Zeitzonen-Bug,
+        # der die falsche Kalendertag-Instanz desselben Flugnamens abgefragt
+        # hatte) für immer eine Neuprüfung blockieren, selbst wenn der echte
+        # Flug noch gar nicht stattgefunden hat.
+        if ist_terminal_status and seg["stunden_bis_abreise"] > 0:
+            schritt["ergebnis"] = (f"Gespeicherter Endstatus ('{alt_status.get('status')}') wirkt veraltet/"
+                                    f"unplausibel (Abflug laut Plan erst in {seg['stunden_bis_abreise']:.1f}h) "
+                                    f"– wird sicherheitshalber neu geprüft")
+        elif ist_terminal_status:
             schritt["ergebnis"] = f"Status bereits final ('{alt_status.get('status')}') – keine weitere Abfrage nötig"
             if debug: diag["verarbeitung"].append(schritt)
             continue
