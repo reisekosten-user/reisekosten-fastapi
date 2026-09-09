@@ -522,9 +522,13 @@ def cron_flug_alerts(debug: bool = False) -> dict:
 
 
 def offene_alerts_fuer_dashboard() -> list:
-    """Für die Dashboard-Anzeige: Segmente mit kürzlich gesendetem Alert
-    (nur die letzten 24 Stunden – danach verschwindet der Hinweis automatisch,
-    auch ohne manuelles Wegklicken)."""
+    """Für die Dashboard-Anzeige: Segmente mit einem AKTUELL noch bestehenden
+    Problem (Verspätung ≥ Schwelle, Stornierung, Umleitung) – NICHT einfach
+    jedes Segment, bei dem irgendwann in den letzten 24h mal ein Alarm
+    gesendet wurde. Ein Alarm bleibt bestehen (alert_gesendet_am), auch wenn
+    sich der Status später wieder normalisiert (z.B. "Expected" nach
+    zwischenzeitlicher Verspätungsmeldung) – ohne diesen Filter würde die
+    Box dann fälschlich einen längst unauffälligen Flug als Problem zeigen."""
     db = get_db(); cur = db.cursor()
     grenze = (jetzt_lokal() - timedelta(hours=24)).isoformat()
     P = ph()
@@ -532,13 +536,24 @@ def offene_alerts_fuer_dashboard() -> list:
                    status, verspaetung_minuten, alert_gesendet_am
                    FROM flug_status
                    WHERE alert_gesendet_am IS NOT NULL AND alert_gesendet_am >= {P}
-                   ORDER BY alert_gesendet_am DESC LIMIT 5""", (grenze,))
+                   ORDER BY alert_gesendet_am DESC LIMIT 20""", (grenze,))
     rows = cur.fetchall()
     cur.close(); db.close()
     out = []
     for r in rows:
         g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
+        status = (g("status",5) or "")
+        verspaetung = g("verspaetung_minuten",6)
+        status_l = status.lower()
+        ist_aktuell_problem = (
+            any(k in status_l for k in ("cancel", "divert"))
+            or (verspaetung is not None and verspaetung >= VERSPAETUNGS_ALARM_SCHWELLE_MIN)
+        )
+        if not ist_aktuell_problem:
+            continue
         out.append({"beleg_id": g("beleg_id",0), "typ": g("transport_typ",1),
                      "nummer": g("transport_nummer",2), "von": g("von_ort",3), "nach": g("nach_ort",4),
-                     "status": g("status",5), "verspaetung": g("verspaetung_minuten",6)})
+                     "status": status, "verspaetung": verspaetung})
+        if len(out) >= 5:
+            break
     return out
