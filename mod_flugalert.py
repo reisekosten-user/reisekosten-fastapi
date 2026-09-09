@@ -8,7 +8,7 @@ Datenquellen:
 """
 from __future__ import annotations
 import os, json, httpx
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from mod_db import get_db, ph, is_postgres
@@ -304,6 +304,7 @@ def ueberwachte_segmente_laden(debug: bool = False):
                 "von_ort": s.get("von_ort") or s.get("von_iata") or "",
                 "nach_ort": s.get("nach_ort") or s.get("nach_iata") or "",
                 "abreise_datum": d_ab, "abreise_zeit": zeit_ab,
+                "abreise_datum_utc": dt_ab_utc.astimezone(timezone.utc).date(),
                 "stunden_bis_abreise": stunden_bis,
                 "dt_ab": dt_ab, "dt_an": dt_an,
             })
@@ -471,7 +472,7 @@ def cron_flug_alerts(debug: bool = False) -> dict:
         if seg["transport_typ"] == "Flug" and seg["transport_nummer"]:
             schritt["quelle"] = "AeroDataBox"
             schritt["api_key_gesetzt"] = bool(AERODATABOX_API_KEY)
-            ergebnis = flugstatus_abrufen(seg["transport_nummer"], seg["abreise_datum"])
+            ergebnis = flugstatus_abrufen(seg["transport_nummer"], seg["abreise_datum_utc"])
         elif seg["transport_typ"] == "Bahn" and seg["transport_nummer"]:
             schritt["quelle"] = "db.transport.rest"
             ergebnis = bahnstatus_abrufen(seg["transport_nummer"], seg["von_ort"],
