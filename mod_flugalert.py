@@ -127,10 +127,21 @@ def flugstatus_abrufen(transport_nummer: str, abreise_datum: date) -> dict:
         if not flug:
             return {"fehler": "Kein Flug gefunden"}
         abflug = flug.get("departure", {})
+        ankunft = flug.get("arrival", {})
         status = flug.get("status", "Unbekannt")
+        # WICHTIG: Verspätung aus der ANKUNFTSZEIT berechnen, nicht der
+        # Abflugzeit – für Reisende zählt, wann sie tatsächlich ankommen.
+        # Ein Flug kann verspätet abheben und trotzdem pünktlich oder sogar
+        # früher landen (Rückenwind, kürzere Route) und umgekehrt.
         verspaetung = None
-        geplant = abflug.get("scheduledTime", {}).get("local")
-        revidiert = abflug.get("revisedTime", {}).get("local")
+        geplant = ankunft.get("scheduledTime", {}).get("local")
+        revidiert = ankunft.get("revisedTime", {}).get("local")
+        if not (geplant and revidiert):
+            # Rückfall auf Abflugzeit, falls keine Ankunftsdaten verfügbar
+            # sind (z.B. weit vor Abflug, AeroDataBox liefert dann oft nur
+            # die Abflugseite)
+            geplant = abflug.get("scheduledTime", {}).get("local")
+            revidiert = abflug.get("revisedTime", {}).get("local")
         if geplant and revidiert:
             try:
                 t1 = datetime.fromisoformat(geplant[:19])
