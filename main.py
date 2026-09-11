@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.7-e"
+APP_VERSION  = "3.7-g"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3638,6 +3638,8 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                 "von_koord": s["von_koord"], "nach_koord": s["nach_koord"],
                 "von_name": s["von_ort"] or s["von_iata"], "nach_name": s["nach_ort"] or s["nach_iata"],
                 "fortschritt": fortschritt, "transport_typ": s["typ"],
+                "dt_ab_anzeige": s["dt_ab_anzeige"], "dt_an_anzeige": s["dt_an_anzeige"],
+                "dt_ab": s["dt_ab"], "dt_an": s["dt_an"],
                 "label": f'{s["transport_nummer"]} {s["von_iata"] or s["von_ort"]} → {s["nach_iata"] or s["nach_ort"]}'.strip(),
             })
 
@@ -3785,13 +3787,24 @@ def dashboard_maps(debug: str = ""):
             if not pos:
                 ohne_position.append({"code": code, "titel": titel, "ma": ma})
             elif pos["status"] == "unterwegs":
+                from zoneinfo import ZoneInfo
+                BERLIN = ZoneInfo("Europe/Berlin")
                 icon = "✈" if pos["transport_typ"] == "Flug" else "🚆"
+
+                def zeit_txt(zeit_lokal, dt):
+                    zeit_lokal = zeit_lokal or "?"
+                    zeit_de = dt.astimezone(BERLIN).strftime("%d.%m. %H:%M") if dt else "?"
+                    return (f"{zeit_lokal} Ortszeit / {zeit_de} DE-Zeit"
+                            if zeit_lokal != zeit_de else f"{zeit_lokal} Uhr")
+
                 strecken.append({
                     "von": pos["von_koord"], "nach": pos["nach_koord"],
                     "von_iata": pos["von_iata"], "nach_iata": pos["nach_iata"],
                     "von_name": pos["von_name"], "nach_name": pos["nach_name"],
                     "fortschritt": pos["fortschritt"], "icon": icon, "kuerzel": kuerzel,
                     "code": code, "titel": titel, "ma": ma, "label": pos["label"],
+                    "ab_zeit": zeit_txt(pos.get("dt_ab_anzeige"), pos.get("dt_ab")),
+                    "an_zeit": zeit_txt(pos.get("dt_an_anzeige"), pos.get("dt_an")),
                 })
             else:
                 from zoneinfo import ZoneInfo
@@ -3948,7 +3961,8 @@ def dashboard_maps(debug: str = ""):
             L.marker([lat, lon], {{icon: personIcon(s.kuerzel)}}).addTo(map).bindPopup(
                 '<b>' + s.code + '</b> – ' + s.titel + '<br>' +
                 '👤 ' + s.ma + '<br>' + s.icon + ' ' + s.label + ' (unterwegs, ' +
-                Math.round(s.fortschritt*100) + '%)'
+                Math.round(s.fortschritt*100) + '%)<br>' +
+                '<span style="font-size:12px;color:#64748b">Ab: ' + s.ab_zeit + '<br>An: ' + s.an_zeit + '</span>'
             );
             bounds.push(s.von, s.nach);
         }});
