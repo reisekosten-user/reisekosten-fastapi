@@ -851,7 +851,7 @@ async def beleg_verarbeiten(
                 {P},{P},{P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},
-                {P},{P},{P},{P},{P},{P},
+                {P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P})"""
 
