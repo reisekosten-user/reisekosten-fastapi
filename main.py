@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.7-j"
+APP_VERSION  = "3.7-k"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4913,15 +4913,44 @@ def reise_detail(code: str):
             if gid:
                 gruppen_arten_tag.setdefault(gid, set()).add(get(b,"belegart",15) or "")
 
-        # Gesamtkosten der Reise (ohne unterdrückte Buchungsbestätigungen, damit
-        # nicht doppelt gezählt wird)
+        # Gruppen-ID → hat diese Gruppe eine Buchungsbestätigung MIT echten
+        # Reisesegmenten (Flug/Bahn/Mietwagen-Ticket)? Wenn ja, ist DIESE der
+        # maßgebliche Beleg (die Segmentdaten stecken sonst nirgendwo anders),
+        # und eine verknüpfte Rechnung/Quittung in derselben Gruppe gilt dann
+        # als redundantes Duplikat (z.B. durch mehrfaches Nachsenden entstanden)
+        # – nicht umgekehrt wie bisher, das war nur bei Hotels korrekt (dort IST
+        # die Buchungsbestätigung meist wirklich nur ein Duplikat der Rechnung).
+        gruppen_mit_segment_buchung = set()
+        for b in beleg_rows_tag:
+            gid = get(b,"beleg_gruppe_id",16)
+            if not gid: continue
+            typ_g = get(b,"transportart",1) or ""
+            if (get(b,"belegart",15) or "") == "Buchungsbestaetigung" and typ_g in ("Flug","Bahn","Mietwagen") \
+                    and segmente_aus_ki_json(get(b,"ki_json",8)):
+                gruppen_mit_segment_buchung.add(gid)
+
+        def beleg_unterdruecken(belegart_x, gruppe_x, hat_segmente_x):
+            if not gruppe_x: return False
+            if gruppe_x in gruppen_mit_segment_buchung:
+                # Diese Gruppe hat eine segmenthaltige Buchungsbestätigung ->
+                # die ist maßgeblich, alles andere in der Gruppe (Rechnung/
+                # Quittung-Duplikate) wird unterdrückt – außer sie selbst.
+                return not hat_segmente_x
+            # Kein Segment-Ticket in der Gruppe -> altes Verhalten (Hotel-Fall):
+            # Buchungsbestätigung wird unterdrückt, wenn eine Rechnung/Quittung
+            # in derselben Gruppe existiert.
+            return (belegart_x == "Buchungsbestaetigung"
+                    and bool(gruppen_arten_tag.get(gruppe_x, set()) & {"Rechnung", "Quittung"}))
+
         beleg_kosten_gesamt = 0.0
         beleg_anzahl_gesamt = 0
         for b in beleg_rows_tag:
             belegart_k = get(b,"belegart",15) or ""
             gruppe_k = get(b,"beleg_gruppe_id",16)
-            if (belegart_k == "Buchungsbestaetigung" and gruppe_k
-                    and gruppen_arten_tag.get(gruppe_k, set()) & {"Rechnung", "Quittung"}):
+            typ_k = get(b,"transportart",1) or ""
+            hat_segmente_k = (typ_k in ("Flug","Bahn","Mietwagen")
+                               and bool(segmente_aus_ki_json(get(b,"ki_json",8))))
+            if beleg_unterdruecken(belegart_k, gruppe_k, hat_segmente_k):
                 continue
             beleg_anzahl_gesamt += 1
             beleg_kosten_gesamt += gesamtbetrag_berechnen(
@@ -4932,9 +4961,9 @@ def reise_detail(code: str):
             bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
             belegart_b = get(b,"belegart",15) or ""
             gruppe_b = get(b,"beleg_gruppe_id",16)
-            if (belegart_b == "Buchungsbestaetigung" and gruppe_b
-                    and gruppen_arten_tag.get(gruppe_b, set()) & {"Rechnung", "Quittung"}):
-                continue  # wird durch die verknüpfte Rechnung/Quittung in der Gruppe repräsentiert
+            hat_segmente_b = typ in ("Flug","Bahn","Mietwagen") and bool(segmente_aus_ki_json(get(b,"ki_json",8)))
+            if beleg_unterdruecken(belegart_b, gruppe_b, hat_segmente_b):
+                continue  # redundantes Duplikat innerhalb der Gruppe
 
             freitext = get(b,"transportart_freitext",2) or ""
             anbieter = get(b,"anbieter",3) or "–"
