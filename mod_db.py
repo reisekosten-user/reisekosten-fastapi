@@ -490,6 +490,7 @@ def get_migrations() -> list[str]:
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS betrag_eur_final NUMERIC(10,2)",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS nebenkosten_eur NUMERIC(10,2)",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS nebenkosten_beschreibung TEXT",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS hotel_adresse TEXT",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS verknuepft_mit_id INTEGER",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS beleg_gruppe_id INTEGER",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS ist_erechnung BOOLEAN DEFAULT FALSE",

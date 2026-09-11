@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.6-k"
+APP_VERSION  = "3.7-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2013,6 +2013,184 @@ async def beleg_gesamtbetrag_speichern(bid: int, request: Request):
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
+
+
+def reiseplan_daten_laden(reise_code: str):
+    """
+    Sammelt alle Reiseplan-relevanten Ereignisse für eine Reise – BEWUSST OHNE
+    jegliche Preisangaben, nur Zeiten, Buchungsnummern, Adressen und
+    Ansprechpartner. Gedacht für den Versand an den Reisenden vor Abreise.
+    Gibt {"titel","abreise","rueckkehr","tage": {datum: [ereignis,...]}} zurück,
+    oder None wenn die Reise nicht existiert.
+    """
+    db = get_db(); cur = db.cursor()
+    P = ph()
+    cur.execute(f"SELECT titel, abreise, rueckkehr FROM reisen WHERE code={P}", (reise_code,))
+    r = cur.fetchone()
+    if not r:
+        cur.close(); db.close()
+        return None
+    g = lambda row,k,i: row[k] if hasattr(row,'keys') else row[i]
+    titel = g(r,"titel",0); abreise = g(r,"abreise",1); rueckkehr = g(r,"rueckkehr",2)
+
+    ereignisse = []  # (datum, sortierzeit, ereignis-dict)
+
+    cur.execute(f"""SELECT transportart, anbieter, buchungscode, rechnungsnummer,
+                    ki_json, hotel_name, hotel_adresse, hotel_checkin_datum, hotel_checkin_zeit,
+                    hotel_checkout_datum, hotel_checkout_zeit
+                    FROM belege WHERE reise_code={P}
+                    AND transportart IN ('Flug','Bahn','Mietwagen','Hotel')""", (reise_code,))
+    for b in cur.fetchall():
+        typ = g(b,"transportart",0); anbieter = g(b,"anbieter",1) or ""
+        buchungscode = g(b,"buchungscode",2) or g(b,"rechnungsnummer",3) or ""
+        if typ == "Hotel":
+            hname = g(b,"hotel_name",5) or anbieter or "Hotel"
+            hadresse = g(b,"hotel_adresse",6) or ""
+            ci_d = _datum_parsen(g(b,"hotel_checkin_datum",7)); ci_z = g(b,"hotel_checkin_zeit",8) or ""
+            co_d = _datum_parsen(g(b,"hotel_checkout_datum",9)); co_z = g(b,"hotel_checkout_zeit",10) or ""
+            if ci_d:
+                ereignisse.append((ci_d, ci_z or "14:00", {
+                    "icon": "🏨", "titel": f"Check-in: {hname}", "zeit": ci_z, "sub": hadresse,
+                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else ""}))
+            if co_d:
+                ereignisse.append((co_d, co_z or "11:00", {
+                    "icon": "🏨", "titel": f"Check-out: {hname}", "zeit": co_z, "sub": hadresse, "extra": ""}))
+        else:
+            ki_str = g(b,"ki_json",4) or ""
+            try: segs = json.loads(ki_str).get("segmente") or []
+            except Exception: segs = []
+            icon = {"Flug": "✈", "Bahn": "🚆", "Mietwagen": "🚗"}.get(typ, "📍")
+            for s in segs:
+                d_ab = _datum_parsen(s.get("abreise_datum"))
+                if not d_ab: continue
+                von_ort = s.get("von_ort") or s.get("von_iata") or ""
+                nach_ort = s.get("nach_ort") or s.get("nach_iata") or ""
+                nummer = s.get("transport_nummer") or anbieter
+                terminal = s.get("abreise_terminal")
+                zeit_txt = f'{s.get("abreise_zeit","")}–{s.get("ankunft_zeit","")}'.strip("–")
+                ereignisse.append((d_ab, s.get("abreise_zeit") or "", {
+                    "icon": icon, "titel": f"{nummer}: {von_ort} → {nach_ort}", "zeit": zeit_txt,
+                    "sub": f"Terminal {terminal}" if terminal else "",
+                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else ""}))
+
+    TERMIN_ICON = {"termin": "🤝", "kundenbesuch": "🤝", "fahrt": "🚕",
+                   "mietwagen": "🚗", "hotel": "🏨", "sonstiges": "📌"}
+    cur.execute(f"""SELECT datum, uhrzeit_von, uhrzeit_bis, titel, typ, ort, ansprechpartner, telefon, notiz
+                    FROM termine WHERE reise_code={P} ORDER BY datum, uhrzeit_von""", (reise_code,))
+    for t in cur.fetchall():
+        d = _datum_parsen(g(t,"datum",0))
+        if not d: continue
+        von = g(t,"uhrzeit_von",1) or ""; bis = g(t,"uhrzeit_bis",2) or ""
+        titel_t = g(t,"titel",3) or "Termin"; typ_t = g(t,"typ",4) or "termin"
+        ort_t = g(t,"ort",5) or ""; ansprech_t = g(t,"ansprechpartner",6) or ""
+        tel_t = g(t,"telefon",7) or ""; notiz_t = g(t,"notiz",8) or ""
+        sub_parts = [p for p in (ort_t, f"👤 {ansprech_t}" if ansprech_t else "",
+                                  f"📞 {tel_t}" if tel_t else "") if p]
+        ereignisse.append((d, von, {
+            "icon": TERMIN_ICON.get(typ_t, "📌"), "titel": titel_t,
+            "zeit": f"{von}–{bis}" if von and bis else von,
+            "sub": " · ".join(sub_parts), "extra": notiz_t}))
+    cur.close(); db.close()
+
+    tage = {}
+    for d, _, ev in ereignisse:
+        tage.setdefault(d, []).append(ev)
+    for d in tage:
+        tage[d].sort(key=lambda e: e.get("zeit") or "")
+    return {"titel": titel, "abreise": abreise, "rueckkehr": rueckkehr, "tage": tage}
+
+
+@app.get("/reise/{code}/reiseplan", response_class=HTMLResponse)
+def reiseplan_anzeigen(code: str):
+    """Reiseplan für den Reisenden – nur Zeiten/Orte/Buchungsnummern, KEINE Preise."""
+    rcode = code.upper()
+    daten = reiseplan_daten_laden(rcode)
+    if not daten:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden.</div>'))
+    wochentage = ["Mo","Di","Mi","Do","Fr","Sa","So"]
+    tage_html = ""
+    for d in sorted(daten["tage"].keys()):
+        datum_txt = f"{wochentage[d.weekday()]} {d.strftime('%d.%m.%Y')}"
+        zeilen = ""
+        for ev in daten["tage"][d]:
+            sub_html = f'<div style="font-size:12px;color:var(--muted);margin-top:2px">{ev["sub"]}</div>' if ev["sub"] else ""
+            extra_html = f'<div style="font-size:11px;color:#7c3aed;margin-top:2px">{ev["extra"]}</div>' if ev["extra"] else ""
+            zeilen += f"""<div style="display:flex;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border)">
+                <div style="width:90px;flex-shrink:0;font-size:13px;font-weight:600;color:var(--muted)">{ev["zeit"] or "–"}</div>
+                <div style="flex:1">
+                  <div style="font-size:14px"><span style="margin-right:6px">{ev["icon"]}</span>{ev["titel"]}</div>
+                  {sub_html}{extra_html}
+                </div>
+              </div>"""
+        tage_html += f"""<div class="card" style="margin-bottom:16px">
+          <div class="card-header"><span class="card-title">{datum_txt}</span></div>
+          <div>{zeilen}</div>
+        </div>"""
+    content = f"""
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div>
+        <h1 class="page-title" style="margin:0">🗺 Reiseplan {rcode}</h1>
+        <div style="color:var(--muted);font-size:13px">{daten["titel"]} · {fmt_date(daten["abreise"])} – {fmt_date(daten["rueckkehr"])}</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <a href="/reise/{rcode}/reiseplan/pdf" class="btn btn-primary">📄 PDF</a>
+        <a href="/reise/{rcode}" class="btn btn-secondary">← Reise</a>
+      </div>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:16px">
+      Reine Zeit-/Orts-/Buchungsübersicht ohne Preisangaben – zum Versand an den Reisenden vor Abreise.
+      Kundentermine ergänzt der Organisator über "+ Termin" auf der Reiseseite.</p>
+    {tage_html or '<div class="alert alert-warn">Noch keine Flug-/Bahn-/Hotel-/Termindaten vorhanden.</div>'}
+    """
+    return HTMLResponse(shell(f"Reiseplan {rcode}", content, "reisen"))
+
+
+@app.get("/reise/{code}/reiseplan/pdf")
+def reiseplan_pdf(code: str):
+    """Reiseplan als PDF – identischer Inhalt wie die HTML-Ansicht, ohne Preise."""
+    rcode = code.upper()
+    daten = reiseplan_daten_laden(rcode)
+    if not daten:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden.</div>'))
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.units import mm
+
+        def esc(s):
+            return (str(s) if s is not None else "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=A4,
+            leftMargin=20*mm, rightMargin=20*mm, topMargin=20*mm, bottomMargin=20*mm)
+        styles = getSampleStyleSheet()
+        story = [Paragraph(f"Reiseplan {esc(rcode)}", styles["Title"]),
+                 Paragraph(esc(daten["titel"]), styles["Heading2"]),
+                 Paragraph(f"{fmt_date(daten['abreise'])} – {fmt_date(daten['rueckkehr'])}", styles["Normal"]),
+                 Spacer(1, 6*mm)]
+        wochentage = ["Mo","Di","Mi","Do","Fr","Sa","So"]
+        for d in sorted(daten["tage"].keys()):
+            story.append(Paragraph(f"{wochentage[d.weekday()]} {d.strftime('%d.%m.%Y')}", styles["Heading3"]))
+            for ev in daten["tage"][d]:
+                zeile = f'<b>{esc(ev["zeit"] or "–")}</b> &nbsp; {esc(ev["icon"])} {esc(ev["titel"])}'
+                story.append(Paragraph(zeile, styles["Normal"]))
+                if ev["sub"]:
+                    story.append(Paragraph(esc(ev["sub"]), styles["Normal"]))
+                if ev["extra"]:
+                    story.append(Paragraph(esc(ev["extra"]), styles["Normal"]))
+                story.append(Spacer(1, 3*mm))
+            story.append(Spacer(1, 5*mm))
+        doc.build(story)
+        pdf_bytes = buf.getvalue()
+        from fastapi.responses import Response
+        return Response(content=pdf_bytes, media_type="application/pdf",
+                        headers={"Content-Disposition": f"inline; filename=Reiseplan_{rcode}.pdf"})
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:800]}</pre>'))
 
 
 @app.get("/reise/{code}/abschluss", response_class=HTMLResponse)
@@ -4945,6 +5123,7 @@ def reise_detail(code: str):
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <a href="/reise/{rcode}/abschluss" class="btn btn-primary">🧾 Abschluss</a>
+            <a href="/reise/{rcode}/reiseplan" class="btn btn-secondary">🗺 Reiseplan</a>
             <a href="/reise/{rcode}/vma-generieren" class="btn btn-secondary">🔄 VMA neu berechnen</a>
             <a href="/reise/{rcode}/bearbeiten" class="btn btn-secondary">✏ Bearbeiten</a>
             <a href="/reise/{rcode}/land/neu" class="btn btn-secondary">🌍 + Land</a>
