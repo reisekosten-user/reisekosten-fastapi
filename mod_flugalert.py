@@ -7,7 +7,7 @@ Datenquellen:
            offiziellen HAFAS-Auskunft der Deutschen Bahn, kein API-Key nötig)
 """
 from __future__ import annotations
-import os, json, httpx
+import os, json, re, httpx
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -17,7 +17,15 @@ from mod_zeit import segment_zeit_zu_utc
 
 AERODATABOX_API_KEY = os.getenv("AERODATABOX_API_KEY", "")
 AERODATABOX_HOST = os.getenv("AERODATABOX_HOST", "aerodatabox.p.rapidapi.com")
-DB_TRANSPORT_REST_URL = "https://v6.db.transport.rest"
+# Offizielle DB-Timetables-API (IRIS) statt der inoffiziellen db.transport.rest-
+# Community-Schnittstelle – die DB hat ihre alte HAFAS-Anbindung, auf der
+# db.transport.rest beruhte, dauerhaft abgeschaltet (siehe github.com/
+# derhuerst/db-rest: "DB HAFAS API is currently not available ... shut off
+# permanently"), was dort zu häufigen 503-Fehlern führte.
+DB_TIMETABLES_CLIENT_ID = os.getenv("DB_TIMETABLES_CLIENT_ID", "")
+DB_TIMETABLES_API_KEY = os.getenv("DB_TIMETABLES_API_KEY", "")
+DB_TIMETABLES_BASE = "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1"
+DB_STADA_BASE = "https://apis.deutschebahn.com/db-api-marketplace/apis/station-data/v2"
 
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
@@ -160,45 +168,125 @@ def flugstatus_abrufen(transport_nummer: str, abreise_datum: date) -> dict:
         return {"fehler": str(e)}
 
 
-def bahnstatus_abrufen(transport_nummer: str, von_ort: str, abreise_datum: date, abreise_zeit: str) -> dict:
-    """Fragt die kostenlose db.transport.rest-Schnittstelle nach dem Zugstatus ab."""
+def _db_headers() -> dict:
+    return {"DB-Client-Id": DB_TIMETABLES_CLIENT_ID, "DB-Api-Key": DB_TIMETABLES_API_KEY,
+            "Accept": "application/json"}
+
+
+def eva_fuer_bahnhof(name: str) -> str | None:
+    """Sucht die EVA-Bahnhofsnummer über die offizielle STADA-Stationsdaten-API."""
+    if not name: return None
+    resp = httpx.get(f"{DB_STADA_BASE}/stations", params={"searchstring": f"*{name}*"},
+                      headers=_db_headers(), timeout=20)
+    resp.raise_for_status()
+    ergebnisse = (resp.json() or {}).get("result") or []
+    if not ergebnisse:
+        return None
+    station = ergebnisse[0]
+    for eva in station.get("evaNumbers") or []:
+        if eva.get("isMain"):
+            return str(eva.get("number"))
+    if station.get("evaNumbers"):
+        return str(station["evaNumbers"][0].get("number"))
+    return None
+
+
+def bahnstatus_abrufen(transport_nummer: str, von_ort: str, nach_ort: str,
+                       abreise_datum: date, abreise_zeit: str) -> dict:
+    """
+    Fragt die OFFIZIELLE DB-Timetables-API (IRIS) nach dem Zugstatus ab –
+    ersetzt die inoffizielle db.transport.rest-Schnittstelle, die durch die
+    dauerhafte Abschaltung der alten DB-HAFAS-API zu häufigen 503-Fehlern
+    führte (siehe github.com/derhuerst/db-rest).
+
+    Ermittelt die Verspätung AM ZIELBAHNHOF (nach_ort), nicht am Startbahnhof –
+    für Reisende zählt die Ankunft. Ablauf: Bahnhofsnamen -> EVA-Nummern (STADA),
+    geplante Zeit aus dem Stundenfahrplan (/plan) suchen, dann mit den aktuellen
+    Änderungen (/fchg) über dieselbe Stop-ID abgleichen.
+    """
+    if not (DB_TIMETABLES_CLIENT_ID and DB_TIMETABLES_API_KEY):
+        return {"fehler": "DB_TIMETABLES_CLIENT_ID/DB_TIMETABLES_API_KEY nicht konfiguriert"}
     try:
-        # 1. Bahnhof suchen
-        resp = httpx.get(f"{DB_TRANSPORT_REST_URL}/locations",
-                          params={"query": von_ort, "results": 1}, timeout=20)
-        resp.raise_for_status()
-        orte = resp.json()
-        if not orte:
-            return {"fehler": f"Bahnhof '{von_ort}' nicht gefunden"}
-        stop_id = orte[0].get("id")
+        import xml.etree.ElementTree as ET
 
-        # 2. Abfahrten an diesem Bahnhof zur passenden Zeit abrufen
-        when = f"{abreise_datum.isoformat()}T{abreise_zeit or '00:00'}:00"
-        resp = httpx.get(f"{DB_TRANSPORT_REST_URL}/stops/{stop_id}/departures",
-                          params={"when": when, "duration": 120}, timeout=20)
-        resp.raise_for_status()
-        abfahrten = resp.json().get("departures", resp.json()) if isinstance(resp.json(), dict) else resp.json()
+        nummer_norm = re.sub(r"\s+", "", transport_nummer or "").upper()
 
-        treffer = None
-        nummer_norm = transport_nummer.replace(" ", "").upper()
-        for a in abfahrten:
-            line_name = (a.get("line", {}).get("name") or "").replace(" ", "").upper()
-            if nummer_norm in line_name or line_name in nummer_norm:
-                treffer = a
+        eva_von = eva_fuer_bahnhof(von_ort)
+        if not eva_von:
+            return {"fehler": f"Bahnhof '{von_ort}' nicht gefunden (EVA-Nummer)"}
+        eva_ziel = eva_fuer_bahnhof(nach_ort) if nach_ort else None
+        eva_ziel = eva_ziel or eva_von  # Rückfall: Startbahnhof, falls Ziel unbekannt
+
+        # Geplanten Halt im Stundenfahrplan suchen (bis zu 6h nach der Abfahrt
+        # absuchen, da uns die genaue Ankunftsuhrzeit am Ziel hier nicht vorliegt)
+        datum_kurz = abreise_datum.strftime("%y%m%d")
+        start_stunde = int((abreise_zeit or "00:00").split(":")[0])
+        gefunden = None
+        for delta_h in range(0, 6):
+            stunde = (start_stunde + delta_h) % 24
+            try:
+                resp = httpx.get(f"{DB_TIMETABLES_BASE}/plan/{eva_ziel}/{datum_kurz}/{stunde:02d}",
+                                  headers=_db_headers(), timeout=20)
+                if resp.status_code != 200:
+                    continue
+                root = ET.fromstring(resp.text)
+            except Exception:
+                continue
+            for s in root.findall("s"):
+                tl = s.find("tl")
+                if tl is None: continue
+                zugname = f'{tl.get("c","")}{tl.get("n","")}'.upper()
+                if zugname == nummer_norm:
+                    gefunden = s
+                    break
+            if gefunden is not None:
                 break
-        if not treffer:
-            return {"fehler": f"Zug '{transport_nummer}' nicht in den Abfahrten gefunden"}
 
-        verspaetung = treffer.get("delay")
-        verspaetung_min = int(verspaetung / 60) if verspaetung else 0
-        status = "cancelled" if treffer.get("cancelled") else (
-            "delayed" if verspaetung_min and verspaetung_min > 0 else "on-time")
+        if gefunden is None:
+            return {"fehler": f"Zug '{transport_nummer}' im Fahrplan von EVA {eva_ziel} nicht gefunden"}
+
+        stop_id = gefunden.get("id")
+        ar = gefunden.find("ar")
+        dp = gefunden.find("dp")
+        ziel_el = ar if ar is not None else dp
+        geplante_zeit = ziel_el.get("pt") if ziel_el is not None else None
+        gleis = ziel_el.get("pp") if ziel_el is not None else None
+
+        # Änderungen (Verspätung/Ausfall/Gleiswechsel) für denselben Halt abfragen
+        status = "on-time"
+        verspaetung_min = 0
+        gleis_neu = gleis
+        try:
+            resp2 = httpx.get(f"{DB_TIMETABLES_BASE}/fchg/{eva_ziel}", headers=_db_headers(), timeout=20)
+            if resp2.status_code == 200:
+                root2 = ET.fromstring(resp2.text)
+                for s2 in root2.findall("s"):
+                    if s2.get("id") != stop_id: continue
+                    ar2 = s2.find("ar"); dp2 = s2.find("dp")
+                    ziel2 = ar2 if ar2 is not None else dp2
+                    if ziel2 is None: continue
+                    if ziel2.get("cs") == "c":
+                        status = "cancelled"
+                        break
+                    if ziel2.get("cp"):
+                        gleis_neu = ziel2.get("cp")
+                    ct = ziel2.get("ct")
+                    if ct and geplante_zeit:
+                        t1 = datetime.strptime(geplante_zeit, "%y%m%d%H%M")
+                        t2 = datetime.strptime(ct, "%y%m%d%H%M")
+                        verspaetung_min = int((t2 - t1).total_seconds() / 60)
+                        if verspaetung_min > 0: status = "delayed"
+                    break
+        except Exception:
+            pass  # keine Änderungsdaten verfügbar -> gilt als pünktlich/plangemäß
+
         return {
             "status": status,
             "verspaetung_minuten": verspaetung_min,
             "gate": None,
-            "terminal": treffer.get("platform"),
-            "rohdaten": json.dumps(treffer, ensure_ascii=False)[:4000],
+            "terminal": gleis_neu,
+            "rohdaten": json.dumps({"eva_ziel": eva_ziel, "stop_id": stop_id,
+                                     "geplante_zeit": geplante_zeit}, ensure_ascii=False)[:4000],
         }
     except Exception as e:
         return {"fehler": str(e)}
@@ -486,7 +574,7 @@ def cron_flug_alerts(debug: bool = False) -> dict:
             ergebnis = flugstatus_abrufen(seg["transport_nummer"], seg["abreise_datum_utc"])
         elif seg["transport_typ"] == "Bahn" and seg["transport_nummer"]:
             schritt["quelle"] = "db.transport.rest"
-            ergebnis = bahnstatus_abrufen(seg["transport_nummer"], seg["von_ort"],
+            ergebnis = bahnstatus_abrufen(seg["transport_nummer"], seg["von_ort"], seg["nach_ort"],
                                           seg["abreise_datum"], seg["abreise_zeit"])
         else:
             schritt["ergebnis"] = "keine Transportnummer – übersprungen"
