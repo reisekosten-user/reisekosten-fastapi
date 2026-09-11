@@ -2,7 +2,7 @@
 mod_vma_tage.py – VMA-Tage Berechnung, Land-Ermittlung, Mahlzeiten-Abzug
 """
 from __future__ import annotations
-import json
+import json, re
 from datetime import date, timedelta
 
 from mod_db import get_db, ph, is_postgres, fmt_date
@@ -129,6 +129,7 @@ def land_fuer_tag(reise_code: str, datum: date, db,
 
     letztes_land = None
     letztes_iata = None
+    letzter_ort = None
     for row in cur.fetchall():
         ki_str = row[0] if isinstance(row, tuple) else row["ki_json"]
         if not ki_str: continue
@@ -143,26 +144,72 @@ def land_fuer_tag(reise_code: str, datum: date, db,
                     if nach_iata and nach_iata in IATA_TO_LAND:
                         letztes_iata = nach_iata
                         letztes_land = IATA_TO_LAND[nach_iata]
+                        letzter_ort = s.get("nach_ort") or None
                     elif not letztes_land:
                         nach_ort = (s.get("nach_ort") or "").strip().lower()
                         if nach_ort in STADT_ZU_LAND:
                             letztes_land = STADT_ZU_LAND[nach_ort]
+                            letzter_ort = s.get("nach_ort") or None
         except: pass
 
     if letztes_land:
+        # Städte-Sonderfall automatisch erkennen (z.B. Los Angeles, New York –
+        # diese Sätze sind über "VMA-Sätze importieren" bereits in der DB,
+        # wurden bisher aber nur bei manueller Länder-Eingabe genutzt, nicht
+        # bei der automatischen Erkennung aus Flugsegmenten).
+        override = None
+        if letzter_ort:
+            try:
+                from mod_vma import staedte_fuer_land, vma_fuer_land_erweitert
+                staedte = staedte_fuer_land(cur, letztes_land)
+                ort_norm = letzter_ort.strip().lower()
+                treffer = next((s for s in staedte if s.strip().lower() == ort_norm
+                                 or ort_norm in s.strip().lower()
+                                 or s.strip().lower() in ort_norm), None)
+                if treffer:
+                    info = vma_fuer_land_erweitert(cur, letztes_land, ort=treffer)
+                    override = {"voll": info["voll"], "halb": info["halb"]}
+                    lname = f'{VMA_SAETZE.get(letztes_land, {}).get("name", letztes_land)} – {treffer}'
+                    cur.close()
+                    return letztes_land, lname, "Flug-Segment (Städte-Satz)", override
+            except Exception:
+                pass
         lname = VMA_SAETZE.get(letztes_land, {}).get("name", letztes_land)
         cur.close()
         return letztes_land, lname, "Flug-Segment", None
 
     # 2. Hotel-Beleg: Hotel das an diesem Tag aktiv ist
-    cur.execute(f"""SELECT land_beleg, ki_json FROM belege
+    cur.execute(f"""SELECT land_beleg, hotel_adresse FROM belege
         WHERE reise_code={P} AND transportart='Hotel'
         AND hotel_checkin_datum<={P} AND hotel_checkout_datum>{P}""",
         (reise_code, datum_s, datum_s))
     row = cur.fetchone()
     if row:
         land = (row[0] if isinstance(row, tuple) else row["land_beleg"]) or ""
+        adresse = (row[1] if isinstance(row, tuple) else row["hotel_adresse"]) or ""
         if land and land in VMA_SAETZE:
+            # Stadt aus der Adresse extrahieren (letzter Teil nach dem Komma,
+            # PLZ-Ziffern entfernt) und gegen importierte Städte-Sätze prüfen
+            override = None
+            if adresse and "," in adresse:
+                ort_teil = adresse.rsplit(",", 1)[-1].strip()
+                ort_teil = re.sub(r'^\d+\s*', '', ort_teil).strip()
+                if ort_teil:
+                    try:
+                        from mod_vma import staedte_fuer_land, vma_fuer_land_erweitert
+                        staedte = staedte_fuer_land(cur, land)
+                        ort_norm = ort_teil.lower()
+                        treffer = next((s for s in staedte if s.strip().lower() == ort_norm
+                                         or ort_norm in s.strip().lower()
+                                         or s.strip().lower() in ort_norm), None)
+                        if treffer:
+                            info = vma_fuer_land_erweitert(cur, land, ort=treffer)
+                            override = {"voll": info["voll"], "halb": info["halb"]}
+                            lname = f'{VMA_SAETZE.get(land, {}).get("name", land)} – {treffer}'
+                            cur.close()
+                            return land, lname, "Hotel-Beleg (Städte-Satz)", override
+                    except Exception:
+                        pass
             lname = VMA_SAETZE.get(land, {}).get("name", land)
             cur.close()
             return land, lname, "Hotel-Beleg", None
