@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.7-g"
+APP_VERSION  = "3.7-h"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -1306,6 +1306,27 @@ async def beleg_betrag_bearbeiten(bid: int, request: Request):
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.get("/beleg/{bid}/flugstatus/zuruecksetzen")
+def beleg_flugstatus_zuruecksetzen(bid: int):
+    """
+    Löscht den gespeicherten Flug-/Bahnstatus (flug_status) für alle Segmente
+    dieses Belegs. Für Fälle, in denen ein einmal gespeicherter Endstatus
+    (z.B. "Arrived" mit einer falsch berechneten Verspätung) auf dem
+    Dashboard hängen bleibt, weil ein bereits vergangener Flug/Zug laut
+    Sicherheitslogik nicht mehr automatisch neu geprüft wird. Nach dem
+    Zurücksetzen verschwindet die Meldung vom Dashboard; beim nächsten
+    fälligen Checkpoint (oder manuellen Testlauf) wird ggf. neu geprüft.
+    """
+    try:
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(f"DELETE FROM flug_status WHERE beleg_id={P}", (bid,))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse("/", status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
 
 @app.get("/beleg/{bid}/loeschen")
 def beleg_loeschen(bid: int):
@@ -3393,7 +3414,8 @@ def dashboard(request: Request):
                 alarme.append({
                     "url": f"/beleg/{a['beleg_id']}",
                     "text": f'{icon} {a["typ"]} {a["nummer"]} ({a["von"]}→{a["nach"]}): {a["status"]}{verspaetung_txt}',
-                    "sub": "Beleg öffnen →"
+                    "sub": "Beleg öffnen →",
+                    "reset_url": f"/beleg/{a['beleg_id']}/flugstatus/zuruecksetzen"
                 })
         except: pass
         try: cur2.close()
@@ -3401,12 +3423,15 @@ def dashboard(request: Request):
 
         if alarme:
             warn_items = "".join(
-                f'<a href="{a["url"]}" style="display:flex;align-items:center;'
+                f'<div style="display:flex;align-items:center;'
                 f'justify-content:space-between;padding:10px 16px;'
-                f'text-decoration:none;color:#991b1b;border-bottom:1px solid #fecaca">'
-                f'<span style="font-weight:600">{a["text"]}</span>'
-                f'<span style="font-size:12px;color:#ef4444">{a["sub"]}</span>'
-                f'</a>'
+                f'border-bottom:1px solid #fecaca">'
+                f'<a href="{a["url"]}" style="text-decoration:none;color:#991b1b;font-weight:600;flex:1">{a["text"]}</a>'
+                f'<span style="display:flex;align-items:center;gap:10px">'
+                + (f'<a href="{a["reset_url"]}" onclick="return confirm(\'Diesen (ggf. veralteten) Status verwerfen und beim nächsten Checkpoint neu prüfen?\')" '
+                   f'style="font-size:11px;color:#94a3b8;text-decoration:none">↺ Zurücksetzen</a>' if a.get("reset_url") else "")
+                + f'<span style="font-size:12px;color:#ef4444">{a["sub"]}</span>'
+                f'</span></div>'
                 for a in alarme)
             warn_html = (
                 f'<div style="background:#fef2f2;border:1px solid #fca5a5;'
