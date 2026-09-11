@@ -332,11 +332,28 @@ Bahn+Flug-Reisen (z.B. Zubringerzug zum Flughafen zählt als eigenes Segment).
 Ein Ticket mit z.B. 4 Teilstrecken (Zug, Flug, Flug, Zug) muss auch 4 Einträge
 in "segmente" ergeben, nicht nur den ersten.
 
+WICHTIG bei DB-Fahrkarten/Online-Tickets (Deutsche Bahn): Diese enthalten
+typischerweise ZWEI Darstellungen derselben Reise – eine kurze "Zugbindung"-
+Aufzählung (nur Zugname + Abfahrtszeit) UND eine detaillierte Tabelle
+"Ihre Reiseverbindung und Reservierung" mit den Spalten Halt/Datum/Zeit/Gleis/
+Produkte. NUTZE die detaillierte Tabelle als Hauptquelle, nicht nur die kurze
+Aufzählung: Dort steht JEDE Teilstrecke als ZWEI aufeinanderfolgende Zeilen –
+die erste Zeile ist der Start-Halt mit "ab"-Zeit, die zweite Zeile ist der
+Ziel-Halt mit "an"-Zeit, beide gehören zu demselben Segment (erkennbar am
+gemeinsamen Zugnamen in der Spalte "Produkte", der nur bei der ersten Zeile
+steht). Erfasse GENAU SO VIELE Segmente, wie es solche Start/Ziel-Zeilenpaare
+gibt (Hinfahrt UND Rückfahrt zusammengezählt) – nicht nur die Anzahl der in
+der kurzen Zugbindungs-Liste genannten Zugnamen, falls diese von der
+detaillierten Tabelle abweicht. "von_ort"/"nach_ort" sind die jeweiligen
+Halt-Namen (z.B. "Würzburg Hbf", "Fulda"), "abreise_zeit" die "ab"-Zeit der
+ersten Zeile, "ankunft_zeit" die "an"-Zeit der zweiten Zeile.
+
 WICHTIG bei "von_iata"/"nach_iata": Fülle diese Felder IMMER, auch wenn auf dem
 Beleg nur der Stadt-/Flughafenname steht (z.B. "Mexico City", nicht "MEX") –
 leite den 3-stelligen IATA-Code dann aus deinem eigenen Wissen über den
 Hauptflughafen dieser Stadt ab (z.B. "Mexico City" -> "MEX", "Frankfurt" ->
 "FRA"). Nur wenn wirklich keine sinnvolle Zuordnung möglich ist, null setzen.
+Bei Bahnhöfen (kein Flughafen) "von_iata"/"nach_iata" auf null lassen.
 
 WICHTIG bei "von_lat"/"von_lon"/"nach_lat"/"nach_lon": Gib IMMER die
 ungefähren geografischen Koordinaten (Dezimalgrad) des jeweiligen Flughafens/
