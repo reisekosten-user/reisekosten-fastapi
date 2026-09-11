@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.8-a"
+APP_VERSION  = "3.8-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3587,6 +3587,21 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         except (TypeError, ValueError):
             return None
 
+    # Bekannte Live-Verspätungen laden (aus den Flug-/Bahn-Alert-Checks) –
+    # ohne das würde die Karte bei einer Verspätung fälschlich denken, ein
+    # Zug/Flug sei schon angekommen, obwohl er laut Realität noch unterwegs ist
+    # (die planmäßige Ankunftszeit allein reicht dafür nicht mehr).
+    verspaetungen = {}  # (beleg_id, segment_index) -> Minuten
+    cur.execute(f"""SELECT b.id, fs.segment_index, fs.verspaetung_minuten
+            FROM flug_status fs JOIN belege b ON b.id = fs.beleg_id
+            WHERE b.reise_code={P} AND fs.verspaetung_minuten IS NOT NULL""", (reise_code,))
+    for row in cur.fetchall():
+        bid_v = row[0] if isinstance(row, tuple) else row["id"]
+        idx_v = row[1] if isinstance(row, tuple) else row["segment_index"]
+        min_v = row[2] if isinstance(row, tuple) else row["verspaetung_minuten"]
+        if min_v:
+            verspaetungen[(bid_v, idx_v)] = min_v
+
     # Alle Flug-/Bahnsegmente mit geparsten Ab-/Ankunftszeitpunkten sammeln
     cur.execute(f"""SELECT id, ki_json, transportart FROM belege
         WHERE reise_code={P} AND transportart IN ('Flug','Bahn')""", (reise_code,))
@@ -3632,6 +3647,16 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                 dt_an = dt_ab + timedelta(hours=2)
                 if debug:
                     eintrag["ankunft_geschaetzt"] = True
+
+            # Bekannte Live-Verspätung einrechnen: sonst würde die Karte bei
+            # einem verspäteten Zug/Flug fälschlich "schon angekommen" zeigen,
+            # sobald nur die PLANMÄSSIGE Ankunftszeit verstrichen ist.
+            verspaetung_min = verspaetungen.get((bid_diag, idx_diag))
+            if verspaetung_min:
+                dt_an = dt_an + timedelta(minutes=verspaetung_min)
+                if debug:
+                    eintrag["verspaetung_beruecksichtigt_min"] = verspaetung_min
+
             typ_segment = typ
             kombi_text = f'{s.get("transport_name","")} {s.get("hinweis","")}'.lower()
             if any(k in kombi_text for k in ("bahn", "train", "zug", "sncf", "ice", "tgv", "railjet")):
