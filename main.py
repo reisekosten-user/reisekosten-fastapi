@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.7-b"
+APP_VERSION  = "3.7-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -344,6 +344,24 @@ def shell(title: str, content: str, page: str = "") -> str:
 </main>
 </body>
 </html>"""
+
+def segmente_aus_ki_json(ki_json_str: str | None) -> list:
+    """
+    Einzige Stelle im Code, die "segmente" aus dem KI-JSON eines Flug-/Bahn-
+    Belegs ausliest. WIRD SOWOHL vom Tagesverlauf (Reise-Detailseite) ALS AUCH
+    vom Reiseplan genutzt – vorher gab es zwei fast identische, aber getrennte
+    Implementierungen, die dadurch auseinanderlaufen konnten (ein Beleg zeigte
+    im Tagesverlauf nur eine zusammengefasste Zeile, im Reiseplan aber korrekt
+    alle Einzelsegmente). Jede künftige Stelle, die Segmente braucht, soll
+    diese Funktion aufrufen statt eigenes json.loads(...).get("segmente").
+    """
+    if not ki_json_str:
+        return []
+    try:
+        return json.loads(ki_json_str).get("segmente") or []
+    except Exception:
+        return []
+
 
 def gesamtbetrag_berechnen(betrag_brutto, waehrung, betrag_eur_geschaetzt,
                             betrag_eur_final, nebenkosten_eur) -> float:
@@ -2056,9 +2074,7 @@ def reiseplan_daten_laden(reise_code: str):
                 ereignisse.append((co_d, co_z or "11:00", {
                     "icon": "🏨", "titel": f"Check-out: {hname}", "zeit": co_z, "sub": hadresse, "extra": ""}))
         else:
-            ki_str = g(b,"ki_json",4) or ""
-            try: segs = json.loads(ki_str).get("segmente") or []
-            except Exception: segs = []
+            segs = segmente_aus_ki_json(g(b,"ki_json",4))
             icon = {"Flug": "✈", "Bahn": "🚆", "Mietwagen": "🚗"}.get(typ, "📍")
             for s in segs:
                 d_ab = _datum_parsen(s.get("abreise_datum"))
@@ -4889,8 +4905,7 @@ def reise_detail(code: str):
 
             segs = []
             if typ in ("Flug", "Bahn"):
-                try: segs = json.loads(get(b,"ki_json",8) or "").get("segmente") or []
-                except Exception: segs = []
+                segs = segmente_aus_ki_json(get(b,"ki_json",8))
 
             if segs:
                 for s in segs:
