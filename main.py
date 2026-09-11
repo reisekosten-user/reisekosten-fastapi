@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.7-h"
+APP_VERSION  = "3.7-i"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -1889,7 +1889,8 @@ async def mails_abrufen():
     else:
         fehler_html = ""
         if result.get("fehler_details"):
-            items = "".join(f"<li>{d}</li>" for d in result["fehler_details"])
+            items = "".join(f'<li style="white-space:pre-wrap;font-family:monospace;font-size:12px">{d}</li>'
+                             for d in result["fehler_details"])
             fehler_html = f'<div class="alert alert-warn" style="margin-top:12px"><b>Fehlerdetails:</b><ul>{items}</ul></div>'
 
         body = f'''

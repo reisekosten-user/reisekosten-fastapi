@@ -237,8 +237,13 @@ async def fetch_mails() -> dict:
 
         except Exception as e:
             import traceback
-            fehler_liste.append(f"{e}")
-            print(f"[Mail-Import Fehler] {e}\n{traceback.format_exc()[:200]}")
+            tb = traceback.format_exc()
+            # Letzte 2 relevante Zeilen (Datei+Zeile) zusätzlich zur Fehlermeldung,
+            # damit die genaue Fehlerstelle sichtbar ist statt nur "str(e)"
+            tb_zeilen = [l for l in tb.strip().split("\n") if l.strip().startswith("File ")]
+            ort = tb_zeilen[-1].strip() if tb_zeilen else ""
+            fehler_liste.append(f"{e}  [{ort}]" if ort else f"{e}")
+            print(f"[Mail-Import Fehler] {e}\n{tb[:2000]}")
 
     try:
         mail.expunge()  # Endgültig löschen
