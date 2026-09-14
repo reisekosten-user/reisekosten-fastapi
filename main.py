@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.8-d"
+APP_VERSION  = "3.9-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2408,9 +2408,18 @@ def reise_abschluss(code: str):
         # VMA-Tage
         cur.execute(f"""SELECT datum,land_code,land_name,vma_satz_voll,vma_satz_halb,
             ist_halber_satz,fruehstueck,mittagessen,abendessen,vma_brutto,vma_netto,
-            trennungspauschale
+            trennungspauschale,tatsaechliche_uhrzeit
             FROM vma_tage WHERE reise_code={P} ORDER BY datum""", (rcode,))
         vma_rows = cur.fetchall()
+
+        # Tatsächliche Reisezeit: Uhrzeit vom ersten bzw. letzten Reisetag
+        antritt_zeit = g(vma_rows[0],"tatsaechliche_uhrzeit",12) if vma_rows else None
+        ende_zeit = g(vma_rows[-1],"tatsaechliche_uhrzeit",12) if vma_rows else None
+
+        # Reise-/Arbeitszeiten je Person und Tag (vom Reisenden im Portal erfasst)
+        cur.execute(f"""SELECT kuerzel, datum, reise_beginn, reise_ende, arbeit_beginn, arbeit_ende
+            FROM reisetage_person WHERE reise_code={P} ORDER BY kuerzel, datum""", (rcode,))
+        zeiten_rows = cur.fetchall()
 
         # Alle Belege
         cur.execute(f"""SELECT id,belegart,transportart,transportart_freitext,
@@ -2418,7 +2427,7 @@ def reise_abschluss(code: str):
             betrag_brutto,betrag_netto,betrag_mwst,waehrung,
             land_beleg,betrag_eur,kurs_eur,kurs_datum,kurs_quelle,
             s3_original,status,beleg_gruppe_id,betrag_eur_final,nebenkosten_eur,
-            nebenkosten_beschreibung
+            nebenkosten_beschreibung,geprueft
             FROM belege WHERE reise_code={P}
             ORDER BY belegdatum NULLS LAST, id""", (rcode,))
         belege = cur.fetchall()
@@ -2551,17 +2560,32 @@ def reise_abschluss(code: str):
             else:
                 bet_s = f"{float(brutto):.2f} {waehrung}" if brutto else "–"
                 if betrag_eur_final_b:
-                    bet_s += f" = {float(betrag_eur_final_b):.2f} EUR (final)"
+                    bet_s += f" = {float(betrag_eur_final_b):.2f} EUR"
                 elif betrag_eur_b:
-                    bet_s += f" ≈ {float(betrag_eur_b):.2f} EUR (geschätzt, Kurs: {kurs})"
+                    bet_s += f" ≈ {float(betrag_eur_b):.2f} EUR (Kurs: {kurs})"
                 else:
                     bet_s += f' <span style="color:#ef4444">⚠ Kurs fehlt</span>'
-                mwst_s = "Auslandsbeleg – Vorsteuer nicht abzugsfähig"
+                mwst_s = "Ausland"
             if nebenkosten_b:
                 bet_s += f'<br><span style="font-size:10px;color:#64748b">+ {float(nebenkosten_b):.2f} EUR {nebenkosten_besch_b or "Nebenkosten"}</span>'
             if ist_vorlaeufig:
-                mwst_s = ('<span style="color:#c2410c">Nur Buchungsbestätigung, noch keine Rechnung – '
-                           'Betrag wird vorläufig mitgerechnet</span>')
+                mwst_s += (' <span style="color:#c2410c;font-size:10px">(nur Buchungsbestätigung)</span>')
+
+            # Spalte "Final": bei Fremdwährung zeigt sie, ob der endgültige Betrag
+            # schon bestätigt ist oder noch auf einer KI-Schätzung beruht
+            if waehrung == "EUR":
+                final_s = '<span style="color:#059669">✓ EUR</span>'
+            elif betrag_eur_final_b:
+                final_s = '<span style="color:#059669" title="Finaler Betrag bestätigt">✓ final</span>'
+            elif betrag_eur_b:
+                final_s = '<span style="color:#b45309" title="Nur KI-Schätzung, noch nicht final bestätigt">⚠ geschätzt</span>'
+            else:
+                final_s = '<span style="color:#ef4444">✗ fehlt</span>'
+
+            geprueft_b = bool(g(b,"geprueft",22))
+            geprueft_s = ('<span style="color:#059669;font-weight:700" title="Geprüft">✓</span>'
+                          if geprueft_b else
+                          '<span style="color:#ef4444;font-weight:700" title="Noch nicht geprüft">✗</span>')
 
             summen[typ] = summen.get(typ, 0) + eur_val
 
@@ -2573,7 +2597,11 @@ def reise_abschluss(code: str):
                 <td style="font-family:monospace;font-size:11px;color:#64748b">{rechnr}</td>
                 <td style="text-align:right;font-family:monospace">
                     {bet_s}</td>
+                <td style="text-align:right;font-family:monospace;font-size:11px">
+                    {f"{float(mwst):.2f} €" if mwst and waehrung=="EUR" and land=="DE" else "–"}</td>
                 <td style="font-size:11px;color:#64748b">{mwst_s}</td>
+                <td style="text-align:center;font-size:11px">{final_s}</td>
+                <td style="text-align:center">{geprueft_s}</td>
                 <td>
                   <a href="/beleg/{bid2}" style="color:var(--blue);font-weight:600;
                      text-decoration:none;margin-right:8px">#{bid2}</a>
@@ -2581,6 +2609,10 @@ def reise_abschluss(code: str):
                      class="btn btn-secondary btn-sm">PDF</a>
                 </td>
             </tr>"""
+
+        # Prüfstatus-Zusammenfassung (für den grünen/roten Gesamthinweis)
+        alle_geprueft = all(bool(g(b,"geprueft",22)) for b in (rechnungen + vorlaeufig)) if (rechnungen or vorlaeufig) else True
+        n_ungeprueft = sum(1 for b in (rechnungen + vorlaeufig) if not bool(g(b,"geprueft",22)))
 
         # Summen pro Kategorie
         summen_html = ""
@@ -2590,7 +2622,7 @@ def reise_abschluss(code: str):
                     color:#64748b;padding:6px 14px">Summe {typ}</td>
                 <td style="text-align:right;font-family:monospace;
                     font-weight:600;padding:6px 14px">{summe:.2f} EUR</td>
-                <td colspan="2"></td>
+                <td colspan="5"></td>
             </tr>"""
 
         # Buchungsbestätigungen (Hinweis)
@@ -2632,14 +2664,48 @@ def reise_abschluss(code: str):
         ma_str = " · ".join(f"{g(m,'kuerzel',0)} – {g(m,'klarname',1)}"
                              for m in ma_rows)
 
+        # Start/Ende der Reise mit tatsächlicher Uhrzeit (falls erfasst)
+        start_txt = fdat(ab) + (f" · {antritt_zeit} Uhr" if antritt_zeit else "")
+        ende_txt = fdat(zu) + (f" · {ende_zeit} Uhr" if ende_zeit else "")
+
+        # Reise-/Arbeitszeiten (aus dem Reisenden-Portal erfasst) – v.a. für
+        # Monteure relevant, die ihre Zeiten dort eintragen
+        zeiten_html = ""
+        if zeiten_rows:
+            zeilen_z = ""
+            for z in zeiten_rows:
+                kuerzel_z = g(z,"kuerzel",0); datum_z = g(z,"datum",1)
+                rb = g(z,"reise_beginn",2) or "–"; re_ = g(z,"reise_ende",3) or "–"
+                ab_z = g(z,"arbeit_beginn",4) or "–"; ae_z = g(z,"arbeit_ende",5) or "–"
+                zeilen_z += f"""<tr>
+                    <td>{fdat(datum_z)}</td><td>{kuerzel_z}</td>
+                    <td style="text-align:right;font-family:monospace">{rb} – {re_}</td>
+                    <td style="text-align:right;font-family:monospace">{ab_z} – {ae_z}</td>
+                </tr>"""
+            zeiten_html = f"""<div class="card" style="margin-bottom:16px">
+              <div class="card-header"><span class="card-title">⏱ Reise-/Arbeitszeiten</span></div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Datum</th><th>Kürzel</th>
+                    <th style="text-align:right">Reisezeit</th>
+                    <th style="text-align:right">Arbeitszeit</th></tr></thead>
+                  <tbody>{zeilen_z}</tbody>
+                </table>
+              </div>
+            </div>"""
+
         content = f"""
         <div style="display:flex;align-items:flex-start;justify-content:space-between;
                     margin-bottom:20px;flex-wrap:wrap;gap:12px">
-          <div>
-            <div style="font-family:monospace;font-size:12px;color:#64748b">{rcode}</div>
-            <h1 class="page-title" style="margin:4px 0">{titel}</h1>
-            <div style="font-size:13px;color:#64748b">
-              📅 {fdat(ab)} – {fdat(zu)} &nbsp;·&nbsp; 👤 {ma_str}
+          <div style="display:flex;gap:14px;align-items:flex-start">
+            <img src="/static/logo3.png" alt="Herrhammer" style="height:44px;width:auto;margin-top:2px">
+            <div>
+              <div style="font-family:monospace;font-size:12px;color:#64748b">{rcode}</div>
+              <h1 class="page-title" style="margin:4px 0">{titel}</h1>
+              <div style="font-size:13px;color:#64748b">
+                🚀 Start: {start_txt} &nbsp;·&nbsp; 🏁 Ende: {ende_txt}<br>
+                👤 {ma_str}
+              </div>
             </div>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -2673,6 +2739,7 @@ def reise_abschluss(code: str):
 
         {kurs_html}
         {best_html}
+        {zeiten_html}
 
         <!-- VMA-Tabelle -->
         <div class="card" style="margin-bottom:16px">
@@ -2709,15 +2776,17 @@ def reise_abschluss(code: str):
             <span class="card-title">🧾 Belege (Rechnungen & Quittungen)</span>
             <span style="font-size:13px;font-weight:600">{kosten_eur:.2f} EUR</span>
           </div>
+          {f'<div style="padding:8px 16px;background:#fef2f2;color:#991b1b;font-size:12px;font-weight:600">⚠ {n_ungeprueft} Beleg{"e" if n_ungeprueft!=1 else ""} noch nicht geprüft</div>' if n_ungeprueft else '<div style="padding:8px 16px;background:#ecfdf5;color:#065f46;font-size:12px;font-weight:600">✓ Alle Belege geprüft</div>'}
           <div class="table-wrap">
             <table>
               <thead><tr>
                 <th>Datum</th><th>Art</th><th>Anbieter</th>
                 <th>Rechnungsnr.</th><th style="text-align:right">Betrag</th>
-                <th>MwSt-Hinweis</th><th>Beleg</th>
+                <th style="text-align:right">MwSt</th><th>Hinweis</th>
+                <th style="text-align:center">Final</th><th style="text-align:center">Geprüft</th><th>Beleg</th>
               </tr></thead>
               <tbody>
-                {kosten_html or '<tr><td colspan="7" class="empty-state">Keine Rechnungen vorhanden</td></tr>'}
+                {kosten_html or '<tr><td colspan="10" class="empty-state">Keine Rechnungen vorhanden</td></tr>'}
                 {summen_html}
               </tbody>
               <tfoot><tr style="border-top:2px solid var(--border);background:#f0fdf4">
@@ -2725,7 +2794,7 @@ def reise_abschluss(code: str):
                   Gesamt Kosten:</td>
                 <td style="text-align:right;font-weight:700;font-size:15px;
                     color:#059669;padding:10px 14px">{kosten_eur:.2f} EUR</td>
-                <td colspan="2"></td>
+                <td colspan="5"></td>
               </tr></tfoot>
             </table>
           </div>
@@ -2761,12 +2830,20 @@ def reise_abschluss_pdf(code: str):
         ma_rows = cur.fetchall()
 
         cur.execute(f"""SELECT datum,land_code,land_name,vma_satz_voll,vma_satz_halb,
-            ist_halber_satz,fruehstueck,mittagessen,abendessen,vma_netto,trennungspauschale
+            ist_halber_satz,fruehstueck,mittagessen,abendessen,vma_netto,trennungspauschale,
+            tatsaechliche_uhrzeit
             FROM vma_tage WHERE reise_code={P} ORDER BY datum""", (rcode,))
         vma_rows = cur.fetchall()
+        antritt_zeit = g(vma_rows[0],"tatsaechliche_uhrzeit",11) if vma_rows else None
+        ende_zeit = g(vma_rows[-1],"tatsaechliche_uhrzeit",11) if vma_rows else None
+
+        cur.execute(f"""SELECT kuerzel, datum, reise_beginn, reise_ende, arbeit_beginn, arbeit_ende
+            FROM reisetage_person WHERE reise_code={P} ORDER BY kuerzel, datum""", (rcode,))
+        zeiten_rows = cur.fetchall()
 
         cur.execute(f"""SELECT id,belegart,anbieter,belegdatum,betrag_brutto,waehrung,betrag_eur,
-            beleg_gruppe_id,s3_original,dateiname,betrag_eur_final,nebenkosten_eur
+            beleg_gruppe_id,s3_original,dateiname,betrag_eur_final,nebenkosten_eur,
+            betrag_mwst,land_beleg,geprueft
             FROM belege WHERE reise_code={P} ORDER BY belegdatum""", (rcode,))
         belege = cur.fetchall()
         cur.close(); db.close()
@@ -2802,7 +2879,7 @@ def reise_abschluss_pdf(code: str):
             for b in rechnungen)
 
         from reportlab.lib.pagesizes import A4
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
         from reportlab.lib.styles import getSampleStyleSheet
         from reportlab.lib.units import mm
         from reportlab.lib import colors
@@ -2814,10 +2891,10 @@ def reise_abschluss_pdf(code: str):
             style = [
                 ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f1f5f9")),
                 ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-                ("FONTSIZE",(0,0),(-1,-1),9),
+                ("FONTSIZE",(0,0),(-1,-1),8),
                 ("LINEBELOW",(0,0),(-1,0),0.5,colors.HexColor("#cbd5e1")),
                 ("ALIGN",(2,0),(-1,-1),"RIGHT"),
-                ("BOTTOMPADDING",(0,0),(-1,-1),4), ("TOPPADDING",(0,0),(-1,-1),4),
+                ("BOTTOMPADDING",(0,0),(-1,-1),3), ("TOPPADDING",(0,0),(-1,-1),3),
             ]
             if fusszeile:
                 style += [("LINEABOVE",(0,-1),(-1,-1),1,colors.HexColor("#94a3b8")),
@@ -2826,17 +2903,44 @@ def reise_abschluss_pdf(code: str):
 
         buf = io.BytesIO()
         doc = SimpleDocTemplate(buf, pagesize=A4,
-            leftMargin=20*mm, rightMargin=20*mm, topMargin=20*mm, bottomMargin=20*mm)
+            leftMargin=16*mm, rightMargin=16*mm, topMargin=14*mm, bottomMargin=14*mm)
         styles = getSampleStyleSheet()
         story = []
 
         ma_namen = ", ".join(g(m,"klarname",1) for m in ma_rows) or "–"
-        story.append(Paragraph(f"Reisekostenabrechnung {esc(rcode)}", styles["Title"]))
-        story.append(Paragraph(esc(titel), styles["Heading2"]))
-        story.append(Spacer(1, 4*mm))
-        story.append(Paragraph(f"Zeitraum: {fmt_date(ab)} – {fmt_date(zu)}", styles["Normal"]))
+        start_txt = fmt_date(ab) + (f" · {antritt_zeit} Uhr" if antritt_zeit else "")
+        ende_txt = fmt_date(zu) + (f" · {ende_zeit} Uhr" if ende_zeit else "")
+
+        kopf_zeilen = [Paragraph(f"Reisekostenabrechnung {esc(rcode)}", styles["Title"]),
+                       Paragraph(esc(titel), styles["Heading2"])]
+        if os.path.exists("static/logo3.png"):
+            try:
+                logo_img = Image("static/logo3.png", width=32*mm, height=13*mm)
+                kopf_tbl = Table([[kopf_zeilen, logo_img]], colWidths=[130*mm, 34*mm])
+                kopf_tbl.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),
+                                               ("ALIGN",(1,0),(1,0),"RIGHT")]))
+                story.append(kopf_tbl)
+            except Exception:
+                story.extend(kopf_zeilen)
+        else:
+            story.extend(kopf_zeilen)
+        story.append(Spacer(1, 3*mm))
+        story.append(Paragraph(f"🚀 Start: {esc(start_txt)} &nbsp;&nbsp; 🏁 Ende: {esc(ende_txt)}", styles["Normal"]))
         story.append(Paragraph(f"Reisende: {esc(ma_namen)}", styles["Normal"]))
-        story.append(Spacer(1, 8*mm))
+        story.append(Spacer(1, 6*mm))
+
+        if zeiten_rows:
+            story.append(Paragraph("Reise-/Arbeitszeiten", styles["Heading2"]))
+            zeiten_daten = [["Datum","Kürzel","Reisezeit","Arbeitszeit"]]
+            for z in zeiten_rows:
+                zeiten_daten.append([
+                    fmt_date(g(z,"datum",1)), esc(g(z,"kuerzel",0)),
+                    f"{g(z,'reise_beginn',2) or '–'} – {g(z,'reise_ende',3) or '–'}",
+                    f"{g(z,'arbeit_beginn',4) or '–'} – {g(z,'arbeit_ende',5) or '–'}"])
+            zeiten_tbl = Table(zeiten_daten, colWidths=[28*mm,20*mm,45*mm,45*mm])
+            zeiten_tbl.setStyle(tbl_style(fusszeile=False))
+            story.append(zeiten_tbl)
+            story.append(Spacer(1, 5*mm))
 
         story.append(Paragraph("Verpflegungsmehraufwand", styles["Heading2"]))
         vma_daten = [["Datum","Land","Satz","Abzüge","Netto","Trennung"]]
@@ -2860,31 +2964,50 @@ def reise_abschluss_pdf(code: str):
         vma_tbl = Table(vma_daten, colWidths=[25*mm,15*mm,25*mm,20*mm,25*mm,25*mm])
         vma_tbl.setStyle(tbl_style())
         story.append(vma_tbl)
-        story.append(Spacer(1, 8*mm))
+        story.append(Spacer(1, 6*mm))
 
         story.append(Paragraph("Kosten (Rechnungen/Quittungen)", styles["Heading2"]))
+        n_ungeprueft_pdf = sum(1 for b in rechnungen if not bool(g(b,"geprueft",14)))
+        if n_ungeprueft_pdf:
+            story.append(Paragraph(f"⚠ {n_ungeprueft_pdf} Beleg(e) noch nicht geprüft",
+                                    styles["Normal"]))
+        else:
+            story.append(Paragraph("✓ Alle Belege geprüft", styles["Normal"]))
+        story.append(Spacer(1, 2*mm))
         if rechnungen:
-            kosten_daten = [["Datum","Anbieter","Betrag"]]
+            kosten_daten = [["Datum","Anbieter","Betrag","MwSt","Final","Geprüft"]]
             for b in rechnungen:
                 bd = g(b,"belegdatum",3)
                 if isinstance(bd,str):
                     try: bd = date.fromisoformat(bd[:10])
                     except Exception: bd = None
                 betrag = g(b,"betrag_brutto",4); waehrung = g(b,"waehrung",5) or "EUR"
-                betrag_eur = g(b,"betrag_eur",6)
+                betrag_eur = g(b,"betrag_eur",6); betrag_eur_final = g(b,"betrag_eur_final",10)
+                mwst_b = g(b,"betrag_mwst",12); land_b = g(b,"land_beleg",13) or ""
+                geprueft_b = bool(g(b,"geprueft",14))
                 bet_txt = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
-                if waehrung != "EUR" and betrag_eur:
-                    bet_txt += f" ({float(betrag_eur):.2f} €)"
+                if waehrung != "EUR" and (betrag_eur_final or betrag_eur):
+                    bet_txt += f" ({float(betrag_eur_final or betrag_eur):.2f} €)"
+                mwst_txt = f"{float(mwst_b):.2f} €" if mwst_b and waehrung=="EUR" and land_b=="DE" else "–"
+                if waehrung == "EUR":
+                    final_txt = "✓"
+                elif betrag_eur_final:
+                    final_txt = "✓"
+                elif betrag_eur:
+                    final_txt = "⚠ Schätz."
+                else:
+                    final_txt = "✗"
                 kosten_daten.append([bd.strftime("%d.%m.%Y") if bd else "–",
-                                      esc(g(b,"anbieter",2) or "–"), bet_txt])
-            kosten_daten.append(["", "Gesamt:", f"{kosten_eur:.2f} €"])
-            kosten_tbl = Table(kosten_daten, colWidths=[30*mm,80*mm,50*mm])
+                                      esc(g(b,"anbieter",2) or "–"), bet_txt, mwst_txt,
+                                      final_txt, "✓" if geprueft_b else "✗"])
+            kosten_daten.append(["", "Gesamt:", f"{kosten_eur:.2f} €", "", "", ""])
+            kosten_tbl = Table(kosten_daten, colWidths=[22*mm,58*mm,38*mm,18*mm,16*mm,18*mm])
             kosten_tbl.setStyle(tbl_style())
             story.append(kosten_tbl)
         else:
             story.append(Paragraph("Keine Rechnungen/Quittungen erfasst.", styles["Normal"]))
 
-        story.append(Spacer(1, 10*mm))
+        story.append(Spacer(1, 6*mm))
         gesamt = vma_total_netto + trennung_total + kosten_eur
         story.append(Paragraph(f"<b>Gesamt zur Abrechnung: {gesamt:.2f} €</b>", styles["Heading2"]))
 
