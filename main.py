@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.8-b"
+APP_VERSION  = "3.8-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -1326,6 +1326,150 @@ def beleg_flugstatus_zuruecksetzen(bid: int):
         return RedirectResponse("/", status_code=303)
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
+
+
+@app.get("/beleg/{bid}/segment/{idx}/umbuchen", response_class=HTMLResponse)
+def beleg_segment_umbuchen_form(bid: int, idx: int):
+    """Formular, um ein einzelnes Flug-/Bahnsegment nach einer Umbuchung
+    manuell zu korrigieren (neue Fluggesellschaft/Zugnummer, neue Zeiten)."""
+    try:
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(f"SELECT reise_code, transportart, ki_json FROM belege WHERE id={P}", (bid,))
+        r = cur.fetchone()
+        cur.close(); db.close()
+        if not r:
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Beleg nicht gefunden.</div>'))
+        g = lambda row,k,i: row[k] if hasattr(row,'keys') else row[i]
+        reise_code = g(r,"reise_code",0)
+        typ = g(r,"transportart",1) or "Flug"
+        ki_str = g(r,"ki_json",2) or "{}"
+        try:
+            segs = json.loads(ki_str).get("segmente") or []
+        except Exception:
+            segs = []
+        if idx >= len(segs):
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Segment nicht gefunden.</div>'))
+        s = segs[idx]
+
+        def v(feld): return (s.get(feld) or "")
+
+        content = f"""
+        <h1 class="page-title">✏ Umbuchung eintragen</h1>
+        <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
+          Beleg #{bid}, Segment {idx}. Änderungen werden in den Reiseplan, die Karte,
+          die Flug-/Bahn-Überwachung und die VMA-Berechnung übernommen.</p>
+        <div class="card" style="max-width:560px">
+          <div class="card-body">
+            <form method="post" action="/beleg/{bid}/segment/{idx}/umbuchen">
+              <div class="form-grid form-grid-2">
+                <div class="form-group full">
+                  <label>Gesellschaft ({"Airline" if typ=="Flug" else "Bahnunternehmen"})</label>
+                  <input type="text" name="transport_name" class="inp" value="{v('transport_name')}">
+                </div>
+                <div class="form-group">
+                  <label>Neue {"Flugnummer" if typ=="Flug" else "Zugnummer"}</label>
+                  <input type="text" name="transport_nummer" class="inp" value="{v('transport_nummer')}" required>
+                </div>
+                <div class="form-group">
+                  <label>{"IATA-Code" if typ=="Flug" else "Bahnhof"} – von</label>
+                  <input type="text" name="von_ort" class="inp" value="{v('von_ort')}" required>
+                </div>
+                <div class="form-group">
+                  <label>{"IATA-Code" if typ=="Flug" else "Bahnhof"} – nach</label>
+                  <input type="text" name="nach_ort" class="inp" value="{v('nach_ort')}" required>
+                </div>
+                <div class="form-group"></div>
+                <div class="form-group">
+                  <label>Neues Abreisedatum</label>
+                  <input type="text" name="abreise_datum" class="inp" placeholder="TT.MM.JJJJ" value="{v('abreise_datum')}" required>
+                </div>
+                <div class="form-group">
+                  <label>Neue Abreisezeit</label>
+                  <input type="time" name="abreise_zeit" class="inp" value="{v('abreise_zeit')}" required>
+                </div>
+                <div class="form-group">
+                  <label>Neues Ankunftsdatum</label>
+                  <input type="text" name="ankunft_datum" class="inp" placeholder="TT.MM.JJJJ" value="{v('ankunft_datum')}" required>
+                </div>
+                <div class="form-group">
+                  <label>Neue Ankunftszeit</label>
+                  <input type="time" name="ankunft_zeit" class="inp" value="{v('ankunft_zeit')}" required>
+                </div>
+              </div>
+              <div class="form-hint" style="margin:10px 0">
+                Zeitzonen-Offsets und Koordinaten werden zurückgesetzt und beim nächsten
+                Check automatisch neu bestimmt (bei rein innerdeutschen Umbuchungen ohne Belang).
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Speichern & VMA neu berechnen</button>
+                <a href="/beleg/{bid}" class="btn btn-secondary">Abbrechen</a>
+              </div>
+            </form>
+          </div>
+        </div>"""
+        return HTMLResponse(shell("Umbuchung", content))
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:500]}</pre>'))
+
+
+@app.post("/beleg/{bid}/segment/{idx}/umbuchen")
+async def beleg_segment_umbuchen_speichern(bid: int, idx: int, request: Request):
+    """Speichert die manuell korrigierten Umbuchungs-Daten im KI-JSON,
+    verwirft den alten Flug-/Bahnstatus und berechnet die VMA der Reise neu."""
+    form = await request.form()
+    try:
+        db = get_db(); cur = db.cursor()
+        P = ph()
+        cur.execute(f"SELECT reise_code, ki_json FROM belege WHERE id={P}", (bid,))
+        r = cur.fetchone()
+        if not r:
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Beleg nicht gefunden.</div>'))
+        g = lambda row,k,i: row[k] if hasattr(row,'keys') else row[i]
+        reise_code = g(r,"reise_code",0)
+        ki = json.loads(g(r,"ki_json",1) or "{}")
+        segs = ki.get("segmente") or []
+        if idx >= len(segs):
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Segment nicht gefunden.</div>'))
+
+        s = segs[idx]
+        for feld in ("transport_name", "transport_nummer", "von_ort", "nach_ort",
+                     "abreise_datum", "abreise_zeit", "ankunft_datum", "ankunft_zeit"):
+            wert = (form.get(feld) or "").strip()
+            if wert: s[feld] = wert
+        # Zeitzonen-Offsets/Koordinaten/IATA-Codes zurücksetzen – die galten für
+        # die ALTE Verbindung, bei einer Umbuchung ggf. nicht mehr korrekt.
+        # Rückfall-Logik (MESZ, Städtenamen-Erkennung) greift automatisch weiter.
+        for feld in ("abreise_utc_offset", "ankunft_utc_offset",
+                     "von_iata", "nach_iata", "von_lat", "von_lon", "nach_lat", "nach_lon"):
+            s[feld] = None
+        ki["segmente"][idx] = s
+
+        cur.execute(f"UPDATE belege SET ki_json={P} WHERE id={P}",
+                    (json.dumps(ki, ensure_ascii=False), bid))
+        # Alten (jetzt veralteten) Status für dieses Segment verwerfen
+        cur.execute(f"DELETE FROM flug_status WHERE beleg_id={P} AND segment_index={P}", (bid, idx))
+        db.commit(); cur.close(); db.close()
+
+        # VMA der betroffenen Reise neu berechnen, falls sich Datum/Land geändert hat
+        if reise_code:
+            db2 = get_db()
+            try:
+                vma_tage_generieren(reise_code, db2)
+            finally:
+                db2.close()
+
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:500]}</pre>'))
 
 
 @app.get("/beleg/{bid}/loeschen")
@@ -3416,7 +3560,8 @@ def dashboard(request: Request):
                     "url": f"/beleg/{a['beleg_id']}",
                     "text": f'{icon} {a["typ"]} {a["nummer"]} ({a["von"]}→{a["nach"]}): {a["status"]}{verspaetung_txt}',
                     "sub": "Beleg öffnen →",
-                    "reset_url": f"/beleg/{a['beleg_id']}/flugstatus/zuruecksetzen"
+                    "reset_url": f"/beleg/{a['beleg_id']}/flugstatus/zuruecksetzen",
+                    "umbuchen_url": f"/beleg/{a['beleg_id']}/segment/{a['segment_index']}/umbuchen"
                 })
         except: pass
         try: cur2.close()
@@ -3429,9 +3574,10 @@ def dashboard(request: Request):
                 f'border-bottom:1px solid #fecaca">'
                 f'<a href="{a["url"]}" style="text-decoration:none;color:#991b1b;font-weight:600;flex:1">{a["text"]}</a>'
                 f'<span style="display:flex;align-items:center;gap:10px">'
+                + (f'<a href="{a["umbuchen_url"]}" style="font-size:11px;color:#7c3aed;text-decoration:none">✏ Umgebucht</a>' if a.get("umbuchen_url") else "")
                 + (f'<a href="{a["reset_url"]}" onclick="return confirm(\'Diesen (ggf. veralteten) Status verwerfen und beim nächsten Checkpoint neu prüfen?\')" '
                    f'style="font-size:11px;color:#94a3b8;text-decoration:none">↺ Zurücksetzen</a>' if a.get("reset_url") else "")
-                + f'<span style="font-size:12px;color:#ef4444">{a["sub"]}</span>'
+                + f'<a href="{a["url"]}" style="font-size:12px;color:#ef4444;text-decoration:none">{a["sub"]}</a>'
                 f'</span></div>'
                 for a in alarme)
             warn_html = (
@@ -3682,6 +3828,19 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
             dauer = (s["dt_an"] - s["dt_ab"]).total_seconds()
             fortschritt = ((jetzt - s["dt_ab"]).total_seconds() / dauer) if dauer > 0 else 0.5
             fortschritt = max(0.0, min(1.0, fortschritt))
+
+            # Nächste Anschluss-Etappe ab dem Zielort dieses Segments (falls
+            # vorhanden) – z.B. der Anschlusszug nach der aktuellen Fahrt.
+            naechste_etappe = None
+            kommende = [k for k in segmente if k["dt_ab"] >= s["dt_an"] and k is not s
+                        and k["von_koord"] and k["nach_koord"]]
+            if kommende:
+                kommende.sort(key=lambda k: k["dt_ab"])
+                k = kommende[0]
+                detail = f'{k["von_iata"] or k["von_ort"] or "?"}-{k["nach_iata"] or k["nach_ort"] or "?"}'
+                naechste_etappe = {"typ": k["typ"], "detail": detail, "datum": k["dt_ab"],
+                                    "zeit_lokal": k["dt_ab_anzeige"]}
+
             cur.close()
             return _ret({
                 "status": "unterwegs",
@@ -3690,7 +3849,7 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                 "von_name": s["von_ort"] or s["von_iata"], "nach_name": s["nach_ort"] or s["nach_iata"],
                 "fortschritt": fortschritt, "transport_typ": s["typ"],
                 "dt_ab_anzeige": s["dt_ab_anzeige"], "dt_an_anzeige": s["dt_an_anzeige"],
-                "dt_ab": s["dt_ab"], "dt_an": s["dt_an"],
+                "dt_ab": s["dt_ab"], "dt_an": s["dt_an"], "naechste_etappe": naechste_etappe,
                 "label": f'{s["transport_nummer"]} {s["von_iata"] or s["von_ort"]} → {s["nach_iata"] or s["nach_ort"]}'.strip(),
             })
 
@@ -3840,13 +3999,21 @@ def dashboard_maps(debug: str = ""):
             elif pos["status"] == "unterwegs":
                 from zoneinfo import ZoneInfo
                 BERLIN = ZoneInfo("Europe/Berlin")
-                icon = "✈" if pos["transport_typ"] == "Flug" else "🚆"
+                TYP_ICON = {"Flug": "✈", "Bahn": "🚆", "Hotel": "🏨"}
+                icon = TYP_ICON.get(pos["transport_typ"], "✈")
 
                 def zeit_txt(zeit_lokal, dt):
                     zeit_lokal = zeit_lokal or "?"
                     zeit_de = dt.astimezone(BERLIN).strftime("%d.%m. %H:%M") if dt else "?"
                     return (f"{zeit_lokal} Ortszeit / {zeit_de} DE-Zeit"
                             if zeit_lokal != zeit_de else f"{zeit_lokal} Uhr")
+
+                next_txt = ""
+                naechste = pos.get("naechste_etappe")
+                if naechste:
+                    n_icon = TYP_ICON.get(naechste["typ"], "📍")
+                    n_zeit = zeit_txt(naechste.get("zeit_lokal"), naechste.get("datum"))
+                    next_txt = f'Next: {n_icon} {naechste["typ"]} · {naechste["detail"]} · {n_zeit}'
 
                 strecken.append({
                     "von": pos["von_koord"], "nach": pos["nach_koord"],
@@ -3856,6 +4023,7 @@ def dashboard_maps(debug: str = ""):
                     "code": code, "titel": titel, "ma": ma, "label": pos["label"],
                     "ab_zeit": zeit_txt(pos.get("dt_ab_anzeige"), pos.get("dt_ab")),
                     "an_zeit": zeit_txt(pos.get("dt_an_anzeige"), pos.get("dt_an")),
+                    "next_txt": next_txt,
                 })
             else:
                 from zoneinfo import ZoneInfo
@@ -4013,7 +4181,8 @@ def dashboard_maps(debug: str = ""):
                 '<b>' + s.code + '</b> – ' + s.titel + '<br>' +
                 '👤 ' + s.ma + '<br>' + s.icon + ' ' + s.label + ' (unterwegs, ' +
                 Math.round(s.fortschritt*100) + '%)<br>' +
-                '<span style="font-size:12px;color:#64748b">Ab: ' + s.ab_zeit + '<br>An: ' + s.an_zeit + '</span>'
+                '<span style="font-size:12px;color:#64748b">Ab: ' + s.ab_zeit + '<br>An: ' + s.an_zeit +
+                (s.next_txt ? '<br>' + s.next_txt : '') + '</span>'
             );
             bounds.push(s.von, s.nach);
         }});
