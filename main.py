@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.9-a"
+APP_VERSION  = "3.9-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -1198,15 +1198,39 @@ async def beleg_daten_bearbeiten(bid: int, request: Request):
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
+
+        # Bei Hotel-Belegen sind "Event"-Zeitraum und Check-in/Check-out
+        # inhaltlich dasselbe (Aufenthaltszeitraum) – beim manuellen Nachtragen
+        # bisher nur "Event" aktualisiert, Check-in/Check-out blieben auf dem
+        # alten (ggf. falschen) KI-Wert stehen. Jetzt generell mitgezogen.
+        hotel_checkin_datum = None
+        hotel_checkout_datum = None
+        hotel_naechte = None
+        zusatz_sql = ""
+        zusatz_vals = ()
+        if transportart == "Hotel" and (event_datum_von or event_datum_bis):
+            hotel_checkin_datum = event_datum_von
+            hotel_checkout_datum = event_datum_bis
+            try:
+                d1 = date.fromisoformat(event_datum_von) if event_datum_von else None
+                d2 = date.fromisoformat(event_datum_bis) if event_datum_bis else None
+                if d1 and d2 and d2 > d1:
+                    hotel_naechte = (d2 - d1).days
+            except Exception:
+                pass
+            zusatz_sql = f", hotel_checkin_datum={P}, hotel_checkout_datum={P}, hotel_naechte={P}"
+            zusatz_vals = (hotel_checkin_datum, hotel_checkout_datum, hotel_naechte)
+
         cur.execute(f"""UPDATE belege SET
             transportart={P}, transportart_freitext={P}, anbieter={P}, reisender={P},
             land_beleg={P}, belegdatum={P}, event_datum_von={P}, event_datum_bis={P},
             event_zeit={P}, event_ort_von={P}, event_ort_bis={P},
-            buchungscode={P}, rechnungsnummer={P}
+            buchungscode={P}, rechnungsnummer={P}{zusatz_sql}
             WHERE id={P}""",
             (transportart, transportart_freitext, anbieter, reisender, land_beleg,
              belegdatum, event_datum_von, event_datum_bis, event_zeit,
-             event_ort_von, event_ort_bis, buchungscode, rechnungsnummer, bid))
+             event_ort_von, event_ort_bis, buchungscode, rechnungsnummer)
+            + zusatz_vals + (bid,))
 
         # Pflichtfelder neu bewerten (Betrag/Belegart/Bezahlart bleiben wie gepflegt)
         cur.execute(f"""SELECT belegdatum, transportart, anbieter, betrag_brutto, waehrung,
@@ -2315,13 +2339,15 @@ def reiseplan_anzeigen(code: str):
         <div style="color:var(--muted);font-size:13px">{daten["titel"]} · {fmt_date(daten["abreise"])} – {fmt_date(daten["rueckkehr"])}</div>
       </div>
       <div style="display:flex;gap:8px">
-        <a href="/reise/{rcode}/reiseplan/pdf" class="btn btn-primary">📄 PDF</a>
+        <a href="/reise/{rcode}/termin/neu?zurueck=reiseplan" class="btn btn-primary">+ Ereignis</a>
+        <a href="/reise/{rcode}/reiseplan/pdf" class="btn btn-secondary">📄 PDF</a>
         <a href="/reise/{rcode}" class="btn btn-secondary">← Reise</a>
       </div>
     </div>
     <p style="font-size:12px;color:var(--muted);margin-bottom:16px">
       Reine Zeit-/Orts-/Buchungsübersicht ohne Preisangaben – zum Versand an den Reisenden vor Abreise.
-      Kundentermine ergänzt der Organisator über "+ Termin" auf der Reiseseite.</p>
+      Über "+ Ereignis" lassen sich Kundenbesuche (mit Adresse/Ansprechpartner/Telefon), Taxifahrten,
+      Messebesuche o.ä. manuell ergänzen.</p>
     {tage_html or '<div class="alert alert-warn">Noch keine Flug-/Bahn-/Hotel-/Termindaten vorhanden.</div>'}
     """
     return HTMLResponse(shell(f"Reiseplan {rcode}", content, "reisen"))
@@ -5879,14 +5905,15 @@ TERMIN_TYPEN = [
 ]
 
 @app.get("/reise/{code}/termin/neu", response_class=HTMLResponse)
-def termin_neu_form(code: str, datum: str = ""):
+def termin_neu_form(code: str, datum: str = "", zurueck: str = ""):
     rcode = code.upper()
     typ_opts = "".join(f'<option value="{v}">{l}</option>' for v, l in TERMIN_TYPEN)
+    ziel = f"/reise/{rcode}/reiseplan" if zurueck == "reiseplan" else f"/reise/{rcode}"
     content = f"""
     <h1 class="page-title">Termin hinzufügen – {rcode}</h1>
     <div class="card" style="max-width:500px">
       <div class="card-body">
-        <form method="post" action="/reise/{rcode}/termin/neu">
+        <form method="post" action="/reise/{rcode}/termin/neu?zurueck={zurueck}">
           <div class="form-grid form-grid-2">
             <div class="form-group full">
               <label>Titel <span class="required">*</span></label>
@@ -5927,7 +5954,7 @@ def termin_neu_form(code: str, datum: str = ""):
           </div>
           <div class="form-actions">
             <button type="submit" class="btn btn-primary">Hinzufügen</button>
-            <a href="/reise/{rcode}" class="btn btn-secondary">Abbrechen</a>
+            <a href="{ziel}" class="btn btn-secondary">Abbrechen</a>
           </div>
         </form>
       </div>
@@ -5935,7 +5962,7 @@ def termin_neu_form(code: str, datum: str = ""):
     return HTMLResponse(shell(f"Termin – {rcode}", content, "reisen"))
 
 @app.post("/reise/{code}/termin/neu")
-async def termin_neu(code: str, request: Request):
+async def termin_neu(code: str, request: Request, zurueck: str = ""):
     rcode = code.upper()
     form = await request.form()
     titel = (form.get("titel") or "").strip()
@@ -5947,10 +5974,11 @@ async def termin_neu(code: str, request: Request):
     ansprechpartner = (form.get("ansprechpartner") or "").strip() or None
     telefon = (form.get("telefon") or "").strip() or None
     notiz = (form.get("notiz") or "").strip() or None
+    ziel = f"/reise/{rcode}/reiseplan" if zurueck == "reiseplan" else f"/reise/{rcode}"
     if not titel or not datum:
         return HTMLResponse(shell("Fehler",
             '<div class="alert alert-err">Titel und Datum sind Pflicht.</div>'
-            f'<a href="/reise/{rcode}/termin/neu" class="btn btn-secondary">Zurück</a>'))
+            f'<a href="/reise/{rcode}/termin/neu?zurueck={zurueck}" class="btn btn-secondary">Zurück</a>'))
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
@@ -5959,7 +5987,7 @@ async def termin_neu(code: str, request: Request):
             f"VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P})",
             (rcode, datum, von, bis, titel, typ, ort, ansprechpartner, telefon, notiz))
         db.commit(); cur.close(); db.close()
-        return RedirectResponse(f"/reise/{rcode}", status_code=303)
+        return RedirectResponse(ziel, status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
