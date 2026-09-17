@@ -429,6 +429,64 @@ def status_holen(beleg_id: int, segment_index: int) -> dict | None:
             "terminal": g("terminal", 4)}
 
 
+def _adb_local_zeit_parsen(local_str: str | None):
+    """Parst AeroDataBox-'local'-Zeitstempel wie '2026-09-20 19:25+02:00' zu
+    (Datum als TT.MM.JJJJ, Uhrzeit als HH:MM, UTC-Offset als +HH:MM)."""
+    if not local_str: return None, None, None
+    m = re.match(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})([+-]\d{2}:\d{2})", local_str)
+    if not m: return None, None, None
+    datum_iso, zeit, offset = m.groups()
+    try:
+        d = date.fromisoformat(datum_iso)
+    except Exception:
+        return None, None, None
+    return d.strftime("%d.%m.%Y"), zeit, offset
+
+
+def segment_zeiten_korrigieren(beleg_id: int, segment_index: int, rohdaten_json: str):
+    """
+    Schreibt die von AeroDataBox bestätigte PLANMÄSSIGE Ab-/Ankunftszeit
+    (inkl. echtem UTC-Offset) ins gespeicherte Segment zurück – ersetzt eine
+    von der KI nur geschätzte Zeit (z.B. bei fehlenden Angaben auf einem
+    Rail&Fly-Beleg) durch die echte, von der Fluggesellschaft bestätigte.
+    Nur für Flug-Segmente sinnvoll: bei Bahn-Segmenten liegt aus der
+    db.transport.rest/DB-Timetables-Abfrage keine vergleichbar exakt
+    gematchte, vollständige Zeitangabe vor.
+    """
+    try:
+        flug = json.loads(rohdaten_json)
+    except Exception:
+        return
+    ab_local = (flug.get("departure") or {}).get("scheduledTime", {}).get("local")
+    an_local = (flug.get("arrival") or {}).get("scheduledTime", {}).get("local")
+    ab_datum, ab_zeit, ab_offset = _adb_local_zeit_parsen(ab_local)
+    an_datum, an_zeit, an_offset = _adb_local_zeit_parsen(an_local)
+    if not (ab_datum and an_datum):
+        return  # keine verwertbaren Zeiten in der Antwort -> nichts ändern
+    db = get_db(); cur = db.cursor(); P = ph()
+    try:
+        cur.execute(f"SELECT ki_json FROM belege WHERE id={P}", (beleg_id,))
+        row = cur.fetchone()
+        if not row:
+            return
+        ki_str = row[0] if isinstance(row, tuple) else row["ki_json"]
+        ki = json.loads(ki_str or "{}")
+        segs = ki.get("segmente") or []
+        if segment_index >= len(segs):
+            return
+        s = segs[segment_index]
+        s["abreise_datum"] = ab_datum; s["abreise_zeit"] = ab_zeit
+        s["ankunft_datum"] = an_datum; s["ankunft_zeit"] = an_zeit
+        if ab_offset: s["abreise_utc_offset"] = ab_offset
+        if an_offset: s["ankunft_utc_offset"] = an_offset
+        ki["segmente"][segment_index] = s
+        cur.execute(f"UPDATE belege SET ki_json={P} WHERE id={P}",
+                    (json.dumps(ki, ensure_ascii=False), beleg_id))
+        db.commit()
+    finally:
+        cur.close(); db.close()
+
+
 def status_speichern(seg: dict, ergebnis: dict):
     """
     Speichert Zeitstempel EXPLIZIT als Python-Wert (jetzt_lokal(), Europe/Berlin) –
@@ -593,6 +651,15 @@ def cron_flug_alerts(debug: bool = False) -> dict:
         status_speichern(seg, ergebnis)
         schritt["ergebnis"] = "erfolgreich geprüft"
 
+        # Bei echten Flügen (nicht Rail&Fly-Zügen) die von AeroDataBox
+        # bestätigte GEPLANTE Zeit ins Segment zurückschreiben – ersetzt eine
+        # von der KI nur geschätzte Ankunftszeit durch die echte, bestätigte.
+        if seg["transport_typ"] == "Flug" and ergebnis.get("rohdaten"):
+            try:
+                segment_zeiten_korrigieren(seg["beleg_id"], seg["segment_index"], ergebnis["rohdaten"])
+            except Exception:
+                pass
+
         if relevante_aenderung(alt_status, ergebnis):
             empfaenger = reisende_und_organisatoren_mailadressen(seg["reise_code"])
             betreff = (f"⚠ {seg['transport_typ']} {seg['transport_nummer']} "
@@ -631,7 +698,7 @@ def offene_alerts_fuer_dashboard() -> list:
     db = get_db(); cur = db.cursor()
     grenze = (jetzt_lokal() - timedelta(hours=24)).isoformat()
     P = ph()
-    cur.execute(f"""SELECT beleg_id, transport_typ, transport_nummer, von_ort, nach_ort,
+    cur.execute(f"""SELECT beleg_id, segment_index, transport_typ, transport_nummer, von_ort, nach_ort,
                    status, verspaetung_minuten, alert_gesendet_am
                    FROM flug_status
                    WHERE alert_gesendet_am IS NOT NULL AND alert_gesendet_am >= {P}
@@ -641,8 +708,8 @@ def offene_alerts_fuer_dashboard() -> list:
     out = []
     for r in rows:
         g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
-        status = (g("status",5) or "")
-        verspaetung = g("verspaetung_minuten",6)
+        status = (g("status",6) or "")
+        verspaetung = g("verspaetung_minuten",7)
         status_l = status.lower()
         ist_aktuell_problem = (
             any(k in status_l for k in ("cancel", "divert"))
@@ -650,8 +717,9 @@ def offene_alerts_fuer_dashboard() -> list:
         )
         if not ist_aktuell_problem:
             continue
-        out.append({"beleg_id": g("beleg_id",0), "typ": g("transport_typ",1),
-                     "nummer": g("transport_nummer",2), "von": g("von_ort",3), "nach": g("nach_ort",4),
+        out.append({"beleg_id": g("beleg_id",0), "segment_index": g("segment_index",1),
+                     "typ": g("transport_typ",2), "nummer": g("transport_nummer",3),
+                     "von": g("von_ort",4), "nach": g("nach_ort",5),
                      "status": status, "verspaetung": verspaetung})
         if len(out) >= 5:
             break
