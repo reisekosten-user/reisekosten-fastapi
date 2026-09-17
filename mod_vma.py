@@ -42,6 +42,7 @@ VMA_SAETZE: dict[str, dict] = {
     "ZA": {"name": "Südafrika",          "voll": 40.00,  "halb": 20.00},
     "CR": {"name": "Costa Rica",         "voll": 40.00,  "halb": 20.00},
     "PA": {"name": "Panama",             "voll": 45.00,  "halb": 22.50},
+    "DO": {"name": "Dominikanische Republik", "voll": 44.00, "halb": 22.00},  # Platzhalter, bitte via "VMA-Sätze importieren" aktualisieren
     "CO": {"name": "Kolumbien",          "voll": 40.00,  "halb": 20.00},
     "CL": {"name": "Chile",              "voll": 45.00,  "halb": 22.50},
     "KR": {"name": "Südkorea",           "voll": 55.00,  "halb": 27.50},
@@ -206,6 +207,7 @@ LAENDER_LISTE = [
     ("QA","Katar"), ("AU","Australien"), ("BR","Brasilien"),
     ("MX","Mexiko"), ("AR","Argentinien"), ("ZA","Südafrika"),
     ("CR","Costa Rica"), ("PA","Panama"), ("CO","Kolumbien"),
+    ("DO","Dominikanische Republik"),
     ("CL","Chile"), ("KR","Südkorea"), ("TH","Thailand"),
     ("ID","Indonesien"), ("MY","Malaysia"), ("HK","Hongkong"),
     ("IL","Israel"), ("HU","Ungarn"), ("RO","Rumänien"),

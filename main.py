@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.9-d"
+APP_VERSION  = "3.9-e"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -896,6 +896,7 @@ def beleg_detail(bid: int, request: Request):
                       <option value="Bar"{' selected' if zahlungsart=='Bar' else ''}>💵 Bar</option>
                       <option value="Ueberweisung"{' selected' if zahlungsart=='Ueberweisung' else ''}>🏦 Überweisung</option>
                       <option value="PayPal"{' selected' if zahlungsart=='PayPal' else ''}>🅿 PayPal</option>
+                      <option value="DurchKunde"{' selected' if zahlungsart=='DurchKunde' else ''}>🤝 Durch Kunde</option>
                       <option value="Unbekannt"{' selected' if zahlungsart=='Unbekannt' else ''}>❓ Unbekannt</option>
                     </select>
                   </form>
