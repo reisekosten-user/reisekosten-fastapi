@@ -6,7 +6,7 @@ import json, re
 from datetime import date, timedelta
 
 from mod_db import get_db, ph, is_postgres, fmt_date
-from mod_vma import VMA_SAETZE, IATA_TO_LAND, STADT_ZU_LAND
+from mod_vma import VMA_SAETZE, IATA_TO_LAND, STADT_ZU_LAND, vma_fuer_land_erweitert
 
 def vma_berechnen(voll: float, halb: float, ist_halb: bool,
                   frueh: bool, mittag: bool, abend: bool) -> tuple:
@@ -309,8 +309,12 @@ def vma_tage_generieren(reise_code: str, db) -> int:
         if override:
             voll = override["voll"]; halb = override["halb"]
         else:
-            satz = VMA_SAETZE.get(lcode, VMA_SAETZE["DE"])
-            voll = satz["voll"]; halb = satz["halb"]
+            # WICHTIG: Immer zuerst die importierte Liste (offizielle BMF-Quelle,
+            # via "VMA-Sätze importieren") fragen – die statische VMA_SAETZE im
+            # Code ist nur ein Rückfall für Länder, die noch nie importiert
+            # wurden, und kann veraltet oder ungenau sein.
+            info = vma_fuer_land_erweitert(cur, lcode, ort=None)
+            voll = info["voll"]; halb = info["halb"]
 
         # Frühstück aus Beleg
         frueh = fruehstueck_aus_beleg(reise_code, tag, db)
