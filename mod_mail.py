@@ -211,7 +211,10 @@ async def fetch_mails() -> dict:
                 # Nur Anhänge verarbeiten – Body ist nur Benachrichtigung
                 for fn, payload, ct in echte_anhaenge:
                     result = await beleg_verarbeiten(payload, fn, reise_code, ct)
-                    belege_erstellt += 1
+                    if result.get("duplikat"):
+                        duplikate += 1
+                    else:
+                        belege_erstellt += 1
             else:
                 # Kein Anhang – Mail-Body selbst ist der Beleg
                 if body and len(body.strip()) > 50:
@@ -223,13 +226,21 @@ async def fetch_mails() -> dict:
                         f"Mail: {betreff_anon[:60]}",
                         reise_code,
                         "text/plain")
-                    belege_erstellt += 1
-                    if msg_id and result.get("beleg_id"):
-                        db = get_db(); cur = db.cursor()
-                        P = ph()
-                        cur.execute(f"UPDATE belege SET buchungscode={P} WHERE id={P}",
-                                    (f"MAIL:{msg_id[:80]}", result["beleg_id"]))
-                        db.commit(); cur.close(); db.close()
+                    if result.get("duplikat"):
+                        duplikate += 1
+                    else:
+                        belege_erstellt += 1
+                        # Nur beim tatsächlich NEU angelegten Beleg die Message-ID
+                        # eintragen – bei einem erkannten Duplikat bleibt der
+                        # ORIGINAL-Buchungscode des bestehenden Belegs unangetastet,
+                        # sonst würde er hier überschrieben und der Duplikat-Check
+                        # für künftige Weiterleitungen wieder unbrauchbar gemacht.
+                        if msg_id and result.get("beleg_id"):
+                            db = get_db(); cur = db.cursor()
+                            P = ph()
+                            cur.execute(f"UPDATE belege SET buchungscode={P} WHERE id={P}",
+                                        (f"MAIL:{msg_id[:80]}", result["beleg_id"]))
+                            db.commit(); cur.close(); db.close()
 
             # Mail löschen (nach erfolgreicher Verarbeitung)
             mail.store(mid, "+FLAGS", "\\Deleted")

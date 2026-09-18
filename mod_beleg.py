@@ -737,6 +737,26 @@ async def beleg_verarbeiten(
     else:
         ki_result = await gpt_analyse(rohtext, dateiname)
 
+    # Inhaltsbasierter Duplikat-Check: Message-ID allein reicht nicht, da eine
+    # WEITERLEITUNG einer E-Mail technisch eine neue, eigene Message-ID
+    # bekommt – der reine Message-ID-Check in mod_mail.py erkennt mehrfach
+    # weitergeleitete Belege deshalb NICHT als Duplikat. Hier stattdessen auf
+    # den von der KI erkannten Buchungscode/Rechnungsnummer prüfen, der bei
+    # jeder Weiterleitung/jedem erneuten Hochladen gleich bleibt.
+    dup_code = ki_result.get("buchungscode") or ki_result.get("rechnungsnummer")
+    if dup_code and ki_result.get("anbieter"):
+        db_dup = get_db(); cur_dup = db_dup.cursor(); P_dup = ph()
+        cur_dup.execute(f"""SELECT id FROM belege
+            WHERE (buchungscode={P_dup} OR rechnungsnummer={P_dup}) AND anbieter={P_dup}
+            LIMIT 1""", (dup_code, dup_code, ki_result.get("anbieter")))
+        vorhanden = cur_dup.fetchone()
+        cur_dup.close(); db_dup.close()
+        if vorhanden:
+            bestehende_id = vorhanden[0] if isinstance(vorhanden, tuple) else vorhanden["id"]
+            return {"beleg_id": bestehende_id, "duplikat": True,
+                    "zusammenfassung": f"Duplikat von Beleg #{bestehende_id} (gleicher Buchungscode "
+                                        f"'{dup_code}' + Anbieter, z.B. durch mehrfache Weiterleitung)"}
+
     # 3. Anonymisieren
     ma_namen, ma_mails = lade_ma_daten()
     anon_text = anonymisieren(rohtext, ma_namen, ma_mails)
