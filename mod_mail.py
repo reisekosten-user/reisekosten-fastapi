@@ -101,6 +101,7 @@ def mail_body_text(msg) -> tuple:
         for part in msg.walk():
             ct = part.get_content_type()
             cd = str(part.get("Content-Disposition") or "")
+            content_id = part.get("Content-ID")
             fn = part.get_filename()
             payload = part.get_payload(decode=True)
             if not payload: continue
@@ -108,6 +109,17 @@ def mail_body_text(msg) -> tuple:
             if fn:
                 fn = decode_mime_header(fn)
                 fn_lower = fn.lower()
+                # WICHTIG: In HTML-Mails eingebettete Bilder (Logos, Icons,
+                # Deko-Grafiken, Tracking-Pixel) kommen technisch auch als
+                # MIME-Teil MIT Dateinamen daher (oft generisch wie
+                # "image001.png") – erkennbar an Content-Disposition: inline
+                # und/oder einer Content-ID (für <img src="cid:..."> im HTML).
+                # Ohne diese Unterscheidung wurden solche Deko-Grafiken bisher
+                # wie echte Beleg-Anhänge behandelt und lösten bei der
+                # Bilderkennung Fantasie-"Belege" aus generischen Icons aus.
+                ist_inline = cd.lower().startswith("inline") or bool(content_id)
+                if ist_inline:
+                    continue
                 # Nicht-Beleg-Dateien überspringen
                 if fn_lower.endswith((".ics",".vcf",".emz",".wmz",".gif")): continue
                 # Nur echte Beleg-Dateien (.xml = eigenständige XRechnung)
