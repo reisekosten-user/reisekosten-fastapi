@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.9-n"
+APP_VERSION  = "3.9-o"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -344,6 +344,39 @@ def shell(title: str, content: str, page: str = "") -> str:
 </main>
 </body>
 </html>"""
+
+def adresse_geokodieren(adresse: str) -> tuple | None:
+    """
+    Wandelt eine Adresse/einen Ortsnamen in (lat, lon, land_code) um – über
+    die kostenlose OpenStreetMap-Nominatim-API (dieselbe Kartenquelle, die
+    wir für die Kartenkacheln ohnehin schon nutzen). Wird für Termine
+    (Kundenbesuche, Taxifahrten etc.) genutzt, damit sie auf der
+    Reisenden-Karte genauso auftauchen können wie Flüge/Hotels.
+    Gibt None zurück, wenn nichts gefunden wird oder die Anfrage fehlschlägt
+    (z.B. bei Netzwerkproblemen) – der Termin bleibt dann einfach ohne
+    Koordinaten (wie bisher), nichts bricht dadurch ab.
+    """
+    if not adresse or not adresse.strip():
+        return None
+    try:
+        resp = httpx.get("https://nominatim.openstreetmap.org/search", params={
+            "q": adresse, "format": "json", "limit": 1, "addressdetails": 1,
+        }, headers={
+            # Nominatims Nutzungsbedingungen verlangen einen identifizierenden
+            # User-Agent (keine anonymen/generischen Anfragen).
+            "User-Agent": "HerrhammerReisekosten/1.0 (interne Reisekosten-App)"
+        }, timeout=10)
+        resp.raise_for_status()
+        ergebnisse = resp.json()
+        if not ergebnisse:
+            return None
+        treffer = ergebnisse[0]
+        lat = float(treffer["lat"]); lon = float(treffer["lon"])
+        land_code = (treffer.get("address", {}).get("country_code") or "").upper() or None
+        return (lat, lon, land_code)
+    except Exception:
+        return None
+
 
 def segmente_aus_ki_json(ki_json_str: str | None) -> list:
     """
@@ -4041,6 +4074,26 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         # Positionsermittlung auf einen groben Länder-Mittelpunkt zurück (z.B.
         # Rom als Standard für "Italien", selbst wenn das Hotel in Turin liegt).
         kandidaten.append((dt, hotel_koord, land, hotel_name, "Hotel", detail_txt, zeit_lokal))
+
+    # Termine (Kundenbesuche, Taxifahrten, Messebesuche etc.) – genau wie
+    # Hotels, aber mit geokodierten Koordinaten statt Flughafen-/Bahnhofsdaten.
+    cur.execute(f"""SELECT datum, uhrzeit_von, titel, typ, lat, lon, land_code, ort
+        FROM termine WHERE reise_code={P} AND lat IS NOT NULL""", (reise_code,))
+    for row in cur.fetchall():
+        g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
+        d = _datum_parsen(g("datum",0))
+        t_zeit = g("uhrzeit_von",1) or "09:00"
+        titel_t = g("titel",2) or "Termin"
+        typ_t = g("typ",3) or "termin"
+        t_lat = g("lat",4); t_lon = g("lon",5)
+        t_land = (g("land_code",6) or "").upper() or None
+        t_ort = g("ort",7)
+        if not d or not t_land: continue
+        dt = segment_zeit_zu_utc(d, t_zeit, None)
+        if dt is None or dt > jetzt: continue
+        zeit_lokal = f"{d.strftime('%d.%m.')} {t_zeit}"
+        kandidaten.append((dt, (float(t_lat), float(t_lon)), t_land, titel_t,
+                            "Termin", t_ort or titel_t, zeit_lokal))
     cur.close()
 
     if kandidaten:
@@ -4074,6 +4127,20 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                 kommende_kandidaten.append((dt_hotel, "Hotel", hotel_adresse or hotel_name or "–",
                                              f"{d.strftime('%d.%m.')} {ci_zeit}"))
         cur2.close()
+
+        cur3 = db.cursor()
+        cur3.execute(f"""SELECT datum, uhrzeit_von, titel, typ
+            FROM termine WHERE reise_code={P} AND lat IS NOT NULL""", (reise_code,))
+        for row in cur3.fetchall():
+            g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
+            d = _datum_parsen(g("datum",0))
+            t_zeit = g("uhrzeit_von",1) or "09:00"
+            titel_t = g("titel",2) or "Termin"
+            if not d: continue
+            dt_t = segment_zeit_zu_utc(d, t_zeit, None)
+            if dt_t and dt_t > jetzt:
+                kommende_kandidaten.append((dt_t, "Termin", titel_t, f"{d.strftime('%d.%m.')} {t_zeit}"))
+        cur3.close()
 
         naechste_etappe = None
         if kommende_kandidaten:
@@ -4161,7 +4228,7 @@ def dashboard_maps(debug: str = ""):
             elif pos["status"] == "unterwegs":
                 from zoneinfo import ZoneInfo
                 BERLIN = ZoneInfo("Europe/Berlin")
-                TYP_ICON = {"Flug": "✈", "Bahn": "🚆", "Hotel": "🏨"}
+                TYP_ICON = {"Flug": "✈", "Bahn": "🚆", "Hotel": "🏨", "Termin": "🤝"}
                 icon = TYP_ICON.get(pos["transport_typ"], "✈")
 
                 def zeit_txt(zeit_lokal, dt):
@@ -4190,7 +4257,7 @@ def dashboard_maps(debug: str = ""):
             else:
                 from zoneinfo import ZoneInfo
                 BERLIN = ZoneInfo("Europe/Berlin")
-                TYP_ICON = {"Flug": "✈", "Bahn": "🚆", "Hotel": "🏨"}
+                TYP_ICON = {"Flug": "✈", "Bahn": "🚆", "Hotel": "🏨", "Termin": "🤝"}
 
                 def format_zeile(praefix, info):
                     icon = TYP_ICON.get(info["typ"], "📍")
@@ -6026,12 +6093,20 @@ async def termin_neu(code: str, request: Request, zurueck: str = ""):
             '<div class="alert alert-err">Titel und Datum sind Pflicht.</div>'
             f'<a href="/reise/{rcode}/termin/neu?zurueck={zurueck}" class="btn btn-secondary">Zurück</a>'))
     try:
+        # Adresse geokodieren (für die Kartenanzeige) – schlägt die Anfrage
+        # fehl oder wird nichts gefunden, wird der Termin trotzdem ganz normal
+        # ohne Koordinaten gespeichert.
+        geo = adresse_geokodieren(ort) if ort else None
+        lat, lon, land_code = geo if geo else (None, None, None)
+
         P = ph()
         db = get_db(); cur = db.cursor()
         cur.execute(
-            f"INSERT INTO termine (reise_code,datum,uhrzeit_von,uhrzeit_bis,titel,typ,ort,ansprechpartner,telefon,notiz) "
-            f"VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P})",
-            (rcode, datum, von, bis, titel, typ, ort, ansprechpartner, telefon, notiz))
+            f"INSERT INTO termine (reise_code,datum,uhrzeit_von,uhrzeit_bis,titel,typ,ort,"
+            f"ansprechpartner,telefon,notiz,lat,lon,land_code) "
+            f"VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})",
+            (rcode, datum, von, bis, titel, typ, ort, ansprechpartner, telefon, notiz,
+             lat, lon, land_code))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(ziel, status_code=303)
     except Exception as e:
