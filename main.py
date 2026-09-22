@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.9-l"
+APP_VERSION  = "3.9-m"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4325,7 +4325,12 @@ def dashboard_maps(debug: str = ""):
                 if (g) g.push(p); else gruppen.push([p]);
             }});
             gruppen.forEach(g => {{
-                if (g.length <= 1) return;
+                if (g.length <= 1) {{
+                    // Einzelmarker: unverändert, IMMER lat_v/lon_v setzen –
+                    // unabhängig davon, ob andere Gruppen mehrere Marker haben.
+                    g.forEach(p => {{ p.lat_v = p.lat; p.lon_v = p.lon; }});
+                    return;
+                }}
                 const versatz = 0.06; // Grad Abstand im Kreis
                 g.forEach((p, i) => {{
                     const winkel = (2 * Math.PI * i) / g.length;
@@ -4333,9 +4338,6 @@ def dashboard_maps(debug: str = ""):
                     p.lon_v = p.lon + versatz * Math.sin(winkel);
                 }});
             }});
-            if (gruppen.every(g => g.length === 1)) {{
-                punkte.forEach(p => {{ p.lat_v = p.lat; p.lon_v = p.lon; }});
-            }}
         }}
         markerVersetzen(marker);
 
