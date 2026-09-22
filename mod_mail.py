@@ -114,11 +114,18 @@ def mail_body_text(msg) -> tuple:
                 # MIME-Teil MIT Dateinamen daher (oft generisch wie
                 # "image001.png") – erkennbar an Content-Disposition: inline
                 # und/oder einer Content-ID (für <img src="cid:..."> im HTML).
-                # Ohne diese Unterscheidung wurden solche Deko-Grafiken bisher
-                # wie echte Beleg-Anhänge behandelt und lösten bei der
-                # Bilderkennung Fantasie-"Belege" aus generischen Icons aus.
+                # ABER: Handy-Mail-Apps markieren beim direkten "Foto teilen
+                # -> Mail" ein einzelnes angehängtes FOTO oft GENAUSO als
+                # inline mit Content-ID (damit es direkt in der Mail
+                # angezeigt wird) – dieselben technischen Merkmale wie ein
+                # kleines Deko-Logo! Nur an Content-Disposition/Content-ID
+                # festzumachen würde also auch echte Fotos verwerfen.
+                # Deshalb zusätzlich die Dateigröße heranziehen: echte Logos/
+                # Icons/Tracking-Pixel sind fast immer winzig (wenige KB),
+                # eine echte Handyfoto-Aufnahme praktisch nie unter ~40 KB.
                 ist_inline = cd.lower().startswith("inline") or bool(content_id)
-                if ist_inline:
+                ist_winzig = len(payload) < 40_000
+                if ist_inline and ist_winzig:
                     continue
                 # Nicht-Beleg-Dateien überspringen
                 if fn_lower.endswith((".ics",".vcf",".emz",".wmz",".gif")): continue
