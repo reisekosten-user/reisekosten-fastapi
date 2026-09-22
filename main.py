@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.9-i"
+APP_VERSION  = "3.9-j"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4307,12 +4307,43 @@ def dashboard_maps(debug: str = ""):
             return pts;
         }}
 
+        // Marker, die (fast) auf demselben Punkt liegen, würden sich sonst
+        // gegenseitig komplett verdecken – hier in einem kleinen Kreis leicht
+        // auseinanderziehen, damit jeder Reisende sichtbar bleibt.
+        function markerVersetzen(punkte) {{
+            const GRUPPEN_RADIUS = 0.05; // Grad (~5km) – gilt als "gleicher Ort"
+            const gruppen = [];
+            punkte.forEach(p => {{
+                let g = gruppen.find(g => Math.abs(g[0].lat - p.lat) < GRUPPEN_RADIUS
+                                        && Math.abs(g[0].lon - p.lon) < GRUPPEN_RADIUS);
+                if (g) g.push(p); else gruppen.push([p]);
+            }});
+            gruppen.forEach(g => {{
+                if (g.length <= 1) return;
+                const versatz = 0.06; // Grad Abstand im Kreis
+                g.forEach((p, i) => {{
+                    const winkel = (2 * Math.PI * i) / g.length;
+                    p.lat_v = p.lat + versatz * Math.cos(winkel);
+                    p.lon_v = p.lon + versatz * Math.sin(winkel);
+                }});
+            }});
+            if (gruppen.every(g => g.length === 1)) {{
+                punkte.forEach(p => {{ p.lat_v = p.lat; p.lon_v = p.lon; }});
+            }}
+        }}
+        markerVersetzen(marker);
+
         marker.forEach(m => {{
-            const mk = L.marker([m.lat, m.lon], {{icon: personIcon(m.kuerzel)}}).addTo(map);
+            const mk = L.marker([m.lat_v, m.lon_v], {{icon: personIcon(m.kuerzel)}}).addTo(map);
             let popup = '<b>' + m.code + '</b> – ' + m.titel + '<br>👤 ' + m.ma + '<br>📍 Aktuell in: ' + m.land;
             (m.zusatz || []).forEach(z => {{ popup += '<br><span style="font-size:12px;color:#64748b">' + z + '</span>'; }});
             mk.bindPopup(popup);
-            bounds.push([m.lat, m.lon]);
+            if (m.lat_v !== m.lat || m.lon_v !== m.lon) {{
+                L.polyline([[m.lat, m.lon],[m.lat_v, m.lon_v]], {{
+                    color: '#94a3b8', weight: 1, dashArray: '2, 3', opacity: 0.6
+                }}).addTo(map);
+            }}
+            bounds.push([m.lat_v, m.lon_v]);
         }});
 
         strecken.forEach(s => {{
