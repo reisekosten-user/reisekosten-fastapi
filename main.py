@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.9-k"
+APP_VERSION  = "3.9-l"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4015,7 +4015,8 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
             kandidaten.append((s["dt_an"], s["nach_koord"], land, s["nach_ort"] or s["nach_iata"],
                                 s["typ"], detail, s["dt_an_anzeige"]))
 
-    cur.execute(f"""SELECT land_beleg, hotel_checkin_datum, hotel_checkin_zeit, hotel_name
+    cur.execute(f"""SELECT land_beleg, hotel_checkin_datum, hotel_checkin_zeit, hotel_name,
+        hotel_lat, hotel_lon
         FROM belege WHERE reise_code={P} AND transportart='Hotel'""", (reise_code,))
     for row in cur.fetchall():
         g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
@@ -4023,6 +4024,8 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         d = _datum_parsen(g("hotel_checkin_datum",1))
         ci_zeit = g("hotel_checkin_zeit",2) or "14:00"
         hotel_name = g("hotel_name",3)
+        hotel_lat = g("hotel_lat",4); hotel_lon = g("hotel_lon",5)
+        hotel_koord = (float(hotel_lat), float(hotel_lon)) if hotel_lat is not None and hotel_lon is not None else None
         if not land or not d: continue
         # Hotels haben kein UTC-Offset-Feld im Schema -> Rückfall auf MESZ
         # (segment_zeit_zu_utc's Standard), damit der Vergleich mit den jetzt
@@ -4030,7 +4033,10 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         dt = segment_zeit_zu_utc(d, ci_zeit, None)
         if dt is None or dt > jetzt: continue
         zeit_lokal = f"{d.strftime('%d.%m.')} {ci_zeit}"
-        kandidaten.append((dt, None, land, hotel_name, "Hotel", hotel_name or "–", zeit_lokal))
+        # WICHTIG: hotel_koord statt None übergeben, sonst fällt die spätere
+        # Positionsermittlung auf einen groben Länder-Mittelpunkt zurück (z.B.
+        # Rom als Standard für "Italien", selbst wenn das Hotel in Turin liegt).
+        kandidaten.append((dt, hotel_koord, land, hotel_name, "Hotel", hotel_name or "–", zeit_lokal))
     cur.close()
 
     if kandidaten:

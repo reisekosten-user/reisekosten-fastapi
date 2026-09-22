@@ -361,6 +361,15 @@ Bahnhofs aus deinem eigenen Wissen an, unabhängig davon, ob sie auf dem Beleg
 stehen (stehen dort normalerweise nicht). Genauigkeit auf 2-3 Nachkommastellen
 reicht. Nur bei völlig unbekanntem/nicht zuordenbarem Ort null setzen.
 
+WICHTIG bei "hotel_lat"/"hotel_lon": Genau wie bei den Flug-/Bahn-Koordinaten
+IMMER die ungefähren geografischen Koordinaten des Hotels/der Hotelstadt aus
+deinem eigenen Wissen angeben – auch wenn nur der Hotelname und die Stadt
+bekannt sind, nicht die exakte Adresse. Das ist wichtig für die korrekte
+Positionsanzeige auf der Karte: ohne diese Koordinaten würde sonst nur ein
+grober Länder-Mittelpunkt verwendet (z.B. Rom als Rückfall für "Italien",
+selbst wenn das Hotel tatsächlich in Turin liegt). Nur bei völlig
+unbekanntem/nicht zuordenbarem Ort null setzen.
+
 WICHTIG bei "ankunft_zeit"/"ankunft_datum": Steht die Ankunftszeit nicht
 explizit auf dem Beleg, SCHÄTZE sie aus deinem eigenen Wissen über die
 typische Reisedauer dieser Strecke (z.B. Kurzstreckenflug Frankfurt-Bukarest
@@ -415,6 +424,8 @@ JSON-Format:
   "event_ort_bis": "Stadtname",
   "hotel_name": "Hotelname",
   "hotel_adresse": "Straße Hausnummer, PLZ Ort (falls auf dem Beleg vorhanden, sonst null)",
+  "hotel_lat": 45.0703,
+  "hotel_lon": 7.6869,
   "hotel_checkin_datum": "DD.MM.YYYY",
   "hotel_checkin_zeit": "HH:MM",
   "hotel_checkout_datum": "DD.MM.YYYY",
@@ -591,7 +602,8 @@ async def beleg_neu_analysieren(bid: int) -> dict:
         betrag_brutto={P}, betrag_netto={P}, betrag_mwst={P}, waehrung={P}, zahlungsart={P},
         event_datum_von={P}, event_datum_bis={P}, event_zeit={P},
         event_ort_von={P}, event_ort_bis={P},
-        hotel_name={P}, hotel_adresse={P}, hotel_checkin_datum={P}, hotel_checkin_zeit={P},
+        hotel_name={P}, hotel_adresse={P}, hotel_lat={P}, hotel_lon={P},
+        hotel_checkin_datum={P}, hotel_checkin_zeit={P},
         hotel_checkout_datum={P}, hotel_checkout_zeit={P}, hotel_naechte={P},
         tanken_kraftstoff={P}, tanken_menge={P}, tanken_einheit={P},
         tanken_preis_einheit={P}, tanken_tankstelle={P}, tanken_kennzeichen={P},
@@ -607,7 +619,8 @@ async def beleg_neu_analysieren(bid: int) -> dict:
         waehrung_ki, ki_result.get("zahlungsart"),
         pd("event_datum_von"), pd("event_datum_bis"), ki_result.get("event_zeit"),
         ki_result.get("event_ort_von"), ki_result.get("event_ort_bis"),
-        ki_result.get("hotel_name"), ki_result.get("hotel_adresse"), pd("hotel_checkin_datum"),
+        ki_result.get("hotel_name"), ki_result.get("hotel_adresse"),
+        pn("hotel_lat"), pn("hotel_lon"), pd("hotel_checkin_datum"),
         ki_result.get("hotel_checkin_zeit"), pd("hotel_checkout_datum"),
         ki_result.get("hotel_checkout_zeit"),
         ki_result.get("hotel_naechte"),
@@ -861,7 +874,7 @@ async def beleg_verarbeiten(
          anbieter, rechnungsnummer, buchungscode, reisender, land_beleg,
          betrag_brutto, betrag_netto, betrag_mwst, waehrung, zahlungsart,
          event_datum_von, event_datum_bis, event_zeit, event_ort_von, event_ort_bis,
-         hotel_name, hotel_adresse, hotel_checkin_datum, hotel_checkin_zeit,
+         hotel_name, hotel_adresse, hotel_lat, hotel_lon, hotel_checkin_datum, hotel_checkin_zeit,
          hotel_checkout_datum, hotel_checkout_zeit, hotel_naechte,
          tanken_kraftstoff, tanken_menge, tanken_einheit,
          tanken_preis_einheit, tanken_tankstelle, tanken_kennzeichen,
@@ -871,7 +884,7 @@ async def beleg_verarbeiten(
                 {P},{P},{P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},
-                {P},{P},{P},{P},{P},{P},{P},
+                {P},{P},{P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P},{P},{P},{P},{P},{P},{P},
                 {P},{P},{P},{P})"""
 
@@ -888,7 +901,8 @@ async def beleg_verarbeiten(
         waehrung_ki, ki_result.get("zahlungsart"),
         pd("event_datum_von"), pd("event_datum_bis"), ki_result.get("event_zeit"),
         ki_result.get("event_ort_von"), ki_result.get("event_ort_bis"),
-        ki_result.get("hotel_name"), ki_result.get("hotel_adresse"), pd("hotel_checkin_datum"),
+        ki_result.get("hotel_name"), ki_result.get("hotel_adresse"),
+        pn("hotel_lat"), pn("hotel_lon"), pd("hotel_checkin_datum"),
         ki_result.get("hotel_checkin_zeit"), pd("hotel_checkout_datum"),
         ki_result.get("hotel_checkout_zeit"),
         ki_result.get("hotel_naechte"),
