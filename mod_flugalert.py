@@ -56,6 +56,7 @@ CHECKPOINTS_VOR_ABREISE = [timedelta(hours=4), timedelta(hours=3), timedelta(hou
 CHECKPOINT_VOR_ANKUNFT = timedelta(minutes=30)
 VERSPAETUNGS_ALARM_SCHWELLE_MIN = 15
 MINDESTABSTAND_MINUTEN = 10  # harte Sperre, siehe segment_check_faellig
+VERSPAETUNG_MAX_NACHPRUEFUNG = timedelta(hours=3)  # Obergrenze für 10-Min-Takt bei Verspätung
 
 
 def _checkpoints_fuer_segment(seg: dict, alt_status: dict | None) -> list:
@@ -79,6 +80,13 @@ def segment_check_faellig(seg: dict, jetzt: datetime, alt_status: dict | None) -
       Checkpoint mehr – der hätte sich mit jeder neu gemeldeten Verspätung
       ein Stück nach vorn verschoben und wäre dadurch nach JEDEM Check sofort
       wieder "fällig" gewesen (führte zum Minutentakt-Bug).
+      WICHTIG – Obergrenze: Diese 10-Minuten-Nachprüfung läuft NUR bis
+      spätestens VERSPAETUNG_MAX_NACHPRUEFUNG nach der PLANMÄSSIGEN Ankunft.
+      Ohne diese Grenze würde ein Flug, bei dem der Endstatus aus irgendeinem
+      Grund nie sauber als "Arrived" erkannt wird (z.B. mehrdeutiger
+      AeroDataBox-Status), bis zu 24h lang ALLE 10 MINUTEN abgefragt werden –
+      genau das hat die massive RapidAPI-Kostenexplosion verursacht (~200
+      Aufrufe an einem einzigen Tag für nur 2 Reisende).
     - Sonst: feste Checkpoints vor der geplanten Abreise (4h/3h/2h/1h/30/15min)
       und 30 Min vor der geplanten Landung, jeweils mit demselben
       Mindestabstand zum letzten Check.
@@ -98,8 +106,10 @@ def segment_check_faellig(seg: dict, jetzt: datetime, alt_status: dict | None) -
 
     bekannte_verspaetung = (alt_status.get("verspaetung_minuten") or 0) if alt_status else 0
     if bekannte_verspaetung > 0:
-        # Bereits verspätet und mindestens MINDESTABSTAND_MINUTEN seit dem
-        # letzten Check vergangen (oder noch nie geprüft) -> einfach erneut nachsehen.
+        if jetzt > seg["dt_an"] + VERSPAETUNG_MAX_NACHPRUEFUNG:
+            return False  # längst über der Kulanzgrenze -> gilt als abgeschlossen
+        # Bereits verspätet, innerhalb der Kulanzgrenze und mindestens
+        # MINDESTABSTAND_MINUTEN seit dem letzten Check vergangen -> erneut nachsehen.
         return True
 
     for p in _checkpoints_fuer_segment(seg, alt_status):
