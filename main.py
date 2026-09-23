@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.10-e"
+APP_VERSION  = "3.10-f"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -5625,6 +5625,18 @@ def reise_detail(code: str):
                     f'style="font-size:11px;padding:2px 6px;border:1px solid var(--border);border-radius:4px">'
                     f'</form>')
 
+            reset_html = ""
+            if quelle_t == "manuell":
+                bestaetigung = ("Diesen Tag von \u2018manuell\u2019 zur\u00fcck auf \u2018automatisch\u2019 setzen? "
+                                 "Land/S\u00e4tze werden beim n\u00e4chsten VMA neu berechnen wieder automatisch ermittelt.")
+                reset_html = (
+                    f'<form method="post" action="/reise/{rcode}/vma/{vid}/zuruecksetzen" style="display:inline"'
+                    f' onsubmit="return confirm(\'{bestaetigung}\')">'
+                    f'<button type="submit" style="font-size:11px;color:#94a3b8;background:none;border:none;'
+                    f'text-decoration:underline;cursor:pointer;padding:4px 6px" '
+                    f'title="Manuell-Markierung entfernen, damit die automatische Erkennung wieder greift">↺ Auto</button>'
+                    f'</form>')
+
             tage_blocks += f"""<div style="border-bottom:1px solid var(--border)">
               <div style="padding:12px 16px;background:var(--bg)">
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
@@ -5639,11 +5651,7 @@ def reise_detail(code: str):
                   <a href="/reise/{rcode}/termin/neu?datum={vd.isoformat() if vd else ''}"
                      style="font-size:11px;color:#2563eb;text-decoration:none;border:0.5px solid #bfdbfe;
                             border-radius:6px;padding:4px 10px">+ Termin</a>
-                  {f'''<form method="post" action="/reise/{rcode}/vma/{vid}/zuruecksetzen" style="display:inline"
-                         onsubmit="return confirm('Diesen Tag von \\'manuell\\' zurück auf \\'automatisch\\' setzen? Land/Sätze werden beim nächsten VMA neu berechnen wieder automatisch ermittelt.')">
-                    <button type="submit" style="font-size:11px;color:#94a3b8;background:none;border:none;
-                            text-decoration:underline;cursor:pointer;padding:4px 6px" title="Manuell-Markierung entfernen, damit die automatische Erkennung wieder greift">↺ Auto</button>
-                  </form>''' if quelle_t == "manuell" else ""}
+                  {reset_html}
                 </div>
                 <form method="post" action="/reise/{rcode}/vma/{vid}/speichern" style="margin-top:8px;display:inline-block">
                   <input type="hidden" name="land_code" value="{lcode_t}">
