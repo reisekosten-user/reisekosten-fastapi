@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.10-l"
+APP_VERSION  = "3.10-m"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2163,6 +2163,28 @@ async def vma_tag_speichern(code: str, vid: int, request: Request):
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
 
+@app.post("/reise/{code}/vma/{vid}/reset-und-neu")
+def vma_tag_reset_und_neu(code: str, vid: int, request: Request):
+    """
+    Kombiniert Zurücksetzen (quelle -> auto) und die komplette Neuberechnung
+    der Reise in EINEM Server-Aufruf, ohne Zwischenschritt/Redirect – schließt
+    jede Möglichkeit aus, dass ein Klick zwischen zwei Einzelschritten verloren
+    geht oder die Reihenfolge durcheinanderkommt.
+    """
+    rcode = code.upper()
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"UPDATE vma_tage SET quelle='auto' WHERE id={P}", (vid,))
+        db.commit()
+        vma_tage_generieren(rcode, db)
+        cur.close(); db.close()
+        ziel = request.headers.get("referer") or f"/reise/{rcode}/vma-debug"
+        return RedirectResponse(ziel, status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
+
 @app.post("/reise/{code}/vma/{vid}/zuruecksetzen")
 def vma_tag_zuruecksetzen(code: str, vid: int, request: Request):
     """
@@ -2209,20 +2231,27 @@ def vma_debug(code: str):
             # Gespeicherten Zustand dieses Tages immer mit anzeigen – zeigt
             # sofort, ob der Tag als "manuell" eingefroren ist und deshalb
             # von "VMA neu berechnen" übersprungen wird.
-            cur.execute(f"""SELECT quelle, land_code, land_name, vma_satz_voll, vma_satz_halb
+            cur.execute(f"""SELECT id, quelle, land_code, land_name, vma_satz_voll, vma_satz_halb
                             FROM vma_tage WHERE reise_code={P} AND datum={P}""",
                         (rcode, tag.isoformat()))
             gerow = cur.fetchone()
             if gerow:
-                q = g(gerow,"quelle",0) or "?"
-                lc = g(gerow,"land_code",1) or "?"
-                ln = g(gerow,"land_name",2) or "?"
-                vv = g(gerow,"vma_satz_voll",3); vh = g(gerow,"vma_satz_halb",4)
+                vid_tag = g(gerow,"id",0)
+                q = g(gerow,"quelle",1) or "?"
+                lc = g(gerow,"land_code",2) or "?"
+                ln = g(gerow,"land_name",3) or "?"
+                vv = g(gerow,"vma_satz_voll",4); vh = g(gerow,"vma_satz_halb",5)
                 farbe_q = "#ef4444" if q == "manuell" else "#059669"
+                fix_btn = (f'<form method="post" action="/reise/{rcode}/vma/{vid_tag}/reset-und-neu" style="display:inline">'
+                           f'<button type="submit" style="font-size:12px;color:white;background:#2563eb;'
+                           f'border:none;border-radius:6px;padding:4px 10px;cursor:pointer;margin-left:8px">'
+                           f'🔧 Diesen Tag jetzt zurücksetzen &amp; neu berechnen</button></form>'
+                           if q == "manuell" else "")
                 gespeichert_txt = (f'<div style="font-size:12px;margin-top:4px">Gespeichert: '
                                     f'<b style="color:{farbe_q}">quelle={q}</b> · {ln} ({lc}) · '
                                     f'voll {float(vv):.2f} € / halb {float(vh):.2f} €'
-                                    f'{" ⚠ manuell -> wird bei Neuberechnung ÜBERSPRUNGEN" if q=="manuell" else ""}</div>')
+                                    f'{" ⚠ manuell -> wird bei Neuberechnung ÜBERSPRUNGEN" if q=="manuell" else ""}'
+                                    f'{fix_btn}</div>')
             else:
                 gespeichert_txt = '<div style="font-size:12px;color:#ef4444;margin-top:4px">Kein vma_tage-Eintrag vorhanden</div>'
 
