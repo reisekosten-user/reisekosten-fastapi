@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.10-i"
+APP_VERSION  = "3.10-j"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2600,28 +2600,36 @@ def reise_abschluss(code: str):
                               # -> zählt vorläufig mit, damit kein Geld in der Summe fehlt
         kurs_fehlt = []      # Auslandsbelege ohne Kurs
 
-        # Gruppen-Zugehörigkeit ermitteln: welche Belegarten stecken in derselben Gruppe?
-        gruppen_arten_abschluss = {}
+        # WICHTIG: Bewusst eine BLACKLIST (nur "Buchungsbestätigung" gilt als
+        # vorläufig), keine Whitelist – es gibt viele Belegarten (Tankbeleg,
+        # Hotel, Taxi, Bewirtung, Sonstige Kosten, Sonstiges ...), die alle
+        # genauso final/abschließend sind wie "Rechnung"/"Quittung". Eine
+        # Whitelist hätte all diese fälschlich als "nur Buchungsbestätigung"
+        # markiert, obwohl der Beleg vollständig war.
+        def ist_belegart_final(art: str) -> bool:
+            return "buchungsbest" not in (art or "").lower()
+
+        gruppen_hat_finale = {}
         for b in belege:
             gid = g(b,"beleg_gruppe_id",18)
             if gid:
-                gruppen_arten_abschluss.setdefault(gid, set()).add((g(b,"belegart",1) or "").lower())
+                if ist_belegart_final(g(b,"belegart",1)):
+                    gruppen_hat_finale[gid] = True
+                else:
+                    gruppen_hat_finale.setdefault(gid, False)
 
-        RECHNUNG_ARTEN = {"rechnung","quittung","receipt"}
         for b in belege:
-            art = (g(b,"belegart",1) or "").lower()
-            is_rechnung = any(r in art for r in RECHNUNG_ARTEN)
+            art = g(b,"belegart",1) or ""
             waehrung = g(b,"waehrung",10) or "EUR"
-            if is_rechnung:
+            if ist_belegart_final(art):
                 rechnungen.append(b)
                 if waehrung != "EUR" and not g(b,"kurs_eur",13):
                     kurs_fehlt.append(b)
                 continue
 
             gid = g(b,"beleg_gruppe_id",18)
-            gruppe_hat_rechnung = bool(gid and gruppen_arten_abschluss.get(gid, set()) & RECHNUNG_ARTEN)
-            if gruppe_hat_rechnung:
-                continue  # wird durch die verknüpfte Rechnung in der Gruppe bereits gezählt
+            if gid and gruppen_hat_finale.get(gid):
+                continue  # wird durch den verknüpften finalen Beleg in der Gruppe bereits gezählt
             betrag = g(b,"betrag_brutto",7)
             if betrag:
                 vorlaeufig.append(b)
@@ -3011,22 +3019,32 @@ def reise_abschluss_pdf(code: str):
         # die nicht mit einer echten Rechnung/Quittung verknüpft sind, zählen
         # vorläufig mit – sonst würde z.B. eine erst als Buchungsbestätigung
         # vorliegende Hotelrechnung stillschweigend in der Summe fehlen.
-        RECHNUNG_ARTEN = {"rechnung","quittung","receipt"}
-        gruppen_arten_pdf = {}
+        # WICHTIG: Bewusst eine BLACKLIST (nur "Buchungsbestätigung" gilt als
+        # vorläufig), keine Whitelist auf "Rechnung"/"Quittung" – es gibt viele
+        # weitere Belegarten (Tankbeleg, Hotel, Taxi, Bewirtung, Sonstige
+        # Kosten, Sonstiges ...), die alle genauso final/abschließend sind.
+        def ist_belegart_final(art: str) -> bool:
+            return "buchungsbest" not in (art or "").lower()
+
+        gruppen_hat_finale_pdf = {}
         for b in belege:
             gid = g(b,"beleg_gruppe_id",7)
             if gid:
-                gruppen_arten_pdf.setdefault(gid, set()).add((g(b,"belegart",1) or "").lower())
+                if ist_belegart_final(g(b,"belegart",1)):
+                    gruppen_hat_finale_pdf[gid] = True
+                else:
+                    gruppen_hat_finale_pdf.setdefault(gid, False)
 
         rechnungen = []
         for b in belege:
-            art = (g(b,"belegart",1) or "").lower()
-            if any(x in art for x in RECHNUNG_ARTEN):
+            art = g(b,"belegart",1) or ""
+            if ist_belegart_final(art):
                 rechnungen.append(b)
                 continue
             gid = g(b,"beleg_gruppe_id",7)
-            gruppe_hat_rechnung = bool(gid and gruppen_arten_pdf.get(gid, set()) & RECHNUNG_ARTEN)
-            if not gruppe_hat_rechnung and g(b,"betrag_brutto",4):
+            if gid and gruppen_hat_finale_pdf.get(gid):
+                continue
+            if g(b,"betrag_brutto",4):
                 rechnungen.append(b)  # vorläufig mitgezählt
 
         kosten_eur = sum(
