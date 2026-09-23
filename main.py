@@ -28,7 +28,7 @@ from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         S3_ENDPOINT, S3_BUCKET)
 from mod_mail import fetch_mails, sende_dms_mail
 from mod_vma_tage import (vma_berechnen, land_fuer_tag,
-                           fruehstueck_aus_beleg, vma_tage_generieren)
+                           fruehstueck_aus_beleg, vma_tage_generieren, land_fuer_letzten_tag)
 from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
                        hat_bereits_passwoerter, pfad_ist_offen, ist_organisator)
 from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_token,
@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.10-f"
+APP_VERSION  = "3.10-g"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2182,6 +2182,59 @@ def vma_tag_zuruecksetzen(code: str, vid: int, request: Request):
         return RedirectResponse(ziel, status_code=303)
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
+
+
+@app.get("/reise/{code}/vma-debug", response_class=HTMLResponse)
+def vma_debug(code: str):
+    """Zeigt für jeden Tag der Reise, was die Rückreisetag-Länderregel sieht
+    und warum sie zu ihrem Ergebnis kommt – zum gezielten Fehlersuchen."""
+    rcode = code.upper()
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT abreise, rueckkehr FROM reisen WHERE code={P}", (rcode,))
+        r = cur.fetchone()
+        if not r:
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden.</div>'))
+        g = lambda row,k,i: row[k] if hasattr(row,'keys') else row[i]
+        ab = _datum_parsen(g(r,"abreise",0)); zu = _datum_parsen(g(r,"rueckkehr",1))
+        tage = (zu - ab).days + 1
+        eintaegig = (tage == 1)
+
+        bloecke = ""
+        for i in range(tage):
+            tag = ab + timedelta(days=i)
+            ist_letzter_tag = (i == tage - 1)
+            if not ist_letzter_tag:
+                bloecke += f'<p style="font-size:12px;color:var(--muted)">{tag.strftime("%d.%m.%Y")}: kein Rückreisetag, normale Logik greift.</p>'
+                continue
+            land, diag = land_fuer_letzten_tag(rcode, tag, db, eintaegig, debug=True)
+            seg_html = ""
+            for s in diag["segmente_heute"]:
+                farbe = "#059669" if s["treffer"] else "#94a3b8"
+                seg_html += (f'<div style="font-size:12px;color:{farbe};margin:2px 0">'
+                             f'Beleg #{s["beleg_id"]}: abreise_datum="{s["abreise_datum_im_segment"]}" '
+                             f'von_iata="{s["von_iata"]}" von_ort="{s["von_ort"]}" '
+                             f'abreise_zeit="{s["abreise_zeit"]}" -> Treffer: {s["treffer"]}</div>')
+            bloecke += f"""<div class="card" style="margin-bottom:12px">
+              <div class="card-body">
+                <b>{tag.strftime("%d.%m.%Y")} (Rückreisetag)</b><br>
+                <span style="font-size:12px;color:var(--muted)">Gesucht: {diag['gesuchtes_datum']}</span><br>
+                <span style="font-size:12px">Belege mit passendem event_datum_von/bis: {diag['belege_gefunden']}
+                &nbsp;·&nbsp; Segmente insgesamt in diesen Belegen: {diag['segmente_gesamt']}</span>
+                <div style="margin-top:6px">{seg_html or '<i style="font-size:12px;color:#ef4444">Keine Segmente gefunden</i>'}</div>
+                <div style="margin-top:6px;font-weight:700">Ergebnis: {land or 'None (Rückfall auf normale Logik)'}</div>
+                {f'<div style="font-size:12px;color:#ef4444;margin-top:4px">{diag["hinweis"]}</div>' if diag["hinweis"] else ''}
+              </div>
+            </div>"""
+        cur.close(); db.close()
+        content = f'<h1 class="page-title">🔍 VMA-Debug {rcode}</h1>{bloecke}'
+        return HTMLResponse(shell(f"VMA-Debug {rcode}", content))
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:1500]}</pre>'))
 
 
 @app.post("/reise/{code}/vma/{vid}/trennungspauschale")

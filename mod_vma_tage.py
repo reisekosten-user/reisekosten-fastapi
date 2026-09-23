@@ -25,7 +25,7 @@ def vma_berechnen(voll: float, halb: float, ist_halb: bool,
     netto = max(0.0, basis - abzug)
     return round(brutto, 2), round(netto, 2)
 
-def land_fuer_letzten_tag(reise_code: str, datum: date, db, eintaegig: bool):
+def land_fuer_letzten_tag(reise_code: str, datum: date, db, eintaegig: bool, debug: bool = False):
     """
     Ermittelt das Land für den ABREISETAG nach der korrekten gesetzlichen Regel
     (§ 9 Abs. 4a EStG, BMF-Schreiben v. 5.12.2025): Hier zählt NICHT der
@@ -40,33 +40,49 @@ def land_fuer_letzten_tag(reise_code: str, datum: date, db, eintaegig: bool):
       letzten fremden Flughafen im chronologischen Verlauf angenähert).
 
     Gibt den Ländercode zurück, oder None wenn nicht ermittelbar (dann greift
-    die normale Logik in land_fuer_tag als Rückfall).
+    die normale Logik in land_fuer_tag als Rückfall). Mit debug=True wird
+    stattdessen (land, diagnose_dict) zurückgegeben.
     """
     cur = db.cursor()
     P = ph()
     datum_s = datum.isoformat()
     datum_de = datum.strftime("%d.%m.%Y")
+    diag = {"gesuchtes_datum": f"{datum_s} / {datum_de}", "belege_gefunden": 0,
+            "segmente_gesamt": 0, "segmente_heute": [], "ergebnis": None, "hinweis": ""}
 
-    cur.execute(f"""SELECT ki_json FROM belege
+    cur.execute(f"""SELECT id, ki_json FROM belege
         WHERE reise_code={P} AND transportart='Flug'
         AND (event_datum_von={P} OR event_datum_bis={P})""",
         (reise_code, datum_s, datum_s))
 
+    belege_rows = cur.fetchall()
+    diag["belege_gefunden"] = len(belege_rows)
     segmente_heute = []
-    for row in cur.fetchall():
-        ki_str = row[0] if isinstance(row, tuple) else row["ki_json"]
+    for row in belege_rows:
+        bid = row[0] if isinstance(row, tuple) else row["id"]
+        ki_str = row[1] if isinstance(row, tuple) else row["ki_json"]
         if not ki_str: continue
         try:
             segs = json.loads(ki_str).get("segmente") or []
+            diag["segmente_gesamt"] += len(segs)
             for s in segs:
                 ab_dat = s.get("abreise_datum", "") or ""
-                if ab_dat == datum_s or ab_dat == datum_de:
+                treffer = (ab_dat == datum_s or ab_dat == datum_de)
+                if debug:
+                    diag["segmente_heute"].append({
+                        "beleg_id": bid, "abreise_datum_im_segment": ab_dat,
+                        "von_iata": s.get("von_iata"), "von_ort": s.get("von_ort"),
+                        "abreise_zeit": s.get("abreise_zeit"), "treffer": treffer,
+                    })
+                if treffer:
                     segmente_heute.append(s)
-        except: pass
+        except Exception as e:
+            if debug: diag["hinweis"] += f" JSON-Fehler bei Beleg {bid}: {e}."
     cur.close()
 
     if not segmente_heute:
-        return None
+        diag["hinweis"] += " Keine Segmente mit passendem abreise_datum gefunden -> Rückfall auf normale Logik."
+        return (None, diag) if debug else None
 
     segmente_heute.sort(key=lambda s: s.get("abreise_zeit") or "")
 
@@ -82,17 +98,23 @@ def land_fuer_letzten_tag(reise_code: str, datum: date, db, eintaegig: bool):
                     ort = (s.get(ort_key) or "").strip().lower()
                     if ort in STADT_ZU_LAND and STADT_ZU_LAND[ort] != "DE":
                         land = STADT_ZU_LAND[ort]
-        return land
+        diag["ergebnis"] = land
+        return (land, diag) if debug else land
     else:
         # Abflugort der ersten Etappe des Tages = letzter Tätigkeitsort
         erste_etappe = segmente_heute[0]
         iata = erste_etappe.get("von_iata")
+        land = None
         if iata and iata in IATA_TO_LAND:
-            return IATA_TO_LAND[iata]
-        von_ort = (erste_etappe.get("von_ort") or "").strip().lower()
-        if von_ort in STADT_ZU_LAND:
-            return STADT_ZU_LAND[von_ort]
-        return None
+            land = IATA_TO_LAND[iata]
+        else:
+            von_ort = (erste_etappe.get("von_ort") or "").strip().lower()
+            if von_ort in STADT_ZU_LAND:
+                land = STADT_ZU_LAND[von_ort]
+            elif debug:
+                diag["hinweis"] += f" von_iata='{iata}' nicht in IATA_TO_LAND UND von_ort='{von_ort}' nicht in STADT_ZU_LAND."
+        diag["ergebnis"] = land
+        return (land, diag) if debug else land
 
 
 def land_fuer_tag(reise_code: str, datum: date, db,
