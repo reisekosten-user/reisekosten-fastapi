@@ -17,6 +17,7 @@ IMAP_USER    = os.getenv("IMAP_USER", "")
 
 from mod_db import get_db, ph, is_postgres, fmt_date
 from mod_anon import anonymisieren
+from mod_geo import adresse_geokodieren
 
 def get_s3():
     """S3/Hetzner Object Storage Client."""
@@ -571,6 +572,17 @@ async def beleg_neu_analysieren(bid: int) -> dict:
         try: return float(v) if v is not None else None
         except: return None
 
+    # Bei Hotels die Adresse ECHT geokodieren (Nominatim), statt nur die
+    # KI-Schätzung "aus dem Kopf" zu übernehmen – eine Adresse mit PLZ ist
+    # eindeutig, eine reine KI-Schätzung kann bei weniger bekannten Orten
+    # (z.B. kleineren Schweizer Gemeinden) daneben liegen. Nur bei Erfolg
+    # überschreiben; schlägt die Geokodierung fehl, bleibt die KI-Schätzung
+    # als Rückfall bestehen.
+    if ki_result.get("transportart") == "Hotel" and ki_result.get("hotel_adresse"):
+        geo = adresse_geokodieren(ki_result["hotel_adresse"])
+        if geo:
+            ki_result["hotel_lat"], ki_result["hotel_lon"] = geo[0], geo[1]
+
     ki_json_str = json.dumps(ki_result, ensure_ascii=False)
     pflicht_ok = bool(ki_result.get("pflichtfelder_ok", False))
     fehlend_str = json.dumps(ki_result.get("fehlende_pflichtfelder", []), ensure_ascii=False)
@@ -848,6 +860,14 @@ async def beleg_verarbeiten(
         v = ki_result.get(key)
         try: return float(v) if v is not None else None
         except: return None
+
+    # Bei Hotels die Adresse ECHT geokodieren (Nominatim), statt nur die
+    # KI-Schätzung "aus dem Kopf" zu übernehmen – siehe ausführlicher
+    # Kommentar in beleg_neu_analysieren() weiter oben im File.
+    if ki_result.get("transportart") == "Hotel" and ki_result.get("hotel_adresse"):
+        geo = adresse_geokodieren(ki_result["hotel_adresse"])
+        if geo:
+            ki_result["hotel_lat"], ki_result["hotel_lon"] = geo[0], geo[1]
 
     pflicht_ok = bool(ki_result.get("pflichtfelder_ok", False))
     fehlend_str = json.dumps(ki_result.get("fehlende_pflichtfelder", []), ensure_ascii=False)

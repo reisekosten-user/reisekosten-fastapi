@@ -37,7 +37,7 @@ from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_tok
                          cron_portal_mails, PORTAL_TAGE_VORHER)
 from mod_flugalert import (konfiguration_laden,
                             cron_flug_alerts, offene_alerts_fuer_dashboard)
-from mod_geo import koordinaten_fuer_land
+from mod_geo import koordinaten_fuer_land, adresse_geokodieren
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 # ── Konfiguration ─────────────────────────────────────────────────────────────
@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.11-a"
+APP_VERSION  = "3.11-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -345,39 +345,6 @@ def shell(title: str, content: str, page: str = "") -> str:
 </main>
 </body>
 </html>"""
-
-def adresse_geokodieren(adresse: str) -> tuple | None:
-    """
-    Wandelt eine Adresse/einen Ortsnamen in (lat, lon, land_code) um – über
-    die kostenlose OpenStreetMap-Nominatim-API (dieselbe Kartenquelle, die
-    wir für die Kartenkacheln ohnehin schon nutzen). Wird für Termine
-    (Kundenbesuche, Taxifahrten etc.) genutzt, damit sie auf der
-    Reisenden-Karte genauso auftauchen können wie Flüge/Hotels.
-    Gibt None zurück, wenn nichts gefunden wird oder die Anfrage fehlschlägt
-    (z.B. bei Netzwerkproblemen) – der Termin bleibt dann einfach ohne
-    Koordinaten (wie bisher), nichts bricht dadurch ab.
-    """
-    if not adresse or not adresse.strip():
-        return None
-    try:
-        resp = httpx.get("https://nominatim.openstreetmap.org/search", params={
-            "q": adresse, "format": "json", "limit": 1, "addressdetails": 1,
-        }, headers={
-            # Nominatims Nutzungsbedingungen verlangen einen identifizierenden
-            # User-Agent (keine anonymen/generischen Anfragen).
-            "User-Agent": "HerrhammerReisekosten/1.0 (interne Reisekosten-App)"
-        }, timeout=10)
-        resp.raise_for_status()
-        ergebnisse = resp.json()
-        if not ergebnisse:
-            return None
-        treffer = ergebnisse[0]
-        lat = float(treffer["lat"]); lon = float(treffer["lon"])
-        land_code = (treffer.get("address", {}).get("country_code") or "").upper() or None
-        return (lat, lon, land_code)
-    except Exception:
-        return None
-
 
 def segmente_aus_ki_json(ki_json_str: str | None) -> list:
     """

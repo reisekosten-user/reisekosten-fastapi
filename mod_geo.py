@@ -258,3 +258,36 @@ def koordinaten_fuer_land(land_code: str):
     if not land_code:
         return None
     return LAND_KOORDINATEN.get(land_code.upper())
+
+
+def adresse_geokodieren(adresse: str) -> tuple | None:
+    """
+    Wandelt eine Adresse/einen Ortsnamen in (lat, lon, land_code) um – über
+    die kostenlose OpenStreetMap-Nominatim-API. Zentral hier statt in main.py
+    oder mod_beleg.py definiert, damit BEIDE Stellen (Termine UND Hotels) sie
+    nutzen können – eine echte Adress-Geokodierung ist deutlich präziser als
+    eine reine KI-Schätzung "aus dem Kopf", die bei weniger bekannten Orten
+    (z.B. Einsiedeln SZ) daneben liegen kann, obwohl die exakte PLZ/Adresse
+    bereits vorliegt.
+    Gibt None zurück, wenn nichts gefunden wird oder die Anfrage fehlschlägt –
+    der Aufrufer fällt dann auf die bisherige Quelle (KI-Schätzung) zurück.
+    """
+    import httpx
+    if not adresse or not adresse.strip():
+        return None
+    try:
+        resp = httpx.get("https://nominatim.openstreetmap.org/search", params={
+            "q": adresse, "format": "json", "limit": 1, "addressdetails": 1,
+        }, headers={
+            "User-Agent": "HerrhammerReisekosten/1.0 (interne Reisekosten-App)"
+        }, timeout=10)
+        resp.raise_for_status()
+        ergebnisse = resp.json()
+        if not ergebnisse:
+            return None
+        treffer = ergebnisse[0]
+        lat = float(treffer["lat"]); lon = float(treffer["lon"])
+        land_code = (treffer.get("address", {}).get("country_code") or "").upper() or None
+        return (lat, lon, land_code)
+    except Exception:
+        return None
