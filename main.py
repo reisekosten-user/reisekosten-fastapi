@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.10-a"
+APP_VERSION  = "3.10-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -337,6 +337,7 @@ def shell(title: str, content: str, page: str = "") -> str:
   {nav("belege", "Belege", "/belege")}
   {nav("mails", "📬 Mails", "/mails-abrufen")}
   {nav("vma", "VMA-Sätze", "/vma")}
+  {nav("einstellungen", "⚙", "/einstellungen")}
   <div class="nav-right">v{APP_VERSION} &nbsp;·&nbsp; <a href="/logout" style="color:inherit">🚪 Logout</a></div>
 </nav>
 <main>
@@ -6503,6 +6504,53 @@ def cron_backup_route(key: str = ""):
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
+
+
+@app.get("/einstellungen", response_class=HTMLResponse)
+def einstellungen_uebersicht(request: Request):
+    """
+    Zentrale Übersicht aller Sonder-/Einstellungsseiten, die über die Zeit
+    entstanden sind (Backups, Flug-Alerts, offene Aufgaben, Posteingang,
+    VMA-Sätze) – bisher jeweils nur über einzelne Buttons an verschiedenen
+    Stellen erreichbar, hier an einem Ort gebündelt.
+    """
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren haben Zugriff auf die Einstellungen.</div>'), status_code=403)
+
+    karten = [
+        ("📋", "Offene Aufgaben", "Belege ohne Prüfung/finalen Betrag, unversendete Belege, "
+         "nicht abgerechnete Reisen – alles an einem Ort.", "/todo"),
+        ("✈", "Flug-/Bahn-Alerts", "Prüfplan, Testlauf, Diagnose der Verspätungs-Überwachung.",
+         "/einstellungen/alerts"),
+        ("💾", "Backups", "Tägliche Datenbank-Sicherung, manuell anstoßen, Liste vorhandener Backups.",
+         "/einstellungen/backups"),
+        ("📬", "Posteingang", "Mails/Belege, die noch keiner Reise zugeordnet werden konnten.",
+         "/unzugeordnet"),
+        ("💰", "VMA-Sätze", "Amtliche Verpflegungsmehraufwand-Sätze einsehen und importieren.",
+         "/vma"),
+        ("🗺", "Karte", "Wo sich zugeordnete Mitarbeiter bei laufenden Reisen aktuell befinden.",
+         "/maps"),
+    ]
+    karten_html = "".join(f"""
+        <a href="{url}" style="text-decoration:none;color:inherit">
+          <div class="card" style="height:100%">
+            <div class="card-body">
+              <div style="font-size:28px;margin-bottom:8px">{icon}</div>
+              <div style="font-weight:700;font-size:15px;margin-bottom:4px">{titel}</div>
+              <div style="font-size:13px;color:var(--muted)">{beschreibung}</div>
+            </div>
+          </div>
+        </a>""" for icon, titel, beschreibung, url in karten)
+
+    content = f"""
+    <h1 class="page-title">⚙ Einstellungen</h1>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:20px">
+      Übersicht aller Sonderseiten – Version {APP_VERSION}, {"PostgreSQL" if is_postgres() else "SQLite"}.</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px">
+      {karten_html}
+    </div>"""
+    return HTMLResponse(shell("Einstellungen", content))
 
 
 @app.get("/einstellungen/backups", response_class=HTMLResponse)
