@@ -136,6 +136,13 @@ def tag_speichern(tag_id: int, frueh: bool, mittag: bool, abend: bool,
     voll = r[0] if isinstance(r, tuple) else r["vma_satz_voll"]
     halb = r[1] if isinstance(r, tuple) else r["vma_satz_halb"]
     ist_halb = bool(r[2] if isinstance(r, tuple) else r["ist_halber_satz"])
+    # Rückfall auf 0, falls der VMA-Satz für diesen Tag aus irgendeinem Grund
+    # nicht gesetzt ist (z.B. Randfall bei bereits abgeschlossener Reise) –
+    # sonst würde float(None) mit einer ungefangenen Exception abstürzen und
+    # dem Reisenden nur einen 502-Fehler zeigen, ohne dass seine Eingabe
+    # (Mahlzeiten/Zeiten) überhaupt gespeichert wird.
+    voll = voll if voll is not None else 0.0
+    halb = halb if halb is not None else 0.0
     brutto, netto = vma_berechnen(voll, halb, ist_halb, frueh, mittag, abend)
 
     cur.execute(f"""UPDATE reisetage_person SET

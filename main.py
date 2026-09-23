@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.10-b"
+APP_VERSION  = "3.10-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -6457,13 +6457,25 @@ async def portal_tag_speichern(token: str, tag_id: int, request: Request):
     if not info:
         return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
     form = await request.form()
-    tag_speichern(
-        tag_id,
-        bool(form.get("fruehstueck")), bool(form.get("mittagessen")), bool(form.get("abendessen")),
-        (form.get("reise_beginn") or "").strip(), (form.get("reise_ende") or "").strip(),
-        (form.get("arbeit_beginn") or "").strip(), (form.get("arbeit_ende") or "").strip(),
-        (form.get("notiz") or "").strip(),
-    )
+    try:
+        tag_speichern(
+            tag_id,
+            bool(form.get("fruehstueck")), bool(form.get("mittagessen")), bool(form.get("abendessen")),
+            (form.get("reise_beginn") or "").strip(), (form.get("reise_ende") or "").strip(),
+            (form.get("arbeit_beginn") or "").strip(), (form.get("arbeit_ende") or "").strip(),
+            (form.get("notiz") or "").strip(),
+        )
+    except Exception as e:
+        # Ein Reisender soll bei einem Server-Fehler nie einen nackten
+        # 502/500 sehen, sondern eine verständliche Meldung – ein Absturz
+        # hier darf außerdem nicht dazu führen, dass die Eingabe kommentarlos
+        # verloren geht, ohne dass jemand davon erfährt.
+        return HTMLResponse(portal_shell("Fehler beim Speichern",
+            '<p>Deine Eingabe konnte leider nicht gespeichert werden. '
+            'Bitte versuch es gleich nochmal – klappt es weiterhin nicht, '
+            'bitte kurz beim Organisator melden.</p>'
+            f'<p style="font-size:11px;color:#94a3b8">{e}</p>'
+            f'<a href="/portal/{token}" class="btn btn-secondary">Zurück</a>'), status_code=500)
     return RedirectResponse(f"/portal/{token}", status_code=303)
 
 
