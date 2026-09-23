@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.10-m"
+APP_VERSION  = "3.10-n"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2145,10 +2145,16 @@ async def vma_tag_speichern(code: str, vid: int, request: Request):
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
-        # Sätze aus DB oder VMA-Tabelle
-        satz = VMA_SAETZE.get(lcode, VMA_SAETZE["DE"])
-        voll = satz["voll"]; halb = satz["halb"]
-        lname = satz.get("name", lcode)
+        # WICHTIG: Immer zuerst die importierte Liste (offizielle BMF-Quelle)
+        # fragen, genau wie bei der Automatik – die statische VMA_SAETZE im
+        # Code ist nur ein Rückfall für Länder, die noch nie importiert
+        # wurden. Vorher wurde hier IMMER der alte Code-Fallback genutzt, was
+        # bei jedem manuellen Speichern (z.B. nur Mahlzeiten-Haken setzen)
+        # einen bereits korrekt importierten Satz wieder auf den alten,
+        # überholten Wert zurückgesetzt hat.
+        info = vma_fuer_land_erweitert(cur, lcode, ort=None)
+        voll = info["voll"]; halb = info["halb"]
+        lname = VMA_SAETZE.get(lcode, {}).get("name", lcode)
         brutto, netto = vma_berechnen(voll, halb, ist_halb, frueh, mittag, abend)
         cur.execute(f"""UPDATE vma_tage SET
             land_code={P}, land_name={P}, vma_satz_voll={P}, vma_satz_halb={P},
