@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.9-o"
+APP_VERSION  = "3.10-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -3822,6 +3822,7 @@ def dashboard(request: Request):
             <a href="/mails-abrufen" class="btn btn-success">📬 Mails abrufen</a>
             <a href="/beleg/upload" class="btn btn-secondary">📎 Beleg hochladen</a>
             <a href="/einstellungen/alerts" class="btn btn-secondary">✈ Alert-Einstellungen</a>
+            <a href="/einstellungen/backups" class="btn btn-secondary">💾 Backups</a>
           </div>
         </div>
 
@@ -6484,6 +6485,88 @@ def cron_flug_alerts_route(key: str = ""):
         return JSONResponse({"fehler": "Ungültiger oder fehlender Schlüssel"}, status_code=403)
     result = cron_flug_alerts()
     return JSONResponse(result)
+
+
+@app.get("/cron/backup")
+def cron_backup_route(key: str = ""):
+    """
+    Für einen externen Cron-Pinger gedacht, der diese URL EINMAL TÄGLICH
+    aufruft (z.B. nachts). Sichert alle Datenbank-Tabellen komprimiert zu S3 –
+    notwendig, weil der kostenlose Render-Tarif keine eigenen automatischen
+    Backups anbietet. Behält automatisch nur die letzten 30 Sicherungen.
+    """
+    if not CRON_SECRET or key != CRON_SECRET:
+        return JSONResponse({"fehler": "Ungültiger oder fehlender Schlüssel"}, status_code=403)
+    from mod_backup import backup_erstellen
+    try:
+        result = backup_erstellen()
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
+
+@app.get("/einstellungen/backups", response_class=HTMLResponse)
+def backups_uebersicht(request: Request):
+    """Zeigt vorhandene Backups und erlaubt, sofort eines manuell anzustoßen."""
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren dürfen Backups einsehen.</div>'), status_code=403)
+    from mod_backup import backups_auflisten
+    try:
+        backups = backups_auflisten()
+    except Exception as e:
+        backups = []
+        fehler_hinweis = f'<div class="alert alert-err">Backup-Liste konnte nicht geladen werden: {e}</div>'
+    else:
+        fehler_hinweis = ""
+
+    zeilen = "".join(
+        f'<tr><td>{b["datum"].strftime("%d.%m.%Y %H:%M")} UTC</td>'
+        f'<td style="font-family:monospace;font-size:12px">{b["key"]}</td>'
+        f'<td style="text-align:right">{b["groesse_kb"]:.1f} KB</td></tr>'
+        for b in backups)
+
+    content = f"""
+    <h1 class="page-title">💾 Datenbank-Backups</h1>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
+      Läuft automatisch einmal täglich (sofern der Cron-Job eingerichtet ist),
+      behält die letzten {30} Sicherungen. Gespeichert im selben S3-Speicher
+      wie die Beleg-PDFs, komprimiert als JSON.</p>
+    {fehler_hinweis}
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-body">
+        <form method="post" action="/einstellungen/backups/jetzt">
+          <button type="submit" class="btn btn-primary">💾 Jetzt sofort sichern</button>
+        </form>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Vorhandene Backups ({len(backups)})</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Erstellt</th><th>Datei</th><th style="text-align:right">Größe</th></tr></thead>
+          <tbody>{zeilen or '<tr><td colspan="3" class="empty-state">Noch keine Backups vorhanden</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin-top:12px">
+      Externen Cron-Dienst (z.B. cron-job.org) täglich auf
+      <code>/cron/backup?key=DEIN_CRON_SECRET</code> einrichten, damit das automatisch läuft.</p>
+    """
+    return HTMLResponse(shell("Backups", content))
+
+
+@app.post("/einstellungen/backups/jetzt")
+def backup_jetzt(request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren dürfen Backups anstoßen.</div>'), status_code=403)
+    from mod_backup import backup_erstellen
+    try:
+        backup_erstellen()
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">Backup fehlgeschlagen: {e}</div>'))
+    return RedirectResponse("/einstellungen/backups", status_code=303)
 
 
 @app.get("/einstellungen/alerts", response_class=HTMLResponse)
