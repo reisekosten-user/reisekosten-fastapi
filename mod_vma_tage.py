@@ -6,7 +6,7 @@ import json, re
 from datetime import date, timedelta
 
 from mod_db import get_db, ph, is_postgres, fmt_date
-from mod_vma import VMA_SAETZE, IATA_TO_LAND, STADT_ZU_LAND, vma_fuer_land_erweitert
+from mod_vma import VMA_SAETZE, IATA_TO_LAND, STADT_ZU_LAND, vma_fuer_land_erweitert, staedte_fuer_land
 
 def vma_berechnen(voll: float, halb: float, ist_halb: bool,
                   frueh: bool, mittag: bool, abend: bool) -> tuple:
@@ -24,6 +24,39 @@ def vma_berechnen(voll: float, halb: float, ist_halb: bool,
     brutto = basis
     netto = max(0.0, basis - abzug)
     return round(brutto, 2), round(netto, 2)
+
+
+def _staedte_override(db, land: str, ort: str | None) -> dict | None:
+    """
+    Prüft, ob für "ort" ein eigener importierter Städte-Satz existiert (z.B.
+    Los Angeles, New York, Turin – teurer/günstiger als der Landesdurchschnitt).
+    Zentral an EINER Stelle, damit alle Automatik-Pfade (Flug-Segment-Ankunft,
+    Hotel-Beleg, Rückreisetag-Regel) konsequent denselben Satz für denselben
+    Ort finden – vorher hat nur der Ankunftstag den Städte-Satz gefunden, der
+    Abreisetag nicht, wodurch derselbe Ort (z.B. Turin) je nach Tag einen
+    anderen VMA-Satz bekam.
+    """
+    if not land or not ort:
+        return None
+    try:
+        cur = db.cursor()
+        staedte = staedte_fuer_land(cur, land)
+        cur.close()
+    except Exception:
+        return None
+    ort_norm = ort.strip().lower()
+    treffer = next((s for s in staedte if s.strip().lower() == ort_norm
+                     or ort_norm in s.strip().lower()
+                     or s.strip().lower() in ort_norm), None)
+    if not treffer:
+        return None
+    try:
+        cur = db.cursor()
+        info = vma_fuer_land_erweitert(cur, land, ort=treffer)
+        cur.close()
+        return {"voll": info["voll"], "halb": info["halb"], "ort": treffer}
+    except Exception:
+        return None
 
 def land_fuer_letzten_tag(reise_code: str, datum: date, db, eintaegig: bool, debug: bool = False):
     """
@@ -82,39 +115,48 @@ def land_fuer_letzten_tag(reise_code: str, datum: date, db, eintaegig: bool, deb
 
     if not segmente_heute:
         diag["hinweis"] += " Keine Segmente mit passendem abreise_datum gefunden -> Rückfall auf normale Logik."
-        return (None, diag) if debug else None
+        return (None, None, diag) if debug else (None, None)
 
     segmente_heute.sort(key=lambda s: s.get("abreise_zeit") or "")
 
     if eintaegig:
         # Letztes im Tagesverlauf besuchtes ausländisches Land
         land = None
+        ort_gefunden = None
         for s in segmente_heute:
             for ort_key, iata_key in (("von_ort","von_iata"), ("nach_ort","nach_iata")):
                 iata = s.get(iata_key)
                 if iata and iata in IATA_TO_LAND and IATA_TO_LAND[iata] != "DE":
                     land = IATA_TO_LAND[iata]
+                    ort_gefunden = s.get(ort_key)
                 elif not iata:
                     ort = (s.get(ort_key) or "").strip().lower()
                     if ort in STADT_ZU_LAND and STADT_ZU_LAND[ort] != "DE":
                         land = STADT_ZU_LAND[ort]
+                        ort_gefunden = s.get(ort_key)
         diag["ergebnis"] = land
-        return (land, diag) if debug else land
+        override = _staedte_override(db, land, ort_gefunden) if land else None
+        return (land, override, diag) if debug else (land, override)
     else:
         # Abflugort der ersten Etappe des Tages = letzter Tätigkeitsort
         erste_etappe = segmente_heute[0]
         iata = erste_etappe.get("von_iata")
         land = None
+        von_ort_roh = erste_etappe.get("von_ort")
         if iata and iata in IATA_TO_LAND:
             land = IATA_TO_LAND[iata]
         else:
-            von_ort = (erste_etappe.get("von_ort") or "").strip().lower()
+            von_ort = (von_ort_roh or "").strip().lower()
             if von_ort in STADT_ZU_LAND:
                 land = STADT_ZU_LAND[von_ort]
             elif debug:
                 diag["hinweis"] += f" von_iata='{iata}' nicht in IATA_TO_LAND UND von_ort='{von_ort}' nicht in STADT_ZU_LAND."
         diag["ergebnis"] = land
-        return (land, diag) if debug else land
+        # Städte-Sonderfall (z.B. Turin) auch hier prüfen – KONSISTENT mit dem
+        # Flug-Segment-Ankunftsschritt oben, sonst bekommt derselbe Ort am
+        # Ankunftstag einen anderen VMA-Satz als am Abreisetag.
+        override = _staedte_override(db, land, von_ort_roh) if land else None
+        return (land, override, diag) if debug else (land, override)
 
 
 def land_fuer_tag(reise_code: str, datum: date, db,
@@ -136,10 +178,13 @@ def land_fuer_tag(reise_code: str, datum: date, db,
     datum_s = datum.isoformat()
 
     if ist_letzter_tag:
-        sonderfall_land = land_fuer_letzten_tag(reise_code, datum, db, eintaegig)
+        sonderfall_land, sonderfall_override = land_fuer_letzten_tag(reise_code, datum, db, eintaegig)
         if sonderfall_land:
-            lname = VMA_SAETZE.get(sonderfall_land, {}).get("name", sonderfall_land)
-            return sonderfall_land, lname, "Letzter Tätigkeitsort (Abreise)", None
+            if sonderfall_override:
+                lname = f'{VMA_SAETZE.get(sonderfall_land, {}).get("name", sonderfall_land)} – {sonderfall_override["ort"]}'
+            else:
+                lname = VMA_SAETZE.get(sonderfall_land, {}).get("name", sonderfall_land)
+            return sonderfall_land, lname, "Letzter Tätigkeitsort (Abreise)", sonderfall_override
 
     cur = db.cursor()
 
@@ -179,23 +224,11 @@ def land_fuer_tag(reise_code: str, datum: date, db,
         # diese Sätze sind über "VMA-Sätze importieren" bereits in der DB,
         # wurden bisher aber nur bei manueller Länder-Eingabe genutzt, nicht
         # bei der automatischen Erkennung aus Flugsegmenten).
-        override = None
-        if letzter_ort:
-            try:
-                from mod_vma import staedte_fuer_land, vma_fuer_land_erweitert
-                staedte = staedte_fuer_land(cur, letztes_land)
-                ort_norm = letzter_ort.strip().lower()
-                treffer = next((s for s in staedte if s.strip().lower() == ort_norm
-                                 or ort_norm in s.strip().lower()
-                                 or s.strip().lower() in ort_norm), None)
-                if treffer:
-                    info = vma_fuer_land_erweitert(cur, letztes_land, ort=treffer)
-                    override = {"voll": info["voll"], "halb": info["halb"]}
-                    lname = f'{VMA_SAETZE.get(letztes_land, {}).get("name", letztes_land)} – {treffer}'
-                    cur.close()
-                    return letztes_land, lname, "Flug-Segment (Städte-Satz)", override
-            except Exception:
-                pass
+        override = _staedte_override(db, letztes_land, letzter_ort)
+        if override:
+            lname = f'{VMA_SAETZE.get(letztes_land, {}).get("name", letztes_land)} – {override["ort"]}'
+            cur.close()
+            return letztes_land, lname, "Flug-Segment (Städte-Satz)", override
         lname = VMA_SAETZE.get(letztes_land, {}).get("name", letztes_land)
         cur.close()
         return letztes_land, lname, "Flug-Segment", None
@@ -212,26 +245,15 @@ def land_fuer_tag(reise_code: str, datum: date, db,
         if land and land in VMA_SAETZE:
             # Stadt aus der Adresse extrahieren (letzter Teil nach dem Komma,
             # PLZ-Ziffern entfernt) und gegen importierte Städte-Sätze prüfen
-            override = None
+            ort_teil = None
             if adresse and "," in adresse:
                 ort_teil = adresse.rsplit(",", 1)[-1].strip()
                 ort_teil = re.sub(r'^\d+\s*', '', ort_teil).strip()
-                if ort_teil:
-                    try:
-                        from mod_vma import staedte_fuer_land, vma_fuer_land_erweitert
-                        staedte = staedte_fuer_land(cur, land)
-                        ort_norm = ort_teil.lower()
-                        treffer = next((s for s in staedte if s.strip().lower() == ort_norm
-                                         or ort_norm in s.strip().lower()
-                                         or s.strip().lower() in ort_norm), None)
-                        if treffer:
-                            info = vma_fuer_land_erweitert(cur, land, ort=treffer)
-                            override = {"voll": info["voll"], "halb": info["halb"]}
-                            lname = f'{VMA_SAETZE.get(land, {}).get("name", land)} – {treffer}'
-                            cur.close()
-                            return land, lname, "Hotel-Beleg (Städte-Satz)", override
-                    except Exception:
-                        pass
+            override = _staedte_override(db, land, ort_teil) if ort_teil else None
+            if override:
+                lname = f'{VMA_SAETZE.get(land, {}).get("name", land)} – {override["ort"]}'
+                cur.close()
+                return land, lname, "Hotel-Beleg (Städte-Satz)", override
             lname = VMA_SAETZE.get(land, {}).get("name", land)
             cur.close()
             return land, lname, "Hotel-Beleg", None

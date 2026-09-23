@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.10-j"
+APP_VERSION  = "3.10-k"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2208,7 +2208,7 @@ def vma_debug(code: str):
             if not ist_letzter_tag:
                 bloecke += f'<p style="font-size:12px;color:var(--muted)">{tag.strftime("%d.%m.%Y")}: kein Rückreisetag, normale Logik greift.</p>'
                 continue
-            land, diag = land_fuer_letzten_tag(rcode, tag, db, eintaegig, debug=True)
+            land, override, diag = land_fuer_letzten_tag(rcode, tag, db, eintaegig, debug=True)
             seg_html = ""
             for s in diag["segmente_heute"]:
                 farbe = "#059669" if s["treffer"] else "#94a3b8"
@@ -2216,6 +2216,8 @@ def vma_debug(code: str):
                              f'Beleg #{s["beleg_id"]}: abreise_datum="{s["abreise_datum_im_segment"]}" '
                              f'von_iata="{s["von_iata"]}" von_ort="{s["von_ort"]}" '
                              f'abreise_zeit="{s["abreise_zeit"]}" -> Treffer: {s["treffer"]}</div>')
+            override_txt = (f' · Städte-Satz: {override["ort"]} (voll {override["voll"]:.2f} € / '
+                             f'halb {override["halb"]:.2f} €)') if override else ' · kein Städte-Satz gefunden, Landesdurchschnitt greift'
             bloecke += f"""<div class="card" style="margin-bottom:12px">
               <div class="card-body">
                 <b>{tag.strftime("%d.%m.%Y")} (Rückreisetag)</b><br>
@@ -2223,7 +2225,7 @@ def vma_debug(code: str):
                 <span style="font-size:12px">Belege mit passendem event_datum_von/bis: {diag['belege_gefunden']}
                 &nbsp;·&nbsp; Segmente insgesamt in diesen Belegen: {diag['segmente_gesamt']}</span>
                 <div style="margin-top:6px">{seg_html or '<i style="font-size:12px;color:#ef4444">Keine Segmente gefunden</i>'}</div>
-                <div style="margin-top:6px;font-weight:700">Ergebnis: {land or 'None (Rückfall auf normale Logik)'}</div>
+                <div style="margin-top:6px;font-weight:700">Ergebnis: {land or 'None (Rückfall auf normale Logik)'}{override_txt if land else ''}</div>
                 {f'<div style="font-size:12px;color:#ef4444;margin-top:4px">{diag["hinweis"]}</div>' if diag["hinweis"] else ''}
               </div>
             </div>"""
