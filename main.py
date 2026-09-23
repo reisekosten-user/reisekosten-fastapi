@@ -27,7 +27,7 @@ from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         OPENAI_KEY, OPENAI_MODEL, OPENAI_URL,
                         S3_ENDPOINT, S3_BUCKET)
 from mod_mail import fetch_mails, sende_dms_mail
-from mod_vma_tage import (vma_berechnen, land_fuer_tag,
+from mod_vma_tage import (vma_berechnen, land_fuer_tag, trennungspauschale_berechnen,
                            fruehstueck_aus_beleg, vma_tage_generieren, land_fuer_letzten_tag)
 from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
                        hat_bereits_passwoerter, pfad_ist_offen, ist_organisator)
@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.10-h"
+APP_VERSION  = "3.10-i"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2263,13 +2263,34 @@ async def vma_tatsaechliche_zeit_speichern(code: str, vid: int, request: Request
     der Reisebeendigung (letzter Reisetag) – kann vom Abflug/Ankunft abweichen,
     z.B. wenn der Mitarbeiter schon vor dem Flug losfährt oder nach der
     Zugankunft noch mit dem eigenen Auto nach Hause fährt.
+    Rechnet direkt danach auch die Trennungspauschale neu (12-Uhr-Regel an
+    Wochenend-An-/Abreisetagen), statt erst auf die nächste manuelle
+    "VMA neu berechnen" zu warten – sonst sähe der Reisende nach dem
+    Eintragen der Uhrzeit fälschlich weiter den alten Pauschal-Wert.
     """
     form = await request.form()
     uhrzeit = (form.get("tatsaechliche_uhrzeit") or "").strip() or None
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
+        cur.execute(f"""SELECT reise_code, datum, ist_halber_satz, trennungspauschale_quelle
+                        FROM vma_tage WHERE id={P}""", (vid,))
+        row = cur.fetchone()
+        g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
         cur.execute(f"UPDATE vma_tage SET tatsaechliche_uhrzeit={P} WHERE id={P}", (uhrzeit, vid))
+
+        if row and (g("trennungspauschale_quelle",3) or "auto") != "manuell":
+            rcode2 = g("reise_code",0)
+            tag = _datum_parsen(g("datum",1))
+            ist_halb2 = bool(g("ist_halber_satz",2))
+            cur.execute(f"SELECT abreise, rueckkehr FROM reisen WHERE code={P}", (rcode2,))
+            rr = cur.fetchone()
+            gr = lambda k,i: rr[k] if hasattr(rr,'keys') else rr[i]
+            abreise_d = _datum_parsen(gr("abreise",0)); rueckkehr_d = _datum_parsen(gr("rueckkehr",1))
+            ist_erster = (tag == abreise_d); ist_letzter = (tag == rueckkehr_d)
+            neue_trennung = trennungspauschale_berechnen(tag, ist_halb2, ist_erster, ist_letzter, uhrzeit)
+            cur.execute(f"UPDATE vma_tage SET trennungspauschale={P} WHERE id={P}", (neue_trennung, vid))
+
         db.commit(); cur.close(); db.close()
         ziel = request.headers.get("referer") or f"/reise/{code.upper()}"
         return RedirectResponse(ziel, status_code=303)

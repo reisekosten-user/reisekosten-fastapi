@@ -311,19 +311,23 @@ def vma_tage_generieren(reise_code: str, db) -> int:
     for i in range(tage):
         tag = ab + timedelta(days=i)
         ist_halb = (i == 0 or i == tage - 1)
+        ist_erster_tag = (i == 0)
         ist_letzter_tag = (i == tage - 1)
 
         # Manuell geänderte Einträge nicht überschreiben
-        cur.execute(f"""SELECT id, quelle, trennungspauschale_quelle, trennungspauschale
+        cur.execute(f"""SELECT id, quelle, trennungspauschale_quelle, trennungspauschale,
+                        tatsaechliche_uhrzeit
                         FROM vma_tage WHERE reise_code={P} AND datum={P}""",
                     (reise_code, tag.isoformat()))
         existing = cur.fetchone()
         trenn_quelle_alt = None
         trenn_alt = None
+        tatsaechliche_zeit_alt = None
         if existing:
             q = (existing[1] if isinstance(existing, tuple) else existing["quelle"]) or ""
             trenn_quelle_alt = (existing[2] if isinstance(existing, tuple) else existing["trennungspauschale_quelle"]) or "auto"
             trenn_alt = existing[3] if isinstance(existing, tuple) else existing["trennungspauschale"]
+            tatsaechliche_zeit_alt = existing[4] if isinstance(existing, tuple) else existing["tatsaechliche_uhrzeit"]
             if q == "manuell":
                 continue  # Manuell → nicht anfassen
 
@@ -347,7 +351,8 @@ def vma_tage_generieren(reise_code: str, db) -> int:
         if trenn_quelle_alt == "manuell":
             trennung = trenn_alt or 0
         else:
-            trennung = trennungspauschale_berechnen(tag, ist_halb)
+            trennung = trennungspauschale_berechnen(tag, ist_halb, ist_erster_tag, ist_letzter_tag,
+                                                      tatsaechliche_zeit_alt)
 
         if existing:
             cur.execute(f"""UPDATE vma_tage SET
@@ -371,19 +376,39 @@ def vma_tage_generieren(reise_code: str, db) -> int:
     return count
 
 
-def trennungspauschale_berechnen(tag: date, ist_halber_reisetag: bool) -> float:
+def trennungspauschale_berechnen(tag: date, ist_halber_reisetag: bool,
+                                  ist_erster_tag: bool = False, ist_letzter_tag: bool = False,
+                                  tatsaechliche_zeit: str | None = None) -> float:
     """
     Trennungspauschale für Wochenend-Reisetage (betriebliche Sonderregelung):
     - Voller Reisetag an einem Samstag/Sonntag: 80 EUR
-    - An- oder Abreisetag (halber VMA-Satz), der auf ein Wochenende fällt: 40 EUR
-      (z.B. vor 12 Uhr angetreten oder nach 12 Uhr beendet)
+    - An- oder Abreisetag (halber VMA-Satz), der auf ein Wochenende fällt: 40 EUR,
+      ABER nur wenn die 12-Uhr-Grenze tatsächlich erfüllt ist:
+        · Antritt-Tag: 40 EUR nur, wenn VOR 12 Uhr losgefahren wurde
+        · End-Tag: 40 EUR nur, wenn NACH 12 Uhr beendet wurde
+      Ist die tatsächliche Uhrzeit noch nicht erfasst, gilt vorläufig die alte
+      Pauschale (40 EUR) als Rückfall – sobald die echte Uhrzeit eingetragen
+      wird, wird automatisch nachgerechnet (auch rückwirkend auf 0 EUR, falls
+      die 12-Uhr-Grenze tatsächlich nicht erfüllt war).
     - An Werktagen: 0 EUR
-    Automatisch ermittelt; bei Bedarf im Tagesverlauf manuell korrigierbar,
-    z.B. wenn am An-/Abreisetag die 12-Uhr-Grenze tatsächlich nicht erfüllt ist.
     """
     ist_wochenende = tag.weekday() in (5, 6)  # 5=Samstag, 6=Sonntag
     if not ist_wochenende:
         return 0.0
-    return 40.0 if ist_halber_reisetag else 80.0
+    if not ist_halber_reisetag:
+        return 80.0
+
+    if tatsaechliche_zeit:
+        try:
+            stunde, minute = (int(x) for x in tatsaechliche_zeit.strip().split(":")[:2])
+            vor_12 = (stunde, minute) < (12, 0)
+            if ist_erster_tag:
+                return 40.0 if vor_12 else 0.0
+            if ist_letzter_tag:
+                return 40.0 if not vor_12 else 0.0
+        except Exception:
+            pass  # unparsbare Uhrzeit -> Rückfall unten
+
+    return 40.0  # tatsächliche Uhrzeit (noch) nicht bekannt -> alte Pauschale als Rückfall
 
 
