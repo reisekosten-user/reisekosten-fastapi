@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.10-d"
+APP_VERSION  = "3.10-e"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2162,6 +2162,27 @@ async def vma_tag_speichern(code: str, vid: int, request: Request):
         return RedirectResponse(ziel, status_code=303)
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
+
+@app.post("/reise/{code}/vma/{vid}/zuruecksetzen")
+def vma_tag_zuruecksetzen(code: str, vid: int, request: Request):
+    """
+    Setzt einen einzelnen VMA-Tag von "manuell" zurück auf "automatisch" –
+    damit greift bei der nächsten "VMA neu berechnen" wieder die normale
+    Erkennungslogik (Flug-/Bahn-Segment, Hotel, Rückreisetag-Regel) für
+    GENAU DIESEN Tag. Nötig, weil ein einmal manuell gesetzter/über das
+    Portal befüllter Tag sonst dauerhaft von der Neuberechnung übersprungen
+    wird, selbst wenn sich die zugrunde liegende Logik später verbessert.
+    """
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"UPDATE vma_tage SET quelle='auto' WHERE id={P}", (vid,))
+        db.commit(); cur.close(); db.close()
+        ziel = request.headers.get("referer") or f"/reise/{code.upper()}"
+        return RedirectResponse(ziel, status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
 
 @app.post("/reise/{code}/vma/{vid}/trennungspauschale")
 async def vma_trennungspauschale_speichern(code: str, vid: int, request: Request):
@@ -5236,7 +5257,7 @@ def reise_detail(code: str):
         # VMA je Tag
         cur.execute(f"""SELECT id, datum, land_code, land_name, ist_halber_satz,
                         fruehstueck, mittagessen, abendessen, vma_netto, vma_satz_voll, vma_satz_halb,
-                        trennungspauschale, trennungspauschale_quelle, tatsaechliche_uhrzeit
+                        trennungspauschale, trennungspauschale_quelle, tatsaechliche_uhrzeit, quelle
                         FROM vma_tage WHERE reise_code = {P} ORDER BY datum""", (rcode,))
         vma_tage_rows = cur.fetchall()
 
@@ -5576,6 +5597,7 @@ def reise_detail(code: str):
             netto = float(get(vt,"vma_netto",8) or 0)
             trennung = float(get(vt,"trennungspauschale",11) or 0)
             tatsaechliche_zeit = get(vt,"tatsaechliche_uhrzeit",13) or ""
+            quelle_t = get(vt,"quelle",14) or ""
             vma_tage_summe += netto
             trennung_summe += trennung
 
@@ -5617,6 +5639,11 @@ def reise_detail(code: str):
                   <a href="/reise/{rcode}/termin/neu?datum={vd.isoformat() if vd else ''}"
                      style="font-size:11px;color:#2563eb;text-decoration:none;border:0.5px solid #bfdbfe;
                             border-radius:6px;padding:4px 10px">+ Termin</a>
+                  {f'''<form method="post" action="/reise/{rcode}/vma/{vid}/zuruecksetzen" style="display:inline"
+                         onsubmit="return confirm('Diesen Tag von \\'manuell\\' zurück auf \\'automatisch\\' setzen? Land/Sätze werden beim nächsten VMA neu berechnen wieder automatisch ermittelt.')">
+                    <button type="submit" style="font-size:11px;color:#94a3b8;background:none;border:none;
+                            text-decoration:underline;cursor:pointer;padding:4px 6px" title="Manuell-Markierung entfernen, damit die automatische Erkennung wieder greift">↺ Auto</button>
+                  </form>''' if quelle_t == "manuell" else ""}
                 </div>
                 <form method="post" action="/reise/{rcode}/vma/{vid}/speichern" style="margin-top:8px;display:inline-block">
                   <input type="hidden" name="land_code" value="{lcode_t}">
