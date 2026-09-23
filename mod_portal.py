@@ -127,8 +127,8 @@ def tag_speichern(tag_id: int, frueh: bool, mittag: bool, abend: bool,
                    arbeit_beginn: str, arbeit_ende: str, notiz: str) -> None:
     P = ph()
     db = get_db(); cur = db.cursor()
-    cur.execute(f"SELECT vma_satz_voll, vma_satz_halb, ist_halber_satz FROM reisetage_person WHERE id={P}",
-                (tag_id,))
+    cur.execute(f"""SELECT vma_satz_voll, vma_satz_halb, ist_halber_satz, reise_code, datum
+                    FROM reisetage_person WHERE id={P}""", (tag_id,))
     r = cur.fetchone()
     if not r:
         cur.close(); db.close()
@@ -136,6 +136,8 @@ def tag_speichern(tag_id: int, frueh: bool, mittag: bool, abend: bool,
     voll = r[0] if isinstance(r, tuple) else r["vma_satz_voll"]
     halb = r[1] if isinstance(r, tuple) else r["vma_satz_halb"]
     ist_halb = bool(r[2] if isinstance(r, tuple) else r["ist_halber_satz"])
+    reise_code = r[3] if isinstance(r, tuple) else r["reise_code"]
+    datum = r[4] if isinstance(r, tuple) else r["datum"]
     # Rückfall auf 0, falls der VMA-Satz für diesen Tag aus irgendeinem Grund
     # nicht gesetzt ist (z.B. Randfall bei bereits abgeschlossener Reise) –
     # sonst würde float(None) mit einer ungefangenen Exception abstürzen und
@@ -151,6 +153,23 @@ def tag_speichern(tag_id: int, frueh: bool, mittag: bool, abend: bool,
         WHERE id={P}""",
         (frueh, mittag, abend, netto, reise_beginn or None, reise_ende or None,
          arbeit_beginn or None, arbeit_ende or None, notiz or None, tag_id))
+
+    # WICHTIG: Portal-Eingaben (reisetage_person) sind bisher NIE in die
+    # eigentliche, für Reise-Ansicht/Abschluss/PDF maßgebliche vma_tage-
+    # Tabelle übernommen worden – zwei getrennte, nie verbundene
+    # Datenspeicher. Hier direkt mitschreiben, damit der Reisende sein
+    # Ergebnis auch tatsächlich in der Reise wiederfindet. quelle wird auf
+    # "manuell" gesetzt, damit "VMA neu berechnen" diese bewusste
+    # Reisenden-Eingabe nicht versehentlich wieder überschreibt.
+    if reise_code and datum:
+        tatsaechliche_zeit = (reise_ende or "").strip() or (reise_beginn or "").strip() or None
+        zeit_sql = f", tatsaechliche_uhrzeit={P}" if tatsaechliche_zeit else ""
+        zeit_val = (tatsaechliche_zeit,) if tatsaechliche_zeit else ()
+        cur.execute(f"""UPDATE vma_tage SET
+            fruehstueck={P}, mittagessen={P}, abendessen={P},
+            vma_brutto={P}, vma_netto={P}, quelle='manuell'{zeit_sql}
+            WHERE reise_code={P} AND datum={P}""",
+            (frueh, mittag, abend, brutto, netto) + zeit_val + (reise_code, datum))
     db.commit(); cur.close(); db.close()
 
 
