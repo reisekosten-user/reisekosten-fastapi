@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.10-k"
+APP_VERSION  = "3.10-l"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2205,8 +2205,32 @@ def vma_debug(code: str):
         for i in range(tage):
             tag = ab + timedelta(days=i)
             ist_letzter_tag = (i == tage - 1)
+
+            # Gespeicherten Zustand dieses Tages immer mit anzeigen – zeigt
+            # sofort, ob der Tag als "manuell" eingefroren ist und deshalb
+            # von "VMA neu berechnen" übersprungen wird.
+            cur.execute(f"""SELECT quelle, land_code, land_name, vma_satz_voll, vma_satz_halb
+                            FROM vma_tage WHERE reise_code={P} AND datum={P}""",
+                        (rcode, tag.isoformat()))
+            gerow = cur.fetchone()
+            if gerow:
+                q = g(gerow,"quelle",0) or "?"
+                lc = g(gerow,"land_code",1) or "?"
+                ln = g(gerow,"land_name",2) or "?"
+                vv = g(gerow,"vma_satz_voll",3); vh = g(gerow,"vma_satz_halb",4)
+                farbe_q = "#ef4444" if q == "manuell" else "#059669"
+                gespeichert_txt = (f'<div style="font-size:12px;margin-top:4px">Gespeichert: '
+                                    f'<b style="color:{farbe_q}">quelle={q}</b> · {ln} ({lc}) · '
+                                    f'voll {float(vv):.2f} € / halb {float(vh):.2f} €'
+                                    f'{" ⚠ manuell -> wird bei Neuberechnung ÜBERSPRUNGEN" if q=="manuell" else ""}</div>')
+            else:
+                gespeichert_txt = '<div style="font-size:12px;color:#ef4444;margin-top:4px">Kein vma_tage-Eintrag vorhanden</div>'
+
             if not ist_letzter_tag:
-                bloecke += f'<p style="font-size:12px;color:var(--muted)">{tag.strftime("%d.%m.%Y")}: kein Rückreisetag, normale Logik greift.</p>'
+                bloecke += f"""<div class="card" style="margin-bottom:12px"><div class="card-body">
+                  <b>{tag.strftime("%d.%m.%Y")}</b> – kein Rückreisetag, normale Logik (Flug-Segment/Hotel) greift.
+                  {gespeichert_txt}
+                </div></div>"""
                 continue
             land, override, diag = land_fuer_letzten_tag(rcode, tag, db, eintaegig, debug=True)
             seg_html = ""
@@ -2225,8 +2249,9 @@ def vma_debug(code: str):
                 <span style="font-size:12px">Belege mit passendem event_datum_von/bis: {diag['belege_gefunden']}
                 &nbsp;·&nbsp; Segmente insgesamt in diesen Belegen: {diag['segmente_gesamt']}</span>
                 <div style="margin-top:6px">{seg_html or '<i style="font-size:12px;color:#ef4444">Keine Segmente gefunden</i>'}</div>
-                <div style="margin-top:6px;font-weight:700">Ergebnis: {land or 'None (Rückfall auf normale Logik)'}{override_txt if land else ''}</div>
+                <div style="margin-top:6px;font-weight:700">Berechnet: {land or 'None (Rückfall auf normale Logik)'}{override_txt if land else ''}</div>
                 {f'<div style="font-size:12px;color:#ef4444;margin-top:4px">{diag["hinweis"]}</div>' if diag["hinweis"] else ''}
+                {gespeichert_txt}
               </div>
             </div>"""
         cur.close(); db.close()
