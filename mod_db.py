@@ -197,6 +197,16 @@ def get_schema() -> list[str]:
                 notiz         TEXT,
                 erstellt      TIMESTAMP DEFAULT NOW()
             )""",
+            """CREATE TABLE IF NOT EXISTS kilometer_fahrten (
+                id            SERIAL PRIMARY KEY,
+                reise_code    TEXT NOT NULL REFERENCES reisen(code) ON DELETE CASCADE,
+                kuerzel       TEXT NOT NULL,
+                datum         DATE NOT NULL,
+                kennzeichen   TEXT NOT NULL,
+                km            NUMERIC(8,1) NOT NULL,
+                notiz         TEXT,
+                erstellt      TIMESTAMP DEFAULT NOW()
+            )""",
             """CREATE TABLE IF NOT EXISTS beleg_gruppen (
                 id          SERIAL PRIMARY KEY,
                 erstellt_am TIMESTAMP DEFAULT NOW()
@@ -382,6 +392,16 @@ def get_schema() -> list[str]:
                 uhrzeit_bis   TEXT,
                 titel         TEXT NOT NULL,
                 typ           TEXT DEFAULT 'termin',
+                notiz         TEXT,
+                erstellt      TEXT DEFAULT (datetime('now'))
+            )""",
+            """CREATE TABLE IF NOT EXISTS kilometer_fahrten (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                reise_code    TEXT REFERENCES reisen(code) ON DELETE CASCADE,
+                kuerzel       TEXT NOT NULL,
+                datum         TEXT NOT NULL,
+                kennzeichen   TEXT NOT NULL,
+                km            REAL NOT NULL,
                 notiz         TEXT,
                 erstellt      TEXT DEFAULT (datetime('now'))
             )""",

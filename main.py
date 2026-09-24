@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.11-i"
+APP_VERSION  = "3.11-k"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2646,6 +2646,11 @@ def reise_abschluss(code: str):
             FROM reisetage_person WHERE reise_code={P} ORDER BY kuerzel, datum""", (rcode,))
         zeiten_rows = cur.fetchall()
 
+        # Gefahrene Kilometer mit Firmen-/Privat-Pkw (vom Reisenden im Portal erfasst)
+        cur.execute(f"""SELECT kuerzel, datum, kennzeichen, km
+            FROM kilometer_fahrten WHERE reise_code={P} ORDER BY kuerzel, datum""", (rcode,))
+        km_rows = cur.fetchall()
+
         # Alle Belege
         cur.execute(f"""SELECT id,belegart,transportart,transportart_freitext,
             anbieter,rechnungsnummer,belegdatum,
@@ -2927,6 +2932,36 @@ def reise_abschluss(code: str):
               </div>
             </div>"""
 
+        # Gefahrene Kilometer (Firmen-/Privat-Pkw) – vom Reisenden im Portal
+        # erfasst; bei Mietwagen steht die Info bereits auf der Mietwagen-
+        # rechnung, taucht hier also bewusst nicht separat auf.
+        km_html = ""
+        if km_rows:
+            zeilen_km = ""
+            km_summe = 0.0
+            for k in km_rows:
+                kuerzel_k = g(k,"kuerzel",0); datum_k = g(k,"datum",1)
+                kennz_k = g(k,"kennzeichen",2); km_k = float(g(k,"km",3) or 0)
+                km_summe += km_k
+                zeilen_km += f"""<tr>
+                    <td>{fdat(datum_k)}</td><td>{kuerzel_k}</td>
+                    <td>{kennz_k}</td>
+                    <td style="text-align:right;font-family:monospace">{km_k:.0f} km</td>
+                </tr>"""
+            km_html = f"""<div class="card" style="margin-bottom:16px">
+              <div class="card-header">
+                <span class="card-title">🚗 Gefahrene Kilometer (Firmen-/Privat-Pkw)</span>
+                <span style="font-size:13px;font-weight:600">{km_summe:.0f} km gesamt</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Datum</th><th>Kürzel</th><th>Kennzeichen</th>
+                    <th style="text-align:right">Kilometer</th></tr></thead>
+                  <tbody>{zeilen_km}</tbody>
+                </table>
+              </div>
+            </div>"""
+
         content = f"""
         <div style="display:flex;align-items:flex-start;justify-content:space-between;
                     margin-bottom:20px;flex-wrap:wrap;gap:12px">
@@ -2973,6 +3008,7 @@ def reise_abschluss(code: str):
         {kurs_html}
         {best_html}
         {zeiten_html}
+        {km_html}
 
         <!-- VMA-Tabelle -->
         <div class="card" style="margin-bottom:16px">
@@ -3073,6 +3109,10 @@ def reise_abschluss_pdf(code: str):
         cur.execute(f"""SELECT kuerzel, datum, reise_beginn, reise_ende, arbeit_beginn, arbeit_ende
             FROM reisetage_person WHERE reise_code={P} ORDER BY kuerzel, datum""", (rcode,))
         zeiten_rows = cur.fetchall()
+
+        cur.execute(f"""SELECT kuerzel, datum, kennzeichen, km
+            FROM kilometer_fahrten WHERE reise_code={P} ORDER BY kuerzel, datum""", (rcode,))
+        km_rows = cur.fetchall()
 
         cur.execute(f"""SELECT id,belegart,anbieter,belegdatum,betrag_brutto,waehrung,betrag_eur,
             beleg_gruppe_id,s3_original,dateiname,betrag_eur_final,nebenkosten_eur,
@@ -3183,6 +3223,21 @@ def reise_abschluss_pdf(code: str):
             zeiten_tbl = Table(zeiten_daten, colWidths=[28*mm,20*mm,45*mm,45*mm])
             zeiten_tbl.setStyle(tbl_style(fusszeile=False))
             story.append(zeiten_tbl)
+            story.append(Spacer(1, 5*mm))
+
+        if km_rows:
+            story.append(Paragraph("Gefahrene Kilometer (Firmen-/Privat-Pkw)", styles["Heading2"]))
+            km_daten = [["Datum","Kürzel","Kennzeichen","Kilometer"]]
+            km_summe_pdf = 0.0
+            for k in km_rows:
+                km_wert = float(g(k,"km",3) or 0); km_summe_pdf += km_wert
+                km_daten.append([
+                    fmt_date(g(k,"datum",1)), esc(g(k,"kuerzel",0)),
+                    esc(g(k,"kennzeichen",2)), f"{km_wert:.0f} km"])
+            km_daten.append(["", "", "Gesamt:", f"{km_summe_pdf:.0f} km"])
+            km_tbl = Table(km_daten, colWidths=[28*mm,20*mm,40*mm,30*mm])
+            km_tbl.setStyle(tbl_style())
+            story.append(km_tbl)
             story.append(Spacer(1, 5*mm))
 
         story.append(Paragraph("Verpflegungsmehraufwand", styles["Heading2"]))
@@ -6612,14 +6667,12 @@ def portal_ansicht(token: str):
     g = lambda r, k, i: r[k] if hasattr(r, "keys") else r[i]
 
     zeilen = ""
-    vma_summe = 0.0
     for t in tage:
         tid = g(t,"id",0); vd = g(t,"datum",1)
         if isinstance(vd, str): vd = date.fromisoformat(vd[:10])
         lname = g(t,"land_name",3) or "Deutschland"; lcode = g(t,"land_code",2) or "DE"
         ist_halb = bool(g(t,"ist_halber_satz",6))
         frueh = bool(g(t,"fruehstueck",7)); mittag = bool(g(t,"mittagessen",8)); abend = bool(g(t,"abendessen",9))
-        netto = float(g(t,"vma_netto",10) or 0); vma_summe += netto
         reise_beginn = g(t,"reise_beginn",11) or ""; reise_ende = g(t,"reise_ende",12) or ""
         arbeit_beginn = g(t,"arbeit_beginn",13) or ""; arbeit_ende = g(t,"arbeit_ende",14) or ""
         notiz = g(t,"notiz",15) or ""
@@ -6635,10 +6688,9 @@ def portal_ansicht(token: str):
 
         zeilen += f"""<div class="card" style="margin-bottom:12px">
           <div class="card-body">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-              <div><b>{wt} {vd.day:02d}.{vd.month:02d}.{vd.year}</b>{halb_txt}
-                <div style="font-size:12px;color:var(--muted)">🌍 {lname} ({lcode})</div></div>
-              <div style="text-align:right;font-weight:700;color:var(--green)">{netto:.2f} EUR</div>
+            <div style="margin-bottom:10px">
+              <b>{wt} {vd.day:02d}.{vd.month:02d}.{vd.year}</b>{halb_txt}
+              <div style="font-size:12px;color:var(--muted)">🌍 {lname} ({lcode})</div>
             </div>
             <form method="post" action="/portal/{token}/tag/{tid}">
               <div style="margin-bottom:10px">{cb("fruehstueck",frueh,"🍳 Frühstück")}{cb("mittagessen",mittag,"🍽 Mittagessen")}{cb("abendessen",abend,"🌙 Abendessen")}</div>
@@ -6659,6 +6711,38 @@ def portal_ansicht(token: str):
           </div>
         </div>"""
 
+    cur_km = get_db(); ccur = cur_km.cursor(); Pk = ph()
+    ccur.execute(f"""SELECT id, datum, kennzeichen, km FROM kilometer_fahrten
+        WHERE reise_code={Pk} AND kuerzel={Pk} ORDER BY datum""",
+        (info["reise_code"], info["kuerzel"]))
+    km_rows = ccur.fetchall(); ccur.close(); cur_km.close()
+    km_zeilen = "".join(
+        f'<div style="display:flex;justify-content:space-between;align-items:center;'
+        f'padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">'
+        f'<span>{fmt_date(g(k,"datum",1))} · {g(k,"kennzeichen",2)} · {g(k,"km",3):.0f} km</span>'
+        f'<a href="/portal/{token}/kilometer/{g(k,"id",0)}/loeschen" '
+        f'style="color:#ef4444;text-decoration:none;font-size:12px" '
+        f'onclick="return confirm(\'Eintrag löschen?\')">🗑</a></div>'
+        for k in km_rows)
+    km_html = f"""<div class="card" style="margin-bottom:16px">
+      <div class="card-header"><span class="card-title">🚗 Gefahrene Kilometer (Firmen-/Privat-Pkw)</span></div>
+      <div class="card-body">
+        <p style="font-size:12px;color:var(--muted);margin:0 0 10px 0">
+          Nur eintragen, wenn du mit einem Firmen- oder deinem privaten Pkw gefahren bist
+          (bei Mietwagen steht das schon auf der Mietwagenrechnung, hier nicht nötig).</p>
+        {km_zeilen}
+        <form method="post" action="/portal/{token}/kilometer/neu" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:end">
+          <div class="form-group" style="margin:0"><label style="font-size:12px">Datum</label>
+            <input type="date" name="datum" required></div>
+          <div class="form-group" style="margin:0"><label style="font-size:12px">Kennzeichen</label>
+            <input type="text" name="kennzeichen" placeholder="z.B. WÜ-AB 123" required style="width:120px"></div>
+          <div class="form-group" style="margin:0"><label style="font-size:12px">Kilometer</label>
+            <input type="number" step="1" name="km" placeholder="z.B. 85" required style="width:90px"></div>
+          <button type="submit" class="btn btn-secondary">+ Hinzufügen</button>
+        </form>
+      </div>
+    </div>"""
+
     ab_txt = fmt_date(info["abreise"]); zu_txt = fmt_date(info["rueckkehr"])
     content = f"""
     <div class="card" style="margin-bottom:16px">
@@ -6672,11 +6756,11 @@ def portal_ansicht(token: str):
           Bitte trage für jeden Reisetag ein, welche Mahlzeiten gestellt wurden und
           deine tatsächlichen Reise-/Arbeitszeiten ein. Du kannst die Angaben jederzeit
           über diesen Link wieder ändern.</p>
-        <div style="text-align:right;font-weight:700;margin-top:10px">
-          VMA gesamt (netto): <span style="color:var(--green)">{vma_summe:.2f} EUR</span>
-        </div>
+        <a href="/portal/{token}/beleg-hochladen" class="btn btn-primary"
+           style="width:100%;display:block;text-align:center;margin-top:12px">📎 Beleg hochladen</a>
       </div>
     </div>
+    {km_html}
     {zeilen}
     """
     return HTMLResponse(portal_shell(f"Reise {info['reise_code']} – {info['klarname']}", content))
@@ -6708,6 +6792,110 @@ async def portal_tag_speichern(token: str, tag_id: int, request: Request):
             f'<p style="font-size:11px;color:#94a3b8">{e}</p>'
             f'<a href="/portal/{token}" class="btn btn-secondary">Zurück</a>'), status_code=500)
     return RedirectResponse(f"/portal/{token}", status_code=303)
+
+
+@app.post("/portal/{token}/kilometer/neu")
+async def portal_kilometer_hinzufuegen(token: str, request: Request):
+    """Trägt eine Fahrt mit Firmen-/Privat-Pkw ein (Datum, Kennzeichen, km).
+    Nur bei Mietwagen nicht nötig, da steht die Info schon auf der Mietwagenrechnung."""
+    info = zugang_aus_token(token)
+    if not info:
+        return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
+    form = await request.form()
+    datum = (form.get("datum") or "").strip()
+    kennzeichen = (form.get("kennzeichen") or "").strip()
+    km = (form.get("km") or "").strip()
+    if not (datum and kennzeichen and km):
+        return RedirectResponse(f"/portal/{token}", status_code=303)
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"""INSERT INTO kilometer_fahrten (reise_code, kuerzel, datum, kennzeichen, km)
+                        VALUES ({P},{P},{P},{P},{P})""",
+                    (info["reise_code"], info["kuerzel"], datum, kennzeichen, float(km)))
+        db.commit(); cur.close(); db.close()
+    except Exception:
+        pass  # kein harter Fehler bei einem Zusatzfeld – Reisender soll einfach weitermachen können
+    return RedirectResponse(f"/portal/{token}", status_code=303)
+
+
+@app.get("/portal/{token}/kilometer/{kid}/loeschen")
+def portal_kilometer_loeschen(token: str, kid: int):
+    """Löscht einen Kilometer-Eintrag – nur, wenn er tatsächlich zu DIESEM
+    Token (Reise+Person) gehört, damit über einen fremden Link nicht die
+    Einträge einer anderen Person gelöscht werden können."""
+    info = zugang_aus_token(token)
+    if not info:
+        return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"""DELETE FROM kilometer_fahrten
+                        WHERE id={P} AND reise_code={P} AND kuerzel={P}""",
+                    (kid, info["reise_code"], info["kuerzel"]))
+        db.commit(); cur.close(); db.close()
+    except Exception:
+        pass
+    return RedirectResponse(f"/portal/{token}", status_code=303)
+
+
+@app.get("/portal/{token}/beleg-hochladen", response_class=HTMLResponse)
+def portal_beleg_form(token: str):
+    """Formular, über das der Reisende selbst Belege zu seiner Reise
+    hochladen kann – landet automatisch als ungeprüfter Beleg im
+    Organisator-Dashboard, muss nicht mehr per Mail weitergeleitet werden."""
+    info = zugang_aus_token(token)
+    if not info:
+        return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
+    content = f"""
+    <div class="card">
+      <div class="card-body">
+        <h1 class="page-title" style="margin:0 0 4px 0">📎 Beleg hochladen</h1>
+        <p style="font-size:13px;color:var(--muted);margin:0 0 16px 0">
+          Für Reise <b>{info['reise_code']}</b> – {info['titel']}. Der Beleg wird automatisch
+          ausgewertet und erscheint danach beim Organisator zur Prüfung.</p>
+        <form method="post" action="/portal/{token}/beleg-hochladen" enctype="multipart/form-data">
+          <input type="file" name="datei" accept=".pdf,.jpg,.jpeg,.png,.heic,.webp" required
+                 style="display:block;margin-bottom:12px">
+          <button type="submit" class="btn btn-primary" style="width:100%">Hochladen</button>
+        </form>
+        <a href="/portal/{token}" class="btn btn-secondary" style="width:100%;margin-top:10px;text-align:center;display:block">← Zurück</a>
+      </div>
+    </div>"""
+    return HTMLResponse(portal_shell("Beleg hochladen", content))
+
+
+@app.post("/portal/{token}/beleg-hochladen")
+async def portal_beleg_upload(token: str, datei: UploadFile = File(...)):
+    info = zugang_aus_token(token)
+    if not info:
+        return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
+    try:
+        datei_bytes = await datei.read()
+        ct = datei.content_type or "application/octet-stream"
+        # WICHTIG: reise_code kommt aus dem Token, NICHT aus einem Formularfeld
+        # -> der Reisende kann so ausschließlich Belege zu SEINER EIGENEN
+        # Reise hochladen, keine Möglichkeit, versehentlich oder absichtlich
+        # eine andere reise_code einzuschleusen.
+        result = await beleg_verarbeiten(datei_bytes, datei.filename or "upload", info["reise_code"], ct)
+        if result.get("duplikat"):
+            meldung = "Dieser Beleg wurde bereits hochgeladen (Duplikat erkannt), kein neuer Eintrag nötig."
+        else:
+            meldung = "Danke! Der Beleg wurde hochgeladen und wartet jetzt auf die Prüfung durch den Organisator."
+        content = f"""<div class="card"><div class="card-body">
+          <div class="alert alert-ok" style="margin-bottom:16px">{meldung}</div>
+          <a href="/portal/{token}/beleg-hochladen" class="btn btn-secondary" style="width:100%;display:block;text-align:center;margin-bottom:8px">Weiteren Beleg hochladen</a>
+          <a href="/portal/{token}" class="btn btn-primary" style="width:100%;display:block;text-align:center">← Zurück zur Übersicht</a>
+        </div></div>"""
+        return HTMLResponse(portal_shell("Beleg hochgeladen", content))
+    except Exception as e:
+        return HTMLResponse(portal_shell("Fehler beim Hochladen",
+            '<div class="card"><div class="card-body">'
+            '<p>Der Beleg konnte leider nicht verarbeitet werden. Bitte versuch es nochmal '
+            'oder melde dich beim Organisator.</p>'
+            f'<p style="font-size:11px;color:#94a3b8">{e}</p>'
+            f'<a href="/portal/{token}/beleg-hochladen" class="btn btn-secondary">Zurück</a>'
+            '</div></div>'), status_code=500)
 
 
 @app.get("/cron/portal-mails")
