@@ -180,6 +180,33 @@ def land_fuer_tag(reise_code: str, datum: date, db,
     if ist_letzter_tag:
         sonderfall_land, sonderfall_override = land_fuer_letzten_tag(reise_code, datum, db, eintaegig)
         if sonderfall_land:
+            # ALLGEMEINGÜLTIGE Ergänzung: Findet die Flugsegment-basierte Regel
+            # zwar das richtige LAND, aber KEINEN Städte-Satz (z.B. weil der
+            # Rückflug technisch woanders abgeht, keine Koordinaten/IATA hat,
+            # oder die Stadt im Flugsegment nicht exakt zum importierten
+            # Städtenamen passt), zusätzlich prüfen, ob ein HOTEL-Aufenthalt
+            # (checkin bis checkout, inkl. Checkout-Tag selbst) diesen Tag
+            # abdeckt – Hotels sind über die echte, geokodierte Adresse
+            # zuverlässiger einer Stadt zuzuordnen als ein Flugsegment-Ortsname.
+            # Das behebt diese Klasse von Inkonsistenz (unterschiedlicher Satz
+            # für denselben Ort je nach Wochentag) grundsätzlich, nicht nur für
+            # einen einzelnen zufällig aufgefallenen Fall.
+            if not sonderfall_override:
+                cur_h = db.cursor()
+                cur_h.execute(f"""SELECT hotel_adresse FROM belege
+                    WHERE reise_code={P} AND transportart='Hotel'
+                    AND hotel_checkin_datum<={P} AND hotel_checkout_datum>={P}
+                    LIMIT 1""", (reise_code, datum_s, datum_s))
+                hrow = cur_h.fetchone()
+                cur_h.close()
+                if hrow:
+                    hadresse = hrow[0] if isinstance(hrow, tuple) else hrow["hotel_adresse"]
+                    if hadresse and "," in hadresse:
+                        ort_teil = hadresse.rsplit(",", 1)[-1].strip()
+                        ort_teil = re.sub(r'^\d+\s*', '', ort_teil).strip()
+                        if ort_teil:
+                            sonderfall_override = _staedte_override(db, sonderfall_land, ort_teil)
+
             if sonderfall_override:
                 lname = f'{VMA_SAETZE.get(sonderfall_land, {}).get("name", sonderfall_land)} – {sonderfall_override["ort"]}'
             else:
