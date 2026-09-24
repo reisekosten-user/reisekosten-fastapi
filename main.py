@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.11-k"
+APP_VERSION  = "3.11-l"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2940,11 +2940,11 @@ def reise_abschluss(code: str):
             zeilen_km = ""
             km_summe = 0.0
             for k in km_rows:
-                kuerzel_k = g(k,"kuerzel",0); datum_k = g(k,"datum",1)
+                kuerzel_k = g(k,"kuerzel",0)
                 kennz_k = g(k,"kennzeichen",2); km_k = float(g(k,"km",3) or 0)
                 km_summe += km_k
                 zeilen_km += f"""<tr>
-                    <td>{fdat(datum_k)}</td><td>{kuerzel_k}</td>
+                    <td>{kuerzel_k}</td>
                     <td>{kennz_k}</td>
                     <td style="text-align:right;font-family:monospace">{km_k:.0f} km</td>
                 </tr>"""
@@ -2955,7 +2955,7 @@ def reise_abschluss(code: str):
               </div>
               <div class="table-wrap">
                 <table>
-                  <thead><tr><th>Datum</th><th>Kürzel</th><th>Kennzeichen</th>
+                  <thead><tr><th>Kürzel</th><th>Kennzeichen</th>
                     <th style="text-align:right">Kilometer</th></tr></thead>
                   <tbody>{zeilen_km}</tbody>
                 </table>
@@ -3227,15 +3227,14 @@ def reise_abschluss_pdf(code: str):
 
         if km_rows:
             story.append(Paragraph("Gefahrene Kilometer (Firmen-/Privat-Pkw)", styles["Heading2"]))
-            km_daten = [["Datum","Kürzel","Kennzeichen","Kilometer"]]
+            km_daten = [["Kürzel","Kennzeichen","Kilometer"]]
             km_summe_pdf = 0.0
             for k in km_rows:
                 km_wert = float(g(k,"km",3) or 0); km_summe_pdf += km_wert
                 km_daten.append([
-                    fmt_date(g(k,"datum",1)), esc(g(k,"kuerzel",0)),
-                    esc(g(k,"kennzeichen",2)), f"{km_wert:.0f} km"])
-            km_daten.append(["", "", "Gesamt:", f"{km_summe_pdf:.0f} km"])
-            km_tbl = Table(km_daten, colWidths=[28*mm,20*mm,40*mm,30*mm])
+                    esc(g(k,"kuerzel",0)), esc(g(k,"kennzeichen",2)), f"{km_wert:.0f} km"])
+            km_daten.append(["", "Gesamt:", f"{km_summe_pdf:.0f} km"])
+            km_tbl = Table(km_daten, colWidths=[30*mm,50*mm,38*mm])
             km_tbl.setStyle(tbl_style())
             story.append(km_tbl)
             story.append(Spacer(1, 5*mm))
@@ -6719,7 +6718,7 @@ def portal_ansicht(token: str):
     km_zeilen = "".join(
         f'<div style="display:flex;justify-content:space-between;align-items:center;'
         f'padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">'
-        f'<span>{fmt_date(g(k,"datum",1))} · {g(k,"kennzeichen",2)} · {g(k,"km",3):.0f} km</span>'
+        f'<span>{g(k,"kennzeichen",2)} · {g(k,"km",3):.0f} km</span>'
         f'<a href="/portal/{token}/kilometer/{g(k,"id",0)}/loeschen" '
         f'style="color:#ef4444;text-decoration:none;font-size:12px" '
         f'onclick="return confirm(\'Eintrag löschen?\')">🗑</a></div>'
@@ -6732,8 +6731,6 @@ def portal_ansicht(token: str):
           (bei Mietwagen steht das schon auf der Mietwagenrechnung, hier nicht nötig).</p>
         {km_zeilen}
         <form method="post" action="/portal/{token}/kilometer/neu" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:end">
-          <div class="form-group" style="margin:0"><label style="font-size:12px">Datum</label>
-            <input type="date" name="datum" required></div>
           <div class="form-group" style="margin:0"><label style="font-size:12px">Kennzeichen</label>
             <input type="text" name="kennzeichen" placeholder="z.B. WÜ-AB 123" required style="width:120px"></div>
           <div class="form-group" style="margin:0"><label style="font-size:12px">Kilometer</label>
@@ -6796,23 +6793,25 @@ async def portal_tag_speichern(token: str, tag_id: int, request: Request):
 
 @app.post("/portal/{token}/kilometer/neu")
 async def portal_kilometer_hinzufuegen(token: str, request: Request):
-    """Trägt eine Fahrt mit Firmen-/Privat-Pkw ein (Datum, Kennzeichen, km).
-    Nur bei Mietwagen nicht nötig, da steht die Info schon auf der Mietwagenrechnung."""
+    """Trägt eine Fahrt mit Firmen-/Privat-Pkw ein (Kennzeichen, km) – kein
+    Datum nötig, das ist für diese Angabe nicht relevant. Nur bei Mietwagen
+    nicht nötig, da steht die Info schon auf der Mietwagenrechnung."""
     info = zugang_aus_token(token)
     if not info:
         return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
     form = await request.form()
-    datum = (form.get("datum") or "").strip()
     kennzeichen = (form.get("kennzeichen") or "").strip()
     km = (form.get("km") or "").strip()
-    if not (datum and kennzeichen and km):
+    if not (kennzeichen and km):
         return RedirectResponse(f"/portal/{token}", status_code=303)
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
+        # datum-Spalte ist NOT NULL, wird dem Reisenden aber nicht mehr
+        # angezeigt/abgefragt -> heutiges Datum als unsichtbarer Platzhalter.
         cur.execute(f"""INSERT INTO kilometer_fahrten (reise_code, kuerzel, datum, kennzeichen, km)
                         VALUES ({P},{P},{P},{P},{P})""",
-                    (info["reise_code"], info["kuerzel"], datum, kennzeichen, float(km)))
+                    (info["reise_code"], info["kuerzel"], date.today().isoformat(), kennzeichen, float(km)))
         db.commit(); cur.close(); db.close()
     except Exception:
         pass  # kein harter Fehler bei einem Zusatzfeld – Reisender soll einfach weitermachen können
