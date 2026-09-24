@@ -18,6 +18,28 @@ IMAP_USER    = os.getenv("IMAP_USER", "")
 from mod_db import get_db, ph, is_postgres, fmt_date
 from mod_anon import anonymisieren
 from mod_geo import adresse_geokodieren
+from mod_vma import IATA_KOORDINATEN
+
+
+def _segment_koordinaten_praezisieren(ki_result: dict) -> None:
+    """
+    Ersetzt bei jedem Flug-/Bahnsegment die von der KI geschätzten
+    von_lat/von_lon/nach_lat/nach_lon durch die EXAKTEN Koordinaten aus der
+    öffentlichen Flughafendatenbank (IATA_KOORDINATEN, ~9.000 Flughäfen),
+    sofern ein IATA-Code bekannt ist. Eine KI-Schätzung "aus dem Kopf" kann
+    auch bei bekannten Flughäfen mehrere Kilometer daneben liegen – das führt
+    auf der Karte dazu, dass der Marker nicht exakt am Flughafen sitzt.
+    Bahnhöfe (kein IATA-Code) bleiben unverändert bei der KI-Schätzung, dafür
+    gibt es keine vergleichbare öffentliche Datenbank in dieser App.
+    Ändert ki_result in-place, gibt nichts zurück.
+    """
+    for seg in (ki_result.get("segmente") or []):
+        for praefix in ("von", "nach"):
+            iata = (seg.get(f"{praefix}_iata") or "").strip().upper()
+            koord = IATA_KOORDINATEN.get(iata) if iata else None
+            if koord:
+                seg[f"{praefix}_lat"], seg[f"{praefix}_lon"] = koord
+from mod_vma import IATA_KOORDINATEN
 
 def get_s3():
     """S3/Hetzner Object Storage Client."""
@@ -583,6 +605,10 @@ async def beleg_neu_analysieren(bid: int) -> dict:
         if geo:
             ki_result["hotel_lat"], ki_result["hotel_lon"] = geo[0], geo[1]
 
+    # Bei allen Flug-/Bahnsegmenten die geschätzten Koordinaten durch die
+    # exakten Flughafen-Koordinaten ersetzen (siehe Funktionskommentar oben).
+    _segment_koordinaten_praezisieren(ki_result)
+
     ki_json_str = json.dumps(ki_result, ensure_ascii=False)
     pflicht_ok = bool(ki_result.get("pflichtfelder_ok", False))
     fehlend_str = json.dumps(ki_result.get("fehlende_pflichtfelder", []), ensure_ascii=False)
@@ -868,6 +894,10 @@ async def beleg_verarbeiten(
         geo = adresse_geokodieren(ki_result["hotel_adresse"])
         if geo:
             ki_result["hotel_lat"], ki_result["hotel_lon"] = geo[0], geo[1]
+
+    # Bei allen Flug-/Bahnsegmenten die geschätzten Koordinaten durch die
+    # exakten Flughafen-Koordinaten ersetzen (siehe Funktionskommentar oben).
+    _segment_koordinaten_praezisieren(ki_result)
 
     pflicht_ok = bool(ki_result.get("pflichtfelder_ok", False))
     fehlend_str = json.dumps(ki_result.get("fehlende_pflichtfelder", []), ensure_ascii=False)
