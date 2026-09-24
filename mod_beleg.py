@@ -595,23 +595,50 @@ async def beleg_neu_analysieren(bid: int) -> dict:
     """
     Führt die KI-Analyse für einen bereits gespeicherten Beleg erneut aus
     (z.B. um neue Felder wie event_zeit nachträglich zu befüllen) und
-    aktualisiert die Analyse-Felder in der DB. Nutzt den gespeicherten
-    Rohtext – funktioniert nicht für reine Bild-Belege ohne Text.
+    aktualisiert die Analyse-Felder in der DB.
+    Funktioniert für beide Beleg-Arten:
+    - Text-Belege: nutzt den gespeicherten Rohtext direkt.
+    - Bild-Belege (Foto ohne extrahierbaren Text): das Originalfoto wird nie
+      separat gespeichert, sondern nur eingebettet in "original.pdf" (siehe
+      bild_zu_pdf()) – hier wird das Bild aus genau diesem PDF wieder
+      extrahiert und erneut per Bilderkennung (gpt_analyse_bild) analysiert,
+      statt die Neuanalyse für Bild-Belege komplett abzulehnen.
     """
     P = ph()
     db = get_db(); cur = db.cursor()
-    cur.execute(f"SELECT rohtext FROM belege WHERE id={P}", (bid,))
+    cur.execute(f"SELECT rohtext, s3_original, dateiname FROM belege WHERE id={P}", (bid,))
     row = cur.fetchone()
     if not row:
         cur.close(); db.close()
         return {"fehler": "Beleg nicht gefunden"}
     rohtext = row[0] if isinstance(row, tuple) else row["rohtext"]
+    s3_original = row[1] if isinstance(row, tuple) else row["s3_original"]
+    dateiname = row[2] if isinstance(row, tuple) else row["dateiname"]
     cur.close(); db.close()
 
-    if not rohtext or rohtext.strip().startswith("{"):
-        return {"fehler": "Kein Text-Rohtext vorhanden (Bild-Beleg) – Neuanalyse nicht möglich"}
+    ist_bild_beleg = not rohtext or rohtext.strip().startswith("{")
 
-    ki_result = await gpt_analyse(rohtext, "")
+    if ist_bild_beleg:
+        if not s3_original:
+            return {"fehler": "Kein gespeichertes Original vorhanden – Neuanalyse nicht möglich"}
+        try:
+            pdf_bytes = s3_download(s3_original)
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            bild_bytes = None
+            for seite in reader.pages:
+                bilder = list(seite.images)
+                if bilder:
+                    bild_bytes = bilder[0].data
+                    break
+            if not bild_bytes:
+                return {"fehler": "Konnte das Originalfoto nicht aus dem gespeicherten PDF extrahieren"}
+            ki_result = await gpt_analyse_bild(bild_bytes, "image/jpeg", dateiname or "beleg")
+        except Exception as e:
+            return {"fehler": f"Bild-Neuanalyse fehlgeschlagen: {e}"}
+    else:
+        ki_result = await gpt_analyse(rohtext, "")
+
     if "fehler" in ki_result and not ki_result.get("anbieter"):
         return {"fehler": ki_result.get("fehler", "KI-Analyse fehlgeschlagen")}
 
