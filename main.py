@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.11-d"
+APP_VERSION  = "3.11-e"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4193,7 +4193,7 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                                 s["typ"], detail, s["dt_an_anzeige"]))
 
     cur.execute(f"""SELECT land_beleg, hotel_checkin_datum, hotel_checkin_zeit, hotel_name,
-        hotel_lat, hotel_lon, hotel_adresse
+        hotel_lat, hotel_lon, hotel_adresse, hotel_checkout_datum, hotel_checkout_zeit
         FROM belege WHERE reise_code={P} AND transportart='Hotel'""", (reise_code,))
     for row in cur.fetchall():
         g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
@@ -4203,6 +4203,8 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         hotel_name = g("hotel_name",3)
         hotel_lat = g("hotel_lat",4); hotel_lon = g("hotel_lon",5)
         hotel_adresse = g("hotel_adresse",6)
+        d_checkout = _datum_parsen(g("hotel_checkout_datum",7))
+        co_zeit = g("hotel_checkout_zeit",8) or "11:00"
         hotel_koord = (float(hotel_lat), float(hotel_lon)) if hotel_lat is not None and hotel_lon is not None else None
         if not land or not d: continue
         # Hotels haben kein UTC-Offset-Feld im Schema -> Rückfall auf MESZ
@@ -4210,23 +4212,24 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         # UTC-bewussten Flug-/Bahnzeiten trotzdem konsistent bleibt.
         dt = segment_zeit_zu_utc(d, ci_zeit, None)
         if dt is None: continue
+        dt_checkout = segment_zeit_zu_utc(d_checkout, co_zeit, None) if d_checkout else None
 
-        # WICHTIG: Die Check-in-Uhrzeit ist oft nur ein GENERISCHER Standardwert
-        # (z.B. "15:00" als übliche Hotel-Check-in-Zeit), unabhängig davon,
-        # wann der Reisende an diesem Tag TATSÄCHLICH ankommt – bei mehreren
-        # Etappen am selben Tag (z.B. Zwischenlandung, Anschlussflug) kann die
-        # tatsächliche Ankunft am Zielort deutlich SPÄTER liegen als die
-        # pauschale Check-in-Zeit. Ohne Korrektur würde die Karte den
-        # Reisenden fälschlich schon "im Hotel" zeigen, obwohl er laut
-        # Flugplan zu dem Zeitpunkt noch gar nicht dort sein kann. Deshalb:
-        # nie früher als die letzte an DEMSELBEN Kalendertag ankommende
-        # Flug-/Bahn-Etappe ansetzen.
-        spaeteste_ankunft_heute = max(
+        # WICHTIG (allgemeingültig, nicht nur "am selben Tag"): Die
+        # Check-in-Uhrzeit ist oft nur ein GENERISCHER Standardwert (z.B.
+        # "15:00"), unabhängig davon, wann der Reisende tatsächlich ankommt.
+        # Flug/Bahn/Termin sind IMMER die präziseren Quellen und sollen das
+        # Hotel als Positionsangabe überstimmen, solange sie zeitlich in den
+        # Aufenthalt (Checkin bis Checkout) fallen und später als die
+        # pauschale Check-in-Zeit sind – nicht nur an genau diesem Kalendertag,
+        # sondern über den GESAMTEN Aufenthalt hinweg (z.B. auch bei einer
+        # Zwischenlandung am Folgetag durch Zeitzonen-Verschiebung).
+        fenster_ende = dt_checkout or (dt + timedelta(hours=24))
+        spaeteste_ankunft_im_aufenthalt = max(
             (s["dt_an"] for s in segmente
-             if s["dt_an"].date() == dt.date() and s["dt_an"] > dt),
+             if dt < s["dt_an"] <= fenster_ende),
             default=None)
-        if spaeteste_ankunft_heute:
-            dt = spaeteste_ankunft_heute
+        if spaeteste_ankunft_im_aufenthalt:
+            dt = spaeteste_ankunft_im_aufenthalt
 
         if dt > jetzt: continue
         zeit_lokal = f"{d.strftime('%d.%m.')} {ci_zeit}"
