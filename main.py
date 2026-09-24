@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.11-g"
+APP_VERSION  = "3.11-h"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2108,20 +2108,60 @@ async def vma_tag_speichern(code: str, vid: int, request: Request):
     lcode   = (form.get("land_code") or "DE").strip().upper()
     ist_halb= bool(form.get("ist_halber_satz"))
     notiz   = (form.get("notiz") or "").strip()
+    # Fluchtklappe: falls die automatische Stadt-/Länder-Erkennung für einen
+    # Sonderfall mal nicht ausreicht, kann hier ein eigener Satz eingetragen
+    # werden, der dann in jedem Fall Vorrang hat (echte manuelle Übersteuerung,
+    # kein Rätselraten mehr nötig).
+    voll_manuell = (form.get("voll_manuell") or "").strip()
+    halb_manuell = (form.get("halb_manuell") or "").strip()
 
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
-        # WICHTIG: Immer zuerst die importierte Liste (offizielle BMF-Quelle)
-        # fragen, genau wie bei der Automatik – die statische VMA_SAETZE im
-        # Code ist nur ein Rückfall für Länder, die noch nie importiert
-        # wurden. Vorher wurde hier IMMER der alte Code-Fallback genutzt, was
-        # bei jedem manuellen Speichern (z.B. nur Mahlzeiten-Haken setzen)
-        # einen bereits korrekt importierten Satz wieder auf den alten,
-        # überholten Wert zurückgesetzt hat.
-        info = vma_fuer_land_erweitert(cur, lcode, ort=None)
-        voll = info["voll"]; halb = info["halb"]
-        lname = VMA_SAETZE.get(lcode, {}).get("name", lcode)
+        rcode = code.upper()
+
+        if voll_manuell and halb_manuell:
+            # Expliziter manueller Satz -> hat immer Vorrang, keine weitere
+            # Automatik-Erkennung nötig.
+            voll = float(voll_manuell); halb = float(halb_manuell)
+            lname = VMA_SAETZE.get(lcode, {}).get("name", lcode)
+        else:
+            # WICHTIG (allgemeingültig): Die vollständige Tages-Erkennung
+            # (land_fuer_tag) erneut durchlaufen, statt nur den nackten
+            # Länder-Satz nachzuschlagen – sonst geht eine bereits erkannte
+            # Städte-Zuordnung (z.B. "Spanien – Madrid") bei jedem einfachen
+            # Häkchen-Setzen verloren und springt auf den Landesdurchschnitt
+            # zurück. Nur wenn der/die Nutzer:in das Land im Dropdown
+            # tatsächlich auf ein ANDERES Land als das automatisch erkannte
+            # ändert, gilt das als bewusste Übersteuerung -> dann schlichter
+            # Länder-Satz ohne Stadt-Rätselraten.
+            cur.execute(f"SELECT reise_code, datum FROM vma_tage WHERE id={P}", (vid,))
+            r = cur.fetchone()
+            g = lambda k,i: r[k] if hasattr(r,'keys') else r[i]
+            tag_datum = _datum_parsen(g("datum",1)) if r else None
+            auto_override = None
+            auto_lcode = None
+            if tag_datum:
+                cur.execute(f"SELECT abreise, rueckkehr FROM reisen WHERE code={P}", (rcode,))
+                rr = cur.fetchone()
+                gr = lambda k,i: rr[k] if hasattr(rr,'keys') else rr[i]
+                ab_d = _datum_parsen(gr("abreise",0)); zu_d = _datum_parsen(gr("rueckkehr",1))
+                tage_ges = (zu_d - ab_d).days + 1
+                ist_letzter = (tag_datum == zu_d)
+                eintaegig_ges = (tage_ges == 1)
+                auto_lcode, _, _, auto_override = land_fuer_tag(rcode, tag_datum, db, ist_letzter, eintaegig_ges)
+
+            if lcode == auto_lcode and auto_override:
+                voll = auto_override["voll"]; halb = auto_override["halb"]
+                lname = f'{VMA_SAETZE.get(lcode, {}).get("name", lcode)} – {auto_override["ort"]}'
+            else:
+                # WICHTIG: Immer zuerst die importierte Liste (offizielle
+                # BMF-Quelle) fragen, genau wie bei der Automatik – die
+                # statische VMA_SAETZE im Code ist nur ein Rückfall.
+                info = vma_fuer_land_erweitert(cur, lcode, ort=None)
+                voll = info["voll"]; halb = info["halb"]
+                lname = VMA_SAETZE.get(lcode, {}).get("name", lcode)
+
         brutto, netto = vma_berechnen(voll, halb, ist_halb, frueh, mittag, abend)
         cur.execute(f"""UPDATE vma_tage SET
             land_code={P}, land_name={P}, vma_satz_voll={P}, vma_satz_halb={P},
@@ -5803,6 +5843,19 @@ def reise_detail(code: str):
                   {cb(rcode, vid, "mittagessen", mittag, "Mittag", 40)}
                   {cb(rcode, vid, "abendessen", abend, "Abend", 40)}
                 </form>
+                <details style="margin-top:6px;font-size:11px">
+                  <summary style="cursor:pointer;color:#94a3b8">Satz manuell überschreiben (falls die Automatik hier mal daneben liegt)</summary>
+                  <form method="post" action="/reise/{rcode}/vma/{vid}/speichern" style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                    <input type="hidden" name="land_code" value="{lcode_t}">
+                    <input type="hidden" name="ist_halber_satz" value="{'1' if ist_halb else ''}">
+                    <input type="hidden" name="fruehstueck" value="{'1' if frueh else ''}">
+                    <input type="hidden" name="mittagessen" value="{'1' if mittag else ''}">
+                    <input type="hidden" name="abendessen" value="{'1' if abend else ''}">
+                    <label>Voller Satz: <input type="number" step="0.01" name="voll_manuell" placeholder="z.B. 28.00" style="width:80px"></label>
+                    <label>Halber Satz: <input type="number" step="0.01" name="halb_manuell" placeholder="z.B. 14.00" style="width:80px"></label>
+                    <button type="submit" class="btn btn-secondary btn-sm">Übernehmen</button>
+                  </form>
+                </details>
                 {trenn_select(rcode, vid, trennung) if vd and vd.weekday() in (5,6) else ""}
                 {tatsaechliche_zeit_html}
               </div>
