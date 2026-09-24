@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.11-c"
+APP_VERSION  = "3.11-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4209,7 +4209,26 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         # (segment_zeit_zu_utc's Standard), damit der Vergleich mit den jetzt
         # UTC-bewussten Flug-/Bahnzeiten trotzdem konsistent bleibt.
         dt = segment_zeit_zu_utc(d, ci_zeit, None)
-        if dt is None or dt > jetzt: continue
+        if dt is None: continue
+
+        # WICHTIG: Die Check-in-Uhrzeit ist oft nur ein GENERISCHER Standardwert
+        # (z.B. "15:00" als übliche Hotel-Check-in-Zeit), unabhängig davon,
+        # wann der Reisende an diesem Tag TATSÄCHLICH ankommt – bei mehreren
+        # Etappen am selben Tag (z.B. Zwischenlandung, Anschlussflug) kann die
+        # tatsächliche Ankunft am Zielort deutlich SPÄTER liegen als die
+        # pauschale Check-in-Zeit. Ohne Korrektur würde die Karte den
+        # Reisenden fälschlich schon "im Hotel" zeigen, obwohl er laut
+        # Flugplan zu dem Zeitpunkt noch gar nicht dort sein kann. Deshalb:
+        # nie früher als die letzte an DEMSELBEN Kalendertag ankommende
+        # Flug-/Bahn-Etappe ansetzen.
+        spaeteste_ankunft_heute = max(
+            (s["dt_an"] for s in segmente
+             if s["dt_an"].date() == dt.date() and s["dt_an"] > dt),
+            default=None)
+        if spaeteste_ankunft_heute:
+            dt = spaeteste_ankunft_heute
+
+        if dt > jetzt: continue
         zeit_lokal = f"{d.strftime('%d.%m.')} {ci_zeit}"
         # "detail" zeigt jetzt die Adresse statt den Hotelnamen zu wiederholen
         # (Name steht im Popup bereits als "Aktuell in: ..."/Ortsname)
