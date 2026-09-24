@@ -246,6 +246,23 @@ schätze den Euro-Gegenwert von "betrag_brutto" anhand des dir bekannten
 ungefähren Wechselkurses zum Datum von "belegdatum" (historischer Tageskurs,
 aus deinem eigenen Wissen). Bei "waehrung"="EUR" beide Felder null lassen.
 
+WICHTIG bei "betrag_netto"/"betrag_mwst" – NUR bei deutschen Belegen
+("land_beleg"="DE"): Steht auf dem Beleg nur ein Bruttobetrag mit einem
+Hinweis wie "inkl. MwSt." OHNE separaten Netto-/MwSt.-Ausweis (typisch bei
+ÖPNV-Fahrscheinen, Parkscheinen, Kleinbeträgen), dann BERECHNE "betrag_netto"
+und "betrag_mwst" selbst aus "betrag_brutto" nach deutschem Steuerrecht:
+- Ermäßigter Satz 7%: Nahverkehr/ÖPNV (Bus, Bahn, Tram im Personennahverkehr,
+  Fahrstrecke bis 50km bzw. Gemeindegebiet), Bücher, Zeitungen, die meisten
+  Lebensmittel, reine Hotelübernachtung (ohne Frühstück/Extras)
+- Regulärer Satz 19%: alles andere (Kraftstoff, Restaurant/Bewirtung vor Ort,
+  die meisten sonstigen Waren/Dienstleistungen, Fernverkehr/Fernbus)
+Rechnung: betrag_netto = betrag_brutto / (1 + Satz), betrag_mwst = betrag_brutto - betrag_netto,
+beide auf 2 Nachkommastellen gerundet. Ist auf dem Beleg dagegen bereits ein
+expliziter Netto-/MwSt.-Betrag angegeben, immer DEN übernehmen, nicht selbst
+rechnen. Bei Belegen aus anderen Ländern ("land_beleg" != "DE") beide Felder
+null lassen, wenn nicht explizit ausgewiesen – ausländische MwSt.-Sätze/-Regeln
+nicht selbst schätzen.
+
 Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
 Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
 
@@ -409,6 +426,23 @@ aus deinem eigenen Wissen – keine Live-Abfrage nötig). Das ist eine grobe
 Arbeitsgrundlage, keine exakte Buchung; der Organisator kann sie später anhand
 der echten Kreditkartenabrechnung überschreiben. Bei "waehrung"="EUR" beide
 Felder null lassen.
+
+WICHTIG bei "betrag_netto"/"betrag_mwst" – NUR bei deutschen Belegen
+("land_beleg"="DE"): Steht auf dem Beleg nur ein Bruttobetrag mit einem
+Hinweis wie "inkl. MwSt." OHNE separaten Netto-/MwSt.-Ausweis (typisch bei
+ÖPNV-Fahrscheinen, Parkscheinen, Kleinbeträgen), dann BERECHNE "betrag_netto"
+und "betrag_mwst" selbst aus "betrag_brutto" nach deutschem Steuerrecht:
+- Ermäßigter Satz 7%: Nahverkehr/ÖPNV (Bus, Bahn, Tram im Personennahverkehr,
+  Fahrstrecke bis 50km bzw. Gemeindegebiet), Bücher, Zeitungen, die meisten
+  Lebensmittel, reine Hotelübernachtung (ohne Frühstück/Extras)
+- Regulärer Satz 19%: alles andere (Kraftstoff, Restaurant/Bewirtung vor Ort,
+  die meisten sonstigen Waren/Dienstleistungen, Fernverkehr/Fernbus)
+Rechnung: betrag_netto = betrag_brutto / (1 + Satz), betrag_mwst = betrag_brutto - betrag_netto,
+beide auf 2 Nachkommastellen gerundet. Ist auf dem Beleg dagegen bereits ein
+expliziter Netto-/MwSt.-Betrag angegeben, immer DEN übernehmen, nicht selbst
+rechnen. Bei Belegen aus anderen Ländern ("land_beleg" != "DE") beide Felder
+null lassen, wenn nicht explizit ausgewiesen – ausländische MwSt.-Sätze/-Regeln
+nicht selbst schätzen.
 
 WICHTIG bei "abreise_utc_offset"/"ankunft_utc_offset": Zeiten auf Reisebelegen
 stehen IMMER in der ORTSZEIT des jeweiligen Ortes – die Abreisezeit in der
