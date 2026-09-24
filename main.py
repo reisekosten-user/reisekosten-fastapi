@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.11-l"
+APP_VERSION  = "3.11-m"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -836,8 +836,9 @@ def beleg_detail(bid: int, request: Request):
           </div>"""
 
         content = f"""
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-wrap:wrap">
           <a href="/belege" class="btn btn-secondary">← Belege</a>
+          {f'<a href="/reise/{rcode}" class="btn btn-secondary">🧳 Reise {rcode}</a>' if rcode else ''}
           <h1 class="page-title" style="margin:0">Beleg #{bid2}</h1>
           {typ_badge}
           {status_badge}
