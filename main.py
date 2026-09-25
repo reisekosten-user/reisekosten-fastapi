@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.12-e"
+APP_VERSION  = "3.12-f"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2230,6 +2230,30 @@ async def vma_tag_speichern(code: str, vid: int, request: Request):
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
 
+@app.post("/reise/{code}/vma-alle-zuruecksetzen")
+def vma_alle_zuruecksetzen(code: str, request: Request):
+    """
+    Setzt ALLE Tage der Reise auf einmal von "manuell" zurück auf
+    "automatisch" und berechnet danach neu – statt jeden betroffenen Tag
+    einzeln über "↺ Auto" zurücksetzen zu müssen. Sinnvoll, wenn nach einer
+    Reihe von Fixes mehrere Tage noch alte, eingefrorene Werte zeigen (z.B.
+    weil sie vor einem Fix schon manuell/automatisch verändert wurden) und
+    uneinheitliche Sätze für denselben Ort anzeigen.
+    """
+    rcode = code.upper()
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"UPDATE vma_tage SET quelle='auto' WHERE reise_code={P}", (rcode,))
+        db.commit()
+        vma_tage_generieren(rcode, db)
+        cur.close(); db.close()
+        ziel = request.headers.get("referer") or f"/reise/{rcode}/vma-debug"
+        return RedirectResponse(ziel, status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
+
 @app.post("/reise/{code}/vma/{vid}/reset-und-neu")
 def vma_tag_reset_und_neu(code: str, vid: int, request: Request):
     """
@@ -2381,7 +2405,14 @@ def vma_debug(code: str):
               </div>
             </div>"""
         cur.close(); db.close()
-        content = f'<h1 class="page-title">🔍 VMA-Debug {rcode}</h1>{bloecke}'
+        content = f"""<h1 class="page-title">🔍 VMA-Debug {rcode}</h1>
+        <form method="post" action="/reise/{rcode}/vma-alle-zuruecksetzen" style="margin-bottom:16px">
+          <button type="submit" class="btn btn-primary"
+                  onclick="return confirm('ALLE Tage dieser Reise von manuell zurück auf automatisch setzen und neu berechnen?')">
+            🔄 Alle Tage zurücksetzen &amp; neu berechnen
+          </button>
+        </form>
+        {bloecke}"""
         return HTMLResponse(shell(f"VMA-Debug {rcode}", content))
     except Exception as e:
         import traceback
@@ -6068,6 +6099,7 @@ def reise_detail(code: str):
             <a href="/reise/{rcode}/abschluss" class="btn btn-primary">🧾 Abschluss</a>
             <a href="/reise/{rcode}/reiseplan" class="btn btn-secondary">🗺 Reiseplan</a>
             <a href="/reise/{rcode}/vma-generieren" class="btn btn-secondary">🔄 VMA neu berechnen</a>
+            <a href="/reise/{rcode}/vma-debug" class="btn btn-secondary">🔍 VMA-Debug</a>
             <a href="/reise/{rcode}/bearbeiten" class="btn btn-secondary">✏ Bearbeiten</a>
             <a href="/reise/{rcode}/land/neu" class="btn btn-secondary">🌍 + Land</a>
           </div>
