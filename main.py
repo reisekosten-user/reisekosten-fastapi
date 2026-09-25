@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.11-m"
+APP_VERSION  = "3.12-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -365,13 +365,15 @@ def segmente_aus_ki_json(ki_json_str: str | None) -> list:
 
 
 def gesamtbetrag_berechnen(betrag_brutto, waehrung, betrag_eur_geschaetzt,
-                            betrag_eur_final, nebenkosten_eur) -> float:
+                            betrag_eur_final, nebenkosten_eur, auslandsentgelt_eur=None) -> float:
     """
     Einheitliche Eurobetrag-Logik für einen Beleg:
     1. Betrag Beleg final (manuell, gemäß Abrechnung) hat Vorrang, falls gesetzt.
     2. Sonst der von der KI geschätzte Euro-Gegenwert (bei Fremdwährung).
     3. Sonst der Bruttobetrag selbst, falls bereits in EUR.
-    4. Nebenkosten (z.B. Kreditkartengebühr) werden immer addiert.
+    4. Nebenkosten (manuell, z.B. sonstige Zusatzkosten) werden immer addiert.
+    5. Auslandsentgelt (automatisch berechnet, siehe auslandsentgelt_neu_berechnen)
+       wird ebenfalls immer addiert.
     """
     if betrag_eur_final is not None:
         basis = float(betrag_eur_final)
@@ -381,7 +383,52 @@ def gesamtbetrag_berechnen(betrag_brutto, waehrung, betrag_eur_geschaetzt,
         basis = float(betrag_brutto)
     else:
         basis = 0.0
-    return basis + float(nebenkosten_eur or 0)
+    return basis + float(nebenkosten_eur or 0) + float(auslandsentgelt_eur or 0)
+
+
+def auslandsentgelt_neu_berechnen(bid: int, db) -> None:
+    """
+    Berechnet automatisch die Auslandseinsatzentgelt-Gebühr der Kreditkarte
+    (typischerweise 1-2%, je nach Karte unterschiedlich) und speichert sie in
+    belege.kreditkarte_auslandsentgelt_eur. Wird bei jeder Änderung der
+    Kartenwahl oder des finalen Eurobetrags neu aufgerufen, damit der Wert
+    nie veraltet ist. Greift NUR bei Fremdwährungsbelegen (bei EUR-Belegen
+    fällt üblicherweise keine gesonderte Auslandsgebühr an) und nur, wenn
+    eine Karte zugeordnet ist, die auf ein bekanntes Mitarbeiterkürzel endet.
+    Bewusst getrennt von "nebenkosten_eur" (das bleibt ein rein manuelles
+    Feld für sonstige Zusatzkosten) – so geht der automatisch berechnete Wert
+    nie verloren, nur weil jemand die Nebenkosten aus einem anderen Grund
+    bearbeitet.
+    """
+    P = ph()
+    cur = db.cursor()
+    cur.execute(f"""SELECT waehrung, betrag_brutto, betrag_eur, betrag_eur_final, kreditkarte_karte
+                    FROM belege WHERE id={P}""", (bid,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); return
+    g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
+    waehrung = g("waehrung",0) or "EUR"
+    kreditkarte_karte = g("kreditkarte_karte",4)
+
+    wert = None
+    if waehrung != "EUR" and kreditkarte_karte:
+        basis = g("betrag_eur_final",3)
+        if basis is None: basis = g("betrag_eur",2)
+        if basis is None: basis = g("betrag_brutto",1)  # letzter Rückfall, ungenau bei Fremdwährung
+        # Mitarbeiterkürzel aus "Firmenkreditkarte-RD"/"Privatkreditkarte-RD" extrahieren
+        kuerzel = kreditkarte_karte.rsplit("-", 1)[-1].strip() if "-" in kreditkarte_karte else None
+        if kuerzel and basis is not None:
+            cur.execute(f"""SELECT kreditkarten_auslandsentgelt_prozent
+                            FROM mitarbeiter WHERE kuerzel={P}""", (kuerzel,))
+            mrow = cur.fetchone()
+            if mrow:
+                prozent = mrow[0] if isinstance(mrow, tuple) else mrow["kreditkarten_auslandsentgelt_prozent"]
+                if prozent is not None:
+                    wert = round(float(basis) * float(prozent) / 100, 2)
+
+    cur.execute(f"UPDATE belege SET kreditkarte_auslandsentgelt_eur={P} WHERE id={P}", (wert, bid))
+    cur.close()
 
 # ── FastAPI App ────────────────────────────────────────────────────────────────
 app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
@@ -530,7 +577,8 @@ def beleg_detail(bid: int, request: Request):
             kurs_eur, betrag_eur, kurs_datum, kurs_quelle,
             zahlungsart, geprueft, pruef_vermerk, geprueft_von, geprueft_am, dms_versendet_am,
             beleg_gruppe_id, ist_erechnung, erechnung_format, s3_erechnung_xml, kreditkarte_karte,
-            betrag_eur_final, nebenkosten_eur, nebenkosten_beschreibung
+            betrag_eur_final, nebenkosten_eur, nebenkosten_beschreibung,
+            kreditkarte_auslandsentgelt_eur
             FROM belege WHERE id={P}""", (bid,))
         r = cur.fetchone()
         # Reisen für Zuordnung
@@ -579,6 +627,7 @@ def beleg_detail(bid: int, request: Request):
         betrag_eur_final=get(r,"betrag_eur_final",57)
         nebenkosten_eur=get(r,"nebenkosten_eur",58)
         nebenkosten_beschreibung=get(r,"nebenkosten_beschreibung",59)
+        auslandsentgelt_eur=get(r,"kreditkarte_auslandsentgelt_eur",60)
         zusammenfassung = f"{typ}: {vendor} – {betrag_brutto} {waehrung}" if vendor else ""
 
         # KI-JSON parsen
@@ -1036,7 +1085,8 @@ def beleg_detail(bid: int, request: Request):
                 </div>
                 <div style="margin-top:10px;padding:10px;background:var(--green-l,#f0fdf4);
                             border-radius:var(--radius-s);font-size:14px;font-weight:700;color:var(--green)">
-                  Gesamtbetrag: {gesamtbetrag_berechnen(betrag_brutto, waehrung, betrag_eur, betrag_eur_final, nebenkosten_eur):.2f} EUR
+                  Gesamtbetrag: {gesamtbetrag_berechnen(betrag_brutto, waehrung, betrag_eur, betrag_eur_final, nebenkosten_eur, auslandsentgelt_eur):.2f} EUR
+                  {f'<div style="font-size:11px;font-weight:400;color:var(--muted);margin-top:2px">davon {auslandsentgelt_eur:.2f} EUR automatisch berechnetes Auslandsentgelt der Kreditkarte</div>' if auslandsentgelt_eur else ''}
                 </div>
                 <button type="submit" class="btn btn-success" style="margin-top:8px;width:100%">
                   Speichern
@@ -1728,6 +1778,7 @@ async def beleg_kreditkarte_speichern(bid: int, request: Request):
         db = get_db(); cur = db.cursor()
         P = ph()
         cur.execute(f"UPDATE belege SET kreditkarte_karte={P} WHERE id={P}", (kreditkarte_karte, bid))
+        auslandsentgelt_neu_berechnen(bid, db)
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
@@ -2154,7 +2205,9 @@ async def vma_tag_speichern(code: str, vid: int, request: Request):
 
             if lcode == auto_lcode and auto_override:
                 voll = auto_override["voll"]; halb = auto_override["halb"]
-                lname = f'{VMA_SAETZE.get(lcode, {}).get("name", lcode)} – {auto_override["ort"]}'
+                ort_txt = auto_override.get("ort")
+                lname = (f'{VMA_SAETZE.get(lcode, {}).get("name", lcode)} – {ort_txt}'
+                         if ort_txt else VMA_SAETZE.get(lcode, {}).get("name", lcode))
             else:
                 # WICHTIG: Immer zuerst die importierte Liste (offizielle
                 # BMF-Quelle) fragen, genau wie bei der Automatik – die
@@ -2417,6 +2470,7 @@ async def beleg_gesamtbetrag_speichern(bid: int, request: Request):
             betrag_eur_final={P}, nebenkosten_eur={P}, nebenkosten_beschreibung={P}
             WHERE id={P}""",
             (betrag_eur_final, nebenkosten_eur, nebenkosten_beschreibung, bid))
+        auslandsentgelt_neu_berechnen(bid, db)
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
@@ -2658,7 +2712,7 @@ def reise_abschluss(code: str):
             betrag_brutto,betrag_netto,betrag_mwst,waehrung,
             land_beleg,betrag_eur,kurs_eur,kurs_datum,kurs_quelle,
             s3_original,status,beleg_gruppe_id,betrag_eur_final,nebenkosten_eur,
-            nebenkosten_beschreibung,geprueft
+            nebenkosten_beschreibung,geprueft,kreditkarte_auslandsentgelt_eur
             FROM belege WHERE reise_code={P}
             ORDER BY belegdatum NULLS LAST, id""", (rcode,))
         belege = cur.fetchall()
@@ -2715,7 +2769,8 @@ def reise_abschluss(code: str):
 
         kosten_eur = sum(
             gesamtbetrag_berechnen(g(b,"betrag_brutto",7), g(b,"waehrung",10), g(b,"betrag_eur",12),
-                                    g(b,"betrag_eur_final",19), g(b,"nebenkosten_eur",20))
+                                    g(b,"betrag_eur_final",19), g(b,"nebenkosten_eur",20),
+                                    g(b,"kreditkarte_auslandsentgelt_eur",23))
             for b in (rechnungen + vorlaeufig))
 
         # Wochentage
@@ -2782,12 +2837,13 @@ def reise_abschluss(code: str):
             betrag_eur_b=g(b,"betrag_eur",12); kurs=g(b,"kurs_eur",13)
             betrag_eur_final_b=g(b,"betrag_eur_final",19); nebenkosten_b=g(b,"nebenkosten_eur",20)
             nebenkosten_besch_b=g(b,"nebenkosten_beschreibung",21)
+            auslandsentgelt_b=g(b,"kreditkarte_auslandsentgelt_eur",23)
 
             typ_label = typ + (f" – {freitext}" if freitext else "")
             if ist_vorlaeufig:
                 typ_label += ' <span style="color:#c2410c;font-weight:600">· vorläufig</span>'
 
-            eur_val = gesamtbetrag_berechnen(brutto, waehrung, betrag_eur_b, betrag_eur_final_b, nebenkosten_b)
+            eur_val = gesamtbetrag_berechnen(brutto, waehrung, betrag_eur_b, betrag_eur_final_b, nebenkosten_b, auslandsentgelt_b)
 
             # Betrag-Spalte
             if waehrung == "EUR":
@@ -2807,6 +2863,8 @@ def reise_abschluss(code: str):
                 mwst_s = "Ausland"
             if nebenkosten_b:
                 bet_s += f'<br><span style="font-size:10px;color:#64748b">+ {float(nebenkosten_b):.2f} EUR {nebenkosten_besch_b or "Nebenkosten"}</span>'
+            if auslandsentgelt_b:
+                bet_s += f'<br><span style="font-size:10px;color:#64748b">+ {float(auslandsentgelt_b):.2f} EUR Auslandsentgelt</span>'
             if ist_vorlaeufig:
                 mwst_s += (' <span style="color:#c2410c;font-size:10px">(nur Buchungsbestätigung)</span>')
 
@@ -3117,7 +3175,7 @@ def reise_abschluss_pdf(code: str):
 
         cur.execute(f"""SELECT id,belegart,anbieter,belegdatum,betrag_brutto,waehrung,betrag_eur,
             beleg_gruppe_id,s3_original,dateiname,betrag_eur_final,nebenkosten_eur,
-            betrag_mwst,land_beleg,geprueft
+            betrag_mwst,land_beleg,geprueft,kreditkarte_auslandsentgelt_eur
             FROM belege WHERE reise_code={P} ORDER BY belegdatum""", (rcode,))
         belege = cur.fetchall()
         cur.close(); db.close()
@@ -3159,7 +3217,8 @@ def reise_abschluss_pdf(code: str):
 
         kosten_eur = sum(
             gesamtbetrag_berechnen(g(b,"betrag_brutto",4), g(b,"waehrung",5), g(b,"betrag_eur",6),
-                                    g(b,"betrag_eur_final",10), g(b,"nebenkosten_eur",11))
+                                    g(b,"betrag_eur_final",10), g(b,"nebenkosten_eur",11),
+                                    g(b,"kreditkarte_auslandsentgelt_eur",15))
             for b in rechnungen)
 
         from reportlab.lib.pagesizes import A4
@@ -4844,6 +4903,11 @@ def mitarbeiter_neu_form():
               </select>
               <div class="form-hint">Standard: Privatkreditkarte (die meisten zahlen mit eigener Karte). Wird bei "Kreditkarte" als Bezahlart automatisch als "Privatkreditkarte-{Kürzel}" bzw. "Firmenkreditkarte-{Kürzel}" hinterlegt.</div>
             </div>
+            <div class="form-group full">
+              <label>Auslandseinsatzentgelt der Karte (%)</label>
+              <input type="number" step="0.01" name="kreditkarten_auslandsentgelt_prozent" class="inp" value="1.5">
+              <div class="form-hint">Gebühr, die die Bank bei Fremdwährungs-Zahlungen berechnet (steht auf der Kartenabrechnung, oft 1-2%). Wird bei Belegen in Fremdwährung automatisch berechnet und zum Gesamtbetrag addiert. 0 eintragen, falls die Karte keine Auslandsgebühr hat.</div>
+            </div>
           </div>
           <div class="form-actions">
             <button type="submit" class="btn btn-primary">Anlegen</button>
@@ -4865,6 +4929,10 @@ async def mitarbeiter_neu(request: Request):
     ist_reisender = bool(form.get("ist_reisender"))
     ist_organisator = bool(form.get("ist_organisator"))
     kreditkarten_typ = (form.get("kreditkarten_typ") or "privat").strip()
+    try:
+        kreditkarten_auslandsentgelt_prozent = float(form.get("kreditkarten_auslandsentgelt_prozent") or 1.5)
+    except ValueError:
+        kreditkarten_auslandsentgelt_prozent = 1.5
     if not kuerzel or not klarname:
         return HTMLResponse(shell("Fehler",
             '<div class="alert alert-err">Kürzel und Name sind Pflichtfelder.</div>'
@@ -4878,9 +4946,11 @@ async def mitarbeiter_neu(request: Request):
         P = ph()
         rolle_txt = "beides" if (ist_reisender and ist_organisator) else ("organisator" if ist_organisator else "reisender")
         cur.execute(f"""INSERT INTO mitarbeiter
-            (kuerzel, klarname, email, email2, email3, rolle, ist_reisender, ist_organisator, kreditkarten_typ)
-            VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P})""",
-                    (kuerzel, klarname, email, email2, email3, rolle_txt, ist_reisender, ist_organisator, kreditkarten_typ))
+            (kuerzel, klarname, email, email2, email3, rolle, ist_reisender, ist_organisator, kreditkarten_typ,
+             kreditkarten_auslandsentgelt_prozent)
+            VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P})""",
+                    (kuerzel, klarname, email, email2, email3, rolle_txt, ist_reisender, ist_organisator,
+                     kreditkarten_typ, kreditkarten_auslandsentgelt_prozent))
         db.commit(); cur.close(); db.close()
         return RedirectResponse("/mitarbeiter", status_code=303)
     except Exception as e:
@@ -4898,7 +4968,7 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
-        cur.execute(f"SELECT kuerzel, klarname, email, rolle, aktiv, email2, email3, ist_reisender, ist_organisator, kreditkarten_typ FROM mitarbeiter WHERE kuerzel={P}",
+        cur.execute(f"SELECT kuerzel, klarname, email, rolle, aktiv, email2, email3, ist_reisender, ist_organisator, kreditkarten_typ, kreditkarten_auslandsentgelt_prozent FROM mitarbeiter WHERE kuerzel={P}",
                     (kuerzel.upper(),))
         r = cur.fetchone()
         cur.close(); db.close()
@@ -4914,6 +4984,8 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
         is_reisend = bool(r[7] if isinstance(r, tuple) else r.get("ist_reisender", True))
         is_org = bool(r[8] if isinstance(r, tuple) else r.get("ist_organisator", False))
         kk_typ = (r[9] if isinstance(r, tuple) else r.get("kreditkarten_typ")) or "privat"
+        kk_prozent = r[10] if isinstance(r, tuple) else r.get("kreditkarten_auslandsentgelt_prozent")
+        if kk_prozent is None: kk_prozent = 1.5
         aktiv_check = "checked" if a else ""
         content = f"""
         <h1 class="page-title">Mitarbeiter bearbeiten</h1>
@@ -4962,6 +5034,11 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
                     <option value="firma"{" selected" if kk_typ=="firma" else ""}>🏢 Firmenkreditkarte</option>
                   </select>
                   <div class="form-hint">Wird bei Belegen mit Bezahlart "Kreditkarte" automatisch als "Privatkreditkarte-{k}" bzw. "Firmenkreditkarte-{k}" angeboten.</div>
+                </div>
+                <div class="form-group full">
+                  <label>Auslandseinsatzentgelt der Karte (%)</label>
+                  <input type="number" step="0.01" name="kreditkarten_auslandsentgelt_prozent" class="inp" value="{kk_prozent}">
+                  <div class="form-hint">Gebühr, die die Bank bei Fremdwährungs-Zahlungen berechnet (steht auf der Kartenabrechnung, oft 1-2%). Wird bei Belegen in Fremdwährung automatisch berechnet und zum Gesamtbetrag addiert. 0 eintragen, falls die Karte keine Auslandsgebühr hat.</div>
                 </div>
                 <div class="form-group full">
                   <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -5107,6 +5184,10 @@ async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
     ist_reisender = bool(form.get("ist_reisender"))
     ist_organisator = bool(form.get("ist_organisator"))
     kreditkarten_typ = (form.get("kreditkarten_typ") or "privat").strip()
+    try:
+        kreditkarten_auslandsentgelt_prozent = float(form.get("kreditkarten_auslandsentgelt_prozent") or 1.5)
+    except ValueError:
+        kreditkarten_auslandsentgelt_prozent = 1.5
     aktiv    = bool(form.get("aktiv"))
     if not klarname:
         return HTMLResponse(shell("Fehler",
@@ -5119,9 +5200,11 @@ async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
         rolle_txt = "beides" if (ist_reisender and ist_organisator) else ("organisator" if ist_organisator else "reisender")
         cur.execute(f"""UPDATE mitarbeiter SET klarname={P}, email={P}, email2={P}, email3={P},
                         rolle={P}, ist_reisender={P}, ist_organisator={P}, kreditkarten_typ={P},
+                        kreditkarten_auslandsentgelt_prozent={P},
                         aktiv={P} WHERE kuerzel={P}""",
                     (klarname, email, email2, email3, rolle_txt, ist_reisender, ist_organisator,
-                     kreditkarten_typ, aktiv_val if aktiv else inaktiv_val, kuerzel.upper()))
+                     kreditkarten_typ, kreditkarten_auslandsentgelt_prozent,
+                     aktiv_val if aktiv else inaktiv_val, kuerzel.upper()))
         db.commit(); cur.close(); db.close()
         return RedirectResponse("/mitarbeiter", status_code=303)
     except Exception as e:
@@ -5504,7 +5587,8 @@ def reise_detail(code: str):
                         betrag_brutto, waehrung, belegdatum, hotel_checkin_zeit, ki_json,
                         event_datum_von, event_datum_bis, hotel_checkin_datum,
                         hotel_checkout_datum, hotel_checkout_zeit, event_zeit,
-                        belegart, beleg_gruppe_id, betrag_eur, betrag_eur_final, nebenkosten_eur
+                        belegart, beleg_gruppe_id, betrag_eur, betrag_eur_final, nebenkosten_eur,
+                        kreditkarte_auslandsentgelt_eur
                         FROM belege WHERE reise_code = {P} ORDER BY belegdatum""", (rcode,))
         beleg_rows_tag = cur.fetchall()
 
@@ -5672,7 +5756,8 @@ def reise_detail(code: str):
             beleg_anzahl_gesamt += 1
             beleg_kosten_gesamt += gesamtbetrag_berechnen(
                 get(b,"betrag_brutto",4), get(b,"waehrung",5), get(b,"betrag_eur",17),
-                get(b,"betrag_eur_final",18), get(b,"nebenkosten_eur",19))
+                get(b,"betrag_eur_final",18), get(b,"nebenkosten_eur",19),
+                get(b,"kreditkarte_auslandsentgelt_eur",20))
 
         for b in beleg_rows_tag:
             bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
