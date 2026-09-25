@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.12-f"
+APP_VERSION  = "3.12-g"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2360,7 +2360,7 @@ def vma_debug(code: str):
                 for hb in hotel_kandidaten:
                     hci = _datum_parsen(g(hb,"hotel_checkin_datum",4))
                     hco = _datum_parsen(g(hb,"hotel_checkout_datum",5))
-                    matcht = bool(hci and hco and hci <= tag < hco)
+                    matcht = bool(hci and hco and hci <= tag <= hco)
                     if matcht: treffer_gefunden = True
                     farbe_h = "#059669" if matcht else "#94a3b8"
                     hotel_diag += (f'<div style="font-size:12px;color:{farbe_h};margin:2px 0">'

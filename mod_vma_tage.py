@@ -260,16 +260,23 @@ def land_fuer_tag(reise_code: str, datum: date, db,
         cur.close()
         return letztes_land, lname, "Flug-Segment", None
 
-    # 2. Hotel-Beleg: Hotel das an diesem Tag aktiv ist. Bei mehreren
-    # passenden Hotels (z.B. eine alte Dublette desselben Buchungsvorgangs)
-    # wird bewusst eines mit einem KONKRETEN Land bevorzugt – "DE" ist der
-    # allgemeine Rückfallwert, wenn nichts Genaueres erkannt wurde, also die
-    # unsicherste Angabe, und soll bei einer Dublette nicht "gewinnen".
+    # 2. Hotel-Beleg: Hotel das an diesem Tag aktiv ist. WICHTIG: Checkout-Tag
+    # bewusst MIT eingeschlossen (<=, nicht <) – der Reisende ist an diesem
+    # Tag ja real noch am Ort, bevor er abreist. Vorher wurde der Checkout-Tag
+    # ausgeschlossen, wodurch z.B. ein letzter Reisetag ohne eigenen Rückflug
+    # (Checkout = letzter Tag) auf einen schlechteren Rückfall (Standard/alte
+    # manuelle Reise-Land-Einträge) durchgefallen ist, obwohl das Hotel den
+    # Tag eigentlich klar abdeckt.
+    # Bei mehreren passenden Hotels (z.B. eine alte Dublette desselben
+    # Buchungsvorgangs) wird bewusst eines mit einem KONKRETEN Land bevorzugt
+    # – "DE" ist der allgemeine Rückfallwert, wenn nichts Genaueres erkannt
+    # wurde, also die unsicherste Angabe, und soll bei einer Dublette nicht
+    # "gewinnen".
     cur.execute(f"""SELECT land_beleg, hotel_adresse FROM belege
         WHERE reise_code={P} AND transportart='Hotel'
-        AND hotel_checkin_datum<={P} AND hotel_checkout_datum>{P}
-        ORDER BY (land_beleg = 'DE') ASC, id DESC""",
-        (reise_code, datum_s, datum_s))
+        AND hotel_checkin_datum<={P} AND hotel_checkout_datum>={P}
+        ORDER BY (land_beleg = 'DE') ASC, (hotel_checkin_datum = {P}) DESC, id DESC""",
+        (reise_code, datum_s, datum_s, datum_s))
     row = cur.fetchone()
     if row:
         land = (row[0] if isinstance(row, tuple) else row["land_beleg"]) or ""
@@ -317,7 +324,7 @@ def fruehstueck_aus_beleg(reise_code: str, datum: date, db) -> bool:
     datum_s = datum.isoformat()
     cur.execute(f"""SELECT ki_json FROM belege
         WHERE reise_code={P} AND transportart='Hotel'
-        AND hotel_checkin_datum<={P} AND hotel_checkout_datum>{P}""",
+        AND hotel_checkin_datum<={P} AND hotel_checkout_datum>={P}""",
         (reise_code, datum_s, datum_s))
     row = cur.fetchone()
     cur.close()
