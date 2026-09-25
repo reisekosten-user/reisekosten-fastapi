@@ -260,10 +260,15 @@ def land_fuer_tag(reise_code: str, datum: date, db,
         cur.close()
         return letztes_land, lname, "Flug-Segment", None
 
-    # 2. Hotel-Beleg: Hotel das an diesem Tag aktiv ist
+    # 2. Hotel-Beleg: Hotel das an diesem Tag aktiv ist. Bei mehreren
+    # passenden Hotels (z.B. eine alte Dublette desselben Buchungsvorgangs)
+    # wird bewusst eines mit einem KONKRETEN Land bevorzugt – "DE" ist der
+    # allgemeine Rückfallwert, wenn nichts Genaueres erkannt wurde, also die
+    # unsicherste Angabe, und soll bei einer Dublette nicht "gewinnen".
     cur.execute(f"""SELECT land_beleg, hotel_adresse FROM belege
         WHERE reise_code={P} AND transportart='Hotel'
-        AND hotel_checkin_datum<={P} AND hotel_checkout_datum>{P}""",
+        AND hotel_checkin_datum<={P} AND hotel_checkout_datum>{P}
+        ORDER BY (land_beleg = 'DE') ASC, id DESC""",
         (reise_code, datum_s, datum_s))
     row = cur.fetchone()
     if row:
