@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.12-c"
+APP_VERSION  = "3.12-d"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2323,8 +2323,38 @@ def vma_debug(code: str):
                 gespeichert_txt = '<div style="font-size:12px;color:#ef4444;margin-top:4px">Kein vma_tage-Eintrag vorhanden</div>'
 
             if not ist_letzter_tag:
+                # Hotel-Beleg-Abgleich nachvollziehbar machen: welche Hotels
+                # wurden für diesen Tag geprüft, welches hat gematcht (falls
+                # keins matcht, greift der Länder-Rückfall bzw. Deutschland).
+                cur.execute(f"""SELECT id, anbieter, hotel_name, land_beleg,
+                                hotel_checkin_datum, hotel_checkout_datum
+                                FROM belege WHERE reise_code={P} AND transportart='Hotel'""",
+                            (rcode,))
+                hotel_kandidaten = cur.fetchall()
+                hotel_diag = ""
+                treffer_gefunden = False
+                for hb in hotel_kandidaten:
+                    hci = _datum_parsen(g(hb,"hotel_checkin_datum",4))
+                    hco = _datum_parsen(g(hb,"hotel_checkout_datum",5))
+                    matcht = bool(hci and hco and hci <= tag < hco)
+                    if matcht: treffer_gefunden = True
+                    farbe_h = "#059669" if matcht else "#94a3b8"
+                    hotel_diag += (f'<div style="font-size:12px;color:{farbe_h};margin:2px 0">'
+                                    f'Beleg #{g(hb,"id",0)}: {g(hb,"hotel_name",2) or g(hb,"anbieter",1)} · '
+                                    f'Land "{g(hb,"land_beleg",3)}" · '
+                                    f'Checkin {hci.strftime("%d.%m.") if hci else "?"} – '
+                                    f'Checkout {hco.strftime("%d.%m.") if hco else "?"} '
+                                    f'-> Treffer: {matcht}</div>')
+                if not hotel_kandidaten:
+                    hotel_diag = '<i style="font-size:12px;color:#ef4444">Keine Hotel-Belege für diese Reise gefunden</i>'
+                elif not treffer_gefunden:
+                    hotel_diag += ('<div style="font-size:12px;color:#ef4444;margin-top:4px">'
+                                    'Kein Hotel deckt diesen Tag ab -> fällt auf "Standard" (Deutschland) zurück, '
+                                    'außer ein Flugsegment oder ein manueller Reise-Land-Eintrag greift zuerst.</div>')
                 bloecke += f"""<div class="card" style="margin-bottom:12px"><div class="card-body">
                   <b>{tag.strftime("%d.%m.%Y")}</b> – kein Rückreisetag, normale Logik (Flug-Segment/Hotel) greift.
+                  <div style="margin-top:6px;font-size:12px;font-weight:600">Hotel-Abgleich:</div>
+                  {hotel_diag}
                   {gespeichert_txt}
                 </div></div>"""
                 continue
