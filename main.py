@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.12-g"
+APP_VERSION  = "3.12-h"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4318,7 +4318,22 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                     eintrag["status"] = f"ÜBERSPRUNGEN – Datum nicht parsbar (abreise_datum={s.get('abreise_datum')!r}, ankunft_datum={s.get('ankunft_datum')!r})"
                     diag.append(eintrag)
                 continue
-            ab_zeit = s.get("abreise_zeit") or "00:00"
+            ab_zeit_roh = s.get("abreise_zeit")
+            if not ab_zeit_roh:
+                # WICHTIG: Fehlt die Abreisezeit komplett (z.B. bei einem
+                # zweiten, unvollständigeren Beleg-Dokument desselben Flugs
+                # ohne Uhrzeitangabe), NIEMALS Mitternacht raten – das würde
+                # einen Flug, der tatsächlich erst später am Tag stattfindet,
+                # fälschlich als "schon mitten in der Nacht abgeflogen und
+                # längst angekommen" erscheinen lassen. Ohne echte Zeit ist
+                # das Segment für die Positionsbestimmung wertlos -> überspringen,
+                # ein anderes (hoffentlich vollständigeres) Segment/Beleg für
+                # dieselbe Strecke liefert die echte Position stattdessen.
+                if debug:
+                    eintrag["status"] = "ÜBERSPRUNGEN – keine Abreisezeit vorhanden, keine Schätzung (verhindert Fehlpositionierung)"
+                    diag.append(eintrag)
+                continue
+            ab_zeit = ab_zeit_roh
             an_zeit_roh = s.get("ankunft_zeit")
             dt_ab = segment_zeit_zu_utc(d_ab, ab_zeit, s.get("abreise_utc_offset"))
             if dt_ab is None:
