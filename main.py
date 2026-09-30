@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.12-i"
+APP_VERSION  = "3.12-j"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4492,6 +4492,24 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                             "Termin", t_ort or titel_t, zeit_lokal))
     cur.close()
 
+    # Start-Ort ab Mitternacht (lokal) des ersten Reisetags als Kandidat
+    # ergänzen: Vor dem allerersten Ereignis der Reise (z.B. morgens vor der
+    # Abfahrt) soll die Karte den Reisenden am ABFAHRTSORT zeigen, nicht "ohne
+    # Position" – er ist ja real dort, auch wenn er noch nicht losgefahren
+    # ist. Nutzt bewusst dieselbe "letzter Kandidat <= jetzt gewinnt"-Logik
+    # wie alle anderen Kandidaten: sobald ein echtes Ereignis eintritt (Zug
+    # fährt ab), übernimmt das automatisch, ohne Sonderfall-Code.
+    if segmente:
+        erstes_segment = min(segmente, key=lambda s: s["dt_ab"])
+        if erstes_segment["von_koord"]:
+            dt_start = erstes_segment["dt_ab"].replace(hour=0, minute=0, second=0, microsecond=0)
+            if dt_start <= jetzt:
+                start_land = (IATA_TO_LAND.get(erstes_segment["von_iata"])
+                              if erstes_segment["von_iata"] else None) or "DE"
+                start_ort = erstes_segment["von_ort"] or erstes_segment["von_iata"] or "Start"
+                kandidaten.append((dt_start, erstes_segment["von_koord"], start_land, start_ort,
+                                    "Start", start_ort, "00:00"))
+
     if kandidaten:
         kandidaten.sort(key=lambda x: x[0])
         dt, koord, land, ort_name, letzter_typ, letztes_detail, letzte_zeit_lokal = kandidaten[-1]
@@ -4751,15 +4769,26 @@ def dashboard_maps(debug: str = ""):
         }}).addTo(map);
         function personIcon(kuerzel) {{
             return L.divIcon({{
-                html: '<div style="position:relative;width:30px;height:36px">' +
-                      '<div style="font-size:26px;line-height:26px;text-align:center;' +
-                      'filter:drop-shadow(0 1px 2px rgba(0,0,0,.4))">🧍</div>' +
-                      '<div style="position:absolute;top:-6px;left:50%;transform:translateX(-50%);' +
-                      'background:#2563eb;color:white;font-size:10px;font-weight:700;' +
-                      'padding:1px 5px;border-radius:8px;border:1.5px solid white;' +
-                      'white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.4)">' + kuerzel + '</div>' +
+                html: '<div style="position:relative;width:36px;height:46px">' +
+                      // Klassische Pin-Form: Kreis mit spitzem unteren Ende
+                      // (per CSS-Trick: eine Ecke des Kreises bleibt eckig,
+                      // dann um 45° gedreht -> zeigt nach unten auf den Ort)
+                      '<div style="position:absolute;top:0;left:1px;width:34px;height:34px;' +
+                      'background:linear-gradient(135deg,#3b82f6,#1e40af);' +
+                      'border-radius:50% 50% 50% 0;transform:rotate(-45deg);' +
+                      'border:2.5px solid #fff;box-shadow:0 3px 8px rgba(0,0,0,.4)">' +
+                      '<div style="transform:rotate(45deg);width:100%;height:100%;' +
+                      'display:flex;align-items:center;justify-content:center">' +
+                      '<span style="color:#fff;font-weight:800;font-size:12px;letter-spacing:.3px;' +
+                      'text-shadow:0 1px 2px rgba(0,0,0,.35);font-family:system-ui,sans-serif">' +
+                      kuerzel + '</span></div></div>' +
+                      // Kleiner heller Punkt in der Spitze, wirkt wie eine
+                      // Glanz-/Fokus-Markierung auf der eigentlichen Position
+                      '<div style="position:absolute;bottom:2px;left:50%;transform:translateX(-50%);' +
+                      'width:6px;height:6px;background:#fff;border-radius:50%;' +
+                      'box-shadow:0 0 0 2px rgba(59,130,246,.5)"></div>' +
                       '</div>',
-                className: '', iconSize: [30,36], iconAnchor: [15,30]
+                className: '', iconSize: [36,46], iconAnchor: [18,44]
             }});
         }}
         const flughafenIcon = L.divIcon({{
