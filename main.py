@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.12-h"
+APP_VERSION  = "3.12-i"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -4555,6 +4555,17 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                     "herkunft": herkunft, "naechste_etappe": naechste_etappe})
 
     # 3. Rückfall: heutiger VMA-Tag (steuerliche Zuordnung, nicht immer = aktueller Ort)
+    # WICHTIG: Nur nutzen, wenn schon MINDESTENS EIN echtes Ereignis (Flug/
+    # Bahn/Hotel/Termin) der Reise tatsächlich stattgefunden hat (kandidaten
+    # nicht leer). Ist "kandidaten" komplett leer, ist die Reise aus Sicht der
+    # Karte noch gar nicht "losgegangen" (z.B. der Reisetag hat begonnen, aber
+    # der erste Zug/Flug ist noch gar nicht abgefahren) – dann das steuerliche
+    # Zielland des Tages als "aktuellen Ort" anzuzeigen wäre falsch: der
+    # Reisende ist ja noch am Ausgangsort, nicht im Zielland. Ohne echtes
+    # Ereignis lieber gar keine Position zeigen, als eine falsche zu raten.
+    if not kandidaten:
+        return _ret(None)
+
     heute_s = date.today().isoformat()
     cur = db.cursor()
     cur.execute(f"SELECT land_code, land_name FROM vma_tage WHERE reise_code={P} AND datum={P}",
