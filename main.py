@@ -47,7 +47,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.13-b"
+APP_VERSION  = "3.13-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2731,13 +2731,40 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> by
     }
     TAGESBALKEN_FARBE = colors.HexColor("#1e3a5f")
 
+    # WICHTIG: reportlab/PDF-Standardschriften stellen komplexe, mehrfarbige
+    # Emojis (🏨🅿️📌🤝 etc.) nicht zuverlässig dar – landet oft als "■"
+    # (fehlendes Glyphen-Rechteck). Statt Emojis daher feste, klar lesbare
+    # Text-Kürzel je Ereignistyp; die HTML-Ansicht im Browser behält die
+    # echten Emojis, das betrifft NUR das PDF.
+    PDF_TYP_LABEL = {
+        "flug": "FLUG", "bahn": "BAHN", "mietwagen": "MIETWAGEN",
+        "hotel": "HOTEL", "termin": "TERMIN", "parken": "PARKEN", "sonstiges": "SONSTIGES",
+    }
+
+    def zeit_formatieren(zeit_roh: str) -> str:
+        """
+        Formatiert eine Zeit-/Zeitraumangabe für die schmale Zeitspalte.
+        WICHTIG: Bei einem Zeitraum (z.B. "12:00–13:40") NIE dem Paragraph
+        das automatische Umbrechen überlassen – das bricht sonst mitten in
+        der Uhrzeit um (z.B. "13:" / "40"), weil der Bindestrich als
+        Umbruchstelle gilt und der Rest dann nicht mehr passt. Stattdessen
+        gezielt NACH der ersten Uhrzeit umbrechen, sieht sauber aus und ist
+        bei jeder Spaltenbreite vorhersehbar.
+        """
+        if not zeit_roh:
+            return "–"
+        if "–" in zeit_roh:
+            ab, an = zeit_roh.split("–", 1)
+            return f"{esc(ab)}<br/>–{esc(an)}"
+        return esc(zeit_roh)
+
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
         leftMargin=16*mm, rightMargin=16*mm, topMargin=16*mm, bottomMargin=16*mm)
     styles = getSampleStyleSheet()
     titel_stil = ParagraphStyle("EvTitel", parent=styles["Normal"], fontSize=10, fontName="Helvetica-Bold", leading=13)
     sub_stil = ParagraphStyle("EvSub", parent=styles["Normal"], fontSize=8.5, textColor=colors.HexColor("#475569"), leading=11)
-    zeit_stil = ParagraphStyle("EvZeit", parent=styles["Normal"], fontSize=10, fontName="Helvetica-Bold", alignment=1)
+    zeit_stil = ParagraphStyle("EvZeit", parent=styles["Normal"], fontSize=9, fontName="Helvetica-Bold", alignment=1, leading=11)
 
     story = [Paragraph(f"Reiseplan {esc(rcode)}" + (" (ohne Buchungscodes)" if ohne_buchungscode else ""), styles["Title"]),
              Paragraph(esc(daten["titel"]), styles["Heading2"]),
@@ -2762,7 +2789,8 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> by
 
         for ev in daten["tage"][d]:
             farbe = FARBEN.get(ev.get("typ"), FARBEN["sonstiges"])
-            inhalt = f'<font size="12">{esc(ev["icon"])}</font> {esc(ev["titel"])}'
+            label = PDF_TYP_LABEL.get(ev.get("typ"), "SONSTIGES")
+            inhalt = f'<font size="7" color="#475569"><b>{label}</b></font>&nbsp;&nbsp;{esc(ev["titel"])}'
             text_teile = [Paragraph(inhalt, titel_stil)]
             if ev.get("sub"):
                 text_teile.append(Paragraph(esc(ev["sub"]), sub_stil))
@@ -2773,8 +2801,8 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> by
             if ev.get("extra") and not (ohne_buchungscode and ev.get("ist_buchungscode")):
                 text_teile.append(Paragraph(esc(ev["extra"]), sub_stil))
 
-            zeile = Table([[Paragraph(esc(ev["zeit"]) or "–", zeit_stil), text_teile]],
-                           colWidths=[20*mm, 158*mm])
+            zeile = Table([[Paragraph(zeit_formatieren(ev["zeit"]), zeit_stil), text_teile]],
+                           colWidths=[24*mm, 154*mm])
             zeile.setStyle(TableStyle([
                 ("BACKGROUND",(0,0),(-1,-1), farbe),
                 ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
