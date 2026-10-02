@@ -47,7 +47,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.13-a"
+APP_VERSION  = "3.13-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2582,15 +2582,16 @@ def reiseplan_daten_laden(reise_code: str):
             s_bis = _datum_parsen(g(b,"event_datum_bis",13))
             s_ort = g(b,"event_ort_von",14) or ""
             if s_von and s_bis and s_von != s_bis:
+                ist_park = "park" in freitext.lower()
                 ereignisse.append((s_von, "", {
-                    "icon": "🅿️" if "park" in freitext.lower() else "📌",
+                    "icon": "🅿️" if ist_park else "📌", "typ": "parken" if ist_park else "sonstiges",
                     "titel": f"{freitext}: Beginn" + (f" – {anbieter}" if anbieter else ""),
                     "zeit": "", "sub": s_ort,
-                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else ""}))
+                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else "", "ist_buchungscode": True}))
                 ereignisse.append((s_bis, "", {
-                    "icon": "🅿️" if "park" in freitext.lower() else "📌",
+                    "icon": "🅿️" if ist_park else "📌", "typ": "parken" if ist_park else "sonstiges",
                     "titel": f"{freitext}: Ende" + (f" – {anbieter}" if anbieter else ""),
-                    "zeit": "", "sub": s_ort, "extra": ""}))
+                    "zeit": "", "sub": s_ort, "extra": "", "ist_buchungscode": False}))
             continue
         if typ == "Hotel":
             hname = g(b,"hotel_name",5) or anbieter or "Hotel"
@@ -2599,14 +2600,16 @@ def reiseplan_daten_laden(reise_code: str):
             co_d = _datum_parsen(g(b,"hotel_checkout_datum",9)); co_z = g(b,"hotel_checkout_zeit",10) or ""
             if ci_d:
                 ereignisse.append((ci_d, ci_z or "14:00", {
-                    "icon": "🏨", "titel": f"Check-in: {hname}", "zeit": ci_z, "sub": hadresse,
-                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else ""}))
+                    "icon": "🏨", "typ": "hotel", "titel": f"Check-in: {hname}", "zeit": ci_z, "sub": hadresse,
+                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else "", "ist_buchungscode": True}))
             if co_d:
                 ereignisse.append((co_d, co_z or "11:00", {
-                    "icon": "🏨", "titel": f"Check-out: {hname}", "zeit": co_z, "sub": hadresse, "extra": ""}))
+                    "icon": "🏨", "typ": "hotel", "titel": f"Check-out: {hname}", "zeit": co_z, "sub": hadresse,
+                    "extra": "", "ist_buchungscode": False}))
         else:
             segs = segmente_aus_ki_json(g(b,"ki_json",4))
             icon = {"Flug": "✈", "Bahn": "🚆", "Mietwagen": "🚗"}.get(typ, "📍")
+            typ_key = {"Flug": "flug", "Bahn": "bahn", "Mietwagen": "mietwagen"}.get(typ, "sonstiges")
             for s in segs:
                 d_ab = _datum_parsen(s.get("abreise_datum"))
                 if not d_ab: continue
@@ -2616,9 +2619,9 @@ def reiseplan_daten_laden(reise_code: str):
                 terminal = s.get("abreise_terminal")
                 zeit_txt = f'{s.get("abreise_zeit","")}–{s.get("ankunft_zeit","")}'.strip("–")
                 ereignisse.append((d_ab, s.get("abreise_zeit") or "", {
-                    "icon": icon, "titel": f"{nummer}: {von_ort} → {nach_ort}", "zeit": zeit_txt,
+                    "icon": icon, "typ": typ_key, "titel": f"{nummer}: {von_ort} → {nach_ort}", "zeit": zeit_txt,
                     "sub": f"Terminal {terminal}" if terminal else "",
-                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else ""}))
+                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else "", "ist_buchungscode": True}))
 
     TERMIN_ICON = {"termin": "🤝", "kundenbesuch": "🤝", "fahrt": "🚕",
                    "mietwagen": "🚗", "hotel": "🏨", "sonstiges": "📌"}
@@ -2634,9 +2637,11 @@ def reiseplan_daten_laden(reise_code: str):
         sub_parts = [p for p in (ort_t, f"👤 {ansprech_t}" if ansprech_t else "",
                                   f"📞 {tel_t}" if tel_t else "") if p]
         ereignisse.append((d, von, {
-            "icon": TERMIN_ICON.get(typ_t, "📌"), "titel": titel_t,
+            "icon": TERMIN_ICON.get(typ_t, "📌"), "typ": "termin", "titel": titel_t,
             "zeit": f"{von}–{bis}" if von and bis else von,
-            "sub": " · ".join(sub_parts), "extra": notiz_t}))
+            # WICHTIG: "extra" ist hier eine NOTIZ, kein Buchungscode – bleibt
+            # deshalb auch in der Buchungscode-freien PDF-Variante erhalten.
+            "sub": " · ".join(sub_parts), "extra": notiz_t, "ist_buchungscode": False}))
     cur.close(); db.close()
 
     tage = {}
@@ -2682,6 +2687,7 @@ def reiseplan_anzeigen(code: str):
       <div style="display:flex;gap:8px">
         <a href="/reise/{rcode}/termin/neu?zurueck=reiseplan" class="btn btn-primary">+ Ereignis</a>
         <a href="/reise/{rcode}/reiseplan/pdf" class="btn btn-secondary">📄 PDF</a>
+        <a href="/reise/{rcode}/reiseplan/pdf?ohne_buchungscode=1" class="btn btn-secondary">📄 PDF (ohne Buchungscodes)</a>
         <a href="/reise/{rcode}" class="btn btn-secondary">← Reise</a>
       </div>
     </div>
@@ -2694,47 +2700,117 @@ def reiseplan_anzeigen(code: str):
     return HTMLResponse(shell(f"Reiseplan {rcode}", content, "reisen"))
 
 
+def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> bytes:
+    """
+    Baut das Reiseplan-PDF. Zwei Varianten über ohne_buchungscode steuerbar:
+    - False: für den Reisenden selbst, mit allen Buchungscodes (wie bisher).
+    - True: identischer Inhalt, aber ohne Buchungscodes – z.B. zum Weitergeben
+      an Kunden/Dritte, ohne dass die eigenen Buchungsreferenzen sichtbar sind.
+    Tabellen-Layout mit leichten Hintergrundfarben je Ereignistyp, damit
+    Flug/Bahn/Hotel/Termin auf einen Blick unterscheidbar sind, und einem
+    farbigen Tagesbalken für klare Tagesumbrüche.
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+
+    def esc(s):
+        return (str(s) if s is not None else "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+    # Leichte, helle Hintergrundfarben je Ereignistyp
+    FARBEN = {
+        "flug":      colors.HexColor("#dbeafe"),
+        "bahn":      colors.HexColor("#dcfce7"),
+        "mietwagen": colors.HexColor("#ede9fe"),
+        "hotel":     colors.HexColor("#fef3c7"),
+        "termin":    colors.HexColor("#fce7f3"),
+        "parken":    colors.HexColor("#e2e8f0"),
+        "sonstiges": colors.HexColor("#f1f5f9"),
+    }
+    TAGESBALKEN_FARBE = colors.HexColor("#1e3a5f")
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+        leftMargin=16*mm, rightMargin=16*mm, topMargin=16*mm, bottomMargin=16*mm)
+    styles = getSampleStyleSheet()
+    titel_stil = ParagraphStyle("EvTitel", parent=styles["Normal"], fontSize=10, fontName="Helvetica-Bold", leading=13)
+    sub_stil = ParagraphStyle("EvSub", parent=styles["Normal"], fontSize=8.5, textColor=colors.HexColor("#475569"), leading=11)
+    zeit_stil = ParagraphStyle("EvZeit", parent=styles["Normal"], fontSize=10, fontName="Helvetica-Bold", alignment=1)
+
+    story = [Paragraph(f"Reiseplan {esc(rcode)}" + (" (ohne Buchungscodes)" if ohne_buchungscode else ""), styles["Title"]),
+             Paragraph(esc(daten["titel"]), styles["Heading2"]),
+             Paragraph(f"{fmt_date(daten['abreise'])} – {fmt_date(daten['rueckkehr'])}", styles["Normal"]),
+             Spacer(1, 5*mm)]
+
+    wochentage = ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag","Samstag","Sonntag"]
+    for d in sorted(daten["tage"].keys()):
+        tagesblock = []
+        # Farbiger Tagesbalken als eigene Mini-Tabelle (Paragraphs selbst
+        # können keinen Hintergrund haben) – sorgt für einen klaren,
+        # auffälligen Umbruch zwischen den Tagen.
+        tag_tbl = Table([[Paragraph(f'<font color="white"><b>{wochentage[d.weekday()]}, {d.strftime("%d.%m.%Y")}</b></font>',
+                                     styles["Normal"])]], colWidths=[178*mm])
+        tag_tbl.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,-1), TAGESBALKEN_FARBE),
+            ("TOPPADDING",(0,0),(-1,-1), 5), ("BOTTOMPADDING",(0,0),(-1,-1), 5),
+            ("LEFTPADDING",(0,0),(-1,-1), 8),
+        ]))
+        tagesblock.append(tag_tbl)
+        tagesblock.append(Spacer(1, 2*mm))
+
+        for ev in daten["tage"][d]:
+            farbe = FARBEN.get(ev.get("typ"), FARBEN["sonstiges"])
+            inhalt = f'<font size="12">{esc(ev["icon"])}</font> {esc(ev["titel"])}'
+            text_teile = [Paragraph(inhalt, titel_stil)]
+            if ev.get("sub"):
+                text_teile.append(Paragraph(esc(ev["sub"]), sub_stil))
+            # Buchungscode nur zeigen, wenn NICHT die buchungscode-freie
+            # Variante gewählt ist UND dieses "extra"-Feld tatsächlich ein
+            # Buchungscode ist (bei Terminen ist "extra" nur eine Notiz und
+            # bleibt in jeder Variante erhalten).
+            if ev.get("extra") and not (ohne_buchungscode and ev.get("ist_buchungscode")):
+                text_teile.append(Paragraph(esc(ev["extra"]), sub_stil))
+
+            zeile = Table([[Paragraph(esc(ev["zeit"]) or "–", zeit_stil), text_teile]],
+                           colWidths=[20*mm, 158*mm])
+            zeile.setStyle(TableStyle([
+                ("BACKGROUND",(0,0),(-1,-1), farbe),
+                ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+                ("TOPPADDING",(0,0),(-1,-1), 5), ("BOTTOMPADDING",(0,0),(-1,-1), 5),
+                ("LEFTPADDING",(0,0),(0,0), 4), ("LEFTPADDING",(1,0),(1,0), 8),
+                ("LINEBELOW",(0,0),(-1,-1), 0.5, colors.white),
+            ]))
+            tagesblock.append(zeile)
+        tagesblock.append(Spacer(1, 4*mm))
+        # KeepTogether: Tagesbalken soll nicht alleine am Seitenende hängen,
+        # ohne dass noch Inhalt des Tages mit auf dieselbe Seite passt.
+        story.append(KeepTogether(tagesblock[:2] + [tagesblock[2]] if len(tagesblock) > 2 else tagesblock))
+        story.extend(tagesblock[3:] if len(tagesblock) > 3 else [])
+
+    doc.build(story)
+    return buf.getvalue()
+
+
 @app.get("/reise/{code}/reiseplan/pdf")
-def reiseplan_pdf(code: str):
-    """Reiseplan als PDF – identischer Inhalt wie die HTML-Ansicht, ohne Preise."""
+def reiseplan_pdf(code: str, ohne_buchungscode: bool = False):
+    """
+    Reiseplan als PDF. Zwei Varianten über den Query-Parameter:
+    - /reise/{code}/reiseplan/pdf  -> für den Reisenden, mit Buchungscodes
+    - /reise/{code}/reiseplan/pdf?ohne_buchungscode=1 -> identisch, aber ohne
+      Buchungscodes (z.B. zum Weitergeben an Kunden/Dritte)
+    """
     rcode = code.upper()
     daten = reiseplan_daten_laden(rcode)
     if not daten:
         return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden.</div>'))
     try:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-        from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.lib.units import mm
-
-        def esc(s):
-            return (str(s) if s is not None else "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-
-        buf = io.BytesIO()
-        doc = SimpleDocTemplate(buf, pagesize=A4,
-            leftMargin=20*mm, rightMargin=20*mm, topMargin=20*mm, bottomMargin=20*mm)
-        styles = getSampleStyleSheet()
-        story = [Paragraph(f"Reiseplan {esc(rcode)}", styles["Title"]),
-                 Paragraph(esc(daten["titel"]), styles["Heading2"]),
-                 Paragraph(f"{fmt_date(daten['abreise'])} – {fmt_date(daten['rueckkehr'])}", styles["Normal"]),
-                 Spacer(1, 6*mm)]
-        wochentage = ["Mo","Di","Mi","Do","Fr","Sa","So"]
-        for d in sorted(daten["tage"].keys()):
-            story.append(Paragraph(f"{wochentage[d.weekday()]} {d.strftime('%d.%m.%Y')}", styles["Heading3"]))
-            for ev in daten["tage"][d]:
-                zeile = f'<b>{esc(ev["zeit"] or "–")}</b> &nbsp; {esc(ev["icon"])} {esc(ev["titel"])}'
-                story.append(Paragraph(zeile, styles["Normal"]))
-                if ev["sub"]:
-                    story.append(Paragraph(esc(ev["sub"]), styles["Normal"]))
-                if ev["extra"]:
-                    story.append(Paragraph(esc(ev["extra"]), styles["Normal"]))
-                story.append(Spacer(1, 3*mm))
-            story.append(Spacer(1, 5*mm))
-        doc.build(story)
-        pdf_bytes = buf.getvalue()
+        pdf_bytes = _reiseplan_pdf_bauen(rcode, daten, ohne_buchungscode)
         from fastapi.responses import Response
+        dateiname = f"Reiseplan_{rcode}" + ("_ohne_Buchungscodes" if ohne_buchungscode else "") + ".pdf"
         return Response(content=pdf_bytes, media_type="application/pdf",
-                        headers={"Content-Disposition": f"inline; filename=Reiseplan_{rcode}.pdf"})
+                        headers={"Content-Disposition": f"inline; filename={dateiname}"})
     except Exception as e:
         import traceback
         return HTMLResponse(shell("Fehler",
