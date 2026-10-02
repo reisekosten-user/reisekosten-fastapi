@@ -39,6 +39,7 @@ from mod_flugalert import (konfiguration_laden,
                             cron_flug_alerts, offene_alerts_fuer_dashboard)
 from mod_geo import koordinaten_fuer_land, adresse_geokodieren
 CRON_SECRET = os.getenv("CRON_SECRET", "")
+GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "")
 
 # ── Konfiguration ─────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -46,7 +47,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.12-k"
+APP_VERSION  = "3.13-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -6537,6 +6538,54 @@ def termin_neu_form(code: str, datum: str = "", zurueck: str = ""):
     rcode = code.upper()
     typ_opts = "".join(f'<option value="{v}">{l}</option>' for v, l in TERMIN_TYPEN)
     ziel = f"/reise/{rcode}/reiseplan" if zurueck == "reiseplan" else f"/reise/{rcode}"
+
+    # Ort/Adresse-Feld: Mit Google Places Autocomplete (Firmenname -> korrekte
+    # Adresse live vorgeschlagen), falls ein API-Key hinterlegt ist – sonst
+    # ganz normales Freitextfeld als Rückfall, nichts bricht dadurch.
+    if GOOGLE_PLACES_API_KEY:
+        ort_feld = f"""
+            <div id="ort_autocomplete_container"></div>
+            <input type="text" id="ort_fallback" placeholder="z.B. Firmenname oder Musterstraße 1, 12345 Musterstadt"
+                   style="display:none">
+            <input type="hidden" name="ort" id="ort_hidden">
+            <input type="hidden" name="lat" id="google_lat">
+            <input type="hidden" name="lon" id="google_lon">
+            <input type="hidden" name="land_code" id="google_land">
+            <script>
+              (g=>{{var h,a,k,p="The Google Maps JavaScript API",c="google",l="importLibrary",q="__ib__",m=document,b=window;b=b[c]||(b[c]={{}});var d=b.maps||(b.maps={{}}),r=new Set,e=new URLSearchParams,u=()=>h||(h=new Promise(async(f,n)=>{{await (a=m.createElement("script"));e.set("libraries",[...r]+"");for(k in g)e.set(k.replace(/[A-Z]/g,t=>"_"+t[0].toLowerCase()),g[k]);e.set("callback",c+".maps."+q);a.src="https://maps."+c+"apis.com/maps/api/js?"+e;d[q]=f;a.onerror=()=>h=n(Error(p+" could not load."));a.nonce=m.querySelector("script[nonce]")?.nonce||"";m.head.append(a)}}));d[l]?console.warn(p+" only loads once. Ignoring:",g):d[l]=(f,...n)=>r.add(f)&&u().then(()=>d[l](f,...n))}})({{key:"{GOOGLE_PLACES_API_KEY}",v:"weekly"}});
+
+              (async () => {{
+                try {{
+                  const {{ PlaceAutocompleteElement }} = await google.maps.importLibrary("places");
+                  const pac = new PlaceAutocompleteElement({{}});
+                  document.getElementById('ort_autocomplete_container').appendChild(pac);
+                  pac.addEventListener('gmp-select', async (ev) => {{
+                    const place = ev.placePrediction.toPlace();
+                    await place.fetchFields({{fields: ['formattedAddress','location','addressComponents']}});
+                    document.getElementById('ort_hidden').value = place.formattedAddress || '';
+                    if (place.location) {{
+                      document.getElementById('google_lat').value = place.location.lat();
+                      document.getElementById('google_lon').value = place.location.lng();
+                    }}
+                    let land = '';
+                    (place.addressComponents || []).forEach(comp => {{
+                      if (comp.types.includes('country')) land = comp.shortText;
+                    }});
+                    document.getElementById('google_land').value = land;
+                  }});
+                }} catch (e) {{
+                  console.warn('Google Places Autocomplete nicht verfügbar, Freitext-Eingabe:', e);
+                  const fb = document.getElementById('ort_fallback');
+                  fb.style.display = 'block';
+                  fb.addEventListener('input', function() {{
+                    document.getElementById('ort_hidden').value = this.value;
+                  }});
+                }}
+              }})();
+            </script>"""
+    else:
+        ort_feld = '<input type="text" name="ort" placeholder="z.B. Musterstraße 1, 12345 Musterstadt">'
+
     content = f"""
     <h1 class="page-title">Termin hinzufügen – {rcode}</h1>
     <div class="card" style="max-width:500px">
@@ -6565,7 +6614,7 @@ def termin_neu_form(code: str, datum: str = "", zurueck: str = ""):
             </div>
             <div class="form-group full">
               <label>Ort / Adresse</label>
-              <input type="text" name="ort" placeholder="z.B. Musterstraße 1, 12345 Musterstadt">
+              {ort_feld}
             </div>
             <div class="form-group">
               <label>Ansprechpartner</label>
@@ -6602,17 +6651,27 @@ async def termin_neu(code: str, request: Request, zurueck: str = ""):
     ansprechpartner = (form.get("ansprechpartner") or "").strip() or None
     telefon = (form.get("telefon") or "").strip() or None
     notiz = (form.get("notiz") or "").strip() or None
+    # Bei Nutzung des Google-Places-Autocompletes liefert das Formular die
+    # Koordinaten direkt mit (per JS-Hiddenfeld) – dann lohnt sich keine
+    # zusätzliche Nominatim-Abfrage mehr, Google hat schon das Genauere.
+    google_lat = (form.get("lat") or "").strip()
+    google_lon = (form.get("lon") or "").strip()
+    google_land = (form.get("land_code") or "").strip()
     ziel = f"/reise/{rcode}/reiseplan" if zurueck == "reiseplan" else f"/reise/{rcode}"
     if not titel or not datum:
         return HTMLResponse(shell("Fehler",
             '<div class="alert alert-err">Titel und Datum sind Pflicht.</div>'
             f'<a href="/reise/{rcode}/termin/neu?zurueck={zurueck}" class="btn btn-secondary">Zurück</a>'))
     try:
-        # Adresse geokodieren (für die Kartenanzeige) – schlägt die Anfrage
-        # fehl oder wird nichts gefunden, wird der Termin trotzdem ganz normal
-        # ohne Koordinaten gespeichert.
-        geo = adresse_geokodieren(ort) if ort else None
-        lat, lon, land_code = geo if geo else (None, None, None)
+        if google_lat and google_lon:
+            lat, lon, land_code = float(google_lat), float(google_lon), (google_land.upper() or None)
+        else:
+            # Rückfall: kein Google-Treffer (JS nicht geladen, Freitext
+            # manuell eingegeben) – Adresse per Nominatim geokodieren.
+            # Schlägt auch das fehl, wird der Termin trotzdem ganz normal
+            # ohne Koordinaten gespeichert.
+            geo = adresse_geokodieren(ort) if ort else None
+            lat, lon, land_code = geo if geo else (None, None, None)
 
         P = ph()
         db = get_db(); cur = db.cursor()
