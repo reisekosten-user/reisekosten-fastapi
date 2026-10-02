@@ -46,7 +46,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.12-j"
+APP_VERSION  = "3.12-k"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2560,12 +2560,37 @@ def reiseplan_daten_laden(reise_code: str):
 
     cur.execute(f"""SELECT transportart, anbieter, buchungscode, rechnungsnummer,
                     ki_json, hotel_name, hotel_adresse, hotel_checkin_datum, hotel_checkin_zeit,
-                    hotel_checkout_datum, hotel_checkout_zeit
+                    hotel_checkout_datum, hotel_checkout_zeit, transportart_freitext,
+                    event_datum_von, event_datum_bis, event_ort_von
                     FROM belege WHERE reise_code={P}
-                    AND transportart IN ('Flug','Bahn','Mietwagen','Hotel')""", (reise_code,))
+                    AND transportart IN ('Flug','Bahn','Mietwagen','Hotel','Sonstiges')""", (reise_code,))
     for b in cur.fetchall():
         typ = g(b,"transportart",0); anbieter = g(b,"anbieter",1) or ""
         buchungscode = g(b,"buchungscode",2) or g(b,"rechnungsnummer",3) or ""
+        if typ == "Sonstiges":
+            # Allgemeingültig: JEDE "Sonstiges"-Position mit einem echten
+            # Datums-ZEITRAUM (von != bis, z.B. Parkplatzreservierung am
+            # Flughafen: Einstellen am Abreisetag, Abholen bei Rückkehr) wird
+            # wie ein Hotel mit Start-/Ende-Eintrag behandelt – nicht nur
+            # Parken speziell, auch andere mehrtägige "Sonstiges"-Belege.
+            # Belege mit nur einem Einzeldatum (die meisten Tank-/Maut-/
+            # Parkscheine) werden bewusst NICHT aufgenommen, sonst würde der
+            # Reiseplan mit lauter Kleinbelegen überladen.
+            freitext = g(b,"transportart_freitext",11) or "Sonstiges"
+            s_von = _datum_parsen(g(b,"event_datum_von",12))
+            s_bis = _datum_parsen(g(b,"event_datum_bis",13))
+            s_ort = g(b,"event_ort_von",14) or ""
+            if s_von and s_bis and s_von != s_bis:
+                ereignisse.append((s_von, "", {
+                    "icon": "🅿️" if "park" in freitext.lower() else "📌",
+                    "titel": f"{freitext}: Beginn" + (f" – {anbieter}" if anbieter else ""),
+                    "zeit": "", "sub": s_ort,
+                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else ""}))
+                ereignisse.append((s_bis, "", {
+                    "icon": "🅿️" if "park" in freitext.lower() else "📌",
+                    "titel": f"{freitext}: Ende" + (f" – {anbieter}" if anbieter else ""),
+                    "zeit": "", "sub": s_ort, "extra": ""}))
+            continue
         if typ == "Hotel":
             hname = g(b,"hotel_name",5) or anbieter or "Hotel"
             hadresse = g(b,"hotel_adresse",6) or ""
