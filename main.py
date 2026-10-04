@@ -47,7 +47,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.13-c"
+APP_VERSION  = "3.13-e"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -893,6 +893,14 @@ def beleg_detail(bid: int, request: Request):
           {typ_badge}
           {status_badge}
         </div>
+        {f'''<div class="alert" style="background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;
+             padding:12px 16px;border-radius:8px;margin-bottom:16px">
+          ✈ Als <b>Flugänderung/Umbuchung</b> erkannt – die neuen Flugdaten stehen unten im Beleg,
+          sind aber noch NICHT automatisch mit dem ursprünglichen Flug-Segment in der Reise verknüpft.
+          Bitte beim betroffenen Segment auf der Reiseseite auf
+          <a href="/beleg/{bid2}/segment/0/umbuchen" style="color:#9a3412;font-weight:700">"✏ Umgebucht"</a>
+          gehen (oder über das Dashboard, falls dort schon ein Alarm dazu läuft), um die neuen Zeiten/
+          Flugnummer zu übernehmen.</div>''' if belegart == "Flugaenderung" else ''}
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
           <div class="card">
@@ -916,6 +924,7 @@ def beleg_detail(bid: int, request: Request):
                       <option value="Rechnung"{' selected' if belegart=='Rechnung' else ''}>Rechnung</option>
                       <option value="Quittung"{' selected' if belegart=='Quittung' else ''}>Quittung</option>
                       <option value="Buchungsbestaetigung"{' selected' if belegart=='Buchungsbestaetigung' else ''}>Buchungsbestätigung</option>
+                      <option value="Flugaenderung"{' selected' if belegart=='Flugaenderung' else ''}>✈ Flugänderung/Umbuchung</option>
                       <option value="Tankbeleg"{' selected' if belegart=='Tankbeleg' else ''}>Tankbeleg (Rechnung)</option>
                       <option value="Hotel"{' selected' if belegart=='Hotel' else ''}>Hotel</option>
                       <option value="Taxi"{' selected' if belegart=='Taxi' else ''}>Taxi</option>
@@ -4657,7 +4666,8 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                 detail = f'{s["von_iata"] or s["von_ort"] or "?"}-{s["nach_iata"] or s["nach_ort"] or "?"}'
                 kommende_kandidaten.append((s["dt_ab"], s["typ"], detail, s["dt_ab_anzeige"]))
         cur2 = db.cursor()
-        cur2.execute(f"""SELECT hotel_checkin_datum, hotel_checkin_zeit, hotel_name, hotel_adresse
+        cur2.execute(f"""SELECT hotel_checkin_datum, hotel_checkin_zeit, hotel_name, hotel_adresse,
+            hotel_checkout_datum, hotel_checkout_zeit
             FROM belege WHERE reise_code={P} AND transportart='Hotel'""", (reise_code,))
         for row in cur2.fetchall():
             g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
@@ -4665,9 +4675,25 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
             ci_zeit = g("hotel_checkin_zeit",1) or "14:00"
             hotel_name = g("hotel_name",2)
             hotel_adresse = g("hotel_adresse",3)
+            d_checkout = _datum_parsen(g("hotel_checkout_datum",4))
+            co_zeit = g("hotel_checkout_zeit",5) or "11:00"
             if not d: continue
             dt_hotel = segment_zeit_zu_utc(d, ci_zeit, None)
-            if dt_hotel and dt_hotel > jetzt:
+            if dt_hotel is None: continue
+            # WICHTIG – dieselbe Korrektur wie bei "Last" (herkunft): die
+            # Check-in-Zeit ist oft nur ein genereller Standardwert. Gibt es
+            # an diesem Reisetag noch eine SPÄTERE Flug-/Bahn-Ankunft (z.B.
+            # erst Zwischenstopp, dann Weiterflug zum Hotel-Ort), kann der
+            # Reisende unmöglich vorher schon einchecken – sonst würde "Next:"
+            # fälschlich das Hotel VOR dem eigentlich nächsten Flug zeigen.
+            dt_checkout = segment_zeit_zu_utc(d_checkout, co_zeit, None) if d_checkout else None
+            fenster_ende = dt_checkout or (dt_hotel + timedelta(hours=24))
+            spaeteste_ankunft = max(
+                (s["dt_an"] for s in segmente if dt_hotel < s["dt_an"] <= fenster_ende),
+                default=None)
+            if spaeteste_ankunft:
+                dt_hotel = spaeteste_ankunft
+            if dt_hotel > jetzt:
                 kommende_kandidaten.append((dt_hotel, "Hotel", hotel_adresse or hotel_name or "–",
                                              f"{d.strftime('%d.%m.')} {ci_zeit}"))
         cur2.close()
