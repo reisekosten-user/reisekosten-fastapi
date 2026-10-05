@@ -876,6 +876,29 @@ _TOP_FELDER = [
 ]
 
 
+def _namens_tokens(name) -> set:
+    """Namen robust zerlegen: "DIESSLIN/RALF MR" == "Ralf Dießlin" (ß/ss, Umlaute,
+    Reihenfolge, Anrede egal)."""
+    import unicodedata
+    s = str(name or "").lower()
+    for a, b in (("ß", "ss"), ("ä", "ae"), ("ö", "oe"), ("ü", "ue")):
+        s = s.replace(a, b)
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+    s = re.sub(r"[^a-z\s]", " ", s)
+    stop = {"herr", "frau", "mr", "mrs", "ms", "miss", "mister", "dr", "prof", "hr", "fr", "mstr", "chd", "inf"}
+    return {t for t in s.split() if len(t) >= 2 and t not in stop}
+
+
+def _gleicher_reisender(a, b) -> bool:
+    """False NUR, wenn beide Namen bekannt sind und keinen gemeinsamen Namensteil
+    haben (= klar verschiedene Personen, z.B. zwei Kollegen mit eigenem Ticket
+    für denselben Flug). Ist ein Name unbekannt, gilt vorsichtig 'gleich'."""
+    ta, tb = _namens_tokens(a), _namens_tokens(b)
+    if not ta or not tb:
+        return True
+    return bool(ta & tb)
+
+
 def _leer(v) -> bool:
     return v is None or str(v).strip() == ""
 
@@ -1054,19 +1077,35 @@ async def beleg_verarbeiten(
                 WHERE (buchungscode={P_dup} OR rechnungsnummer={P_dup}) AND anbieter={P_dup}
                 ORDER BY id LIMIT 1""", (dup_code, dup_code, ki_result.get("anbieter")))
         vorhanden = cur_dup.fetchone()
+        # Rückfall: Die Anbieter-Schreibweise kann zwischen Original und Änderung
+        # abweichen ("Lufthansa" / "Deutsche Lufthansa AG"). Bei Flug/Bahn ist der
+        # Buchungscode innerhalb DERSELBEN Reise eindeutig genug.
+        if (not vorhanden and reise_code and ki_result.get("buchungscode")
+                and ki_result.get("transportart") in ("Flug", "Bahn")):
+            try:
+                cur_dup.execute(f"""SELECT id, ki_json FROM belege
+                    WHERE buchungscode={P_dup} AND reise_code={P_dup} AND transportart={P_dup}
+                    AND aenderung_status IS NULL ORDER BY id LIMIT 1""",
+                    (ki_result["buchungscode"], reise_code, ki_result["transportart"]))
+                vorhanden = cur_dup.fetchone()
+            except Exception:
+                db_dup.rollback(); vorhanden = None
         cur_dup.close(); db_dup.close()
         if vorhanden:
             bestehende_id = vorhanden[0] if isinstance(vorhanden, tuple) else vorhanden["id"]
             alt_ki_str = vorhanden[1] if isinstance(vorhanden, tuple) else vorhanden["ki_json"]
             try: alt_ki = json.loads(alt_ki_str or "{}")
             except Exception: alt_ki = {}
-            unterschiede = (_aenderungen_ermitteln(alt_ki, ki_result)
-                            if ki_result.get("transportart") in _AENDERUNGS_TYPEN else [])
-            if not unterschiede:
-                return {"beleg_id": bestehende_id, "duplikat": True,
-                        "zusammenfassung": f"Duplikat von Beleg #{bestehende_id} (gleicher Buchungscode "
-                                            f"'{dup_code}' + Anbieter, z.B. durch mehrfache Weiterleitung)"}
-            aenderung_info = {"zu": bestehende_id, "diffs": unterschiede}
+            # Anderer Reisender (z.B. zwei Kollegen, jeder mit eigenem Ticket auf
+            # demselben Flug/Zug) = eigener Beleg, weder Duplikat noch Änderung.
+            if _gleicher_reisender(alt_ki.get("reisender"), ki_result.get("reisender")):
+                unterschiede = (_aenderungen_ermitteln(alt_ki, ki_result)
+                                if ki_result.get("transportart") in _AENDERUNGS_TYPEN else [])
+                if not unterschiede:
+                    return {"beleg_id": bestehende_id, "duplikat": True,
+                            "zusammenfassung": f"Duplikat von Beleg #{bestehende_id} (gleicher Buchungscode "
+                                                f"'{dup_code}' + Anbieter, z.B. durch mehrfache Weiterleitung)"}
+                aenderung_info = {"zu": bestehende_id, "diffs": unterschiede}
 
     # 3. Anonymisieren
     ma_namen, ma_mails = lade_ma_daten()
@@ -1107,16 +1146,22 @@ async def beleg_verarbeiten(
             # NICHT automatisch "Duplikat" – eine Änderungsmail zeigt fast immer
             # denselben Preis. Erst Inhalt vergleichen, nur bei Gleichheit verwerfen.
             unterschiede2 = []
+            anderer_reisender = False
             if ki_result.get("transportart") in _AENDERUNGS_TYPEN:
                 try:
                     P1 = ph(); db1 = get_db(); c1 = db1.cursor()
                     c1.execute(f"SELECT ki_json FROM belege WHERE id={P1}", (dupe_id,))
                     rr = c1.fetchone(); c1.close(); db1.close()
                     alt_ki2 = json.loads((rr[0] if isinstance(rr, tuple) else rr["ki_json"]) or "{}")
-                    unterschiede2 = _aenderungen_ermitteln(alt_ki2, ki_result)
+                    if _gleicher_reisender(alt_ki2.get("reisender"), ki_result.get("reisender")):
+                        unterschiede2 = _aenderungen_ermitteln(alt_ki2, ki_result)
+                    else:
+                        anderer_reisender = True   # gleicher Preis/Tag, aber andere Person
                 except Exception:
                     unterschiede2 = []
-            if unterschiede2:
+            if anderer_reisender:
+                pass  # eigener Beleg für den anderen Reisenden
+            elif unterschiede2:
                 aenderung_info = {"zu": dupe_id, "diffs": unterschiede2}
             else:
                 return {"beleg_id": dupe_id, "duplikat": True, "status": "duplikat",

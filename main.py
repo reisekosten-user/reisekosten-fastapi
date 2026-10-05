@@ -25,7 +25,8 @@ from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         beleg_neu_anonymisieren, beleg_neu_analysieren,
                         pruefkopf_pdf_erzeugen, beleg_mit_pruefkopf,
                         OPENAI_KEY, OPENAI_MODEL, OPENAI_URL,
-                        S3_ENDPOINT, S3_BUCKET)
+                        S3_ENDPOINT, S3_BUCKET,
+                        _gleicher_reisender, _SEG_FELDER, _wert_gleich)
 from mod_mail import fetch_mails, sende_dms_mail
 from mod_vma_tage import (vma_berechnen, land_fuer_tag, trennungspauschale_berechnen,
                            fruehstueck_aus_beleg, vma_tage_generieren, land_fuer_letzten_tag)
@@ -47,7 +48,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.14-a"
+APP_VERSION  = "3.14-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2885,6 +2886,7 @@ def reiseplan_anzeigen(code: str):
           <div>{zeilen}</div>
         </div>"""
     content = f"""
+    {_ueberschneidungs_banner_fuer_reise(rcode)}
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
       <div>
         <h1 class="page-title" style="margin:0">🗺 Reiseplan {rcode}</h1>
@@ -6023,6 +6025,276 @@ async def reise_neu(request: Request):
             '<a href="/reisen/neu" class="btn btn-secondary">Zurück</a>'))
 
 # ── Reise Detail ───────────────────────────────────────────────────────────────
+# ── Überschneidende Flug-/Zug-Segmente (Dubletten über mehrere Belege) ───────
+def _seg_kurz(s: dict) -> str:
+    nr = s.get("transport_nummer") or s.get("transport_name") or "Segment"
+    zeit = f'{s.get("abreise_zeit") or "?"}–{s.get("ankunft_zeit") or "?"}'
+    von = s.get("von_ort") or s.get("von_iata") or "?"
+    nach = s.get("nach_ort") or s.get("nach_iata") or "?"
+    return f'{nr} · {von} → {nach} · {s.get("abreise_datum") or "?"} {zeit}'
+
+
+def _gleiche_strecke(sa: dict, sb: dict) -> bool:
+    def gleich(p):
+        ia, ib = (sa.get(f"{p}_iata") or "").strip().upper(), (sb.get(f"{p}_iata") or "").strip().upper()
+        if ia and ib:
+            return ia == ib
+        oa = re.sub(r"[^a-z0-9]", "", str(sa.get(f"{p}_ort") or "").lower())
+        ob = re.sub(r"[^a-z0-9]", "", str(sb.get(f"{p}_ort") or "").lower())
+        if not oa or not ob:
+            return False
+        return oa == ob or (len(oa) >= 4 and len(ob) >= 4 and (oa in ob or ob in oa))
+    return gleich("von") and gleich("nach")
+
+
+def _seg_unterschiede(sa: dict, sb: dict) -> list:
+    out = []
+    for feld, label in _SEG_FELDER:
+        va, vb = sa.get(feld), sb.get(feld)
+        la, lb = (va is None or str(va).strip() == ""), (vb is None or str(vb).strip() == "")
+        if la and lb:
+            continue
+        if la or lb:
+            out.append({"label": label, "a": "" if la else str(va), "b": "" if lb else str(vb), "art": "ergaenzt"})
+        elif not _wert_gleich(feld, va, vb):
+            out.append({"label": label, "a": str(va), "b": str(vb), "art": "abweichend"})
+    return out
+
+
+def _segment_ueberschneidungen(reise_code: str) -> list:
+    """
+    Findet Flug-/Bahn-Segmente VERSCHIEDENER Belege einer Reise, die offenbar
+    dieselbe Fahrt beschreiben oder zeitlich übereinanderliegen – typisch, wenn
+    eine geänderte Buchung als zweiter Beleg ankommt und die Erkennung auf
+    Beleg-Ebene (Buchungscode/Anbieter/Betrag) nicht gegriffen hat.
+    Bewusst NICHT geprüft: Hotels (Check-in/-out dürfen sich überschneiden).
+    Segmente verschiedener Reisender gelten nicht als Überschneidung.
+    """
+    from mod_zeit import segment_zeit_zu_utc
+    P = ph()
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"""SELECT id, transportart, anbieter, buchungscode, reisender, ki_json
+                        FROM belege WHERE reise_code={P} AND transportart IN ('Flug','Bahn')
+                        AND aenderung_status IS NULL ORDER BY id""", (reise_code,))
+        rows = cur.fetchall(); cur.close(); db.close()
+    except Exception:
+        return []
+    segs = []
+    for r in rows:
+        g = lambda k, i: r[k] if hasattr(r, 'keys') else r[i]
+        try:
+            ki = json.loads(g("ki_json", 5) or "{}")
+        except Exception:
+            continue
+        for idx, s in enumerate(ki.get("segmente") or []):
+            d = _datum_parsen(s.get("abreise_datum"))
+            if not d:
+                continue
+            d_an = _datum_parsen(s.get("ankunft_datum")) or d
+            dt_ab = segment_zeit_zu_utc(d, s.get("abreise_zeit"), s.get("abreise_utc_offset"))
+            dt_an = (segment_zeit_zu_utc(d_an, s.get("ankunft_zeit"), s.get("ankunft_utc_offset"))
+                     if s.get("ankunft_zeit") else None)
+            if dt_ab and dt_an and dt_an <= dt_ab:
+                dt_an = dt_an + timedelta(days=1)   # Nachtflug/-zug
+            segs.append({"beleg": g("id", 0), "idx": idx, "typ": g("transportart", 1),
+                         "anbieter": g("anbieter", 2) or "", "code": g("buchungscode", 3) or "",
+                         "reisender": g("reisender", 4) or ki.get("reisender") or "",
+                         "seg": s, "datum": d, "dt_ab": dt_ab, "dt_an": dt_an,
+                         "nr": re.sub(r"\s+", "", str(s.get("transport_nummer") or "")).upper()})
+    paare = []
+    for i in range(len(segs)):
+        for j in range(i + 1, len(segs)):
+            a, b = segs[i], segs[j]
+            if a["beleg"] == b["beleg"] or a["typ"] != b["typ"]:
+                continue
+            if a["seg"].get("beide_behalten") and b["seg"].get("beide_behalten"):
+                continue
+            if not _gleicher_reisender(a["reisender"], b["reisender"]):
+                continue
+            grund = None
+            if a["datum"] == b["datum"]:
+                if a["nr"] and a["nr"] == b["nr"]:
+                    grund = "gleiche Nummer am gleichen Tag"
+                elif _gleiche_strecke(a["seg"], b["seg"]):
+                    grund = "gleiche Strecke am gleichen Tag"
+            if not grund and a["dt_ab"] and a["dt_an"] and b["dt_ab"] and b["dt_an"]:
+                minuten = (min(a["dt_an"], b["dt_an"]) - max(a["dt_ab"], b["dt_ab"])).total_seconds() / 60
+                if minuten > 15:
+                    grund = "Zeiten überlappen"
+            if not grund:
+                continue
+            diffs = _seg_unterschiede(a["seg"], b["seg"])
+            paare.append({"a": a, "b": b, "grund": grund, "diffs": diffs,
+                          "identisch": not any(d["art"] == "abweichend" for d in diffs)})
+    return paare
+
+
+def _ueberschneidungs_banner_fuer_reise(rcode: str) -> str:
+    n = len(_segment_ueberschneidungen(rcode))
+    if not n:
+        return ""
+    return ('<div class="alert" style="background:#fef2f2;border:2px solid #f87171;color:#991b1b;'
+            'padding:12px 16px;border-radius:8px;margin-bottom:16px">'
+            f'⚠ <b>{n} überschneidende Flug-/Zug-Segmente</b> – vermutlich eine Buchung doppelt (z.B. nach '
+            'einer Änderung). Reiseplan, Karte und VMA zeigen bis zur Klärung beide. '
+            f'<a href="/reise/{rcode}/ueberschneidungen" style="color:#991b1b;font-weight:700">Jetzt klären →</a></div>')
+
+
+@app.get("/reise/{code}/ueberschneidungen", response_class=HTMLResponse)
+def reise_ueberschneidungen(code: str):
+    from html import escape as e
+    rcode = code.upper()
+    paare = _segment_ueberschneidungen(rcode)
+
+    def seite(x, titel):
+        kopf = (f'<a href="/beleg/{x["beleg"]}">Beleg #{x["beleg"]}</a> · {e(x["anbieter"])}'
+                + (f' · Code {e(x["code"])}' if x["code"] else "")
+                + (f' · 👤 {e(x["reisender"])}' if x["reisender"] else ""))
+        return (f'<div style="flex:1;min-width:240px;padding:8px 10px;background:#f8fafc;border-radius:8px">'
+                f'<div style="font-size:11px;color:#64748b;font-weight:700">{titel}</div>'
+                f'<div style="font-size:12px;margin:2px 0 6px 0">{kopf}</div>'
+                f'<div style="font-size:13px;font-weight:600">{e(_seg_kurz(x["seg"]))}</div></div>')
+
+    karten = ""
+    for k, p in enumerate(paare):
+        a, b = p["a"], p["b"]
+        chips = ""
+        for d in p["diffs"]:
+            if d["art"] == "abweichend":
+                chips += (f'<span style="display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;'
+                          f'background:#fef3c7;font-size:12px">{e(d["label"])}: <s>{e(d["a"])}</s> → <b>{e(d["b"])}</b></span>')
+            else:
+                chips += (f'<span style="display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;'
+                          f'background:#e2e8f0;font-size:12px">{e(d["label"])} ergänzt: {e(d["a"] or d["b"])}</span>')
+        badge = ('<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:12px">'
+                 'identisch</span>' if p["identisch"] else
+                 '<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:10px;font-size:12px">'
+                 'weicht ab</span>')
+        # Vorauswahl: identisch -> älteres Dokument (A) behalten; abweichend ->
+        # neueres Dokument (B), weil es meist die Änderung ist (änderbar!).
+        chk_a, chk_b = (" checked", "") if p["identisch"] else ("", " checked")
+        karten += (
+            '<div class="card" style="margin-bottom:12px"><div class="card-body">'
+            f'<div style="margin-bottom:8px"><b>{"✈ Flug" if a["typ"] == "Flug" else "🚆 Zug"}</b> {badge} '
+            f'<span style="font-size:12px;color:#64748b">({e(p["grund"])})</span></div>'
+            f'<div style="display:flex;gap:10px;flex-wrap:wrap">{seite(a, "A")}{seite(b, "B")}</div>'
+            f'<div style="margin-top:6px">{chips}</div>'
+            f'<div style="margin-top:8px;font-size:13px">'
+            f'<label><input type="radio" name="p{k}" value="a"{chk_a}> A behalten (B ausblenden)</label> &nbsp; '
+            f'<label><input type="radio" name="p{k}" value="b"{chk_b}> B behalten (A ausblenden)</label> &nbsp; '
+            f'<label><input type="radio" name="p{k}" value="beide"> beide behalten (z.B. zwei Reisende)</label></div>'
+            f'<input type="hidden" name="p{k}_a" value="{a["beleg"]}:{a["idx"]}">'
+            f'<input type="hidden" name="p{k}_b" value="{b["beleg"]}:{b["idx"]}">'
+            '</div></div>')
+
+    # Belege, die nach früheren Bereinigungen keine aktiven Segmente mehr haben
+    hinweis = ""
+    try:
+        P = ph(); db = get_db(); cur = db.cursor()
+        cur.execute(f"""SELECT id, anbieter, betrag_brutto, ki_json FROM belege
+                        WHERE reise_code={P} AND transportart IN ('Flug','Bahn')
+                        AND aenderung_status IS NULL ORDER BY id""", (rcode,))
+        leer = []
+        for r in cur.fetchall():
+            try:
+                kj = json.loads((r[3] if isinstance(r, tuple) else r["ki_json"]) or "{}")
+            except Exception:
+                continue
+            if kj.get("segmente_verworfen") and not kj.get("segmente"):
+                leer.append((r[0] if isinstance(r, tuple) else r["id"],
+                             (r[1] if isinstance(r, tuple) else r["anbieter"]) or "",
+                             (r[2] if isinstance(r, tuple) else r["betrag_brutto"])))
+        cur.close(); db.close()
+        if leer:
+            zeilen = ", ".join(f'<a href="/beleg/{i}">#{i}</a> ({e(a)}'
+                               + (f", {float(b):.2f} EUR" if b else "") + ")" for i, a, b in leer)
+            hinweis = ('<div class="alert" style="background:#fffbeb;border:1px solid #fcd34d;color:#92400e;'
+                       'padding:12px 16px;border-radius:8px;margin-bottom:16px">'
+                       f'ℹ Diese Belege haben nach der Bereinigung <b>keine aktiven Segmente</b> mehr: {zeilen}. '
+                       'Ihr Betrag zählt weiterhin in den Kosten – ist der Beleg eine reine Dublette, '
+                       'bitte löschen oder den Betrag prüfen.</div>')
+    except Exception:
+        pass
+
+    if paare:
+        inhalt = (f'<p style="font-size:13px;color:var(--muted)">Diese Segmente stammen aus <b>verschiedenen Belegen</b> '
+                  'und liegen übereinander. Wähle je Zeile, welche Version gilt. Das ausgeblendete Segment wird '
+                  'nicht gelöscht, sondern am Beleg als "verworfen" aufbewahrt. Hotels sind von der Prüfung ausgenommen.</p>'
+                  f'<form method="post" action="/reise/{rcode}/ueberschneidungen/anwenden">'
+                  f'<input type="hidden" name="anzahl" value="{len(paare)}">{karten}'
+                  '<button type="submit" class="btn btn-primary">✅ Auswahl übernehmen</button></form>')
+    else:
+        inhalt = '<div class="alert alert-ok">Keine überschneidenden Flug-/Zug-Segmente gefunden. ✔</div>'
+    content = (f'<h1 class="page-title">Überschneidungen – {rcode}</h1>'
+               f'<a href="/reise/{rcode}" class="btn btn-secondary" style="margin-bottom:16px">← Reise</a>'
+               f'{hinweis}{inhalt}')
+    return HTMLResponse(shell(f"Überschneidungen – {rcode}", content, "reisen"))
+
+
+@app.post("/reise/{code}/ueberschneidungen/anwenden")
+async def reise_ueberschneidungen_anwenden(code: str, request: Request):
+    rcode = code.upper()
+    form = await request.form()
+    try:
+        anzahl = int(form.get("anzahl") or 0)
+    except ValueError:
+        anzahl = 0
+    entfernen, behalten = {}, {}     # beleg_id -> {idx: grund} bzw. {idx, ...}
+    try:
+        for k in range(anzahl):
+            wahl = form.get(f"p{k}")
+            ra, rb = form.get(f"p{k}_a") or "", form.get(f"p{k}_b") or ""
+            if not wahl or ":" not in ra or ":" not in rb:
+                continue
+            ba, ia = (int(x) for x in ra.split(":", 1))
+            bb, ib = (int(x) for x in rb.split(":", 1))
+            if wahl == "a":
+                entfernen.setdefault(bb, {})[ib] = f"Überschneidung mit Beleg #{ba} (dort behalten)"
+            elif wahl == "b":
+                entfernen.setdefault(ba, {})[ia] = f"Überschneidung mit Beleg #{bb} (dort behalten)"
+            elif wahl == "beide":
+                behalten.setdefault(ba, set()).add(ia)
+                behalten.setdefault(bb, set()).add(ib)
+        P = ph(); db = get_db(); cur = db.cursor()
+        for bid in set(entfernen) | set(behalten):
+            cur.execute(f"SELECT ki_json FROM belege WHERE id={P} AND reise_code={P}", (bid, rcode))
+            r = cur.fetchone()
+            if not r:
+                continue
+            ki = json.loads((r[0] if isinstance(r, tuple) else r["ki_json"]) or "{}")
+            segs = ki.get("segmente") or []
+            for idx in behalten.get(bid, set()):
+                if idx < len(segs) and idx not in entfernen.get(bid, {}):
+                    segs[idx]["beide_behalten"] = True
+            verworfen = list(ki.get("segmente_verworfen") or [])
+            for idx in sorted(entfernen.get(bid, {}), reverse=True):
+                if idx < len(segs):
+                    s = segs.pop(idx)
+                    s["_grund"] = entfernen[bid][idx]
+                    verworfen.append(s)
+            ki["segmente"] = segs
+            if verworfen:
+                ki["segmente_verworfen"] = verworfen
+            cur.execute(f"UPDATE belege SET ki_json={P} WHERE id={P}", (json.dumps(ki, ensure_ascii=False), bid))
+            if segs:
+                _event_daten_in_db_aktualisieren(cur, bid, ki)
+            # Segment-Indizes haben sich verschoben -> alter Status passt nicht mehr
+            cur.execute(f"DELETE FROM flug_status WHERE beleg_id={P}", (bid,))
+        db.commit(); cur.close(); db.close()
+        db2 = get_db()
+        try:
+            vma_tage_generieren(rcode, db2)
+        finally:
+            db2.close()
+        return RedirectResponse(f"/reise/{rcode}/ueberschneidungen", status_code=303)
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:500]}</pre>'))
+
+
 def _aenderungs_banner_fuer_reise(rcode: str) -> str:
     """Auffälliger Hinweis oben auf der Reise, solange Änderungs-Belege (z.B. neue
     Flugzeiten, Ersatzzug) noch nicht geklärt sind – die Reise zeigt bis dahin
@@ -6523,6 +6795,7 @@ def reise_detail(code: str):
 
         content = f"""
         {_aenderungs_banner_fuer_reise(rcode)}
+        {_ueberschneidungs_banner_fuer_reise(rcode)}
         <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:20px;flex-wrap:wrap">
           <div style="flex:1">
             <div style="font-family:monospace;font-size:13px;color:var(--muted);margin-bottom:4px">{rcode}</div>
