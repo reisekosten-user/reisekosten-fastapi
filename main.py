@@ -47,7 +47,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.13-e"
+APP_VERSION  = "3.14-a"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -579,7 +579,8 @@ def beleg_detail(bid: int, request: Request):
             zahlungsart, geprueft, pruef_vermerk, geprueft_von, geprueft_am, dms_versendet_am,
             beleg_gruppe_id, ist_erechnung, erechnung_format, s3_erechnung_xml, kreditkarte_karte,
             betrag_eur_final, nebenkosten_eur, nebenkosten_beschreibung,
-            kreditkarte_auslandsentgelt_eur
+            kreditkarte_auslandsentgelt_eur,
+            aenderung_status, aenderung_zu_beleg_id, aenderung_diff_json
             FROM belege WHERE id={P}""", (bid,))
         r = cur.fetchone()
         # Reisen für Zuordnung
@@ -629,6 +630,11 @@ def beleg_detail(bid: int, request: Request):
         nebenkosten_eur=get(r,"nebenkosten_eur",58)
         nebenkosten_beschreibung=get(r,"nebenkosten_beschreibung",59)
         auslandsentgelt_eur=get(r,"kreditkarte_auslandsentgelt_eur",60)
+        aenderung_status=get(r,"aenderung_status",61)
+        aenderung_zu=get(r,"aenderung_zu_beleg_id",62)
+        aenderung_diff_json=get(r,"aenderung_diff_json",63)
+        aenderung_html = _aenderung_panel_html(bid2, aenderung_status, aenderung_zu, aenderung_diff_json)
+        aenderung_hinweis_html = _aenderung_hinweis_fuer_original_html(bid2)
         zusammenfassung = f"{typ}: {vendor} – {betrag_brutto} {waehrung}" if vendor else ""
 
         # KI-JSON parsen
@@ -893,6 +899,7 @@ def beleg_detail(bid: int, request: Request):
           {typ_badge}
           {status_badge}
         </div>
+        {aenderung_html}{aenderung_hinweis_html}
         {f'''<div class="alert" style="background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;
              padding:12px 16px;border-radius:8px;margin-bottom:16px">
           ✈ Als <b>Flugänderung/Umbuchung</b> erkannt – die neuen Flugdaten stehen unten im Beleg,
@@ -900,7 +907,7 @@ def beleg_detail(bid: int, request: Request):
           Bitte beim betroffenen Segment auf der Reiseseite auf
           <a href="/beleg/{bid2}/segment/0/umbuchen" style="color:#9a3412;font-weight:700">"✏ Umgebucht"</a>
           gehen (oder über das Dashboard, falls dort schon ein Alarm dazu läuft), um die neuen Zeiten/
-          Flugnummer zu übernehmen.</div>''' if belegart == "Flugaenderung" else ''}
+          Flugnummer zu übernehmen.</div>''' if belegart == "Flugaenderung" and not aenderung_status else ''}
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
           <div class="card">
@@ -1539,6 +1546,7 @@ async def beleg_segment_umbuchen_speichern(bid: int, idx: int, request: Request)
 
         cur.execute(f"UPDATE belege SET ki_json={P} WHERE id={P}",
                     (json.dumps(ki, ensure_ascii=False), bid))
+        _event_daten_in_db_aktualisieren(cur, bid, ki)
         # Alten (jetzt veralteten) Status für dieses Segment verwerfen
         cur.execute(f"DELETE FROM flug_status WHERE beleg_id={P} AND segment_index={P}", (bid, idx))
         db.commit(); cur.close(); db.close()
@@ -1557,6 +1565,195 @@ async def beleg_segment_umbuchen_speichern(bid: int, idx: int, request: Request)
         return HTMLResponse(shell("Fehler",
             f'<div class="alert alert-err">{e}</div>'
             f'<pre style="font-size:11px">{traceback.format_exc()[:500]}</pre>'))
+
+
+def _event_daten_in_db_aktualisieren(cur, bid: int, ki: dict) -> None:
+    """Setzt event_datum_von/bis eines Flug-/Bahn-/Mietwagen-Belegs aus seinen
+    Segmenten neu. Wichtig, weil z.B. die VMA-Länderermittlung Flüge über diese
+    beiden Spalten findet – nach einer Umbuchung auf ein anderes Datum würde der
+    Beleg sonst am neuen Tag nicht mehr gefunden."""
+    daten = []
+    for s in ki.get("segmente") or []:
+        for k in ("abreise_datum", "ankunft_datum"):
+            d = _datum_parsen(s.get(k))
+            if d: daten.append(d)
+    if not daten:
+        return
+    P = ph()
+    cur.execute(f"""UPDATE belege SET event_datum_von={P}, event_datum_bis={P}
+                    WHERE id={P} AND transportart IN ('Flug','Bahn','Mietwagen')""",
+                (min(daten).isoformat(), max(daten).isoformat(), bid))
+
+
+def _aenderung_panel_html(bid: int, status, zu_id, diff_json) -> str:
+    """Vergleichsansicht für einen Änderungs-Beleg: je Unterschied alt/neu/eigener Wert."""
+    from html import escape as e
+    if not status:
+        return ""
+    if status != "offen":
+        txt = "übernommen" if status == "uebernommen" else "verworfen"
+        return ('<div class="alert" style="background:#f1f5f9;border:1px solid #cbd5e1;color:#475569;'
+                'padding:12px 16px;border-radius:8px;margin-bottom:16px">'
+                f'Änderungs-Beleg zu <a href="/beleg/{zu_id}">Beleg #{zu_id}</a> – Änderungen wurden {txt}.</div>')
+    try:
+        diffs = json.loads(diff_json or "[]")
+    except Exception:
+        diffs = []
+    zeilen = ""
+    for i, d in enumerate(diffs):
+        typ = d.get("typ")
+        neu_chk = "" if typ == "entfaellt" else " checked"
+        alt_chk = " checked" if typ == "entfaellt" else ""
+        eigen = ""
+        if typ == "aenderung":
+            eigen = ('<br><input type="text" name="eigen_%d" placeholder="oder eigener Wert" '
+                     'style="width:140px;font-size:12px;margin-top:4px">' % i)
+        zeilen += (
+            '<tr style="border-top:1px solid #fed7aa">'
+            f'<td style="padding:6px 8px;font-size:13px">{e(str(d.get("label", "")))}</td>'
+            f'<td style="padding:6px 8px;background:#fef2f2;font-size:13px">{e(str(d.get("alt") or "–"))}</td>'
+            f'<td style="padding:6px 8px;background:#f0fdf4;font-size:13px;font-weight:600">{e(str(d.get("neu") or "–"))}</td>'
+            '<td style="padding:6px 8px;font-size:12px;white-space:nowrap">'
+            f'<label><input type="radio" name="wahl_{i}" value="neu"{neu_chk}> neu</label> &nbsp;'
+            f'<label><input type="radio" name="wahl_{i}" value="alt"{alt_chk}> alt</label>{eigen}</td></tr>')
+    if not zeilen:
+        zeilen = '<tr><td colspan="4" style="padding:8px">Keine Unterschiede gespeichert.</td></tr>'
+    return (
+        '<div class="card" style="margin-bottom:16px;border:2px solid #fb923c">'
+        '<div class="card-header"><span class="card-title">⚠ Änderung zu '
+        f'<a href="/beleg/{zu_id}">Beleg #{zu_id}</a> – bitte prüfen</span></div>'
+        '<div class="card-body">'
+        '<p style="font-size:13px;color:#9a3412;margin:0 0 10px 0">Dieses Dokument weicht vom bereits erfassten Beleg ab. '
+        'Es zählt in Reiseplan, Karte und Kosten <b>nicht</b>, bis entschieden ist, welche Werte stimmen.</p>'
+        f'<form method="post" action="/beleg/{bid}/aenderung/anwenden">'
+        '<div class="table-wrap"><table style="width:100%;border-collapse:collapse"><thead><tr style="text-align:left;font-size:12px">'
+        '<th style="padding:6px 8px">Was</th><th style="padding:6px 8px">Bisher</th>'
+        '<th style="padding:6px 8px">Neu im Dokument</th><th style="padding:6px 8px">Wert nehmen</th></tr></thead>'
+        f'<tbody>{zeilen}</tbody></table></div>'
+        '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+        '<button type="submit" class="btn btn-primary">✅ Auswahl übernehmen</button></div></form>'
+        f'<form method="post" action="/beleg/{bid}/aenderung/verwerfen" style="margin-top:8px" '
+        'onsubmit="return confirm(\'Alle Änderungen verwerfen und den bisherigen Beleg unverändert lassen?\')">'
+        '<button type="submit" class="btn btn-secondary">✖ Alles verwerfen (Bisheriges bleibt)</button></form>'
+        '</div></div>')
+
+
+def _aenderung_hinweis_fuer_original_html(bid: int) -> str:
+    """Hinweis am ORIGINAL-Beleg, wenn zu ihm noch ungeklärte Änderungen vorliegen."""
+    try:
+        P = ph(); db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT id FROM belege WHERE aenderung_zu_beleg_id={P} AND aenderung_status='offen'", (bid,))
+        ids = [(r[0] if isinstance(r, tuple) else r["id"]) for r in cur.fetchall()]
+        cur.close(); db.close()
+    except Exception:
+        return ""
+    if not ids:
+        return ""
+    links = ", ".join(f'<a href="/beleg/{i}" style="color:#9a3412;font-weight:700">#{i}</a>' for i in ids)
+    return ('<div class="alert" style="background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;'
+            'padding:12px 16px;border-radius:8px;margin-bottom:16px">'
+            f'⚠ Zu diesem Beleg liegen <b>ungeklärte Änderungen</b> vor (Beleg {links}) – '
+            'bitte dort die richtigen Werte auswählen.</div>')
+
+
+@app.post("/beleg/{bid}/aenderung/anwenden")
+async def beleg_aenderung_anwenden(bid: int, request: Request):
+    """Übernimmt die gewählten Werte eines Änderungs-Belegs in den Original-Beleg."""
+    form = await request.form()
+    try:
+        P = ph(); db = get_db(); cur = db.cursor()
+        g = lambda row, k, i: row[k] if hasattr(row, 'keys') else row[i]
+        cur.execute(f"SELECT aenderung_zu_beleg_id, aenderung_diff_json, aenderung_status FROM belege WHERE id={P}", (bid,))
+        r = cur.fetchone()
+        if not r or g(r, "aenderung_status", 2) != "offen":
+            cur.close(); db.close()
+            return RedirectResponse(f"/beleg/{bid}", status_code=303)
+        orig_id = g(r, "aenderung_zu_beleg_id", 0)
+        diffs = json.loads(g(r, "aenderung_diff_json", 1) or "[]")
+        cur.execute(f"SELECT reise_code, ki_json FROM belege WHERE id={P}", (orig_id,))
+        o = cur.fetchone()
+        if not o:
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Original-Beleg nicht gefunden.</div>'))
+        reise_code = g(o, "reise_code", 0)
+        ki = json.loads(g(o, "ki_json", 1) or "{}")
+        segs = ki.get("segmente") or []
+        # Geografie-/Zeitzonen-Zwischenwerte gelten nur für die alte Strecke
+        GEO = ("abreise_utc_offset", "ankunft_utc_offset", "von_iata", "nach_iata",
+               "von_lat", "von_lon", "nach_lat", "nach_lon")
+        spalten, entfernen = {}, []
+        for i, d in enumerate(diffs):
+            typ, pfad = d.get("typ"), d.get("pfad", "")
+            wahl = form.get(f"wahl_{i}") or ("alt" if typ == "entfaellt" else "neu")
+            eigen = (form.get(f"eigen_{i}") or "").strip()
+            if typ == "aenderung":
+                if eigen: wert = eigen
+                elif wahl == "neu": wert = d.get("neu")
+                else: continue
+                if pfad.startswith("seg:"):
+                    _, oi, feld = pfad.split(":", 2); oi = int(oi)
+                    if oi < len(segs):
+                        segs[oi][feld] = wert
+                        if feld in ("von_ort", "nach_ort"):
+                            for gf in GEO: segs[oi][gf] = None
+                elif pfad.startswith("feld:"):
+                    feld = pfad.split(":", 1)[1]
+                    ki[feld] = wert; spalten[feld] = wert
+            elif typ == "neu_segment" and wahl == "neu":
+                segs.append(d.get("neu_segment") or {})
+            elif typ == "entfaellt" and wahl == "neu":
+                entfernen.append(int(pfad.split(":", 1)[1]))
+        for oi in sorted(set(entfernen), reverse=True):
+            if oi < len(segs): segs.pop(oi)
+        if segs or "segmente" in ki:
+            ki["segmente"] = segs
+
+        set_teile, werte = [f"ki_json={P}"], [json.dumps(ki, ensure_ascii=False)]
+        TEXT_SPALTEN = ("hotel_name", "hotel_adresse", "hotel_checkin_zeit", "hotel_checkout_zeit", "waehrung")
+        DATUM_SPALTEN = ("event_datum_von", "event_datum_bis", "hotel_checkin_datum", "hotel_checkout_datum")
+        for feld, wert in spalten.items():
+            if feld in TEXT_SPALTEN:
+                set_teile.append(f"{feld}={P}"); werte.append(wert)
+            elif feld == "betrag_brutto":
+                try:
+                    werte.append(float(str(wert).replace(",", "."))); set_teile.append(f"{feld}={P}")
+                except ValueError:
+                    pass
+            elif feld in DATUM_SPALTEN:
+                dd = _datum_parsen(wert)
+                if dd:
+                    set_teile.append(f"{feld}={P}"); werte.append(dd.isoformat())
+        cur.execute("UPDATE belege SET " + ", ".join(set_teile) + f" WHERE id={P}", tuple(werte) + (orig_id,))
+        if segs:
+            _event_daten_in_db_aktualisieren(cur, orig_id, ki)
+        # Alter Flug-/Bahnstatus gilt für die alten Zeiten nicht mehr
+        cur.execute(f"DELETE FROM flug_status WHERE beleg_id={P}", (orig_id,))
+        cur.execute(f"UPDATE belege SET aenderung_status='uebernommen' WHERE id={P}", (bid,))
+        db.commit(); cur.close(); db.close()
+
+        if reise_code:
+            db2 = get_db()
+            try:
+                vma_tage_generieren(reise_code, db2)
+            finally:
+                db2.close()
+        return RedirectResponse(f"/beleg/{orig_id}", status_code=303)
+    except Exception as e:
+        import traceback
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err">{e}</div>'
+            f'<pre style="font-size:11px">{traceback.format_exc()[:500]}</pre>'))
+
+
+@app.post("/beleg/{bid}/aenderung/verwerfen")
+def beleg_aenderung_verwerfen(bid: int):
+    try:
+        P = ph(); db = get_db(); cur = db.cursor()
+        cur.execute(f"UPDATE belege SET aenderung_status='verworfen' WHERE id={P} AND aenderung_status='offen'", (bid,))
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
 
 
 @app.get("/beleg/{bid}/loeschen")
@@ -4978,45 +5175,22 @@ def dashboard_maps(debug: str = ""):
             return pts;
         }}
 
-        // Marker, die (fast) auf demselben Punkt liegen, würden sich sonst
-        // gegenseitig komplett verdecken – hier in einem kleinen Kreis leicht
-        // auseinanderziehen, damit jeder Reisende sichtbar bleibt.
-        function markerVersetzen(punkte) {{
-            const GRUPPEN_RADIUS = 0.05; // Grad (~5km) – gilt als "gleicher Ort"
-            const gruppen = [];
-            punkte.forEach(p => {{
-                let g = gruppen.find(g => Math.abs(g[0].lat - p.lat) < GRUPPEN_RADIUS
-                                        && Math.abs(g[0].lon - p.lon) < GRUPPEN_RADIUS);
-                if (g) g.push(p); else gruppen.push([p]);
-            }});
-            gruppen.forEach(g => {{
-                if (g.length <= 1) {{
-                    // Einzelmarker: unverändert, IMMER lat_v/lon_v setzen –
-                    // unabhängig davon, ob andere Gruppen mehrere Marker haben.
-                    g.forEach(p => {{ p.lat_v = p.lat; p.lon_v = p.lon; }});
-                    return;
-                }}
-                const versatz = 0.06; // Grad Abstand im Kreis
-                g.forEach((p, i) => {{
-                    const winkel = (2 * Math.PI * i) / g.length;
-                    p.lat_v = p.lat + versatz * Math.cos(winkel);
-                    p.lon_v = p.lon + versatz * Math.sin(winkel);
-                }});
-            }});
-        }}
-        markerVersetzen(marker);
+        // --- Personen-Marker (am Ort UND unterwegs) einheitlich verwalten ---
+        // Überlappende Pins werden in BILDSCHIRM-PIXELN auseinandergezogen
+        // (nicht in Grad) und bei jeder Zoomstufe neu berechnet. Ein fester
+        // Versatz in Grad ist bei weit herausgezoomter Karte unsichtbar klein
+        // (Pins verdecken sich dann trotzdem), bei starkem Zoom dagegen
+        // unnötig groß. Gilt auch für Kollegen auf demselben Flug/Zug, die
+        // an exakt derselben Stelle der Strecke unterwegs sind.
+        const personen = [];
 
         marker.forEach(m => {{
-            const mk = L.marker([m.lat_v, m.lon_v], {{icon: personIcon(m.kuerzel)}}).addTo(map);
+            const mk = L.marker([m.lat, m.lon], {{icon: personIcon(m.kuerzel)}}).addTo(map);
             let popup = '<b>' + m.code + '</b> – ' + m.titel + '<br>👤 ' + m.ma + '<br>📍 Aktuell in: ' + m.land;
             (m.zusatz || []).forEach(z => {{ popup += '<br><span style="font-size:12px;color:#64748b">' + z + '</span>'; }});
             mk.bindPopup(popup);
-            if (m.lat_v !== m.lat || m.lon_v !== m.lon) {{
-                L.polyline([[m.lat, m.lon],[m.lat_v, m.lon_v]], {{
-                    color: '#94a3b8', weight: 1, dashArray: '2, 3', opacity: 0.6
-                }}).addTo(map);
-            }}
-            bounds.push([m.lat_v, m.lon_v]);
+            personen.push({{lat: m.lat, lon: m.lon, mk: mk}});
+            bounds.push([m.lat, m.lon]);
         }});
 
         strecken.forEach(s => {{
@@ -5031,17 +5205,48 @@ def dashboard_maps(debug: str = ""):
             // (nicht linear – das würde bei langen Strecken sichtbar von der
             // gezeichneten gekrümmten Linie abweichen)
             const [lat, lon] = greatCirclePoint(s.von[0], s.von[1], s.nach[0], s.nach[1], s.fortschritt);
-            L.marker([lat, lon], {{icon: personIcon(s.kuerzel)}}).addTo(map).bindPopup(
+            const mk = L.marker([lat, lon], {{icon: personIcon(s.kuerzel)}}).addTo(map).bindPopup(
                 '<b>' + s.code + '</b> – ' + s.titel + '<br>' +
                 '👤 ' + s.ma + '<br>' + s.icon + ' ' + s.label + ' (unterwegs, ' +
                 Math.round(s.fortschritt*100) + '%)<br>' +
                 '<span style="font-size:12px;color:#64748b">Ab: ' + s.ab_zeit + '<br>An: ' + s.an_zeit +
                 (s.next_txt ? '<br>' + s.next_txt : '') + '</span>'
             );
+            personen.push({{lat: lat, lon: lon, mk: mk}});
             bounds.push(s.von, s.nach);
         }});
 
+        const versatzLinien = L.layerGroup().addTo(map);
+        function personenVerteilen() {{
+            versatzLinien.clearLayers();
+            const SCHWELLE = 40;  // Pixel: näher als das gilt als "überlappend"
+            const gruppen = [];
+            personen.forEach(p => {{
+                p.pt = map.latLngToContainerPoint([p.lat, p.lon]);
+                const g = gruppen.find(grp => grp.some(q => Math.hypot(q.pt.x - p.pt.x, q.pt.y - p.pt.y) < SCHWELLE));
+                if (g) g.push(p); else gruppen.push([p]);
+            }});
+            gruppen.forEach(g => {{
+                if (g.length === 1) {{ g[0].mk.setLatLng([g[0].lat, g[0].lon]); return; }}
+                const cx = g.reduce((a, p) => a + p.pt.x, 0) / g.length;
+                const cy = g.reduce((a, p) => a + p.pt.y, 0) / g.length;
+                // Radius so wählen, dass benachbarte Pins (36px breit) sich
+                // nicht berühren – wächst automatisch mit der Gruppengröße.
+                const R = Math.max(24, 22 / Math.sin(Math.PI / g.length));
+                g.forEach((p, i) => {{
+                    const w = (2 * Math.PI * i) / g.length;
+                    const ll = map.containerPointToLatLng([cx + R * Math.cos(w), cy + R * Math.sin(w)]);
+                    p.mk.setLatLng(ll);
+                    L.polyline([[p.lat, p.lon], [ll.lat, ll.lng]], {{
+                        color: '#94a3b8', weight: 1, dashArray: '2, 3', opacity: 0.7
+                    }}).addTo(versatzLinien);
+                }});
+            }});
+        }}
+        map.on('zoomend', personenVerteilen);
+
         if (bounds.length > 0) {{ map.fitBounds(bounds, {{padding: [40,40], maxZoom: 6}}); }}
+        if (personen.length > 0) {{ personenVerteilen(); }}
         </script>
         """
         return HTMLResponse(shell("Karte – Reisende", content, "start"))
@@ -5818,6 +6023,30 @@ async def reise_neu(request: Request):
             '<a href="/reisen/neu" class="btn btn-secondary">Zurück</a>'))
 
 # ── Reise Detail ───────────────────────────────────────────────────────────────
+def _aenderungs_banner_fuer_reise(rcode: str) -> str:
+    """Auffälliger Hinweis oben auf der Reise, solange Änderungs-Belege (z.B. neue
+    Flugzeiten, Ersatzzug) noch nicht geklärt sind – die Reise zeigt bis dahin
+    bewusst die bisherigen Werte."""
+    try:
+        P = ph(); db = get_db(); cur = db.cursor()
+        cur.execute(f"""SELECT id, aenderung_zu_beleg_id FROM belege
+                        WHERE reise_code={P} AND aenderung_status='offen' ORDER BY id""", (rcode,))
+        rows = [((r[0], r[1]) if isinstance(r, tuple) else (r["id"], r["aenderung_zu_beleg_id"]))
+                for r in cur.fetchall()]
+        cur.close(); db.close()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    links = " · ".join(f'<a href="/beleg/{i}" style="color:#9a3412;font-weight:700">Beleg #{i}</a> (zu #{z})'
+                       for i, z in rows)
+    n = len(rows)
+    return ('<div class="alert" style="background:#fff7ed;border:2px solid #fb923c;color:#9a3412;'
+            'padding:12px 16px;border-radius:8px;margin-bottom:16px">'
+            f'⚠ <b>{n} Änderung{"en" if n != 1 else ""} warten auf Klärung</b> – die Reise zeigt bis dahin die '
+            f'bisherigen Daten. Bitte Unterschiede prüfen und die richtigen Werte wählen: {links}</div>')
+
+
 @app.get("/reise/{code}", response_class=HTMLResponse)
 def reise_detail(code: str):
     try:
@@ -6293,6 +6522,7 @@ def reise_detail(code: str):
                 </div>"""
 
         content = f"""
+        {_aenderungs_banner_fuer_reise(rcode)}
         <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:20px;flex-wrap:wrap">
           <div style="flex:1">
             <div style="font-family:monospace;font-size:13px;color:var(--muted);margin-bottom:4px">{rcode}</div>

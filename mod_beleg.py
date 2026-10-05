@@ -9,6 +9,56 @@ from datetime import date
 OPENAI_KEY   = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 OPENAI_URL   = "https://api.openai.com/v1/chat/completions"
+# Optional: Denkaufwand neuerer Modelle (GPT-5/6-Familie), z.B. "low" für
+# schnellere/günstigere Belegauslesung. Leer lassen = Modell-Standard.
+OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "")
+
+
+def _modell_ist_klassisch() -> bool:
+    """GPT-4/3.5-Familie nutzt max_tokens + temperature; neuere Modelle
+    (GPT-5/6, o-Serie) verlangen stattdessen max_completion_tokens und lehnen
+    ein abweichendes temperature mit HTTP 400 ab."""
+    m = (OPENAI_MODEL or "").lower()
+    return m.startswith("gpt-4") or m.startswith("gpt-3")
+
+
+def _modell_params(max_tokens: int, klassisch: bool) -> dict:
+    if klassisch:
+        return {"max_tokens": max_tokens, "temperature": 0.0}
+    # Bei Denk-Modellen zählen auch die internen Denkschritte zum Limit –
+    # deshalb großzügiger bemessen, sonst bleibt für die Antwort nichts übrig.
+    p = {"max_completion_tokens": max_tokens * 4}
+    if OPENAI_REASONING_EFFORT:
+        p["reasoning_effort"] = OPENAI_REASONING_EFFORT
+    return p
+
+
+async def _openai_chat(client, messages: list, max_tokens: int):
+    """
+    Einheitlicher OpenAI-Aufruf, unabhängig vom eingestellten Modell
+    (OPENAI_MODEL). Passt die Parameter automatisch an die Modellfamilie an
+    und versucht es EINMAL mit der jeweils anderen Parameter-Variante, falls
+    das Modell die gewählte mit "unsupported/max_tokens/temperature" ablehnt –
+    so überlebt die App einen Modellwechsel (z.B. wegen Abschaltung der
+    GPT-4-Familie), ohne dass jeder Beleg-Upload mit HTTP 400 scheitert.
+    """
+    klassisch = _modell_ist_klassisch()
+    resp = None
+    for versuch in range(2):
+        resp = await client.post(
+            OPENAI_URL,
+            headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
+            json={"model": OPENAI_MODEL, "messages": messages,
+                  **_modell_params(max_tokens, klassisch)})
+        if resp.status_code != 400 or versuch == 1:
+            return resp
+        txt = resp.text.lower()
+        if any(k in txt for k in ("max_tokens", "max_completion_tokens", "temperature",
+                                   "unsupported", "reasoning_effort")):
+            klassisch = not klassisch  # andere Parameter-Variante probieren
+        else:
+            return resp
+    return resp
 S3_ENDPOINT  = os.getenv("S3_ENDPOINT", "")
 S3_BUCKET    = os.getenv("S3_BUCKET", "")
 S3_ACCESS_KEY= os.getenv("S3_ACCESS_KEY", "")
@@ -268,7 +318,7 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
 
 """ + """{
   "belegdatum": "DD.MM.YYYY",
-  "belegart": "Rechnung|Quittung|Sonstiges",
+  "belegart": "Rechnung|Quittung|Flugaenderung|Sonstiges",
   "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Sonstiges",
   "transportart_freitext": "nur wenn Sonstiges",
   "anbieter": "Name des Anbieters",
@@ -299,20 +349,13 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
 }"""
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                OPENAI_URL,
-                headers={"Authorization": f"Bearer {OPENAI_KEY}",
-                         "Content-Type": "application/json"},
-                json={"model": OPENAI_MODEL,
-                      "messages": [{"role": "user", "content": [
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await _openai_chat(client, [{"role": "user", "content": [
                           {"type": "text", "text": prompt},
                           {"type": "image_url", "image_url": {
                               "url": f"data:{content_type};base64,{b64}",
                               "detail": "high"}}
-                      ]}],
-                      "max_tokens": 3000,
-                      "temperature": 0.0})
+                      ]}], 3000)
 
             if resp.status_code != 200:
                 return {"fehler": f"HTTP {resp.status_code}: {resp.text[:200]}",
@@ -388,6 +431,25 @@ detaillierten Tabelle abweicht. "von_ort"/"nach_ort" sind die jeweiligen
 Halt-Namen (z.B. "Würzburg Hbf", "Fulda"), "abreise_zeit" die "ab"-Zeit der
 ersten Zeile, "ankunft_zeit" die "an"-Zeit der zweiten Zeile.
 
+WICHTIG bei Flugänderungs-/Umbuchungsdokumenten: Airlines verschicken bei
+Flugplanänderungen, Umbuchungen oder Ersatzflügen oft ein SEPARATES Dokument
+zur ursprünglichen Buchung – erkennbar an Formulierungen wie "Ihre Flugzeiten
+haben sich geändert", "Schedule Change", "Your flight has been rescheduled",
+"Flugplanänderung", "Ersatzverbindung", "Umbuchungsbestätigung", "Involuntary
+Rebooking" oder ähnlich, OFT OHNE dass das Wort "Rechnung" oder "Buchung"
+überhaupt vorkommt. Erkennst du so ein Dokument:
+- "belegart" = "Flugaenderung" setzen (NICHT "Rechnung" oder "Sonstiges").
+- "segmente" trotzdem ganz normal mit den NEUEN (geänderten) Flugdaten füllen
+  – das ist oft die einzige Stelle, an der die aktuell gültigen Zeiten/
+  Flugnummern stehen, nicht nur ein Vermerk ohne Nutzdaten.
+- Steht auf dem Dokument sowohl die ALTE als auch die NEUE Verbindung
+  (manche Airlines zeigen beides zum Vergleich), nur die NEUE als "segmente"
+  übernehmen, die alte NICHT – sonst entstehen doppelte/falsche Einträge.
+- "notiz"-artige Zusatzinfos (sofern ein solches Feld im Schema vorhanden
+  ist) nutzen, um kurz zu vermerken "Flugänderung zu Beleg-Buchungscode X",
+  falls der ursprüngliche Buchungscode auf dem Dokument erkennbar ist – hilft
+  später beim Zuordnen zur Originalbuchung.
+
 WICHTIG bei "von_iata"/"nach_iata": Fülle diese Felder IMMER, auch wenn auf dem
 Beleg nur der Stadt-/Flughafenname steht (z.B. "Mexico City", nicht "MEX") –
 leite den 3-stelligen IATA-Code dann aus deinem eigenen Wissen über den
@@ -459,7 +521,7 @@ Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfe
 JSON-Format:
 """ + """{
   "belegdatum": "DD.MM.YYYY",
-  "belegart": "Rechnung|Buchungsbestaetigung|Quittung|Sonstiges",
+  "belegart": "Rechnung|Buchungsbestaetigung|Quittung|Flugaenderung|Sonstiges",
   "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Sonstiges",
   "transportart_freitext": "nur wenn Sonstiges",
   "anbieter": "Name des Anbieters",
@@ -529,16 +591,8 @@ JSON-Format:
 """ + rohtext[:30000]
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                OPENAI_URL,
-                headers={"Authorization": f"Bearer {OPENAI_KEY}",
-                         "Content-Type": "application/json"},
-                json={"model": OPENAI_MODEL,
-                      "messages": [{"role": "user",
-                                    "content": prompt}],
-                      "max_tokens": 4000,
-                      "temperature": 0.0})
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await _openai_chat(client, [{"role": "user", "content": prompt}], 4000)
 
             if resp.status_code != 200:
                 return {"fehler": f"HTTP {resp.status_code}: {resp.text[:300]}",
@@ -606,6 +660,18 @@ async def beleg_neu_analysieren(bid: int) -> dict:
     """
     P = ph()
     db = get_db(); cur = db.cursor()
+    # Änderungs-Belege dürfen nicht neu analysiert werden: das Ergebnis würde
+    # deren (bewusst neutralisierte) Segmente/Beträge wieder in die Reise
+    # einspeisen und alles doppelt zählen.
+    try:
+        cur.execute(f"SELECT aenderung_status FROM belege WHERE id={P}", (bid,))
+        ar = cur.fetchone()
+        if ar and (ar[0] if isinstance(ar, tuple) else ar["aenderung_status"]):
+            cur.close(); db.close()
+            return {"fehler": "Dies ist ein Änderungs-Beleg – Neu-Analyse nicht möglich. "
+                              "Bitte die Änderungen übernehmen oder verwerfen."}
+    except Exception:
+        db.rollback()
     cur.execute(f"SELECT rohtext, s3_original, dateiname FROM belege WHERE id={P}", (bid,))
     row = cur.fetchone()
     if not row:
@@ -791,6 +857,117 @@ def erechnung_erkennen(original_pdf: bytes) -> dict:
     return {"ist_erechnung": False, "format": None, "xml_bytes": None, "xml_name": None}
 
 
+# ── Änderungs-Erkennung: neues Dokument vs. bereits vorhandener Beleg ─────────
+_AENDERUNGS_TYPEN = ("Flug", "Bahn", "Mietwagen", "Hotel")
+_SEG_FELDER = [
+    ("transport_nummer", "Flug-/Zugnummer"), ("transport_name", "Gesellschaft"),
+    ("von_ort", "Von"), ("nach_ort", "Nach"),
+    ("abreise_datum", "Abreisedatum"), ("abreise_zeit", "Abreisezeit"),
+    ("ankunft_datum", "Ankunftsdatum"), ("ankunft_zeit", "Ankunftszeit"),
+    ("abreise_terminal", "Abreise-Terminal/Gleis"), ("ankunft_terminal", "Ankunfts-Terminal/Gleis"),
+    ("klasse", "Klasse"),
+]
+_TOP_FELDER = [
+    ("betrag_brutto", "Betrag brutto"), ("waehrung", "Währung"),
+    ("event_datum_von", "Datum von"), ("event_datum_bis", "Datum bis"),
+    ("hotel_name", "Hotel"), ("hotel_adresse", "Hotel-Adresse"),
+    ("hotel_checkin_datum", "Hotel Check-in (Datum)"), ("hotel_checkin_zeit", "Hotel Check-in (Zeit)"),
+    ("hotel_checkout_datum", "Hotel Check-out (Datum)"), ("hotel_checkout_zeit", "Hotel Check-out (Zeit)"),
+]
+
+
+def _leer(v) -> bool:
+    return v is None or str(v).strip() == ""
+
+
+def _wert_gleich(feld: str, a, b) -> bool:
+    """Tolerant vergleichen: Groß/Kleinschreibung, Leerzeichen, 9:05 = 09:05,
+    Beträge auf den Cent genau."""
+    if "betrag" in feld:
+        try: return abs(float(a) - float(b)) < 0.005
+        except (TypeError, ValueError): pass
+    sa, sb = re.sub(r"\s+", " ", str(a)).strip().lower(), re.sub(r"\s+", " ", str(b)).strip().lower()
+    if "zeit" in feld:
+        ma, mb = re.match(r"^(\d{1,2}):(\d{2})", sa), re.match(r"^(\d{1,2}):(\d{2})", sb)
+        if ma and mb:
+            return (int(ma.group(1)), ma.group(2)) == (int(mb.group(1)), mb.group(2))
+    return sa == sb
+
+
+def _seg_titel(s: dict) -> str:
+    return (f'{s.get("transport_nummer") or s.get("transport_name") or "Segment"} '
+            f'{s.get("von_ort") or "?"}→{s.get("nach_ort") or "?"}').strip()
+
+
+def _aenderungen_ermitteln(alt: dict, neu: dict) -> list:
+    """
+    Vergleicht den bereits gespeicherten Beleg (alt) mit dem neu eingegangenen
+    Dokument (neu) und liefert eine Liste der Unterschiede. Regeln:
+    - Nur Werte, die im NEUEN Dokument tatsächlich stehen, zählen (fehlt etwas
+      im neuen Dokument, ist das keine Änderung – es wird nichts überschrieben).
+    - Fehlt ein Wert im alten Beleg, im neuen steht er: Ergänzung.
+    - Segmente werden zuerst über die Flug-/Zugnummer zugeordnet, dann über
+      die Strecke, dann (bei gleich vielen übrigen) über die Reihenfolge –
+      so wird auch eine GEÄNDERTE Flugnummer als Änderung erkannt statt als
+      "neues + wegfallendes Segment".
+    """
+    diffs = []
+    for feld, label in _TOP_FELDER:
+        a, b = alt.get(feld), neu.get(feld)
+        if _leer(b) or (not _leer(a) and _wert_gleich(feld, a, b)):
+            continue
+        diffs.append({"typ": "aenderung", "pfad": f"feld:{feld}", "label": label,
+                      "alt": "" if _leer(a) else str(a), "neu": str(b)})
+
+    alt_s, neu_s = alt.get("segmente") or [], neu.get("segmente") or []
+    key = lambda s: re.sub(r"\s+", "", str(s.get("transport_nummer") or "")).upper()
+    used, paare = set(), []
+    for ni, ns in enumerate(neu_s):                       # 1) gleiche Nummer
+        kand = [oi for oi, os_ in enumerate(alt_s) if oi not in used and key(ns) and key(os_) == key(ns)]
+        if kand:
+            best = next((oi for oi in kand if _wert_gleich("datum", alt_s[oi].get("abreise_datum"),
+                                                            ns.get("abreise_datum"))), kand[0])
+            used.add(best); paare.append([ni, best])
+        else:
+            paare.append([ni, None])
+    for p in paare:                                        # 2) gleiche Strecke
+        if p[1] is None:
+            ns = neu_s[p[0]]
+            kand = [oi for oi, os_ in enumerate(alt_s) if oi not in used
+                    and _wert_gleich("x", os_.get("von_ort") or "", ns.get("von_ort") or "")
+                    and _wert_gleich("x", os_.get("nach_ort") or "", ns.get("nach_ort") or "")]
+            if kand: used.add(kand[0]); p[1] = kand[0]
+    offen_n = [p for p in paare if p[1] is None]
+    offen_a = [oi for oi in range(len(alt_s)) if oi not in used]
+    if offen_n and len(offen_n) == len(offen_a):           # 3) gleiche Reihenfolge
+        for p, oi in zip(offen_n, offen_a):
+            p[1] = oi; used.add(oi)
+
+    for ni, oi in paare:
+        ns = neu_s[ni]
+        if oi is None:
+            diffs.append({"typ": "neu_segment", "pfad": "neu_segment", "neu_segment": ns,
+                          "label": f"Neues Segment: {_seg_titel(ns)} am {ns.get('abreise_datum') or '?'} {ns.get('abreise_zeit') or ''}".strip(),
+                          "alt": "", "neu": "hinzufügen"})
+            continue
+        os_ = alt_s[oi]
+        for feld, label in _SEG_FELDER:
+            a, b = os_.get(feld), ns.get(feld)
+            if _leer(b) or (not _leer(a) and _wert_gleich(feld, a, b)):
+                continue
+            diffs.append({"typ": "aenderung", "pfad": f"seg:{oi}:{feld}",
+                          "label": f"Segment {oi + 1} ({_seg_titel(os_)}) · {label}",
+                          "alt": "" if _leer(a) else str(a), "neu": str(b)})
+    if neu_s and len(neu_s) >= len(alt_s):                 # Dokument wirkt vollständig
+        for oi in range(len(alt_s)):
+            if oi not in used:
+                diffs.append({"typ": "entfaellt", "pfad": f"entfaellt:{oi}",
+                              "label": f"Segment {oi + 1} fehlt im neuen Dokument: {_seg_titel(alt_s[oi])}",
+                              "alt": "bleibt bestehen", "neu": "entfernen"})
+    return diffs
+
+
+
 async def beleg_verarbeiten(
     datei_bytes: bytes,
     dateiname: str,
@@ -855,19 +1032,41 @@ async def beleg_verarbeiten(
     # weitergeleitete Belege deshalb NICHT als Duplikat. Hier stattdessen auf
     # den von der KI erkannten Buchungscode/Rechnungsnummer prüfen, der bei
     # jeder Weiterleitung/jedem erneuten Hochladen gleich bleibt.
+    # WICHTIG: Gleicher Buchungscode heißt NICHT automatisch "Duplikat". Airlines/
+    # Bahn schicken Änderungen (neue Zeiten, Ersatzflug, Gleiswechsel) ebenfalls
+    # mit demselben Buchungscode – die dürfen nicht stillschweigend verworfen
+    # werden. Deshalb Inhalt vergleichen: identisch = echtes Duplikat (z.B.
+    # mehrfach weitergeleitet), abweichend = Änderungs-Beleg, der die
+    # Unterschiede zur manuellen Klärung bereithält (siehe aenderung_*-Spalten).
+    aenderung_info = None
     dup_code = ki_result.get("buchungscode") or ki_result.get("rechnungsnummer")
     if dup_code and ki_result.get("anbieter"):
         db_dup = get_db(); cur_dup = db_dup.cursor(); P_dup = ph()
-        cur_dup.execute(f"""SELECT id FROM belege
-            WHERE (buchungscode={P_dup} OR rechnungsnummer={P_dup}) AND anbieter={P_dup}
-            LIMIT 1""", (dup_code, dup_code, ki_result.get("anbieter")))
+        try:
+            cur_dup.execute(f"""SELECT id, ki_json FROM belege
+                WHERE (buchungscode={P_dup} OR rechnungsnummer={P_dup}) AND anbieter={P_dup}
+                AND aenderung_status IS NULL
+                ORDER BY id LIMIT 1""", (dup_code, dup_code, ki_result.get("anbieter")))
+        except Exception:
+            # Spalte aenderung_status fehlt noch (/init nicht gelaufen) -> altes Verhalten
+            db_dup.rollback()
+            cur_dup.execute(f"""SELECT id, ki_json FROM belege
+                WHERE (buchungscode={P_dup} OR rechnungsnummer={P_dup}) AND anbieter={P_dup}
+                ORDER BY id LIMIT 1""", (dup_code, dup_code, ki_result.get("anbieter")))
         vorhanden = cur_dup.fetchone()
         cur_dup.close(); db_dup.close()
         if vorhanden:
             bestehende_id = vorhanden[0] if isinstance(vorhanden, tuple) else vorhanden["id"]
-            return {"beleg_id": bestehende_id, "duplikat": True,
-                    "zusammenfassung": f"Duplikat von Beleg #{bestehende_id} (gleicher Buchungscode "
-                                        f"'{dup_code}' + Anbieter, z.B. durch mehrfache Weiterleitung)"}
+            alt_ki_str = vorhanden[1] if isinstance(vorhanden, tuple) else vorhanden["ki_json"]
+            try: alt_ki = json.loads(alt_ki_str or "{}")
+            except Exception: alt_ki = {}
+            unterschiede = (_aenderungen_ermitteln(alt_ki, ki_result)
+                            if ki_result.get("transportart") in _AENDERUNGS_TYPEN else [])
+            if not unterschiede:
+                return {"beleg_id": bestehende_id, "duplikat": True,
+                        "zusammenfassung": f"Duplikat von Beleg #{bestehende_id} (gleicher Buchungscode "
+                                            f"'{dup_code}' + Anbieter, z.B. durch mehrfache Weiterleitung)"}
+            aenderung_info = {"zu": bestehende_id, "diffs": unterschiede}
 
     # 3. Anonymisieren
     ma_namen, ma_mails = lade_ma_daten()
@@ -902,10 +1101,26 @@ async def beleg_verarbeiten(
         except Exception:
             dupe_row = None
         cur0.close(); db0.close()
-        if dupe_row:
+        if dupe_row and not aenderung_info:
             dupe_id = dupe_row[0] if isinstance(dupe_row, tuple) else dupe_row["id"]
-            return {"beleg_id": dupe_id, "duplikat": True, "status": "duplikat",
-                    "zusammenfassung": f"Duplikat – bereits vorhanden als Beleg #{dupe_id}, nicht erneut angelegt."}
+            # Auch hier gilt: gleicher Betrag/Anbieter/Datum heißt bei Reise-Belegen
+            # NICHT automatisch "Duplikat" – eine Änderungsmail zeigt fast immer
+            # denselben Preis. Erst Inhalt vergleichen, nur bei Gleichheit verwerfen.
+            unterschiede2 = []
+            if ki_result.get("transportart") in _AENDERUNGS_TYPEN:
+                try:
+                    P1 = ph(); db1 = get_db(); c1 = db1.cursor()
+                    c1.execute(f"SELECT ki_json FROM belege WHERE id={P1}", (dupe_id,))
+                    rr = c1.fetchone(); c1.close(); db1.close()
+                    alt_ki2 = json.loads((rr[0] if isinstance(rr, tuple) else rr["ki_json"]) or "{}")
+                    unterschiede2 = _aenderungen_ermitteln(alt_ki2, ki_result)
+                except Exception:
+                    unterschiede2 = []
+            if unterschiede2:
+                aenderung_info = {"zu": dupe_id, "diffs": unterschiede2}
+            else:
+                return {"beleg_id": dupe_id, "duplikat": True, "status": "duplikat",
+                        "zusammenfassung": f"Duplikat – bereits vorhanden als Beleg #{dupe_id}, nicht erneut angelegt."}
 
     # Zusammenfassung aus KI-Ergebnis
     if "fehler" not in ki_result:
@@ -1032,9 +1247,26 @@ async def beleg_verarbeiten(
         cur.execute(sql, vals)
         beleg_id = cur.lastrowid
 
+    if aenderung_info:
+        # Änderungs-Beleg: Segmente/Beträge/Hoteldaten NICHT in die Reise
+        # übernehmen (sonst doppelte Flüge in Reiseplan, Karte, Kosten und VMA).
+        # Die neuen Werte liegen im Diff und werden erst nach Klärung durch
+        # den Organisator in den Original-Beleg übernommen.
+        ki_mod = dict(ki_result)
+        ki_mod["segmente_aenderung"] = ki_mod.pop("segmente", None) or []
+        P_a = ph()
+        cur.execute(f"""UPDATE belege SET aenderung_zu_beleg_id={P_a}, aenderung_diff_json={P_a},
+                aenderung_status='offen', ki_json={P_a}, betrag_brutto=NULL,
+                event_datum_von=NULL, event_datum_bis=NULL,
+                hotel_checkin_datum=NULL, hotel_checkout_datum=NULL
+                WHERE id={P_a}""",
+            (aenderung_info["zu"], json.dumps(aenderung_info["diffs"], ensure_ascii=False),
+             json.dumps(ki_mod, ensure_ascii=False), beleg_id))
+
     db.commit(); cur.close(); db.close()
     return {"beleg_id": beleg_id, "zusammenfassung": zusammenfassung,
-            "ki": ki_result, "pflichtfelder_ok": pflicht_ok}
+            "ki": ki_result, "pflichtfelder_ok": pflicht_ok,
+            "aenderung_zu": aenderung_info["zu"] if aenderung_info else None}
 
 
 
