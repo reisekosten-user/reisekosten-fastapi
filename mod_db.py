@@ -513,6 +513,7 @@ def get_migrations() -> list[str]:
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS aenderung_status TEXT",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS kreditkarte_auslandsentgelt_eur NUMERIC(10,2)",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS betrag_eur_final NUMERIC(10,2)",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS kk_abrechnung_datum DATE",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS nebenkosten_eur NUMERIC(10,2)",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS nebenkosten_beschreibung TEXT",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS hotel_adresse TEXT",

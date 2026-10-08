@@ -19,6 +19,8 @@ from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schem
 from mod_vma import (VMA_SAETZE, IATA_TO_LAND, LAENDER_LISTE, vma_fuer_land,
                       importiere_aktuelle_saetze, vma_fuer_land_erweitert, STADT_ZU_LAND)
 from mod_anon import anonymisieren
+from mod_kk import (abrechnung_parsen, abrechnung_zuordnen, mitarbeiter_finden,
+                    belege_laden as kk_belege_laden, treffer_speichern as kk_treffer_speichern)
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         lade_ma_daten, get_s3, s3_upload, s3_download,
                         bild_zu_pdf, text_zu_pdf, pdf_text_lesen,
@@ -48,7 +50,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.14-c"
+APP_VERSION  = "3.15"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -404,12 +406,16 @@ def auslandsentgelt_neu_berechnen(bid: int, db) -> None:
     """
     P = ph()
     cur = db.cursor()
-    cur.execute(f"""SELECT waehrung, betrag_brutto, betrag_eur, betrag_eur_final, kreditkarte_karte
+    cur.execute(f"""SELECT waehrung, betrag_brutto, betrag_eur, betrag_eur_final, kreditkarte_karte,
+                           kk_abrechnung_datum
                     FROM belege WHERE id={P}""", (bid,))
     row = cur.fetchone()
     if not row:
         cur.close(); return
     g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
+    if g("kk_abrechnung_datum",5) is not None:
+        # Betrag und Gebühr stammen aus der echten Kreditkartenabrechnung -> nie neu berechnen
+        cur.close(); return
     waehrung = g("waehrung",0) or "EUR"
     kreditkarte_karte = g("kreditkarte_karte",4)
 
@@ -765,7 +771,8 @@ def beleg_detail(bid: int, request: Request):
                     {kk_opts}
                   </select>
                 </form>
-                {f'<div style="font-size:12px;color:var(--muted);margin-top:4px">💳 {kreditkarte_karte}</div>' if kreditkarte_karte else ''}"""
+                {f'<div style="font-size:12px;color:var(--muted);margin-top:4px">💳 {kreditkarte_karte}</div>' if kreditkarte_karte else ''}
+                {_kk_abgerechnet_hinweis(bid2)}"""
 
         # Verknüpfung: unabhängig von der Belegart – jeder Beleg jeder Art kann
         # mit jedem anderen Beleg derselben Reise zu einer Gruppe zusammengefasst
@@ -7856,6 +7863,279 @@ def cron_backup_route(key: str = ""):
         return JSONResponse({"fehler": str(e)}, status_code=500)
 
 
+# ── Kreditkarten-Abrechnung (lokal, ohne KI) ──────────────────────────────────
+# Organisator lädt die Monatsabrechnung (PDF) hoch. Die Datei wird nur im
+# Arbeitsspeicher gelesen und NICHT gespeichert. Es wird keine KI und kein
+# externer Dienst benutzt. Gespeichert wird nur, was der Organisator in der
+# Vorschau bestätigt: endgültiger Euro-Betrag, echte Auslandsgebühr,
+# Abrechnungsdatum am jeweiligen Beleg.
+
+def _kk_mitarbeiter_laden() -> list:
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT kuerzel, klarname, kreditkarten_typ FROM mitarbeiter WHERE aktiv=" +
+                ("TRUE" if is_postgres() else "1") + " ORDER BY klarname")
+    rows = cur.fetchall()
+    cur.close(); db.close()
+    out = []
+    for r in rows:
+        out.append({"kuerzel": r[0] if isinstance(r, tuple) else r["kuerzel"],
+                    "klarname": r[1] if isinstance(r, tuple) else r["klarname"],
+                    "typ": (r[2] if isinstance(r, tuple) else r["kreditkarten_typ"]) or "privat"})
+    return out
+
+
+def _kk_abgerechnet_hinweis(bid) -> str:
+    """Zeigt am Beleg, ob er mit einer Kreditkartenabrechnung abgeglichen wurde.
+    Eigene Verbindung und Fehler werden abgefangen: fehlt die Spalte noch
+    (vor /init), bleibt die Belegseite trotzdem benutzbar."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT kk_abrechnung_datum FROM belege WHERE id={ph()}", (bid,))
+        r = cur.fetchone()
+        cur.close(); db.close()
+        d = (r[0] if isinstance(r, tuple) else r["kk_abrechnung_datum"]) if r else None
+        if d:
+            return (f'<div style="font-size:12px;color:#15803d;margin-top:4px">'
+                    f'✔ Mit Kreditkartenabrechnung vom {fmt_date(d)} abgeglichen</div>')
+    except Exception:
+        pass
+    return ""
+
+
+def _kk_kein_zugriff():
+    return HTMLResponse(shell("Kein Zugriff",
+        '<div class="alert alert-err">Nur Organisatoren haben Zugriff.</div>'), status_code=403)
+
+
+def _kk_upload_seite(meldung: str = "") -> str:
+    from html import escape as e
+    opts = '<option value="">automatisch erkennen (Karteninhaber)</option>'
+    for m in _kk_mitarbeiter_laden():
+        opts += f'<option value="{e(m["kuerzel"])}">{e(m["kuerzel"])} – {e(m["klarname"])}</option>'
+    return f"""
+    <h1 class="page-title">💳 Kreditkarten-Abrechnung</h1>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
+      Monatsabrechnung der Firmenkarte hochladen. Die App trägt bei Fremdwährungsbelegen den
+      endgültigen Euro-Betrag und die echte Auslandsgebühr ein. Alles andere auf der Abrechnung
+      wird ignoriert.</p>
+    {meldung}
+    <div class="card" style="max-width:640px"><div class="card-body">
+      <form method="post" action="/einstellungen/kreditkarten/pruefen" enctype="multipart/form-data">
+        <div class="form-group">
+          <label>Abrechnung (PDF) <span class="required">*</span></label>
+          <input type="file" name="datei" required accept=".pdf"
+                 style="width:100%;padding:8px;border:1px solid var(--border);
+                        border-radius:var(--radius-s);background:white">
+        </div>
+        <div class="form-group">
+          <label>Karteninhaber</label>
+          <select name="mitarbeiter" style="width:100%">{opts}</select>
+        </div>
+        <button type="submit" class="btn btn-primary">Abrechnung prüfen</button>
+        <a href="/einstellungen" class="btn btn-secondary">Abbrechen</a>
+      </form>
+      <p style="font-size:12px;color:var(--muted);margin-top:14px">
+        🔒 Das PDF wird nur gelesen und nicht gespeichert. Keine KI, kein externer Dienst.
+        Name, Kartennummer und fremde Buchungen werden nicht abgelegt. Es passiert nichts,
+        bevor Sie die Vorschau bestätigen.</p>
+    </div></div>"""
+
+
+@app.get("/einstellungen/kreditkarten", response_class=HTMLResponse)
+def kk_upload_formular(request: Request):
+    if not ist_organisator(request):
+        return _kk_kein_zugriff()
+    return HTMLResponse(shell("Kreditkarten-Abrechnung", _kk_upload_seite(), "einstellungen"))
+
+
+def _kk_betrag(x) -> str:
+    return f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+@app.post("/einstellungen/kreditkarten/pruefen", response_class=HTMLResponse)
+async def kk_pruefen(request: Request, datei: UploadFile = File(...), mitarbeiter: str = Form("")):
+    from html import escape as e
+    if not ist_organisator(request):
+        return _kk_kein_zugriff()
+
+    def fehler(text):
+        return HTMLResponse(shell("Kreditkarten-Abrechnung", _kk_upload_seite(
+            f'<div class="alert alert-err" style="max-width:640px">{e(text)}</div>'), "einstellungen"))
+
+    pdf_bytes = await datei.read()
+    if not pdf_bytes or len(pdf_bytes) > 10 * 1024 * 1024:
+        return fehler("Datei leer oder größer als 10 MB.")
+    parsed = abrechnung_parsen(pdf_bytes)
+    del pdf_bytes
+    if parsed.get("fehler"):
+        return fehler(parsed["fehler"])
+
+    ma_liste = _kk_mitarbeiter_laden()
+    if mitarbeiter:
+        ma = next((m for m in ma_liste if m["kuerzel"] == mitarbeiter), None)
+    else:
+        ma = mitarbeiter_finden(parsed["karteninhaber"], ma_liste)
+    if not ma:
+        return fehler("Der Karteninhaber konnte keinem Mitarbeiter eindeutig zugeordnet werden. "
+                      "Bitte oben den Karteninhaber auswählen und erneut hochladen.")
+
+    try:
+        db = get_db()
+        belege = kk_belege_laden(db, parsed["zeitraum"])
+        db.close()
+    except Exception as ex:
+        return fehler(f"Belege konnten nicht geladen werden: {ex}. "
+                      "Falls die Meldung eine fehlende Spalte nennt: einmal /init aufrufen.")
+
+    erg = abrechnung_zuordnen(parsed["positionen"], belege, parsed["karteninhaber"], ma["kuerzel"])
+    label_typ = "Privatkreditkarte" if ma["typ"] == "privat" else "Firmenkreditkarte"
+    karten_label = f"{label_typ}-{ma['kuerzel']}"
+    abr_datum = parsed["abrechnungsdatum"] or date.today()
+
+    def beleg_zelle(b):
+        name = b.get("hotel_name") or b.get("anbieter") or b.get("tanken_tankstelle") or b.get("belegart") or "Beleg"
+        return (f'<a href="/beleg/{b["id"]}" target="_blank">#{b["id"]} {e(str(name))}</a>'
+                f'<div style="font-size:11px;color:var(--muted)">Reise {e(str(b.get("reise_code") or "–"))}</div>')
+
+    def status_zelle(t):
+        grund = e(", ".join(t["gruende"]))
+        if t["sicher"]:
+            return f'<span style="color:#15803d">✔ sicher</span><div style="font-size:11px;color:var(--muted)">{grund}</div>'
+        return (f'<span style="color:#b45309">⚠ bitte prüfen</span>'
+                f'<div style="font-size:11px;color:var(--muted)">{grund}</div>')
+
+    zeilen_fremd, zeilen_eur = "", ""
+    for t in erg["treffer"]:
+        p, b = t["pos"], t["beleg"]
+        fremd = p["waehrung"] != "EUR"
+        wert = f'{b["id"]}|{1 if fremd else 0}|{p["betrag_eur"]:.2f}|{p["entgelt_eur"]:.2f}'
+        haken = "checked" if t["sicher"] else ""
+        if fremd:
+            zeilen_fremd += f"""<tr>
+              <td><input type="checkbox" name="auswahl" value="{wert}" {haken} style="width:auto"></td>
+              <td>{beleg_zelle(b)}</td>
+              <td>{e(p["text"])}<div style="font-size:11px;color:var(--muted)">{fmt_date(p["datum_beleg"])}</div></td>
+              <td style="text-align:right">{_kk_betrag(p["betrag_fremd"])} {e(p["waehrung"])}</td>
+              <td style="text-align:right"><b>{_kk_betrag(p["betrag_eur"])} €</b></td>
+              <td style="text-align:right">{_kk_betrag(p["entgelt_eur"])} €</td>
+              <td>{status_zelle(t)}</td></tr>"""
+        else:
+            zeilen_eur += f"""<tr>
+              <td><input type="checkbox" name="auswahl" value="{wert}" {haken} style="width:auto"></td>
+              <td>{beleg_zelle(b)}</td>
+              <td>{e(p["text"])}<div style="font-size:11px;color:var(--muted)">{fmt_date(p["datum_beleg"])}</div></td>
+              <td style="text-align:right">{_kk_betrag(p["betrag_eur"])} €</td>
+              <td>{status_zelle(t)}</td></tr>"""
+
+    offen_fremd = [p for p in erg["offen"] if p["waehrung"] != "EUR"]
+    offen_rest = [p for p in erg["offen"] if p["waehrung"] == "EUR"]
+    zeilen_offen_fremd = "".join(
+        f'<tr><td>{fmt_date(p["datum_beleg"])}</td><td>{e(p["text"])}</td>'
+        f'<td style="text-align:right">{_kk_betrag(p["betrag_fremd"])} {e(p["waehrung"])}</td>'
+        f'<td style="text-align:right">{_kk_betrag(p["betrag_eur"] + p["entgelt_eur"])} €</td></tr>'
+        for p in offen_fremd)
+    zeilen_offen_rest = "".join(
+        f'<tr><td>{fmt_date(p["datum_beleg"])}</td><td>{e(p["text"])}</td>'
+        f'<td style="text-align:right">{_kk_betrag(p["betrag_eur"])} €</td></tr>' for p in offen_rest)
+
+    if parsed["summe_ok"] is True:
+        kontrolle = (f'<span style="color:#15803d">✔ Kontrolle: Summe der gelesenen Positionen '
+                     f'({_kk_betrag(parsed["summe_positionen"])} €) = Neuer Saldo</span>')
+    elif parsed["summe_ok"] is False:
+        kontrolle = (f'<span style="color:#b91c1c">⚠ Summe der gelesenen Positionen '
+                     f'({_kk_betrag(parsed["summe_positionen"])} €) weicht vom Neuen Saldo '
+                     f'({_kk_betrag(parsed["saldo_neu"])} €) ab, {parsed["nicht_gelesen"]} Position(en) '
+                     f'nicht lesbar. Bitte nichts übernehmen, sondern die Abrechnung prüfen.</span>')
+    else:
+        kontrolle = '<span style="color:var(--muted)">Keine Kontrollsumme gefunden.</span>'
+
+    zr = parsed["zeitraum"]
+    zeitraum_txt = f"{fmt_date(zr[0])} – {fmt_date(zr[1])}" if zr else "–"
+    anzahl_treffer = len(erg["treffer"])
+
+    tab_fremd = (f"""<div class="card" style="margin-bottom:16px"><div class="card-body">
+        <h3 style="margin-bottom:8px">Fremdwährung: Euro-Betrag und Gebühr werden eingetragen</h3>
+        <div class="table-wrap"><table>
+        <tr><th></th><th>Beleg</th><th>Abrechnung</th><th style="text-align:right">Betrag</th>
+            <th style="text-align:right">Euro endgültig</th><th style="text-align:right">Gebühr</th><th>Status</th></tr>
+        {zeilen_fremd}</table></div></div></div>""") if zeilen_fremd else ""
+    tab_eur = (f"""<div class="card" style="margin-bottom:16px"><div class="card-body">
+        <h3 style="margin-bottom:8px">Euro-Belege: Zahlung mit Karte wird bestätigt</h3>
+        <div class="table-wrap"><table>
+        <tr><th></th><th>Beleg</th><th>Abrechnung</th><th style="text-align:right">Betrag</th><th>Status</th></tr>
+        {zeilen_eur}</table></div></div></div>""") if zeilen_eur else ""
+    tab_offen_fremd = (f"""<div class="card" style="margin-bottom:16px"><div class="card-body">
+        <h3 style="margin-bottom:8px">Fremdwährung ohne passenden Beleg</h3>
+        <p style="font-size:12px;color:var(--muted)">Kein Beleg gefunden. Entweder nicht reisebezogen
+        oder der Beleg fehlt noch.</p>
+        <div class="table-wrap"><table>
+        <tr><th>Datum</th><th>Abrechnung</th><th style="text-align:right">Betrag</th>
+            <th style="text-align:right">Euro inkl. Gebühr</th></tr>
+        {zeilen_offen_fremd}</table></div></div></div>""") if zeilen_offen_fremd else ""
+    tab_offen_rest = (f"""<details style="margin-bottom:16px"><summary style="cursor:pointer;font-size:13px">
+        {len(offen_rest)} weitere Euro-Positionen ohne Beleg (werden ignoriert und nicht gespeichert)</summary>
+        <div class="table-wrap"><table>
+        <tr><th>Datum</th><th>Abrechnung</th><th style="text-align:right">Betrag</th></tr>
+        {zeilen_offen_rest}</table></div></details>""") if zeilen_offen_rest else ""
+
+    keine = ""
+    if not anzahl_treffer:
+        keine = '<div class="alert alert-warn">Es wurde kein Beleg dieser Abrechnung zugeordnet.</div>'
+
+    uebernehmen = ""
+    if anzahl_treffer:
+        uebernehmen = '<button type="submit" class="btn btn-primary">Ausgewählte übernehmen</button> '
+
+    content = f"""
+    <h1 class="page-title">💳 Abrechnung prüfen</h1>
+    <div class="card" style="margin-bottom:16px"><div class="card-body" style="font-size:13px">
+      <b>{e(ma["kuerzel"])} – {e(ma["klarname"])}</b> · Karte ••••{e(parsed["karte_ende"] or "")} ·
+      Abrechnung vom {fmt_date(abr_datum)} (Zeitraum {zeitraum_txt})<br>
+      {len(parsed["positionen"])} Positionen gelesen, {anzahl_treffer} Belegen zugeordnet.<br>{kontrolle}
+    </div></div>
+    {keine}
+    <form method="post" action="/einstellungen/kreditkarten/uebernehmen">
+      <input type="hidden" name="datum" value="{abr_datum.isoformat()}">
+      <input type="hidden" name="kuerzel" value="{e(ma["kuerzel"])}">
+      {tab_fremd}{tab_eur}
+      <div style="margin-bottom:20px">{uebernehmen}
+        <a href="/einstellungen/kreditkarten" class="btn btn-secondary">Abbrechen</a></div>
+    </form>
+    {tab_offen_fremd}{tab_offen_rest}"""
+    return HTMLResponse(shell("Abrechnung prüfen", content, "einstellungen"))
+
+
+@app.post("/einstellungen/kreditkarten/uebernehmen", response_class=HTMLResponse)
+async def kk_uebernehmen(request: Request):
+    if not ist_organisator(request):
+        return _kk_kein_zugriff()
+    form = await request.form()
+    try:
+        abr_datum = date.fromisoformat((form.get("datum") or "").strip())
+        kuerzel = (form.get("kuerzel") or "").strip()
+        ma = next((m for m in _kk_mitarbeiter_laden() if m["kuerzel"] == kuerzel), None)
+        if not ma:
+            raise ValueError("Mitarbeiter unbekannt")
+        eintraege = []
+        for v in form.getlist("auswahl"):
+            bid, fremd, eur, fee = v.split("|")
+            eintraege.append({"beleg_id": int(bid), "fremdwaehrung": fremd == "1",
+                              "betrag_eur": round(float(eur), 2), "entgelt_eur": round(float(fee), 2)})
+        label_typ = "Privatkreditkarte" if ma["typ"] == "privat" else "Firmenkreditkarte"
+        db = get_db()
+        n = kk_treffer_speichern(db, eintraege, abr_datum, f"{label_typ}-{kuerzel}")
+        db.commit(); db.close()
+    except Exception as ex:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err"><b>Fehler:</b> {ex}</div>'),
+                            status_code=400)
+    content = f"""
+    <h1 class="page-title">💳 Abrechnung übernommen</h1>
+    <div class="alert alert-ok">✔ {n} Beleg(e) aktualisiert (Abrechnung vom {fmt_date(abr_datum)}).</div>
+    <a href="/einstellungen/kreditkarten" class="btn btn-primary">Weitere Abrechnung</a>
+    <a href="/einstellungen" class="btn btn-secondary">Einstellungen</a>"""
+    return HTMLResponse(shell("Abrechnung übernommen", content, "einstellungen"))
+
+
 @app.get("/einstellungen", response_class=HTMLResponse)
 def einstellungen_uebersicht(request: Request):
     """
@@ -7881,6 +8161,8 @@ def einstellungen_uebersicht(request: Request):
          "/vma"),
         ("🗺", "Karte", "Wo sich zugeordnete Mitarbeiter bei laufenden Reisen aktuell befinden.",
          "/maps"),
+        ("💳", "Kreditkarten-Abrechnung", "Monatsabrechnung hochladen: endgültige Euro-Beträge und "
+         "echte Auslandsgebühren werden den Belegen zugeordnet (ohne KI).", "/einstellungen/kreditkarten"),
     ]
     karten_html = "".join(f"""
         <a href="{url}" style="text-decoration:none;color:inherit">
