@@ -48,7 +48,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.14-b"
+APP_VERSION  = "3.14-c"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2894,8 +2894,8 @@ def reiseplan_anzeigen(code: str):
       </div>
       <div style="display:flex;gap:8px">
         <a href="/reise/{rcode}/termin/neu?zurueck=reiseplan" class="btn btn-primary">+ Ereignis</a>
-        <a href="/reise/{rcode}/reiseplan/pdf" class="btn btn-secondary">📄 PDF</a>
-        <a href="/reise/{rcode}/reiseplan/pdf?ohne_buchungscode=1" class="btn btn-secondary">📄 PDF (ohne Buchungscodes)</a>
+        <a href="/reise/{rcode}/reiseplan/pdf" class="btn btn-secondary">📄 PDF für Reisemappe Mitarbeiter</a>
+        <a href="/reise/{rcode}/reiseplan/pdf?ohne_buchungscode=1" class="btn btn-secondary">📄 PDF zum Emailversand</a>
         <a href="/reise/{rcode}" class="btn btn-secondary">← Reise</a>
       </div>
     </div>
@@ -2974,7 +2974,7 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> by
     sub_stil = ParagraphStyle("EvSub", parent=styles["Normal"], fontSize=8.5, textColor=colors.HexColor("#475569"), leading=11)
     zeit_stil = ParagraphStyle("EvZeit", parent=styles["Normal"], fontSize=9, fontName="Helvetica-Bold", alignment=1, leading=11)
 
-    story = [Paragraph(f"Reiseplan {esc(rcode)}" + (" (ohne Buchungscodes)" if ohne_buchungscode else ""), styles["Title"]),
+    story = [Paragraph(f"Reiseplan {esc(rcode)}", styles["Title"]),
              Paragraph(esc(daten["titel"]), styles["Heading2"]),
              Paragraph(f"{fmt_date(daten['abreise'])} – {fmt_date(daten['rueckkehr'])}", styles["Normal"]),
              Spacer(1, 5*mm)]
@@ -3044,7 +3044,7 @@ def reiseplan_pdf(code: str, ohne_buchungscode: bool = False):
     try:
         pdf_bytes = _reiseplan_pdf_bauen(rcode, daten, ohne_buchungscode)
         from fastapi.responses import Response
-        dateiname = f"Reiseplan_{rcode}" + ("_ohne_Buchungscodes" if ohne_buchungscode else "") + ".pdf"
+        dateiname = f"Reiseplan_{rcode}" + ("_Emailversand" if ohne_buchungscode else "_Reisemappe") + ".pdf"
         return Response(content=pdf_bytes, media_type="application/pdf",
                         headers={"Content-Disposition": f"inline; filename={dateiname}"})
     except Exception as e:
