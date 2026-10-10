@@ -22,6 +22,7 @@ from mod_anon import anonymisieren
 from mod_kk import (abrechnung_parsen, abrechnung_zuordnen, mitarbeiter_finden, auswahl_wert,
                     zuordnungen_laden as kk_zuordnungen_laden,
                     belege_laden as kk_belege_laden, treffer_speichern as kk_treffer_speichern)
+import mod_bewirtung as bw
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         lade_ma_daten, get_s3, s3_upload, s3_download,
                         bild_zu_pdf, text_zu_pdf, pdf_text_lesen,
@@ -51,7 +52,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.16"
+APP_VERSION  = "3.17"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -850,8 +851,10 @@ def beleg_detail(bid: int, request: Request):
             </div>
           </div>"""
 
+        bewirtung_karte_html = _bewirtung_karte(bid2)
+
         pruef_karte_html = ""
-        if belegart in ("Rechnung", "Quittung"):
+        if belegart in ("Rechnung", "Quittung", "Bewirtungsbeleg"):
             aktueller_user = request.session.get("klarname") or request.session.get("kuerzel") or "–"
             if geprueft:
                 vermerk_teil = f' · "{pruef_vermerk}"' if pruef_vermerk else ""
@@ -945,6 +948,7 @@ def beleg_detail(bid: int, request: Request):
                       <option value="Hotel"{' selected' if belegart=='Hotel' else ''}>Hotel</option>
                       <option value="Taxi"{' selected' if belegart=='Taxi' else ''}>Taxi</option>
                       <option value="Bewirtung"{' selected' if belegart=='Bewirtung' else ''}>Bewirtung</option>
+                      <option value="Bewirtungsbeleg"{' selected' if belegart=='Bewirtungsbeleg' else ''}>Bewirtungsbeleg (Eigenbeleg)</option>
                       <option value="Sonstige Kosten"{' selected' if belegart=='Sonstige Kosten' else ''}>Sonstige Kosten (z.B. Extragepäck)</option>
                       <option value="Sonstiges"{' selected' if belegart=='Sonstiges' else ''}>Sonstiges</option>
                     </select>
@@ -1121,6 +1125,7 @@ def beleg_detail(bid: int, request: Request):
             </div>
           </div>
 
+          {bewirtung_karte_html}
           {verknuepfung_karte_html}
           {pruef_karte_html}
         </div>
@@ -1768,6 +1773,11 @@ def beleg_aenderung_verwerfen(bid: int):
 @app.get("/beleg/{bid}/loeschen")
 def beleg_loeschen(bid: int):
     """Löscht einen Beleg unwiderruflich aus der Datenbank (Dateien in S3 bleiben)."""
+    sperre = _bewirtung_sperre(bid)
+    if sperre:
+        return HTMLResponse(shell("Löschen nicht möglich",
+            f'<div class="alert alert-err">{sperre}</div>'
+            f'<a href="/beleg/{bid}" class="btn btn-secondary">← Zurück zum Beleg</a>'), status_code=409)
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
@@ -2028,6 +2038,11 @@ async def beleg_belegart_speichern(bid: int, request: Request):
 async def beleg_zuordnen(bid: int, request: Request):
     form = await request.form()
     rcode = (form.get("reise_code") or "").strip() or None
+    sperre = _bewirtung_sperre(bid)
+    if sperre:
+        return HTMLResponse(shell("Zuordnung nicht möglich",
+            f'<div class="alert alert-err">{sperre}</div>'
+            f'<a href="/beleg/{bid}" class="btn btn-secondary">← Zurück zum Beleg</a>'), status_code=409)
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
@@ -4240,7 +4255,7 @@ def todo_liste_laden() -> list:
         # 2. Belege noch nicht geprüft, obwohl die Reise bereits zurück ist
         cur.execute(f"""SELECT COUNT(*) FROM belege b
             JOIN reisen r ON r.code = b.reise_code
-            WHERE b.belegart IN ('Rechnung','Quittung') AND b.geprueft = {'FALSE' if is_postgres() else '0'}
+            WHERE b.belegart IN ('Rechnung','Quittung','Bewirtungsbeleg') AND b.geprueft = {'FALSE' if is_postgres() else '0'}
             AND r.rueckkehr < {P}""", (today,))
         n = cur.fetchone()[0]
         if n:
@@ -4280,7 +4295,7 @@ def todo_liste_laden() -> list:
         cur.execute(f"""SELECT DISTINCT r.code, r.titel FROM reisen r
             WHERE r.rueckkehr < {P} AND EXISTS (
                 SELECT 1 FROM belege b WHERE b.reise_code = r.code
-                AND b.belegart IN ('Rechnung','Quittung')
+                AND b.belegart IN ('Rechnung','Quittung','Bewirtungsbeleg')
                 AND (b.geprueft = {'FALSE' if is_postgres() else '0'} OR b.dms_versendet_am IS NULL)
             )""", (today,))
         rows = cur.fetchall()
@@ -4328,7 +4343,7 @@ def todo_belege_laden() -> list:
 
         if waehrung != "EUR" and betrag_eur_final is None and betrag_brutto is not None:
             probleme.append("💶 Betrag final offen")
-        if belegart in ("Rechnung", "Quittung"):
+        if belegart in ("Rechnung", "Quittung", "Bewirtungsbeleg"):
             rueckkehr_d = rueckkehr
             if isinstance(rueckkehr_d, str):
                 try: rueckkehr_d = date.fromisoformat(rueckkehr_d[:10])
@@ -4358,7 +4373,7 @@ def todo_reisen_laden() -> list:
     cur.execute(f"""SELECT DISTINCT r.code, r.titel, r.rueckkehr FROM reisen r
         WHERE r.rueckkehr < {P} AND EXISTS (
             SELECT 1 FROM belege b WHERE b.reise_code = r.code
-            AND b.belegart IN ('Rechnung','Quittung')
+            AND b.belegart IN ('Rechnung','Quittung','Bewirtungsbeleg')
             AND (b.geprueft = {'FALSE' if is_postgres() else '0'} OR b.dms_versendet_am IS NULL)
         ) ORDER BY r.rueckkehr DESC""", (today,))
     rows = cur.fetchall()
@@ -7844,6 +7859,7 @@ def portal_ansicht(token: str):
       </div>
     </div>"""
 
+    bewirtung_html = _bw_portal_karte(token, info)
     ab_txt = fmt_date(info["abreise"]); zu_txt = fmt_date(info["rueckkehr"])
     content = f"""
     <div class="card" style="margin-bottom:16px">
@@ -7862,6 +7878,7 @@ def portal_ansicht(token: str):
       </div>
     </div>
     {km_html}
+    {bewirtung_html}
     {zeilen}
     """
     return HTMLResponse(portal_shell(f"Reise {info['reise_code']} – {info['klarname']}", content))
@@ -8038,6 +8055,829 @@ def cron_backup_route(key: str = ""):
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
+
+
+# ── Bewirtungsbeleg (Eigenbeleg mit elektronischer Bestätigung) ───────────────
+# Reisende füllen den Beleg über ihren Portal-Link aus (Anlass, Teilnehmer, Betrag),
+# ordnen ihn einem Rechnungs-/Kassenbeleg zu (oder begründen die Ausnahme "Eigenbeleg")
+# und bestätigen die Richtigkeit elektronisch. Danach ist er gesperrt; Änderungen
+# nur als neue Version. Fachlogik steht in mod_bewirtung.py.
+
+_BW_WAEHRUNGEN = ["EUR", "USD", "GBP", "CHF", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF",
+                  "JPY", "CAD", "AUD", "AED", "TRY"]
+
+_BW_CSS = """<style>
+.bw-tn-row{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px}
+.bw-box{border:1px solid var(--border);border-radius:8px;padding:10px;margin-top:8px;background:#fafbfc}
+.bw-opt{display:block;padding:8px 0;font-size:14px;font-weight:400;cursor:pointer;line-height:1.4}
+.bw-opt input{width:auto;margin-right:8px}
+.bw-sig{border:1px dashed #94a3b8;border-radius:8px;background:#fff;width:100%;touch-action:none;display:block}
+.bw-dl{display:grid;grid-template-columns:150px 1fr;gap:4px 12px;font-size:13px;margin:0}
+.bw-dl dt{color:var(--muted)}
+.bw-dl dd{margin:0}
+</style>"""
+
+_BW_FORM_JS = """<script>
+(function(){
+  var form=document.getElementById('bwform'); if(!form) return;
+  function umschalten(){
+    var r=form.querySelector('input[name=quelle]:checked'); var q=r?r.value:'';
+    ['beleg','upload','eigen'].forEach(function(k){
+      var el=document.getElementById('bwq_'+k); if(el) el.style.display=(k===q)?'block':'none';
+    });
+  }
+  form.querySelectorAll('input[name=quelle]').forEach(function(r){r.addEventListener('change',umschalten);});
+  umschalten();
+  var sel=document.getElementById('bw_hauptbeleg');
+  if(sel){ sel.addEventListener('change',function(){
+    var o=sel.options[sel.selectedIndex]; if(!o||!o.value) return;
+    function fill(id,v){var f=document.getElementById(id); if(f && !f.value && v) f.value=v;}
+    fill('bw_datum',o.dataset.datum); fill('bw_ort',o.dataset.ort); fill('bw_betrag',o.dataset.betrag);
+    var w=document.getElementById('bw_waehrung'); if(w && o.dataset.waehrung) w.value=o.dataset.waehrung;
+  }); }
+  var add=document.getElementById('bw_tn_add');
+  if(add){ add.addEventListener('click',function(){
+    var box=document.getElementById('bw_tn'); var n=box.children.length+1;
+    var row=document.createElement('div'); row.className='bw-tn-row';
+    row.innerHTML='<input type="text" name="tn_name" placeholder="Name '+n+'" maxlength="120">'
+      +'<input type="text" name="tn_firma" placeholder="Firma / Funktion" maxlength="120">';
+    box.appendChild(row);
+  }); }
+})();
+</script>"""
+
+_BW_SIG_JS = """<script>
+(function(){
+  var c=document.getElementById('bw_sig'); if(!c) return;
+  var ctx=c.getContext('2d'); var zeichnet=false, hat=false;
+  ctx.lineWidth=2.4; ctx.lineCap='round'; ctx.lineJoin='round'; ctx.strokeStyle='#0f172a';
+  function pos(ev){var r=c.getBoundingClientRect();
+    return {x:(ev.clientX-r.left)*(c.width/r.width), y:(ev.clientY-r.top)*(c.height/r.height)};}
+  c.addEventListener('pointerdown',function(ev){
+    ev.preventDefault(); zeichnet=true; var p=pos(ev); ctx.beginPath(); ctx.moveTo(p.x,p.y);
+    try{c.setPointerCapture(ev.pointerId);}catch(e){}
+  });
+  c.addEventListener('pointermove',function(ev){
+    if(!zeichnet) return; ev.preventDefault(); var p=pos(ev); ctx.lineTo(p.x,p.y); ctx.stroke(); hat=true;
+  });
+  function ende(){zeichnet=false;}
+  c.addEventListener('pointerup',ende); c.addEventListener('pointercancel',ende); c.addEventListener('pointerleave',ende);
+  document.getElementById('bw_sig_clear').addEventListener('click',function(){
+    ctx.clearRect(0,0,c.width,c.height); hat=false; document.getElementById('bw_sig_data').value='';
+  });
+  document.getElementById('bw_best_form').addEventListener('submit',function(){
+    if(hat){document.getElementById('bw_sig_data').value=c.toDataURL('image/png');}
+  });
+})();
+</script>"""
+
+
+def _bw_e(x) -> str:
+    from html import escape
+    return escape("" if x is None else str(x), quote=True)
+
+
+def _bw_client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+
+def _bw_betrag_txt(x, w="EUR") -> str:
+    return bw.betrag_text(x, w)
+
+
+def _bw_status_badge(d: dict) -> str:
+    if d["status"] == "bestaetigt":
+        farbe, text = "#dcfce7:#166534", "✓ bestätigt"
+    elif d["status"] == "ersetzt":
+        farbe, text = "#e2e8f0:#475569", "ersetzt"
+    else:
+        farbe, text = "#fef3c7:#92400e", "Entwurf"
+    bg, fg = farbe.split(":")
+    return (f'<span style="font-size:11px;background:{bg};color:{fg};padding:2px 8px;'
+            f'border-radius:10px;white-space:nowrap">{text}</span>')
+
+
+def _bw_ungueltig():
+    return HTMLResponse(portal_shell("Link ungültig",
+        '<div class="card"><div class="card-body"><p>Dieser Link ist ungültig oder abgelaufen. '
+        'Bitte wende dich an dein Büro.</p></div></div>'), status_code=404)
+
+
+def _bw_nicht_gefunden(token: str):
+    return HTMLResponse(portal_shell("Nicht gefunden",
+        '<div class="card"><div class="card-body"><p>Dieser Bewirtungsbeleg wurde nicht gefunden.</p>'
+        f'<a href="/portal/{token}" class="btn btn-secondary">← Zurück</a></div></div>'), status_code=404)
+
+
+def _bw_eigene(db, info: dict, bid: int):
+    """Bewirtung laden – nur wenn sie zu Reise UND Person des Tokens gehört."""
+    d = bw.laden(db, bid)
+    if not d or d["reise_code"] != info["reise_code"] or d["kuerzel"] != info["kuerzel"]:
+        return None
+    return d
+
+
+def _bw_portal_karte(token: str, info: dict) -> str:
+    """Karte auf der Portal-Startseite: eigene Bewirtungsbelege + Button zum Anlegen."""
+    zeilen = ""
+    try:
+        db = get_db()
+        try:
+            liste = bw.liste_fuer(db, info["reise_code"], info["kuerzel"])
+        finally:
+            db.close()
+    except Exception:
+        return ""          # Tabelle fehlt noch (vor /init) -> Karte einfach nicht anzeigen
+    for d in liste:
+        ziel = (f"/portal/{token}/bewirtung/{d['id']}/bearbeiten" if d["status"] == "entwurf"
+                else f"/portal/{token}/bewirtung/{d['id']}")
+        v = f" · Version {d['version']}" if d["version"] > 1 else ""
+        zeilen += (f'<a href="{ziel}" style="display:flex;justify-content:space-between;align-items:center;'
+                   f'gap:8px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;'
+                   f'color:inherit;text-decoration:none"><span><b>{_bw_e(d["nummer"])}</b>{v}<br>'
+                   f'<span style="color:var(--muted);font-size:12px">{bw.datum_de(d["datum"])} · '
+                   f'{_bw_e(d["ort"] or "–")}</span></span>{_bw_status_badge(d)}</a>')
+    return f"""<div class="card" style="margin-bottom:16px">
+      <div class="card-header"><span class="card-title">🍽 Bewirtungsbelege</span></div>
+      <div class="card-body">
+        <p style="font-size:12px;color:var(--muted);margin:0 0 10px 0">
+          Wenn du Gäste (z. B. Kunden) eingeladen hast: Anlass und Teilnehmer hier eintragen und
+          bestätigen. Die Rechnung bzw. der Kassenbon bleibt der Originalbeleg. Eigene Mahlzeiten
+          auf der Reise gehören <b>nicht</b> hierher.</p>
+        {zeilen}
+        <a href="/portal/{token}/bewirtung/neu" class="btn btn-secondary"
+           style="width:100%;display:block;text-align:center;margin-top:10px">+ Bewirtungsbeleg erstellen</a>
+      </div>
+    </div>"""
+
+
+def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | None,
+                   quelle: str, belege: list, warnung: str = "") -> str:
+    """Formular (neu/bearbeiten). `d` enthält die Werte, die angezeigt werden sollen."""
+    opts = '<option value="">– Beleg wählen –</option>'
+    for b in belege:
+        sel = " selected" if str(b["id"]) == str(d.get("hauptbeleg_id") or "") else ""
+        label = (f'#{b["id"]} · {b["anbieter"] or "–"} · {bw.datum_de(b["datum"])} · '
+                 f'{_bw_betrag_txt(b["betrag"], b["waehrung"])}')
+        betrag_attr = "" if b["betrag"] is None else f'{b["betrag"]:.2f}'.replace(".", ",")
+        opts += (f'<option value="{b["id"]}"{sel} data-datum="{_bw_e(b["datum"] or "")}" '
+                 f'data-ort="{_bw_e(b["anbieter"] or "")}" data-betrag="{betrag_attr}" '
+                 f'data-waehrung="{_bw_e(b["waehrung"])}">{_bw_e(label)}</option>')
+
+    waehr = list(_BW_WAEHRUNGEN)
+    if d.get("waehrung") and d["waehrung"] not in waehr:
+        waehr.insert(0, d["waehrung"])
+    waehr_opts = "".join(f'<option value="{w}"{" selected" if w == (d.get("waehrung") or "EUR") else ""}>{w}</option>'
+                         for w in waehr)
+
+    tn = list(d.get("teilnehmer") or [])
+    if not tn:
+        tn = [{"name": info["klarname"], "firma": ""}]
+    while len(tn) < 4:
+        tn.append({"name": "", "firma": ""})
+    tn_html = "".join(
+        f'<div class="bw-tn-row"><input type="text" name="tn_name" value="{_bw_e(p.get("name"))}" '
+        f'placeholder="Name {i}" maxlength="120"><input type="text" name="tn_firma" '
+        f'value="{_bw_e(p.get("firma"))}" placeholder="Firma / Funktion" maxlength="120"></div>'
+        for i, p in enumerate(tn, start=1))
+
+    fehler_html = ""
+    if fehler:
+        fehler_html = ('<div class="alert alert-err" style="margin-bottom:14px"><b>Bitte prüfen:</b><ul '
+                       'style="margin:6px 0 0 18px;padding:0">'
+                       + "".join(f"<li>{_bw_e(f)}</li>" for f in fehler) + "</ul></div>")
+    warn_html = f'<div class="alert alert-warn" style="margin-bottom:14px">{warnung}</div>' if warnung else ""
+
+    def chk(k):
+        return " checked" if quelle == k else ""
+
+    betrag_wert = "" if d.get("betrag") is None else f'{float(d["betrag"]):.2f}'.replace(".", ",")
+    tg_wert = "" if d.get("trinkgeld") is None else f'{float(d["trinkgeld"]):.2f}'.replace(".", ",")
+    titel = "Bewirtungsbeleg bearbeiten" if bid else "Neuer Bewirtungsbeleg"
+    version_hinweis = (f' <span style="font-size:12px;color:var(--muted)">(Korrektur, Version {d["version"]})</span>'
+                       if d.get("version", 1) > 1 else "")
+    nummer_txt = f' {_bw_e(d["nummer"])}' if d.get("nummer") else ""
+    bid_feld = f'<input type="hidden" name="bid" value="{bid}">' if bid else ""
+    loeschen = ""
+    if bid:
+        loeschen = (f'<form method="post" action="/portal/{token}/bewirtung/{bid}/loeschen" '
+                    f'onsubmit="return confirm(\'Entwurf wirklich löschen?\')" style="margin-top:8px">'
+                    f'<button type="submit" class="btn btn-secondary" style="width:100%;color:#b91c1c">'
+                    f'🗑 Entwurf löschen</button></form>')
+
+    return f"""{_BW_CSS}
+    <div class="card"><div class="card-body">
+      <h1 class="page-title" style="margin:0 0 4px 0">🍽 {titel}{nummer_txt}{version_hinweis}</h1>
+      <p style="font-size:13px;color:var(--muted);margin:0 0 14px 0">
+        Reise <b>{_bw_e(info["reise_code"])}</b> – {_bw_e(info["titel"])}</p>
+      {fehler_html}{warn_html}
+      <form method="post" action="/portal/{token}/bewirtung/speichern" enctype="multipart/form-data" id="bwform">
+        {bid_feld}
+        <h3 style="font-size:14px;margin:0 0 4px 0">1. Zu welchem Beleg gehört die Bewirtung?</h3>
+        <label class="bw-opt"><input type="radio" name="quelle" value="beleg"{chk("beleg")}>
+          Zu einem Beleg, der schon hochgeladen ist</label>
+        <div id="bwq_beleg" class="bw-box">
+          <select name="hauptbeleg_id" id="bw_hauptbeleg" style="width:100%">{opts}</select>
+        </div>
+        <label class="bw-opt"><input type="radio" name="quelle" value="upload"{chk("upload")}>
+          Beleg (Rechnung/Kassenbon) jetzt hochladen</label>
+        <div id="bwq_upload" class="bw-box">
+          <input type="file" name="datei" accept=".pdf,.jpg,.jpeg,.png,.heic,.webp">
+          <p style="font-size:12px;color:var(--muted);margin:6px 0 0 0">Das Hochladen kann einen Moment dauern.</p>
+        </div>
+        <label class="bw-opt"><input type="radio" name="quelle" value="eigen"{chk("eigen")}>
+          Es gibt keinen Originalbeleg <span style="color:#b45309">(nur Ausnahme)</span></label>
+        <div id="bwq_eigen" class="bw-box">
+          <div class="alert alert-warn" style="font-size:12px;margin:0 0 8px 0">
+            In einer Gaststätte muss die <b>echte Rechnung</b> vorliegen – ein Eigenbeleg ersetzt sie nicht.
+            Nur bei echten Ausnahmen (z. B. Beleg verloren, Bewirtung im privaten Rahmen). Das wird vermerkt und
+            vom Organisator geprüft.</div>
+          <label style="font-size:12px">Begründung <span class="required">*</span></label>
+          <textarea name="eigenbeleg_begruendung" rows="2" style="width:100%"
+            placeholder="Warum gibt es keinen Beleg?">{_bw_e(d.get("eigenbeleg_begruendung"))}</textarea>
+        </div>
+
+        <h3 style="font-size:14px;margin:18px 0 8px 0">2. Angaben zur Bewirtung</h3>
+        <div class="form-grid form-grid-2">
+          <div class="form-group"><label style="font-size:12px">Tag der Bewirtung</label>
+            <input type="date" name="datum" id="bw_datum" value="{_bw_e(d.get("datum"))}"></div>
+          <div class="form-group"><label style="font-size:12px">Ort / Restaurant</label>
+            <input type="text" name="ort" id="bw_ort" value="{_bw_e(d.get("ort"))}" maxlength="160"
+                   placeholder="z. B. Restaurant Adler, Würzburg"></div>
+          <div class="form-group full"><label style="font-size:12px">Anlass der Bewirtung</label>
+            <input type="text" name="anlass" value="{_bw_e(d.get("anlass"))}" maxlength="300"
+                   placeholder="z. B. Projektbesprechung Neuanlage mit Firma Muster"></div>
+          <div class="form-group"><label style="font-size:12px">Betrag laut Beleg</label>
+            <input type="text" inputmode="decimal" name="betrag" id="bw_betrag" value="{betrag_wert}"
+                   placeholder="z. B. 86,40"></div>
+          <div class="form-group"><label style="font-size:12px">Währung</label>
+            <select name="waehrung" id="bw_waehrung">{waehr_opts}</select></div>
+          <div class="form-group"><label style="font-size:12px">Trinkgeld, falls nicht auf dem Beleg (optional)</label>
+            <input type="text" inputmode="decimal" name="trinkgeld" value="{tg_wert}" placeholder="z. B. 5,00"></div>
+        </div>
+
+        <h3 style="font-size:14px;margin:18px 0 4px 0">3. Teilnehmer</h3>
+        <p style="font-size:12px;color:var(--muted);margin:0 0 8px 0">
+          Alle Personen mit Namen, auch du selbst. Bei Gästen die Firma angeben.</p>
+        <div id="bw_tn">{tn_html}</div>
+        <button type="button" id="bw_tn_add" class="btn btn-secondary btn-sm">+ Teilnehmer</button>
+
+        <button type="submit" name="aktion" value="weiter" class="btn btn-primary"
+                style="width:100%;margin-top:18px">Weiter zur Bestätigung →</button>
+        <button type="submit" name="aktion" value="entwurf" class="btn btn-secondary"
+                style="width:100%;margin-top:8px">Als Entwurf speichern</button>
+      </form>
+      {loeschen}
+      <a href="/portal/{token}" class="btn btn-secondary"
+         style="width:100%;margin-top:8px;text-align:center;display:block">← Zurück zur Übersicht</a>
+    </div></div>
+    {_BW_FORM_JS}"""
+
+
+def _bw_form_aus_request(form, info: dict) -> dict:
+    """Formularwerte in ein Bewirtungs-Dict übersetzen."""
+    quelle = (form.get("quelle") or "beleg")
+    hb = None
+    try:
+        hb = int(form.get("hauptbeleg_id") or 0) or None
+    except ValueError:
+        hb = None
+    datum = (form.get("datum") or "").strip()
+    try:
+        datum = date.fromisoformat(datum).isoformat() if datum else None
+    except ValueError:
+        datum = None
+    waehrung = (form.get("waehrung") or "EUR").strip().upper()[:3] or "EUR"
+    return {
+        "reise_code": info["reise_code"], "kuerzel": info["kuerzel"],
+        "quelle": quelle, "hauptbeleg_id": hb if quelle in ("beleg", "upload") else None,
+        "eigenbeleg": quelle == "eigen",
+        "eigenbeleg_begruendung": (form.get("eigenbeleg_begruendung") or "").strip() if quelle == "eigen" else "",
+        "datum": datum, "ort": (form.get("ort") or "").strip(),
+        "anlass": (form.get("anlass") or "").strip(),
+        "teilnehmer": bw.teilnehmer_aus_formular(form.getlist("tn_name"), form.getlist("tn_firma")),
+        "betrag": bw.zahl_parsen(form.get("betrag")), "trinkgeld": bw.zahl_parsen(form.get("trinkgeld")),
+        "waehrung": waehrung,
+    }
+
+
+@app.get("/portal/{token}/bewirtung/neu", response_class=HTMLResponse)
+def portal_bewirtung_neu(token: str, beleg: int = 0):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        belege = bw.belege_zur_auswahl(db, info["reise_code"], info["klarname"], None, beleg or None)
+    finally:
+        db.close()
+    d = {"hauptbeleg_id": beleg or None, "teilnehmer": [], "waehrung": "EUR", "version": 1}
+    for b in belege:
+        if b["id"] == beleg:
+            d.update({"datum": b["datum"], "ort": b["anbieter"] or "", "betrag": b["betrag"],
+                      "waehrung": b["waehrung"]})
+    quelle = "beleg" if belege else "upload"
+    return HTMLResponse(portal_shell("Bewirtungsbeleg",
+                        _bw_form_seite(token, info, d, [], None, quelle, belege)))
+
+
+@app.get("/portal/{token}/bewirtung/{bid}/bearbeiten", response_class=HTMLResponse)
+def portal_bewirtung_bearbeiten(token: str, bid: int):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        d = _bw_eigene(db, info, bid)
+        if not d:
+            return _bw_nicht_gefunden(token)
+        if d["status"] != "entwurf":
+            return RedirectResponse(f"/portal/{token}/bewirtung/{bid}", status_code=303)
+        belege = bw.belege_zur_auswahl(db, info["reise_code"], info["klarname"], d["nummer"], d["hauptbeleg_id"])
+    finally:
+        db.close()
+    quelle = "eigen" if d["eigenbeleg"] else ("beleg" if d["hauptbeleg_id"] else ("beleg" if belege else "upload"))
+    return HTMLResponse(portal_shell(f"Bewirtungsbeleg {d['nummer']}",
+                        _bw_form_seite(token, info, d, [], bid, quelle, belege)))
+
+
+@app.post("/portal/{token}/bewirtung/speichern")
+async def portal_bewirtung_speichern(token: str, request: Request):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    form = await request.form()
+    try:
+        bid = int(form.get("bid") or 0) or None
+    except ValueError:
+        bid = None
+    aktion = form.get("aktion") or "weiter"
+    d = _bw_form_aus_request(form, info)
+    warnung = ""
+    db = get_db()
+    try:
+        bestehend = None
+        if bid:
+            bestehend = _bw_eigene(db, info, bid)
+            if not bestehend:
+                return _bw_nicht_gefunden(token)
+            if bestehend["status"] != "entwurf":
+                return RedirectResponse(f"/portal/{token}/bewirtung/{bid}", status_code=303)
+            d.update({"nummer": bestehend["nummer"], "version": bestehend["version"]})
+        d.setdefault("version", 1)
+
+        # Nur diese beiden Belege dürfen die Auswahlregeln (eigener Beleg, frei) umgehen:
+        # der gerade hochgeladene und der bereits im eigenen Entwurf gespeicherte.
+        ausnahme_id = (bestehend or {}).get("hauptbeleg_id")
+
+        # Neuer Beleg im selben Schritt hochgeladen -> normale Beleg-Pipeline (reise_code aus dem Token!)
+        datei = form.get("datei")
+        if d["quelle"] == "upload" and datei is not None and getattr(datei, "filename", ""):
+            try:
+                inhalt = await datei.read()
+                res = await beleg_verarbeiten(inhalt, datei.filename or "upload", info["reise_code"],
+                                              datei.content_type or "application/octet-stream")
+                neu_id = res.get("beleg_id")
+                kurz = bw.beleg_kurz(db, neu_id) if neu_id else None
+                if not kurz or kurz["reise_code"] != info["reise_code"]:
+                    warnung = ("Der Beleg wurde schon bei einer anderen Reise erfasst und kann hier nicht "
+                               "verwendet werden. Bitte beim Organisator melden.")
+                else:
+                    d["hauptbeleg_id"] = neu_id
+                    ausnahme_id = neu_id
+                    d["quelle"] = "beleg"
+                    if not d["datum"] and kurz["datum"]:
+                        d["datum"] = kurz["datum"]
+                    if not d["ort"] and kurz["anbieter"]:
+                        d["ort"] = kurz["anbieter"]
+                    if d["betrag"] is None and kurz["betrag"] is not None:
+                        d["betrag"] = kurz["betrag"]
+                    d["waehrung"] = kurz["waehrung"] or d["waehrung"]
+            except Exception as e:
+                warnung = ("Der Beleg konnte nicht hochgeladen werden. Bitte noch einmal versuchen "
+                           f"oder den Beleg über „Beleg hochladen“ senden. ({_bw_e(e)})")
+        elif d["quelle"] == "upload" and not d["hauptbeleg_id"]:
+            d["quelle"] = "beleg"
+
+        # Gewählter Beleg muss zur Reise und zur Person passen und frei sein
+        belege = bw.belege_zur_auswahl(db, info["reise_code"], info["klarname"],
+                                       (bestehend or {}).get("nummer"), ausnahme_id)
+        if d["hauptbeleg_id"] and d["hauptbeleg_id"] not in {b["id"] for b in belege}:
+            d["hauptbeleg_id"] = None
+            warnung = warnung or "Der gewählte Beleg ist nicht verfügbar. Bitte einen anderen wählen."
+        if d["hauptbeleg_id"]:
+            for b in belege:
+                if b["id"] == d["hauptbeleg_id"] and b["waehrung"]:
+                    d["waehrung"] = b["waehrung"]
+
+        if aktion == "weiter":
+            fehler = bw.validieren(d)
+            if fehler or warnung:
+                return HTMLResponse(portal_shell("Bewirtungsbeleg",
+                    _bw_form_seite(token, info, d, fehler, bid, d["quelle"], belege, warnung)))
+        new_id = bw.entwurf_speichern(db, d, bid)
+        db.commit()
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return HTMLResponse(portal_shell("Fehler beim Speichern",
+            '<div class="card"><div class="card-body"><p>Der Bewirtungsbeleg konnte nicht gespeichert werden. '
+            'Bitte versuch es gleich noch einmal oder melde dich beim Organisator.</p>'
+            f'<p style="font-size:11px;color:#94a3b8">{_bw_e(e)}</p>'
+            f'<a href="/portal/{token}" class="btn btn-secondary">← Zurück</a></div></div>'), status_code=500)
+    finally:
+        db.close()
+    if aktion == "weiter":
+        return RedirectResponse(f"/portal/{token}/bewirtung/{new_id}/pruefen", status_code=303)
+    return RedirectResponse(f"/portal/{token}", status_code=303)
+
+
+def _bw_detail_html(d: dict, klarname: str, haupt: dict | None, integritaet: bool | None,
+                    pdf_url: str, zeige_technik: bool = True) -> str:
+    """Gemeinsame Anzeige (Portal und Organisator) für einen Bewirtungsbeleg."""
+    tn = "".join(f'<li>{_bw_e(p.get("name"))}'
+                 + (f' <span style="color:var(--muted)">({_bw_e(p.get("firma"))})</span>' if p.get("firma") else "")
+                 + "</li>" for p in d["teilnehmer"])
+    if d["eigenbeleg"]:
+        beleg_txt = (f'<span style="color:#b45309"><b>Eigenbeleg ohne Originalbeleg (Ausnahme)</b></span><br>'
+                     f'Begründung: {_bw_e(d["eigenbeleg_begruendung"])}')
+    elif haupt:
+        beleg_txt = (f'Beleg <b>#{haupt["id"]}</b> – {_bw_e(haupt["anbieter"] or "–")}, '
+                     f'{bw.datum_de(haupt["datum"])}, {_bw_betrag_txt(haupt["betrag"], haupt["waehrung"])}')
+    else:
+        beleg_txt = "–"
+    tg = (f'<dt>Trinkgeld</dt><dd>{_bw_betrag_txt(d["trinkgeld"], d["waehrung"])} (zusätzlich)</dd>'
+          if d.get("trinkgeld") else "")
+    best = ""
+    if d["status"] in ("bestaetigt", "ersetzt"):
+        integ = ""
+        if integritaet is True:
+            integ = '<span style="color:#166534">✓ Prüfsumme stimmt – unverändert seit der Bestätigung</span>'
+        elif integritaet is False:
+            integ = '<span style="color:#b91c1c"><b>✖ Prüfsumme weicht ab – Daten wurden verändert!</b></span>'
+        technik = ""
+        if zeige_technik:
+            technik = (f'<dt>IP-Adresse</dt><dd>{_bw_e(d["bestaetigt_ip"] or "–")}</dd>'
+                       f'<dt>Prüfsumme</dt><dd style="font-family:monospace;font-size:11px;'
+                       f'word-break:break-all">{_bw_e(d["pruefsumme"])}<br>{integ}</dd>')
+        sig = ""
+        if d.get("signatur_png"):
+            sig = (f'<dt>Unterschrift</dt><dd><img alt="Unterschrift" style="max-width:240px;'
+                   f'border:1px solid var(--border);border-radius:6px;background:#fff" '
+                   f'src="data:image/png;base64,{_bw_e(d["signatur_png"])}"></dd>')
+        best = (f'<h3 style="font-size:14px;margin:16px 0 8px 0">Bestätigung</h3><dl class="bw-dl">'
+                f'<dt>Bestätigt von</dt><dd>{_bw_e(d["bestaetigt_name"])}</dd>'
+                f'<dt>Zeitpunkt</dt><dd>{_bw_e(bw.lokal_text(d["bestaetigt_am"]))}</dd>{technik}{sig}</dl>')
+    pdf_btn = (f'<a href="{pdf_url}" target="_blank" class="btn btn-secondary" '
+               f'style="width:100%;display:block;text-align:center;margin-top:12px">📄 PDF ansehen</a>'
+               if d.get("s3_pdf") else "")
+    return f"""{_BW_CSS}
+      <dl class="bw-dl">
+        <dt>Nummer</dt><dd><b>{_bw_e(d["nummer"])}</b> · Version {d["version"]} {_bw_status_badge(d)}</dd>
+        <dt>Bewirtender</dt><dd>{_bw_e(klarname)}</dd>
+        <dt>Reise</dt><dd>{_bw_e(d["reise_code"])}</dd>
+        <dt>Tag</dt><dd>{bw.datum_de(d["datum"])}</dd>
+        <dt>Ort / Restaurant</dt><dd>{_bw_e(d["ort"])}</dd>
+        <dt>Anlass</dt><dd>{_bw_e(d["anlass"])}</dd>
+        <dt>Betrag</dt><dd><b>{_bw_betrag_txt(d["betrag"], d["waehrung"])}</b></dd>{tg}
+        <dt>Zugehöriger Beleg</dt><dd>{beleg_txt}</dd>
+        <dt>Teilnehmer</dt><dd><ol style="margin:0;padding-left:18px">{tn}</ol></dd>
+      </dl>{best}{pdf_btn}"""
+
+
+@app.get("/portal/{token}/bewirtung/{bid}/pruefen", response_class=HTMLResponse)
+def portal_bewirtung_pruefen(token: str, bid: int, fehler: str = ""):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        d = _bw_eigene(db, info, bid)
+        if not d:
+            return _bw_nicht_gefunden(token)
+        if d["status"] != "entwurf":
+            return RedirectResponse(f"/portal/{token}/bewirtung/{bid}", status_code=303)
+        haupt = bw.beleg_kurz(db, d["hauptbeleg_id"]) if d["hauptbeleg_id"] else None
+    finally:
+        db.close()
+    return HTMLResponse(portal_shell("Bewirtungsbeleg bestätigen",
+                                     _bw_bestaetigen_seite(token, info, d, haupt, fehler)))
+
+
+def _bw_bestaetigen_seite(token: str, info: dict, d: dict, haupt: dict | None, fehler: str = "",
+                          name_wert: str = "") -> str:
+    probleme = bw.validieren(d)
+    fehler_html = (f'<div class="alert alert-err" style="margin-bottom:14px">{_bw_e(fehler)}</div>' if fehler else "")
+    if probleme:
+        form_html = ('<div class="alert alert-err"><b>Es fehlen noch Angaben:</b><ul style="margin:6px 0 0 18px">'
+                     + "".join(f"<li>{_bw_e(p)}</li>" for p in probleme) + "</ul></div>"
+                     f'<a href="/portal/{token}/bewirtung/{d["id"]}/bearbeiten" class="btn btn-primary" '
+                     f'style="width:100%;display:block;text-align:center">Angaben ergänzen</a>')
+    else:
+        form_html = f"""
+      <form method="post" action="/portal/{token}/bewirtung/{d["id"]}/bestaetigen" id="bw_best_form">
+        <h3 style="font-size:14px;margin:18px 0 8px 0">Bestätigung</h3>
+        <label class="bw-opt"><input type="checkbox" name="haken" value="1">
+          Ich bestätige, dass die Angaben vollständig und richtig sind und die Bewirtung
+          geschäftlich veranlasst war.</label>
+        <div class="form-group" style="margin-top:8px"><label style="font-size:12px">
+          Vollständiger Name als Bestätigung <span class="required">*</span></label>
+          <input type="text" name="name_eingabe" value="{_bw_e(name_wert)}" autocomplete="off"
+                 placeholder="{_bw_e(info["klarname"])}"></div>
+        <div class="form-group"><label style="font-size:12px">Unterschrift (optional, mit Finger oder Maus)</label>
+          <canvas id="bw_sig" class="bw-sig" width="600" height="200"></canvas>
+          <button type="button" id="bw_sig_clear" class="btn btn-secondary btn-sm"
+                  style="margin:6px 0 4px 0;width:auto">Unterschrift löschen</button>
+          <input type="hidden" name="signatur" id="bw_sig_data"></div>
+        <p style="font-size:12px;color:var(--muted);margin:12px 0">
+          Mit „Verbindlich bestätigen“ wird der Beleg gesperrt. Zeitpunkt, Name und eine Prüfsumme werden
+          gespeichert. Spätere Änderungen sind nur als neue Version möglich; die alte Version bleibt erhalten.</p>
+        <button type="submit" class="btn btn-success" style="width:100%">✓ Verbindlich bestätigen</button>
+        <a href="/portal/{token}/bewirtung/{d["id"]}/bearbeiten" class="btn btn-secondary"
+           style="width:100%;display:block;text-align:center;margin-top:8px">← Angaben ändern</a>
+      </form>{_BW_SIG_JS}"""
+    return f"""<div class="card"><div class="card-body">
+      <h1 class="page-title" style="margin:0 0 12px 0">🍽 Bewirtungsbeleg prüfen und bestätigen</h1>
+      {fehler_html}
+      {_bw_detail_html(d, info["klarname"], haupt, None, "", False)}
+      {form_html}
+    </div></div>"""
+
+
+@app.post("/portal/{token}/bewirtung/{bid}/bestaetigen")
+async def portal_bewirtung_bestaetigen(token: str, bid: int, request: Request):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    form = await request.form()
+    db = get_db()
+    try:
+        d = _bw_eigene(db, info, bid)
+        if not d:
+            return _bw_nicht_gefunden(token)
+        if d["status"] != "entwurf":
+            return RedirectResponse(f"/portal/{token}/bewirtung/{bid}", status_code=303)
+        name_eingabe = (form.get("name_eingabe") or "").strip()
+        try:
+            bw.bestaetigen(db, bid, info["klarname"], name_eingabe, bool(form.get("haken")),
+                           form.get("signatur") or None, _bw_client_ip(request),
+                           request.headers.get("user-agent", ""))
+            db.commit()
+        except ValueError as e:
+            db.rollback()
+            haupt = bw.beleg_kurz(db, d["hauptbeleg_id"]) if d["hauptbeleg_id"] else None
+            return HTMLResponse(portal_shell("Bewirtungsbeleg bestätigen",
+                _bw_bestaetigen_seite(token, info, d, haupt, str(e), name_eingabe)), status_code=400)
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return HTMLResponse(portal_shell("Fehler",
+            '<div class="card"><div class="card-body"><p>Die Bestätigung konnte nicht gespeichert werden. '
+            'Es wurde nichts verändert. Bitte versuch es gleich noch einmal oder melde dich beim '
+            'Organisator.</p>'
+            f'<p style="font-size:11px;color:#94a3b8">{_bw_e(e)}</p>'
+            f'<a href="/portal/{token}/bewirtung/{bid}/pruefen" class="btn btn-secondary">← Zurück</a>'
+            '</div></div>'), status_code=500)
+    finally:
+        db.close()
+    return RedirectResponse(f"/portal/{token}/bewirtung/{bid}?ok=1", status_code=303)
+
+
+@app.get("/portal/{token}/bewirtung/{bid}", response_class=HTMLResponse)
+def portal_bewirtung_ansicht(token: str, bid: int, ok: int = 0):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        d = _bw_eigene(db, info, bid)
+        if not d:
+            return _bw_nicht_gefunden(token)
+        if d["status"] == "entwurf":
+            return RedirectResponse(f"/portal/{token}/bewirtung/{bid}/bearbeiten", status_code=303)
+        haupt = bw.beleg_kurz(db, d["hauptbeleg_id"]) if d["hauptbeleg_id"] else None
+        alle = bw.versionen(db, d["nummer"])
+    finally:
+        db.close()
+    banner = ""
+    if ok:
+        banner = ('<div class="alert alert-ok" style="margin-bottom:14px">✓ Bestätigt und gespeichert. '
+                  'Der Beleg liegt jetzt beim Organisator zur Prüfung.</div>')
+    versionen_html = ""
+    if len(alle) > 1:
+        versionen_html = '<h3 style="font-size:14px;margin:16px 0 6px 0">Versionen</h3>'
+        for v in alle:
+            ziel = f"/portal/{token}/bewirtung/{v['id']}"
+            versionen_html += (f'<div style="font-size:13px;padding:4px 0"><a href="{ziel}">Version {v["version"]}</a> · '
+                               f'{_bw_status_badge(v)} · {_bw_e(bw.lokal_text(v["bestaetigt_am"]))}</div>')
+    korrektur = ""
+    if d["status"] == "bestaetigt":
+        korrektur = (f'<form method="post" action="/portal/{token}/bewirtung/{bid}/korrektur" '
+                     f'onsubmit="return confirm(\'Eine Korrektur erzeugt eine neue Version, die erneut '
+                     f'bestätigt werden muss. Fortfahren?\')" style="margin-top:10px">'
+                     f'<button type="submit" class="btn btn-secondary" style="width:100%">'
+                     f'✏ Korrigieren (neue Version)</button></form>')
+    elif d["status"] == "ersetzt":
+        banner += ('<div class="alert alert-warn" style="margin-bottom:14px">Diese Version wurde durch eine '
+                   'neuere ersetzt und bleibt nur zur Nachvollziehbarkeit erhalten.</div>')
+    content = f"""<div class="card"><div class="card-body">
+      <h1 class="page-title" style="margin:0 0 12px 0">🍽 Bewirtungsbeleg</h1>
+      {banner}
+      {_bw_detail_html(d, info["klarname"], haupt, bw.integritaet_ok(d), f"/portal/{token}/bewirtung/{bid}/pdf", False)}
+      {korrektur}{versionen_html}
+      <a href="/portal/{token}" class="btn btn-primary"
+         style="width:100%;display:block;text-align:center;margin-top:12px">← Zurück zur Übersicht</a>
+    </div></div>"""
+    return HTMLResponse(portal_shell(f"Bewirtungsbeleg {d['nummer']}", content))
+
+
+@app.post("/portal/{token}/bewirtung/{bid}/korrektur")
+def portal_bewirtung_korrektur(token: str, bid: int):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        d = _bw_eigene(db, info, bid)
+        if not d:
+            return _bw_nicht_gefunden(token)
+        try:
+            neu_id = bw.korrektur_starten(db, bid)
+            db.commit()
+        except ValueError:
+            db.rollback()
+            # Es gibt schon einen offenen Korrektur-Entwurf -> dorthin weiterleiten
+            cur = db.cursor()
+            cur.execute(f"SELECT id FROM bewirtungen WHERE ersetzt_id={ph()} AND status='entwurf'", (bid,))
+            r = cur.fetchone(); cur.close()
+            neu_id = (r[0] if isinstance(r, tuple) else r["id"]) if r else None
+            if not neu_id:
+                return RedirectResponse(f"/portal/{token}/bewirtung/{bid}", status_code=303)
+    finally:
+        db.close()
+    return RedirectResponse(f"/portal/{token}/bewirtung/{neu_id}/bearbeiten", status_code=303)
+
+
+@app.post("/portal/{token}/bewirtung/{bid}/loeschen")
+def portal_bewirtung_loeschen(token: str, bid: int):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        d = _bw_eigene(db, info, bid)
+        if d and d["status"] == "entwurf":
+            bw.entwurf_loeschen(db, bid)
+            db.commit()
+    finally:
+        db.close()
+    return RedirectResponse(f"/portal/{token}", status_code=303)
+
+
+@app.get("/portal/{token}/bewirtung/{bid}/pdf")
+def portal_bewirtung_pdf(token: str, bid: int):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        d = _bw_eigene(db, info, bid)
+    finally:
+        db.close()
+    if not d or not d.get("s3_pdf"):
+        return _bw_nicht_gefunden(token)
+    return _bw_pdf_antwort(d)
+
+
+def _bw_pdf_antwort(d: dict):
+    from fastapi.responses import Response
+    try:
+        inhalt = bw.pdf_laden(d)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">PDF nicht verfügbar: {_bw_e(e)}</div>'),
+                            status_code=500)
+    return Response(content=inhalt, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="Bewirtungsbeleg_{d["nummer"]}_v{d["version"]}.pdf"'})
+
+
+# ── Bewirtungsbeleg: Organisator-Ansicht ──────────────────────────────────────
+def _bewirtung_karte(bid: int) -> str:
+    """Karte auf der Beleg-Detailseite: zeigt die Bewirtung, wenn der Beleg ihr Nebenbeleg
+    (Eigenbeleg) oder ihr Rechnungsbeleg ist. Fehler (z. B. Tabelle fehlt) -> keine Karte."""
+    try:
+        db = get_db()
+        try:
+            liste = bw.zu_beleg(db, bid)
+        finally:
+            db.close()
+    except Exception:
+        return ""
+    if not liste:
+        return ""
+    zeilen = ""
+    for d in liste:
+        rolle = "Eigenbeleg dieser Bewirtung" if d["beleg_id"] == bid else "Rechnungsbeleg dieser Bewirtung"
+        zeilen += (f'<div style="padding:8px 0;border-bottom:1px solid var(--border);font-size:13px">'
+                   f'<a href="/bewirtung/{d["id"]}" style="color:#2563eb"><b>{_bw_e(d["nummer"])}</b></a> '
+                   f'· Version {d["version"]} {_bw_status_badge(d)}<br>'
+                   f'<span style="color:var(--muted);font-size:12px">{rolle} · {bw.datum_de(d["datum"])} · '
+                   f'{_bw_e(d["ort"] or "–")} · {len(d["teilnehmer"])} Teilnehmer</span></div>')
+    return f"""<div class="card">
+        <div class="card-header"><span class="card-title">🍽 Bewirtungsbeleg</span></div>
+        <div class="card-body">{zeilen}</div>
+      </div>"""
+
+
+def _bewirtung_sperre(bid: int) -> str:
+    """Leer, wenn der Beleg frei ist. Sonst eine Meldung: Belege einer Bewirtung (Eigenbeleg oder
+    Rechnungsbeleg) werden nicht gelöscht/verschoben, damit der Nachweis vollständig bleibt."""
+    try:
+        db = get_db()
+        try:
+            liste = bw.zu_beleg(db, bid)
+        finally:
+            db.close()
+    except Exception:
+        return ""
+    if not liste:
+        return ""
+    nummern = ", ".join(sorted({d["nummer"] for d in liste}))
+    return (f"Dieser Beleg gehört zum Bewirtungsnachweis {nummern} und kann deshalb nicht gelöscht oder "
+            f"einer anderen Reise zugeordnet werden. Zuerst die Bewirtung klären (Entwurf löschen bzw. "
+            f"Korrektur über den Reisenden).")
+
+
+@app.get("/bewirtung/{bid}", response_class=HTMLResponse)
+def bewirtung_organisator(request: Request, bid: int):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren haben Zugriff.</div>'), status_code=403)
+    db = get_db()
+    try:
+        d = bw.laden(db, bid)
+        if not d:
+            return HTMLResponse(shell("Nicht gefunden",
+                '<div class="alert alert-err">Bewirtungsbeleg nicht gefunden.</div>'), status_code=404)
+        haupt = bw.beleg_kurz(db, d["hauptbeleg_id"]) if d["hauptbeleg_id"] else None
+        alle = bw.versionen(db, d["nummer"])
+        cur = db.cursor()
+        cur.execute(f"SELECT klarname FROM mitarbeiter WHERE kuerzel={ph()}", (d["kuerzel"],))
+        r = cur.fetchone(); cur.close()
+        klarname = (r[0] if isinstance(r, tuple) else r["klarname"]) if r else d["kuerzel"]
+    finally:
+        db.close()
+    links = f'<a href="/reise/{_bw_e(d["reise_code"])}" class="btn btn-secondary">🧳 Reise {_bw_e(d["reise_code"])}</a> '
+    if d["beleg_id"]:
+        links += f'<a href="/beleg/{d["beleg_id"]}" class="btn btn-secondary">📎 Eigenbeleg #{d["beleg_id"]}</a> '
+    if haupt:
+        links += f'<a href="/beleg/{haupt["id"]}" class="btn btn-secondary">🧾 Rechnungsbeleg #{haupt["id"]}</a>'
+    warn = ""
+    if d["eigenbeleg"]:
+        warn = ('<div class="alert alert-warn" style="margin-bottom:14px">⚠ <b>Eigenbeleg ohne Originalbeleg.</b> '
+                'Bei Bewirtung in einer Gaststätte ist die Rechnung Pflicht – bitte die Begründung prüfen.</div>')
+    vers = ""
+    if len(alle) > 1:
+        vers = '<h3 style="font-size:14px;margin:16px 0 6px 0">Versionen</h3>'
+        for v in alle:
+            vers += (f'<div style="font-size:13px;padding:3px 0"><a href="/bewirtung/{v["id"]}">Version {v["version"]}</a> · '
+                     f'{_bw_status_badge(v)} · {_bw_e(bw.lokal_text(v["bestaetigt_am"]))} · '
+                     f'{"✓ unverändert" if bw.integritaet_ok(v) else ("–" if v["status"] == "entwurf" else "✖ Prüfsumme weicht ab")}</div>')
+    content = f"""
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+      <a href="/belege" class="btn btn-secondary">← Belege</a>
+      <h1 class="page-title" style="margin:0">🍽 Bewirtungsbeleg {_bw_e(d["nummer"])}</h1>
+    </div>
+    <div style="margin-bottom:14px">{links}</div>
+    <div class="card" style="max-width:760px"><div class="card-body">
+      {warn}
+      {_bw_detail_html(d, klarname, haupt, bw.integritaet_ok(d) if d["status"] != "entwurf" else None,
+                       f"/bewirtung/{bid}/pdf", True)}
+      {vers}
+    </div></div>"""
+    return HTMLResponse(shell(f"Bewirtung {d['nummer']}", content, "belege"))
+
+
+@app.get("/bewirtung/{bid}/pdf")
+def bewirtung_organisator_pdf(request: Request, bid: int):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren haben Zugriff.</div>'), status_code=403)
+    db = get_db()
+    try:
+        d = bw.laden(db, bid)
+    finally:
+        db.close()
+    if not d or not d.get("s3_pdf"):
+        return HTMLResponse(shell("Nicht gefunden",
+            '<div class="alert alert-err">Kein PDF vorhanden.</div>'), status_code=404)
+    return _bw_pdf_antwort(d)
 
 
 # ── Kreditkarten-Abrechnung (lokal, ohne KI) ──────────────────────────────────
