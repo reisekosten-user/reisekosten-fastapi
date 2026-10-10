@@ -192,9 +192,11 @@ def pruefkopf_pdf_erzeugen(reise_code: str, geprueft_von: str, geprueft_am, prue
         Paragraph("Prüfvermerk – Reisekostenbeleg", styles["Heading1"]),
         Spacer(1, 8*mm),
     ]
+    # Bemerkung als Absatz, damit lange Texte (z. B. Verweis auf einen Bewirtungsbeleg) umbrechen
+    vermerk_absatz = Paragraph(esc(pruef_vermerk).replace("\n", "<br/>"), styles["Normal"])
     daten = [
         ["Geprüft am / durch:", f"{fmt_date(geprueft_am)} · {esc(geprueft_von)}"],
-        ["Bemerkung:", esc(pruef_vermerk)],
+        ["Bemerkung:", vermerk_absatz],
         ["Reise-ID:", esc(reise_code)],
         ["Anbieter:", esc(anbieter)],
         ["Betrag:", f"{betrag:.2f} {waehrung}" if betrag else "–"],

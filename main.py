@@ -23,6 +23,7 @@ from mod_kk import (abrechnung_parsen, abrechnung_zuordnen, mitarbeiter_finden, 
                     zuordnungen_laden as kk_zuordnungen_laden,
                     belege_laden as kk_belege_laden, treffer_speichern as kk_treffer_speichern)
 import mod_bewirtung as bw
+import mod_vorschuss as vs
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         lade_ma_daten, get_s3, s3_upload, s3_download,
                         bild_zu_pdf, text_zu_pdf, pdf_text_lesen,
@@ -52,7 +53,12 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.17"
+APP_VERSION  = "3.18"
+
+# Belegarten, die der Organisator prüft (Prüf-Deckblatt) und die an die DMS-Stelle (Habel) gehen
+PRUEF_BELEGARTEN = ("Rechnung", "Quittung", "Bewirtungsbeleg",
+                    "Vorschussquittung", "Rueckgabequittung", "Bargeldbeschaffung")
+PRUEF_SQL = "(" + ",".join(f"'{a}'" for a in PRUEF_BELEGARTEN) + ")"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -851,10 +857,10 @@ def beleg_detail(bid: int, request: Request):
             </div>
           </div>"""
 
-        bewirtung_karte_html = _bewirtung_karte(bid2)
+        bewirtung_karte_html = _bewirtung_karte(bid2) + _vorschuss_karte(bid2)
 
         pruef_karte_html = ""
-        if belegart in ("Rechnung", "Quittung", "Bewirtungsbeleg"):
+        if belegart in PRUEF_BELEGARTEN:
             aktueller_user = request.session.get("klarname") or request.session.get("kuerzel") or "–"
             if geprueft:
                 vermerk_teil = f' · "{pruef_vermerk}"' if pruef_vermerk else ""
@@ -949,6 +955,9 @@ def beleg_detail(bid: int, request: Request):
                       <option value="Taxi"{' selected' if belegart=='Taxi' else ''}>Taxi</option>
                       <option value="Bewirtung"{' selected' if belegart=='Bewirtung' else ''}>Bewirtung</option>
                       <option value="Bewirtungsbeleg"{' selected' if belegart=='Bewirtungsbeleg' else ''}>Bewirtungsbeleg (Eigenbeleg)</option>
+                      <option value="Vorschussquittung"{' selected' if belegart=='Vorschussquittung' else ''}>Vorschussquittung (Bargeld-Konto)</option>
+                      <option value="Bargeldbeschaffung"{' selected' if belegart=='Bargeldbeschaffung' else ''}>Bargeldbeschaffung (Bargeld-Konto)</option>
+                      <option value="Rueckgabequittung"{' selected' if belegart=='Rueckgabequittung' else ''}>Rückgabequittung (Bargeld-Konto)</option>
                       <option value="Sonstige Kosten"{' selected' if belegart=='Sonstige Kosten' else ''}>Sonstige Kosten (z.B. Extragepäck)</option>
                       <option value="Sonstiges"{' selected' if belegart=='Sonstiges' else ''}>Sonstiges</option>
                     </select>
@@ -1773,7 +1782,7 @@ def beleg_aenderung_verwerfen(bid: int):
 @app.get("/beleg/{bid}/loeschen")
 def beleg_loeschen(bid: int):
     """Löscht einen Beleg unwiderruflich aus der Datenbank (Dateien in S3 bleiben)."""
-    sperre = _bewirtung_sperre(bid)
+    sperre = _bewirtung_sperre(bid) or _vorschuss_sperre(bid)
     if sperre:
         return HTMLResponse(shell("Löschen nicht möglich",
             f'<div class="alert alert-err">{sperre}</div>'
@@ -2038,7 +2047,7 @@ async def beleg_belegart_speichern(bid: int, request: Request):
 async def beleg_zuordnen(bid: int, request: Request):
     form = await request.form()
     rcode = (form.get("reise_code") or "").strip() or None
-    sperre = _bewirtung_sperre(bid)
+    sperre = _bewirtung_sperre(bid) or _vorschuss_sperre(bid)
     if sperre:
         return HTMLResponse(shell("Zuordnung nicht möglich",
             f'<div class="alert alert-err">{sperre}</div>'
@@ -2066,6 +2075,9 @@ def pruef_pdf_fuer_beleg(bid: int) -> bytes:
     g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
     rcode = g("reise_code",0); geprueft_von = g("geprueft_von",1); geprueft_am = g("geprueft_am",2)
     vermerk = g("pruef_vermerk",3); anbieter = g("anbieter",4)
+    zusatz = _bewirtung_vermerk_zusatz(bid)
+    if zusatz:
+        vermerk = (str(vermerk) + "\n" if vermerk else "") + zusatz
     betrag = g("betrag_brutto",5); waehrung = g("waehrung",6) or "EUR"
     belegdat = g("belegdatum",7); s3o = g("s3_original",8)
     if not s3o:
@@ -3666,6 +3678,7 @@ def reise_abschluss(code: str):
         {best_html}
         {zeiten_html}
         {km_html}
+        {_vorschuss_abschluss_html(rcode)}
 
         <!-- VMA-Tabelle -->
         <div class="card" style="margin-bottom:16px">
@@ -3962,6 +3975,16 @@ def reise_abschluss_pdf(code: str):
         else:
             story.append(Paragraph("Keine Rechnungen/Quittungen erfasst.", styles["Normal"]))
 
+        vs_daten = _vorschuss_abschluss_pdf_daten(rcode)
+        if vs_daten:
+            story.append(Spacer(1, 4*mm))
+            story.append(Paragraph("Reisevorschuss / Bargeld-Konto (Beträge in der jeweiligen Währung)", styles["Heading3"]))
+            vs_tbl = Table(vs_daten, colWidths=[34*mm,12*mm,24*mm,24*mm,22*mm,24*mm,38*mm])
+            vs_tbl.setStyle(tbl_style(fusszeile=False))
+            story.append(vs_tbl)
+            story.append(Paragraph("Ein ausgezahlter Vorschuss ist in „Gesamt zur Abrechnung“ nicht abgezogen.",
+                                   styles["Normal"]))
+
         story.append(Spacer(1, 6*mm))
         gesamt = vma_total_netto + trennung_total + kosten_eur
         story.append(Paragraph(f"<b>Gesamt zur Abrechnung: {gesamt:.2f} €</b>", styles["Heading2"]))
@@ -4255,7 +4278,7 @@ def todo_liste_laden() -> list:
         # 2. Belege noch nicht geprüft, obwohl die Reise bereits zurück ist
         cur.execute(f"""SELECT COUNT(*) FROM belege b
             JOIN reisen r ON r.code = b.reise_code
-            WHERE b.belegart IN ('Rechnung','Quittung','Bewirtungsbeleg') AND b.geprueft = {'FALSE' if is_postgres() else '0'}
+            WHERE b.belegart IN {PRUEF_SQL} AND b.geprueft = {'FALSE' if is_postgres() else '0'}
             AND r.rueckkehr < {P}""", (today,))
         n = cur.fetchone()[0]
         if n:
@@ -4295,7 +4318,7 @@ def todo_liste_laden() -> list:
         cur.execute(f"""SELECT DISTINCT r.code, r.titel FROM reisen r
             WHERE r.rueckkehr < {P} AND EXISTS (
                 SELECT 1 FROM belege b WHERE b.reise_code = r.code
-                AND b.belegart IN ('Rechnung','Quittung','Bewirtungsbeleg')
+                AND b.belegart IN {PRUEF_SQL}
                 AND (b.geprueft = {'FALSE' if is_postgres() else '0'} OR b.dms_versendet_am IS NULL)
             )""", (today,))
         rows = cur.fetchall()
@@ -4303,6 +4326,16 @@ def todo_liste_laden() -> list:
             aufgaben.append({"icon": "🧾", "prio": "info",
                 "text": f'Reisen abgeschlossen, aber noch nicht final abgerechnet ({len(rows)})',
                 "sub": "Rückkehr liegt bereits zurück",
+                "url": "/todo"})
+    except Exception: pass
+
+    try:
+        # 6. Bargeld-Konto / Reisevorschuss: unbestätigte Buchungen, offene Rückgabe, Bar-Belege ohne Zuordnung
+        vs_reisen = _vorschuss_todo_laden()
+        if vs_reisen:
+            aufgaben.append({"icon": "💵", "prio": "warn",
+                "text": f'Reisevorschuss: offene Punkte bei {len(vs_reisen)} Reise{"n" if len(vs_reisen)!=1 else ""}',
+                "sub": "Bestätigung, Rückgabe oder Bar-Belege klären",
                 "url": "/todo"})
     except Exception: pass
 
@@ -4343,7 +4376,7 @@ def todo_belege_laden() -> list:
 
         if waehrung != "EUR" and betrag_eur_final is None and betrag_brutto is not None:
             probleme.append("💶 Betrag final offen")
-        if belegart in ("Rechnung", "Quittung", "Bewirtungsbeleg"):
+        if belegart in PRUEF_BELEGARTEN:
             rueckkehr_d = rueckkehr
             if isinstance(rueckkehr_d, str):
                 try: rueckkehr_d = date.fromisoformat(rueckkehr_d[:10])
@@ -4373,7 +4406,7 @@ def todo_reisen_laden() -> list:
     cur.execute(f"""SELECT DISTINCT r.code, r.titel, r.rueckkehr FROM reisen r
         WHERE r.rueckkehr < {P} AND EXISTS (
             SELECT 1 FROM belege b WHERE b.reise_code = r.code
-            AND b.belegart IN ('Rechnung','Quittung','Bewirtungsbeleg')
+            AND b.belegart IN {PRUEF_SQL}
             AND (b.geprueft = {'FALSE' if is_postgres() else '0'} OR b.dms_versendet_am IS NULL)
         ) ORDER BY r.rueckkehr DESC""", (today,))
     rows = cur.fetchall()
@@ -4413,6 +4446,13 @@ def todo_seite(request: Request):
                 <td><div style="display:flex;gap:4px;flex-wrap:wrap">{probleme_html}</div></td>
             </tr>"""
 
+        vs_zeilen = ""
+        for v in _vorschuss_todo_laden():
+            vs_zeilen += (f'<tr><td><a href="/reise/{v["reise_code"]}/vorschuss" style="color:var(--blue);font-weight:600;'
+                          f'text-decoration:none">{v["reise_code"]}</a></td><td>{v["titel"]}</td>'
+                          f'<td>{"<br>".join(v["punkte"])}</td>'
+                          f'<td><a href="/reise/{v["reise_code"]}/vorschuss" class="btn btn-secondary btn-sm">Öffnen</a></td></tr>')
+
         reisen_zeilen = ""
         for r in reisen:
             code = get(r,"code",0); titel = get(r,"titel",1); rueckkehr = get(r,"rueckkehr",2)
@@ -4440,6 +4480,18 @@ def todo_seite(request: Request):
               </tr></thead>
               <tbody>
                 {beleg_zeilen or '<tr><td colspan="6" class="empty-state">Keine offenen Belege 🎉</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:20px">
+          <div class="card-header"><span class="card-title">💵 Reisevorschuss / Bargeld-Konto – offene Punkte</span></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Reise</th><th>Titel</th><th>Offen</th><th></th></tr></thead>
+              <tbody>
+                {vs_zeilen or '<tr><td colspan="4" class="empty-state">Keine offenen Punkte 🎉</td></tr>'}
               </tbody>
             </table>
           </div>
@@ -7010,6 +7062,7 @@ def reise_detail(code: str):
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <a href="/reise/{rcode}/abschluss" class="btn btn-primary">🧾 Abschluss</a>
+            <a href="/reise/{rcode}/vorschuss" class="btn btn-secondary">💵 Vorschuss</a>
             <a href="/reise/{rcode}/reiseplan" class="btn btn-secondary">🗺 Reiseplan</a>
             <a href="/reise/{rcode}/vma-generieren" class="btn btn-secondary">🔄 VMA neu berechnen</a>
             <a href="/reise/{rcode}/vma-debug" class="btn btn-secondary">🔍 VMA-Debug</a>
@@ -7860,6 +7913,7 @@ def portal_ansicht(token: str):
     </div>"""
 
     bewirtung_html = _bw_portal_karte(token, info)
+    vorschuss_html = _vs_portal_karte(token, info)
     ab_txt = fmt_date(info["abreise"]); zu_txt = fmt_date(info["rueckkehr"])
     content = f"""
     <div class="card" style="margin-bottom:16px">
@@ -7879,6 +7933,7 @@ def portal_ansicht(token: str):
     </div>
     {km_html}
     {bewirtung_html}
+    {vorschuss_html}
     {zeilen}
     """
     return HTMLResponse(portal_shell(f"Reise {info['reise_code']} – {info['klarname']}", content))
@@ -8318,6 +8373,8 @@ def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | Non
           <div class="form-group"><label style="font-size:12px">Trinkgeld, falls nicht auf dem Beleg (optional)</label>
             <input type="text" inputmode="decimal" name="trinkgeld" value="{tg_wert}" placeholder="z. B. 5,00"></div>
         </div>
+        <p style="font-size:12px;color:var(--muted);margin:0">Bei Rechnungen ab 250 € muss auf der Rechnung der Name
+          des Bewirtenden (unsere Firma) stehen. Bitte vor dem Bezahlen prüfen lassen.</p>
 
         <h3 style="font-size:14px;margin:18px 0 4px 0">3. Teilnehmer</h3>
         <p style="font-size:12px;color:var(--muted);margin:0 0 8px 0">
@@ -8603,7 +8660,7 @@ def _bw_bestaetigen_seite(token: str, info: dict, d: dict, haupt: dict | None, f
       </form>{_BW_SIG_JS}"""
     return f"""<div class="card"><div class="card-body">
       <h1 class="page-title" style="margin:0 0 12px 0">🍽 Bewirtungsbeleg prüfen und bestätigen</h1>
-      {fehler_html}
+      {fehler_html}{_bw_hinweise(d)}
       {_bw_detail_html(d, info["klarname"], haupt, None, "", False)}
       {form_html}
     </div></div>"""
@@ -8814,6 +8871,48 @@ def _bewirtung_sperre(bid: int) -> str:
             f"Korrektur über den Reisenden).")
 
 
+def _bewirtung_vermerk_zusatz(bid: int) -> str:
+    """Querverweis für das Prüf-Deckblatt: Rechnungsbeleg -> Bewirtungsbeleg und umgekehrt.
+    Nur bestätigte Bewirtungsbelege. Fehler (z. B. Tabelle fehlt) -> kein Zusatz."""
+    try:
+        db = get_db()
+        try:
+            liste = [d for d in bw.zu_beleg(db, bid) if d["status"] == "bestaetigt"]
+        finally:
+            db.close()
+    except Exception:
+        return ""
+    teile = []
+    for d in liste:
+        stand = f"Version {d['version']}, elektronisch bestätigt am {bw.lokal_text(d['bestaetigt_am'])}"
+        if d["beleg_id"] == bid:
+            if d["hauptbeleg_id"]:
+                teile.append(f"Eigenbeleg {d['nummer']} ({stand}) zur Rechnung/Quittung Beleg #{d['hauptbeleg_id']}")
+            else:
+                teile.append(f"Eigenbeleg {d['nummer']} ({stand}), ohne Originalbeleg")
+        else:
+            teile.append(f"Dazu gehört der Bewirtungsbeleg {d['nummer']} ({stand})")
+    return "; ".join(teile)
+
+
+def _bw_hinweise(d: dict) -> str:
+    """Weiche Hinweise (sperren nichts): 250-€-Regel und zeitnahe Erstellung."""
+    out = ""
+    try:
+        tage = (date.today() - date.fromisoformat(str(d.get("datum"))[:10])).days
+    except Exception:
+        tage = None
+    if tage is not None and tage > 14:
+        out += (f'<div class="alert alert-warn" style="margin-bottom:12px;font-size:13px">Die Bewirtung liegt {tage} Tage zurück. '
+                'Ein Bewirtungsbeleg soll zeitnah erstellt werden. Bitte nur bestätigen, wenn die Angaben sicher stimmen.</div>')
+    betrag = d.get("betrag")
+    if betrag is not None and (d.get("waehrung") or "EUR") == "EUR" and float(betrag) >= 250:
+        out += ('<div class="alert alert-warn" style="margin-bottom:12px;font-size:13px"><b>Rechnung ab 250 €:</b> '
+                'Auf der Rechnung muss der Name des Bewirtenden (unsere Firma) stehen, sonst ist der Abzug gefährdet. '
+                'Bitte die Rechnung prüfen.</div>')
+    return out
+
+
 @app.get("/bewirtung/{bid}", response_class=HTMLResponse)
 def bewirtung_organisator(request: Request, bid: int):
     if not ist_organisator(request):
@@ -8842,6 +8941,7 @@ def bewirtung_organisator(request: Request, bid: int):
     if d["eigenbeleg"]:
         warn = ('<div class="alert alert-warn" style="margin-bottom:14px">⚠ <b>Eigenbeleg ohne Originalbeleg.</b> '
                 'Bei Bewirtung in einer Gaststätte ist die Rechnung Pflicht – bitte die Begründung prüfen.</div>')
+    warn += _bw_hinweise(d)
     vers = ""
     if len(alle) > 1:
         vers = '<h3 style="font-size:14px;margin:16px 0 6px 0">Versionen</h3>'
@@ -8878,6 +8978,1069 @@ def bewirtung_organisator_pdf(request: Request, bid: int):
         return HTMLResponse(shell("Nicht gefunden",
             '<div class="alert alert-err">Kein PDF vorhanden.</div>'), status_code=404)
     return _bw_pdf_antwort(d)
+
+
+# ── Reisevorschuss / Bargeld-Konto ────────────────────────────────────────────
+# Auszahlung und Rückgabe erfasst der Organisator, der Mitarbeiter bestätigt im Portal.
+# Selbst beschafftes Bargeld (Geldautomat, Wechselstube) trägt der Mitarbeiter im Portal ein.
+# Kurse werden von Hand eingetragen (1 EUR = x Fremdwährung). Fachlogik: mod_vorschuss.py.
+
+_VS_FORM_JS = """<script>
+(function(){
+  var f=document.getElementById('vsform'); if(!f) return;
+  var w=f.elements['waehrung'], b=f.elements['betrag'], k=f.elements['kurs'], e=f.elements['eur_betrag'];
+  function num(x){x=(x||'').replace(/\\s/g,''); if(x.indexOf(',')>-1&&x.indexOf('.')>-1){x=x.replace(/\\./g,'').replace(',','.');}else{x=x.replace(',','.');} var v=parseFloat(x); return isNaN(v)?null:v;}
+  function fmt(v,n){return v.toFixed(n).replace('.',',');}
+  function istEur(){return (w.value||'').toUpperCase()==='EUR';}
+  function umschalten(){var box=document.getElementById('vs_kursbox'); if(box) box.style.display=istEur()?'none':'block';
+    var lab=document.getElementById('vs_kurslabel'); if(lab) lab.textContent=(w.value||'…').toUpperCase();}
+  function ausKurs(){if(istEur()) return; var bv=num(b.value), kv=num(k.value); if(bv&&kv){e.value=fmt(bv/kv,2);}}
+  function ausEur(){if(istEur()) return; var bv=num(b.value), ev=num(e.value); if(bv&&ev){k.value=fmt(bv/ev,6);}}
+  w.addEventListener('input',function(){umschalten();ausKurs();});
+  b.addEventListener('input',function(){ausKurs();});
+  k.addEventListener('input',ausKurs); e.addEventListener('input',ausEur);
+  umschalten();
+})();
+</script>"""
+
+
+def _vs_zahl(x, n: int = 2) -> str:
+    return "" if x is None else f"{float(x):.{n}f}".replace(".", ",")
+
+
+def _vs_kurs4(k) -> str:
+    return "–" if not k else f"{float(k):.4f}".replace(".", ",")
+
+
+def _vs_eur_signed(v) -> str:
+    return "–" if v is None else f"{float(v):+.2f} EUR".replace(".", ",")
+
+
+def _vs_form_felder(d: dict, eigen: bool) -> str:
+    datalist = '<datalist id="vs_wl">' + "".join(f'<option value="{w}">' for w in vs.WAEHRUNGEN) + "</datalist>"
+    quellen_opts = "".join(
+        f'<option value="{q}"{" selected" if q == d.get("quelle_txt") else ""}>{q}</option>' for q in vs.QUELLEN)
+    quelle_html = ""
+    if eigen:
+        quelle_html = (f'<div class="form-group"><label style="font-size:12px">Beschafft über</label>'
+                       f'<select name="quelle_txt"><option value="">– wählen –</option>{quellen_opts}</select></div>')
+    eur_label = ("Euro-Betrag laut Kontoauszug (belastet, inkl. Gebühren)" if eigen else "Gegenwert in EUR")
+    hinweis = ("Der belastete Euro-Betrag steht auf dem Kontoauszug oder der Kreditkartenabrechnung. "
+               "Kurs oder Euro-Betrag genügt, das andere rechnet die Seite aus." if eigen else
+               "Kurs von Hand eintragen, wie auf dem Wechselbeleg oder der Bank-Abrechnung. "
+               "Kurs oder Euro-Gegenwert genügt, das andere rechnet die Seite aus.")
+    return f"""{datalist}
+        <div class="form-grid form-grid-2">
+          <div class="form-group"><label style="font-size:12px">Datum</label>
+            <input type="date" name="datum" value="{_bw_e(d.get("datum"))}"></div>
+          {quelle_html}
+          <div class="form-group"><label style="font-size:12px">Währung (z. B. USD)</label>
+            <input type="text" name="waehrung" list="vs_wl" maxlength="3" value="{_bw_e(d.get("waehrung") or "EUR")}"
+                   style="text-transform:uppercase" autocomplete="off"></div>
+          <div class="form-group"><label style="font-size:12px">Betrag in dieser Währung</label>
+            <input type="text" inputmode="decimal" name="betrag" value="{_vs_zahl(d.get("betrag"))}" placeholder="z. B. 500,00"></div>
+        </div>
+        <div id="vs_kursbox">
+          <div class="form-grid form-grid-2">
+            <div class="form-group"><label style="font-size:12px">Kurs: 1 EUR = … <span id="vs_kurslabel">USD</span></label>
+              <input type="text" inputmode="decimal" name="kurs" value="{_vs_zahl(d.get("kurs"), 6) if d.get("waehrung") not in (None, "EUR") else ""}" placeholder="z. B. 1,0850"></div>
+            <div class="form-group"><label style="font-size:12px">{eur_label}</label>
+              <input type="text" inputmode="decimal" name="eur_betrag" value="{_vs_zahl(d.get("eur_betrag")) if d.get("waehrung") not in (None, "EUR") else ""}" placeholder="z. B. 460,83"></div>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin:0 0 8px 0">{hinweis}</p>
+        </div>
+        <div class="form-group"><label style="font-size:12px">Notiz (optional)</label>
+          <input type="text" name="notiz" maxlength="200" value="{_bw_e(d.get("notiz"))}"></div>"""
+
+
+def _vs_form_aus_request(form, art: str) -> dict:
+    """Formularwerte in ein Buchungs-Dict übersetzen (Kurs/Euro-Betrag werden ausgerechnet)."""
+    datum = (form.get("datum") or "").strip()
+    try:
+        datum = date.fromisoformat(datum).isoformat() if datum else None
+    except ValueError:
+        datum = None
+    waehrung = (form.get("waehrung") or "").strip().upper()[:3]
+    betrag = bw.zahl_parsen(form.get("betrag"))
+    d = {"art": art, "datum": datum, "waehrung": waehrung, "betrag": betrag,
+         "quelle_txt": (form.get("quelle_txt") or "").strip() if art == "eigenbeschaffung" else "",
+         "notiz": (form.get("notiz") or "").strip()}
+    kurs, eur, fehler = vs.kurs_berechnen(waehrung, betrag, form.get("kurs"), form.get("eur_betrag"))
+    d["kurs"], d["eur_betrag"] = kurs, eur
+    d["_kursfehler"] = fehler
+    return d
+
+
+def _vs_fehlerbox(fehler: list) -> str:
+    if not fehler:
+        return ""
+    return ('<div class="alert alert-err" style="margin-bottom:14px"><b>Bitte prüfen:</b><ul '
+            'style="margin:6px 0 0 18px;padding:0">' + "".join(f"<li>{_bw_e(f)}</li>" for f in fehler) + "</ul></div>")
+
+
+def _vs_fehler_sammeln(d: dict) -> list:
+    fehler = vs.validieren(d)
+    kf = d.get("_kursfehler")
+    if kf:
+        # Die Standardmeldungen "Betrag/Kurs fehlt" durch die genauere Kursmeldung ersetzen
+        fehler = [f for f in fehler if "Kurs oder den Euro-Gegenwert" not in f and "Betrag größer 0" not in f] + [kf]
+    return fehler
+
+
+def _vs_status_badge(d: dict) -> str:
+    if d["status"] == "bestaetigt":
+        bg, fg, text = "#dcfce7", "#166534", "✓ bestätigt"
+    elif d["status"] == "ersetzt":
+        bg, fg, text = "#e2e8f0", "#475569", "ersetzt"
+    else:
+        bg, fg, text = "#fef3c7", "#92400e", "wartet auf Bestätigung"
+    return (f'<span style="font-size:11px;background:{bg};color:{fg};padding:2px 8px;border-radius:10px;'
+            f'white-space:nowrap">{text}</span>')
+
+
+def _vs_detail_html(d: dict, klarname: str, integritaet: bool | None, pdf_url: str, technik: bool) -> str:
+    aussteller = ""
+    if d.get("aussteller_name"):
+        label = "Ausgezahlt durch" if d["art"] == "auszahlung" else "Entgegengenommen durch"
+        aussteller = (f'<dt>{label}</dt><dd>{_bw_e(d["aussteller_name"])} am '
+                      f'{_bw_e(bw.lokal_text(d["aussteller_am"]))}</dd>')
+    quelle = f'<dt>Beschafft über</dt><dd>{_bw_e(d["quelle_txt"])}</dd>' if d.get("quelle_txt") else ""
+    kurs = (f'<dt>Kurs</dt><dd>{_bw_e(vs.kurs_text(d))}</dd>' if d["waehrung"] != "EUR" else "")
+    notiz = f'<dt>Notiz</dt><dd>{_bw_e(d["notiz"])}</dd>' if d.get("notiz") else ""
+    best = ""
+    if d["status"] in ("bestaetigt", "ersetzt"):
+        integ = ""
+        if integritaet is True:
+            integ = '<span style="color:#166534">✓ Prüfsumme stimmt – unverändert seit der Bestätigung</span>'
+        elif integritaet is False:
+            integ = '<span style="color:#b91c1c"><b>✖ Prüfsumme weicht ab – Daten wurden verändert!</b></span>'
+        tech = ""
+        if technik:
+            tech = (f'<dt>IP-Adresse</dt><dd>{_bw_e(d["bestaetigt_ip"] or "–")}</dd>'
+                    f'<dt>Prüfsumme</dt><dd style="font-family:monospace;font-size:11px;word-break:break-all">'
+                    f'{_bw_e(d["pruefsumme"])}<br>{integ}</dd>')
+        sig = ""
+        if d.get("signatur_png"):
+            sig = (f'<dt>Unterschrift</dt><dd><img alt="Unterschrift" style="max-width:240px;border:1px solid '
+                   f'var(--border);border-radius:6px;background:#fff" '
+                   f'src="data:image/png;base64,{_bw_e(d["signatur_png"])}"></dd>')
+        best = (f'<h3 style="font-size:14px;margin:16px 0 8px 0">Bestätigung</h3><dl class="bw-dl">'
+                f'<dt>Bestätigt von</dt><dd>{_bw_e(d["bestaetigt_name"])}</dd>'
+                f'<dt>Zeitpunkt</dt><dd>{_bw_e(bw.lokal_text(d["bestaetigt_am"]))}</dd>{tech}{sig}</dl>')
+    pdf_btn = (f'<a href="{pdf_url}" target="_blank" class="btn btn-secondary" style="width:100%;display:block;'
+               f'text-align:center;margin-top:12px">📄 PDF ansehen</a>' if d.get("s3_pdf") else "")
+    return f"""{_BW_CSS}
+      <dl class="bw-dl">
+        <dt>Nummer</dt><dd><b>{_bw_e(d["nummer"])}</b> · Version {d["version"]} {_vs_status_badge(d)}</dd>
+        <dt>Art</dt><dd>{_bw_e(vs.ARTEN[d["art"]])}</dd>
+        <dt>Mitarbeiter</dt><dd>{_bw_e(klarname)}</dd>
+        <dt>Reise</dt><dd>{_bw_e(d["reise_code"])}</dd>
+        <dt>Datum</dt><dd>{bw.datum_de(d["datum"])}</dd>{quelle}
+        <dt>Betrag</dt><dd><b>{_bw_e(vs.betrag_text(d["betrag"], d["waehrung"]))}</b></dd>{kurs}
+        <dt>Gegenwert EUR</dt><dd>{_bw_e(vs.betrag_text(d["eur_betrag"], "EUR"))}</dd>{aussteller}{notiz}
+      </dl>{best}{pdf_btn}"""
+
+
+def _vs_pdf_antwort(d: dict):
+    from fastapi.responses import Response
+    try:
+        inhalt = vs.pdf_laden(d)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">PDF nicht verfügbar: {_bw_e(e)}</div>'),
+                            status_code=500)
+    return Response(content=inhalt, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{vs.BELEGARTEN[d["art"]]}_{d["nummer"]}_v{d["version"]}.pdf"'})
+
+
+def _vs_name(db, kuerzel: str) -> str:
+    cur = db.cursor()
+    cur.execute(f"SELECT klarname FROM mitarbeiter WHERE kuerzel={ph()}", (kuerzel,))
+    r = cur.fetchone(); cur.close()
+    return (r[0] if isinstance(r, tuple) else r["klarname"]) if r else kuerzel
+
+
+# ── Portal ────────────────────────────────────────────────────────────────────
+def _vs_zusammenfassung_html(person: dict) -> str:
+    """Kurze Übersicht je Währung für den Mitarbeiter."""
+    zeilen = ""
+    for c, x in sorted(person["waehrungen"].items()):
+        if not (x["V"] or x["T"] or x["R"] or x["A"]):
+            continue
+        teile = []
+        if x["V"]:
+            teile.append(f"erhalten {vs.betrag_text(x['V'], c)}")
+        if x["T"]:
+            teile.append(f"selbst beschafft {vs.betrag_text(x['T'], c)}")
+        if x["R"]:
+            teile.append(f"zurückgegeben {vs.betrag_text(x['R'], c)}")
+        if x["A"]:
+            teile.append(f"bar ausgegeben (Belege) {vs.betrag_text(x['A'], c)}")
+        hinweis = ""
+        if person["offen"]:
+            hinweis = '<br><span style="color:var(--muted)">Stand vorläufig, bis alle Buchungen bestätigt sind.</span>'
+        elif x["rueckgabe_offen"] > 0.005:
+            hinweis = (f'<br><b style="color:#b45309">Noch bei dir (Firmengeld): '
+                       f'{vs.betrag_text(x["rueckgabe_offen"], c)} – bitte zurückgeben.</b>')
+        elif x["eigenanteil"] > 0.005:
+            hinweis = (f'<br><b style="color:#166534">Du hast {vs.betrag_text(x["eigenanteil"], c)} aus eigenem Geld '
+                       f'bezahlt – wird dir erstattet.</b>')
+        zeilen += (f'<div style="font-size:13px;padding:6px 0;border-bottom:1px solid var(--border)">'
+                   f'<b>{c}:</b> {_bw_e(" · ".join(teile))}{hinweis}</div>')
+    return zeilen
+
+
+def _vs_portal_karte(token: str, info: dict) -> str:
+    try:
+        db = get_db()
+        try:
+            liste = vs.liste_reise(db, info["reise_code"], info["kuerzel"])
+            erg = vs.abrechnung(db, info["reise_code"])
+        finally:
+            db.close()
+    except Exception:
+        return ""          # Tabelle fehlt noch (vor /init)
+    offene = [b for b in liste if b["status"] == "offen"]
+    zeilen = ""
+    for b in liste:
+        if b["status"] == "offen":
+            ziel = f"/portal/{token}/vorschuss/{b['id']}/bestaetigen"
+        else:
+            ziel = f"/portal/{token}/vorschuss/{b['id']}"
+        v = f" · Version {b['version']}" if b["version"] > 1 else ""
+        zeilen += (f'<a href="{ziel}" style="display:flex;justify-content:space-between;align-items:center;gap:8px;'
+                   f'padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;color:inherit;'
+                   f'text-decoration:none"><span><b>{_bw_e(b["nummer"])}</b>{v}<br>'
+                   f'<span style="color:var(--muted);font-size:12px">{_bw_e(vs.ARTEN[b["art"]])} · {bw.datum_de(b["datum"])} · '
+                   f'{_bw_e(vs.betrag_text(b["betrag"], b["waehrung"]))}</span></span>{_vs_status_badge(b)}</a>')
+    warn = ""
+    if offene:
+        warn = (f'<div class="alert alert-warn" style="margin-bottom:10px;font-size:13px">'
+                f'{len(offene)} Buchung(en) warten auf deine Bestätigung. Bitte antippen und bestätigen.</div>')
+    person = erg["personen"].get(info["kuerzel"])
+    zus = _vs_zusammenfassung_html(person) if person else ""
+    return f"""<div class="card" style="margin-bottom:16px">
+      <div class="card-header"><span class="card-title">💵 Reisevorschuss / Bargeld</span></div>
+      <div class="card-body">
+        <p style="font-size:12px;color:var(--muted);margin:0 0 10px 0">
+          Hier siehst du Vorschuss und Rückgabe und bestätigst sie. Hast du im Reiseland selbst Geld abgehoben
+          oder gewechselt, trage es unten ein.</p>
+        {warn}{zeilen}{zus}
+        <a href="/portal/{token}/vorschuss/neu" class="btn btn-secondary"
+           style="width:100%;display:block;text-align:center;margin-top:10px">+ Geldautomat / Wechselstube eintragen</a>
+      </div>
+    </div>"""
+
+
+def _vs_eigene(db, info: dict, bid: int):
+    d = vs.laden(db, bid)
+    if not d or d["reise_code"] != info["reise_code"] or d["kuerzel"] != info["kuerzel"]:
+        return None
+    return d
+
+
+def _vs_portal_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | None) -> str:
+    version_hinweis = (f' <span style="font-size:12px;color:var(--muted)">(Korrektur, Version {d["version"]})</span>'
+                       if d.get("version", 1) > 1 else "")
+    loeschen = ""
+    if bid:
+        loeschen = (f'<form method="post" action="/portal/{token}/vorschuss/{bid}/loeschen" '
+                    f'onsubmit="return confirm(\'Eintrag wirklich löschen?\')" style="margin-top:8px">'
+                    f'<button type="submit" class="btn btn-secondary" style="width:100%;color:#b91c1c">'
+                    f'🗑 Eintrag löschen</button></form>')
+    bid_feld = f'<input type="hidden" name="bid" value="{bid}">' if bid else ""
+    return f"""{_BW_CSS}
+    <div class="card"><div class="card-body">
+      <h1 class="page-title" style="margin:0 0 4px 0">💵 Bargeld selbst beschafft{version_hinweis}</h1>
+      <p style="font-size:13px;color:var(--muted);margin:0 0 14px 0">Reise <b>{_bw_e(info["reise_code"])}</b> – {_bw_e(info["titel"])}.
+        Für Geld, das du im Reiseland selbst abgehoben oder gewechselt hast. Den Kontoauszug oder Wechselbeleg
+        lädst du zusätzlich über „Beleg hochladen“ hoch.</p>
+      {_vs_fehlerbox(fehler)}
+      <form method="post" action="/portal/{token}/vorschuss/speichern" id="vsform">
+        {bid_feld}
+        {_vs_form_felder(d, True)}
+        <button type="submit" class="btn btn-primary" style="width:100%;margin-top:6px">Weiter zur Bestätigung →</button>
+      </form>
+      {loeschen}
+      <a href="/portal/{token}" class="btn btn-secondary" style="width:100%;margin-top:8px;text-align:center;display:block">← Zurück zur Übersicht</a>
+    </div></div>
+    {_VS_FORM_JS}"""
+
+
+@app.get("/portal/{token}/vorschuss/neu", response_class=HTMLResponse)
+def portal_vorschuss_neu(token: str):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    d = {"art": "eigenbeschaffung", "waehrung": "", "version": 1}
+    return HTMLResponse(portal_shell("Bargeld selbst beschafft", _vs_portal_form_seite(token, info, d, [], None)))
+
+
+@app.get("/portal/{token}/vorschuss/{bid}/bearbeiten", response_class=HTMLResponse)
+def portal_vorschuss_bearbeiten(token: str, bid: int):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        d = _vs_eigene(db, info, bid)
+    finally:
+        db.close()
+    if not d or d["art"] != "eigenbeschaffung":
+        return _bw_nicht_gefunden(token)
+    if d["status"] != "offen":
+        return RedirectResponse(f"/portal/{token}/vorschuss/{bid}", status_code=303)
+    return HTMLResponse(portal_shell("Bargeld selbst beschafft", _vs_portal_form_seite(token, info, d, [], bid)))
+
+
+@app.post("/portal/{token}/vorschuss/speichern")
+async def portal_vorschuss_speichern(token: str, request: Request):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    form = await request.form()
+    try:
+        bid = int(form.get("bid") or 0) or None
+    except ValueError:
+        bid = None
+    d = _vs_form_aus_request(form, "eigenbeschaffung")
+    d.update({"reise_code": info["reise_code"], "kuerzel": info["kuerzel"], "version": 1})
+    db = get_db()
+    try:
+        if bid:
+            alt = _vs_eigene(db, info, bid)
+            if not alt or alt["art"] != "eigenbeschaffung":
+                return _bw_nicht_gefunden(token)
+            if alt["status"] != "offen":
+                return RedirectResponse(f"/portal/{token}/vorschuss/{bid}", status_code=303)
+            d["version"] = alt["version"]
+        fehler = _vs_fehler_sammeln(d)
+        if fehler:
+            return HTMLResponse(portal_shell("Bargeld selbst beschafft", _vs_portal_form_seite(token, info, d, fehler, bid)))
+        neu = vs.speichern(db, d, bid)
+        db.commit()
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return HTMLResponse(portal_shell("Fehler beim Speichern",
+            '<div class="card"><div class="card-body"><p>Der Eintrag konnte nicht gespeichert werden. Bitte versuch es '
+            'gleich noch einmal oder melde dich beim Organisator.</p>'
+            f'<p style="font-size:11px;color:#94a3b8">{_bw_e(e)}</p>'
+            f'<a href="/portal/{token}" class="btn btn-secondary">← Zurück</a></div></div>'), status_code=500)
+    finally:
+        db.close()
+    return RedirectResponse(f"/portal/{token}/vorschuss/{neu}/bestaetigen", status_code=303)
+
+
+def _vs_bestaetigen_seite(token: str, info: dict, d: dict, fehler: str = "", name_wert: str = "") -> str:
+    fehler_html = f'<div class="alert alert-err" style="margin-bottom:14px">{_bw_e(fehler)}</div>' if fehler else ""
+    text = {"auszahlung": "Ich bestätige, den Betrag als Reisevorschuss für diese Reise erhalten zu haben. "
+                          "Er wird mit den tatsächlichen Reisekosten abgerechnet, nicht verbrauchtes Bargeld gebe ich zurück.",
+            "rueckgabe": "Ich bestätige, den Betrag in bar zurückgegeben zu haben.",
+            "eigenbeschaffung": "Ich bestätige, das Bargeld wie angegeben selbst beschafft zu haben und dass die "
+                                "Angaben vollständig und richtig sind."}[d["art"]]
+    bearbeiten = ""
+    if d["art"] == "eigenbeschaffung":
+        bearbeiten = (f'<a href="/portal/{token}/vorschuss/{d["id"]}/bearbeiten" class="btn btn-secondary" '
+                      f'style="width:100%;display:block;text-align:center;margin-top:8px">← Angaben ändern</a>')
+    else:
+        bearbeiten = ('<p style="font-size:12px;color:var(--muted)">Stimmt etwas nicht? Dann nicht bestätigen, '
+                      'sondern beim Organisator melden.</p>')
+    return f"""<div class="card"><div class="card-body">
+      <h1 class="page-title" style="margin:0 0 12px 0">💵 {_bw_e(vs.ARTEN[d["art"]])} bestätigen</h1>
+      {fehler_html}
+      {_vs_detail_html(d, info["klarname"], None, "", False)}
+      <form method="post" action="/portal/{token}/vorschuss/{d["id"]}/bestaetigen" id="bw_best_form">
+        <h3 style="font-size:14px;margin:18px 0 8px 0">Bestätigung</h3>
+        <label class="bw-opt"><input type="checkbox" name="haken" value="1"> {_bw_e(text)}</label>
+        <div class="form-group" style="margin-top:8px"><label style="font-size:12px">
+          Vollständiger Name als Bestätigung <span class="required">*</span></label>
+          <input type="text" name="name_eingabe" value="{_bw_e(name_wert)}" autocomplete="off"
+                 placeholder="{_bw_e(info["klarname"])}"></div>
+        <div class="form-group"><label style="font-size:12px">Unterschrift (optional, mit Finger oder Maus)</label>
+          <canvas id="bw_sig" class="bw-sig" width="600" height="200"></canvas>
+          <button type="button" id="bw_sig_clear" class="btn btn-secondary btn-sm" style="margin:6px 0 4px 0;width:auto">Unterschrift löschen</button>
+          <input type="hidden" name="signatur" id="bw_sig_data"></div>
+        <p style="font-size:12px;color:var(--muted);margin:12px 0">
+          Mit „Verbindlich bestätigen“ wird die Buchung gesperrt. Zeitpunkt, Name und eine Prüfsumme werden
+          gespeichert. Spätere Änderungen sind nur als neue Version möglich.</p>
+        <button type="submit" class="btn btn-success" style="width:100%">✓ Verbindlich bestätigen</button>
+        {bearbeiten}
+        <a href="/portal/{token}" class="btn btn-secondary" style="width:100%;display:block;text-align:center;margin-top:8px">Später bestätigen</a>
+      </form>{_BW_SIG_JS}
+    </div></div>"""
+
+
+@app.get("/portal/{token}/vorschuss/{bid}/bestaetigen", response_class=HTMLResponse)
+def portal_vorschuss_bestaetigen_seite(token: str, bid: int):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        d = _vs_eigene(db, info, bid)
+    finally:
+        db.close()
+    if not d:
+        return _bw_nicht_gefunden(token)
+    if d["status"] != "offen":
+        return RedirectResponse(f"/portal/{token}/vorschuss/{bid}", status_code=303)
+    return HTMLResponse(portal_shell("Bestätigen", _vs_bestaetigen_seite(token, info, d)))
+
+
+@app.post("/portal/{token}/vorschuss/{bid}/bestaetigen")
+async def portal_vorschuss_bestaetigen(token: str, bid: int, request: Request):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    form = await request.form()
+    db = get_db()
+    try:
+        d = _vs_eigene(db, info, bid)
+        if not d:
+            return _bw_nicht_gefunden(token)
+        if d["status"] != "offen":
+            return RedirectResponse(f"/portal/{token}/vorschuss/{bid}", status_code=303)
+        name_eingabe = (form.get("name_eingabe") or "").strip()
+        try:
+            vs.bestaetigen(db, bid, info["klarname"], name_eingabe, bool(form.get("haken")),
+                           form.get("signatur") or None, _bw_client_ip(request), request.headers.get("user-agent", ""))
+            db.commit()
+        except ValueError as e:
+            db.rollback()
+            return HTMLResponse(portal_shell("Bestätigen", _vs_bestaetigen_seite(token, info, d, str(e), name_eingabe)),
+                                status_code=400)
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return HTMLResponse(portal_shell("Fehler",
+            '<div class="card"><div class="card-body"><p>Die Bestätigung konnte nicht gespeichert werden. Es wurde nichts '
+            'verändert. Bitte versuch es gleich noch einmal oder melde dich beim Organisator.</p>'
+            f'<p style="font-size:11px;color:#94a3b8">{_bw_e(e)}</p>'
+            f'<a href="/portal/{token}/vorschuss/{bid}/bestaetigen" class="btn btn-secondary">← Zurück</a></div></div>'),
+            status_code=500)
+    finally:
+        db.close()
+    return RedirectResponse(f"/portal/{token}/vorschuss/{bid}?ok=1", status_code=303)
+
+
+@app.get("/portal/{token}/vorschuss/{bid}", response_class=HTMLResponse)
+def portal_vorschuss_ansicht(token: str, bid: int, ok: int = 0):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        d = _vs_eigene(db, info, bid)
+        if not d:
+            return _bw_nicht_gefunden(token)
+        if d["status"] == "offen":
+            return RedirectResponse(f"/portal/{token}/vorschuss/{bid}/bestaetigen", status_code=303)
+        alle = vs.versionen(db, d["nummer"])
+    finally:
+        db.close()
+    banner = ""
+    if ok:
+        banner = ('<div class="alert alert-ok" style="margin-bottom:14px">✓ Bestätigt und gespeichert. '
+                  'Die Buchung liegt jetzt beim Organisator.</div>')
+    if d["status"] == "ersetzt":
+        banner += ('<div class="alert alert-warn" style="margin-bottom:14px">Diese Version wurde durch eine neuere ersetzt '
+                   'und bleibt nur zur Nachvollziehbarkeit erhalten.</div>')
+    versionen_html = ""
+    if len(alle) > 1:
+        versionen_html = '<h3 style="font-size:14px;margin:16px 0 6px 0">Versionen</h3>' + "".join(
+            f'<div style="font-size:13px;padding:4px 0"><a href="/portal/{token}/vorschuss/{v["id"]}">Version {v["version"]}</a> · '
+            f'{_vs_status_badge(v)}</div>' for v in alle)
+    korrektur = ""
+    if d["status"] == "bestaetigt" and d["art"] == "eigenbeschaffung":
+        korrektur = (f'<form method="post" action="/portal/{token}/vorschuss/{bid}/korrektur" '
+                     f'onsubmit="return confirm(\'Eine Korrektur erzeugt eine neue Version, die erneut bestätigt '
+                     f'werden muss. Fortfahren?\')" style="margin-top:10px"><button type="submit" '
+                     f'class="btn btn-secondary" style="width:100%">✏ Korrigieren (neue Version)</button></form>')
+    elif d["status"] == "bestaetigt":
+        korrektur = ('<p style="font-size:12px;color:var(--muted);margin-top:10px">Korrekturen an Auszahlung und '
+                     'Rückgabe macht der Organisator. Danach bestätigst du die neue Version erneut.</p>')
+    content = f"""<div class="card"><div class="card-body">
+      <h1 class="page-title" style="margin:0 0 12px 0">💵 {_bw_e(vs.ARTEN[d["art"]])}</h1>
+      {banner}
+      {_vs_detail_html(d, info["klarname"], vs.integritaet_ok(d), f"/portal/{token}/vorschuss/{bid}/pdf", False)}
+      {korrektur}{versionen_html}
+      <a href="/portal/{token}" class="btn btn-primary" style="width:100%;display:block;text-align:center;margin-top:12px">← Zurück zur Übersicht</a>
+    </div></div>"""
+    return HTMLResponse(portal_shell(f"{d['nummer']}", content))
+
+
+@app.post("/portal/{token}/vorschuss/{bid}/korrektur")
+def portal_vorschuss_korrektur(token: str, bid: int):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        d = _vs_eigene(db, info, bid)
+        if not d or d["art"] != "eigenbeschaffung":
+            return _bw_nicht_gefunden(token)
+        try:
+            neu = vs.korrektur_starten(db, bid)
+            db.commit()
+        except ValueError:
+            db.rollback()
+            cur = db.cursor()
+            cur.execute(f"SELECT id FROM bargeld_buchungen WHERE ersetzt_id={ph()} AND status='offen'", (bid,))
+            r = cur.fetchone(); cur.close()
+            neu = (r[0] if isinstance(r, tuple) else r["id"]) if r else None
+            if not neu:
+                return RedirectResponse(f"/portal/{token}/vorschuss/{bid}", status_code=303)
+    finally:
+        db.close()
+    return RedirectResponse(f"/portal/{token}/vorschuss/{neu}/bearbeiten", status_code=303)
+
+
+@app.post("/portal/{token}/vorschuss/{bid}/loeschen")
+def portal_vorschuss_loeschen(token: str, bid: int):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        d = _vs_eigene(db, info, bid)
+        if d and d["status"] == "offen" and d["art"] == "eigenbeschaffung":
+            vs.loeschen(db, bid)
+            db.commit()
+    finally:
+        db.close()
+    return RedirectResponse(f"/portal/{token}", status_code=303)
+
+
+@app.get("/portal/{token}/vorschuss/{bid}/pdf")
+def portal_vorschuss_pdf(token: str, bid: int):
+    info = zugang_aus_token(token)
+    if not info:
+        return _bw_ungueltig()
+    db = get_db()
+    try:
+        d = _vs_eigene(db, info, bid)
+    finally:
+        db.close()
+    if not d or not d.get("s3_pdf"):
+        return _bw_nicht_gefunden(token)
+    return _vs_pdf_antwort(d)
+
+
+# ── Organisator ───────────────────────────────────────────────────────────────
+def _vs_kein_zugriff():
+    return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren haben Zugriff.</div>'),
+                        status_code=403)
+
+
+def _vs_abrechnung_html(code: str, erg: dict) -> str:
+    """Abrechnung je Mitarbeiter und Währung."""
+    out = ""
+    for k, p in erg["personen"].items():
+        zeilen = ""
+        details = ""
+        for c, x in sorted(p["waehrungen"].items()):
+            def t(v):
+                return vs.betrag_text(v, c) if v else "–"
+            rest = ("–" if x["rueckgabe_offen"] <= 0.005 else
+                    f'<b style="color:#b45309">{_bw_e(vs.betrag_text(x["rueckgabe_offen"], c))}</b>'
+                    + ("" if x["rueckgabe_offen_eur"] is None else f'<br><span style="color:var(--muted);font-size:11px">≈ {x["rueckgabe_offen_eur"]:.2f} EUR</span>'))
+            eigen = ("–" if x["eigenanteil"] <= 0.005 else
+                     f'<b style="color:#166534">{_bw_e(vs.betrag_text(x["eigenanteil"], c))}</b>'
+                     + ("" if x["eigenanteil_eur"] is None else f'<br><span style="color:var(--muted);font-size:11px">≈ {x["eigenanteil_eur"]:.2f} EUR</span>'))
+            kurs = "–" if c == "EUR" else _vs_kurs4(x["kurs_V"])
+            kerg = _vs_eur_signed(x["kursergebnis"])
+            zeilen += (f'<tr><td><b>{c}</b></td><td style="text-align:right">{_bw_e(t(x["V"]))}</td>'
+                       f'<td style="text-align:right">{_bw_e(t(x["T"]))}</td><td style="text-align:right">{_bw_e(t(x["R"]))}</td>'
+                       f'<td style="text-align:right">{_bw_e(t(x["A"]))}<br><span style="color:var(--muted);font-size:11px">{len(x["belege"])} Beleg(e)</span></td>'
+                       f'<td style="text-align:right">{rest}</td><td style="text-align:right">{eigen}</td>'
+                       f'<td style="text-align:right">{kurs}</td><td style="text-align:right">{kerg}</td></tr>')
+            for wtxt in x["warnungen"]:
+                details += f'<div class="alert alert-warn" style="font-size:12px;margin:6px 0">⚠ {c}: {_bw_e(wtxt)}</div>'
+            if c != "EUR" and x["bewertung_eur_je_fw"] and x["belege"]:
+                aend = [{"id": b["id"], "anbieter": b["anbieter"], "betrag": b["betrag"], "alt": b["eur_final"],
+                         "neu": round(b["betrag"] * x["bewertung_eur_je_fw"], 2),
+                         "frei": b["eur_final"] is None or (b["kurs_quelle"] or "").startswith("Bargeld-Konto")} for b in x["belege"]]
+                zl = ""
+                for a in aend:
+                    alt_txt = "–" if a["alt"] is None else f'{a["alt"]:.2f}'
+                    zl += (f'<tr><td>#{a["id"]}</td><td>{_bw_e(a["anbieter"] or "–")}</td>'
+                           f'<td style="text-align:right">{_bw_e(vs.betrag_text(a["betrag"], c))}</td>'
+                           f'<td style="text-align:right">{alt_txt}</td>'
+                           f'<td style="text-align:right"><b>{a["neu"]:.2f}</b></td>'
+                           f'<td>{"" if a["frei"] else "bleibt (manuell gesetzt)"}</td></tr>')
+                kurs_je = f'{x["bewertung_eur_je_fw"]:.6f}'.replace(".", ",")
+                details += f"""<details style="margin:8px 0"><summary style="cursor:pointer;font-size:13px">
+                  Bar-Belege in {c} bewerten: 1 {c} = {kurs_je} EUR ({len(aend)} Beleg(e))</summary>
+                  <div class="table-wrap"><table><thead><tr><th>Beleg</th><th>Anbieter</th><th style="text-align:right">Betrag</th>
+                  <th style="text-align:right">EUR final alt</th><th style="text-align:right">EUR final neu</th><th></th></tr></thead>
+                  <tbody>{zl}</tbody></table></div>
+                  <form method="post" action="/reise/{_bw_e(code)}/vorschuss/bewerten" style="margin-top:8px">
+                    <input type="hidden" name="kuerzel" value="{_bw_e(k)}"><input type="hidden" name="waehrung" value="{c}">
+                    <button type="submit" class="btn btn-primary btn-sm">Bewertung in die Belege übernehmen</button>
+                  </form></details>"""
+        if not zeilen:
+            continue
+        vorlaeufig = ""
+        if p["offen"]:
+            vorlaeufig = ('<div class="alert alert-warn" style="font-size:12px;margin:0 0 8px 0">Vorläufig: Es gibt unbestätigte '
+                          'Buchungen. „Rückgabe offen“ und „Erstattung“ sind erst nach der Bestätigung verlässlich.</div>')
+        out += f"""<div class="card" style="margin-bottom:16px">
+          <div class="card-header"><span class="card-title">📊 Abrechnung {_bw_e(p["name"])}</span>
+            {f'<span style="font-size:12px;color:#b45309">{p["offen"]} Buchung(en) noch nicht bestätigt (zählen noch nicht)</span>' if p["offen"] else ""}</div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Währung</th><th style="text-align:right">Ausgezahlt</th><th style="text-align:right">Selbst beschafft</th>
+              <th style="text-align:right">Zurückgegeben</th><th style="text-align:right">Bar-Belege</th>
+              <th style="text-align:right">Rückgabe offen</th><th style="text-align:right">Erstattung (Eigenanteil)</th>
+              <th style="text-align:right">Kurs Auszahlung (1 EUR =)</th><th style="text-align:right">Kursergebnis</th></tr></thead>
+            <tbody>{zeilen}</tbody></table></div>
+          <div class="card-body">{vorlaeufig}{details}</div></div>"""
+    if erg["unzugeordnet"]:
+        liste = "".join(f'<li><a href="/beleg/{b["id"]}">#{b["id"]}</a> {_bw_e(b["anbieter"] or "–")} · '
+                        f'{_bw_e(vs.betrag_text(b["betrag"], b["waehrung"]))} · Reisender: {_bw_e(b["reisender"] or "–")}</li>'
+                        for b in erg["unzugeordnet"])
+        out += ('<div class="alert alert-warn" style="margin-bottom:16px"><b>Bar-Belege ohne eindeutigen Mitarbeiter</b> '
+                '(bitte am Beleg über „Daten nachtragen“ den Reisenden eintragen):'
+                f'<ul style="margin:6px 0 0 18px">{liste}</ul></div>')
+    return out
+
+
+@app.get("/reise/{code}/vorschuss", response_class=HTMLResponse)
+def vorschuss_uebersicht(request: Request, code: str, ok: str = ""):
+    if not ist_organisator(request):
+        return _vs_kein_zugriff()
+    rcode = code.upper()
+    db = get_db()
+    try:
+        cur = db.cursor()
+        cur.execute(f"SELECT titel FROM reisen WHERE code={ph()}", (rcode,))
+        r = cur.fetchone(); cur.close()
+        if not r:
+            return HTMLResponse(shell("Nicht gefunden", '<div class="alert alert-err">Reise nicht gefunden.</div>'), status_code=404)
+        titel = r[0] if isinstance(r, tuple) else r["titel"]
+        teilnehmer = reisende_der_reise(rcode)
+        buchungen = vs.liste_reise(db, rcode)
+        erg = vs.abrechnung(db, rcode)
+    finally:
+        db.close()
+    personen = {}
+    for m in teilnehmer:
+        personen[m[0] if isinstance(m, tuple) else m["kuerzel"]] = m[1] if isinstance(m, tuple) else m["klarname"]
+    for b in buchungen:
+        personen.setdefault(b["kuerzel"], erg["personen"].get(b["kuerzel"], {}).get("name", b["kuerzel"]))
+    banner = ""
+    if ok == "gespeichert":
+        banner = ('<div class="alert alert-ok" style="margin-bottom:14px">Gespeichert. Die Buchung wartet jetzt auf die '
+                  'Bestätigung des Mitarbeiters (im Portal-Link).</div>')
+    elif ok == "bewertet":
+        banner = '<div class="alert alert-ok" style="margin-bottom:14px">Die Bar-Belege wurden bewertet.</div>'
+    karten = ""
+    for k, name in personen.items():
+        zeilen = ""
+        for b in [x for x in buchungen if x["kuerzel"] == k]:
+            akt = f'<a href="/vorschuss/{b["id"]}" class="btn btn-secondary btn-sm">Ansehen</a> '
+            if b["status"] == "offen" and b["art"] in ("auszahlung", "rueckgabe"):
+                akt += (f'<a href="/reise/{rcode}/vorschuss/{b["id"]}/bearbeiten" class="btn btn-secondary btn-sm">Bearbeiten</a> ')
+            if b["status"] == "offen":
+                akt += (f'<form method="post" action="/reise/{rcode}/vorschuss/{b["id"]}/loeschen" style="display:inline" '
+                        f'onsubmit="return confirm(\'Buchung wirklich löschen?\')"><button type="submit" '
+                        f'class="btn btn-secondary btn-sm" style="color:#b91c1c">Löschen</button></form>')
+            if b["status"] == "bestaetigt" and b["art"] in ("auszahlung", "rueckgabe"):
+                akt += (f'<form method="post" action="/reise/{rcode}/vorschuss/{b["id"]}/korrektur" style="display:inline" '
+                        f'onsubmit="return confirm(\'Korrektur erzeugt eine neue Version, die der Mitarbeiter erneut bestätigen muss. Fortfahren?\')">'
+                        f'<button type="submit" class="btn btn-secondary btn-sm">Korrigieren</button></form>')
+            zeilen += (f'<tr><td><b>{_bw_e(b["nummer"])}</b>{" v" + str(b["version"]) if b["version"] > 1 else ""}</td>'
+                       f'<td>{_bw_e(vs.ARTEN[b["art"]])}</td><td>{bw.datum_de(b["datum"])}</td>'
+                       f'<td style="text-align:right">{_bw_e(vs.betrag_text(b["betrag"], b["waehrung"]))}</td>'
+                       f'<td style="text-align:right">{"–" if b["waehrung"] == "EUR" else _vs_kurs4(b["kurs"])}</td>'
+                       f'<td style="text-align:right">{_bw_e(vs.betrag_text(b["eur_betrag"], "EUR"))}</td>'
+                       f'<td>{_vs_status_badge(b)}</td><td>{akt}</td></tr>')
+        tab = (f'<div class="table-wrap"><table><thead><tr><th>Nr.</th><th>Art</th><th>Datum</th>'
+               f'<th style="text-align:right">Betrag</th><th style="text-align:right">Kurs (1 EUR =)</th>'
+               f'<th style="text-align:right">EUR</th><th>Status</th><th></th></tr></thead><tbody>{zeilen}</tbody></table></div>'
+               if zeilen else '<div class="empty-state" style="padding:14px">Noch keine Buchungen.</div>')
+        karten += f"""<div class="card" style="margin-bottom:16px">
+          <div class="card-header"><span class="card-title">👤 {_bw_e(name)} <span style="color:var(--muted);font-weight:400">({_bw_e(k)})</span></span>
+            <span><a href="/reise/{rcode}/vorschuss/neu?kuerzel={_bw_e(k)}&art=auszahlung" class="btn btn-primary btn-sm">+ Auszahlung</a>
+            <a href="/reise/{rcode}/vorschuss/neu?kuerzel={_bw_e(k)}&art=rueckgabe" class="btn btn-secondary btn-sm">+ Rückgabe</a></span></div>
+          {tab}</div>"""
+    content = f"""{_BW_CSS}
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+      <a href="/reise/{rcode}" class="btn btn-secondary">← Reise {rcode}</a>
+      <h1 class="page-title" style="margin:0">💵 Reisevorschuss {rcode} – {_bw_e(titel)}</h1>
+    </div>
+    <p style="font-size:13px;color:var(--muted);margin:0 0 14px 0">Auszahlung und Rückgabe erfassen Sie hier mit Kurs von Hand,
+      der Mitarbeiter bestätigt im Portal. Selbst beschafftes Bargeld trägt der Mitarbeiter im Portal ein.
+      In die Abrechnung zählen nur bestätigte Buchungen.</p>
+    {banner}{karten or '<div class="alert alert-warn">Dieser Reise sind keine Mitarbeiter zugeordnet.</div>'}
+    {_vs_abrechnung_html(rcode, erg)}"""
+    return HTMLResponse(shell(f"Vorschuss {rcode}", content, "reisen"))
+
+
+def _vs_org_form_seite(code: str, d: dict, fehler: list, bid: int | None, name: str, aussteller: str = "") -> str:
+    art = d["art"]
+    titel = {"auszahlung": "Vorschuss auszahlen", "rueckgabe": "Rückgabe Bargeld erfassen"}[art]
+    bid_feld = f'<input type="hidden" name="bid" value="{bid}">' if bid else ""
+    version_hinweis = (f' <span style="font-size:12px;color:var(--muted)">(Korrektur, Version {d["version"]})</span>'
+                       if d.get("version", 1) > 1 else "")
+    return f"""{_BW_CSS}
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+      <a href="/reise/{code}/vorschuss" class="btn btn-secondary">← Vorschuss {code}</a>
+      <h1 class="page-title" style="margin:0">💵 {titel}{version_hinweis}</h1>
+    </div>
+    <div class="card" style="max-width:640px"><div class="card-body">
+      <p style="font-size:13px;margin:0 0 12px 0">Mitarbeiter: <b>{_bw_e(name)}</b> · Reise <b>{_bw_e(code)}</b></p>
+      {_vs_fehlerbox(fehler)}
+      <form method="post" action="/reise/{code}/vorschuss/speichern" id="vsform">
+        {bid_feld}<input type="hidden" name="kuerzel" value="{_bw_e(d["kuerzel"])}"><input type="hidden" name="art" value="{art}">
+        {_vs_form_felder(d, False)}
+        <p style="font-size:12px;color:var(--muted)">Mit dem Speichern erfassen Sie die Buchung unter Ihrem Login
+          ({_bw_e(aussteller)}). Danach bestätigt der Mitarbeiter im Portal.</p>
+        <button type="submit" class="btn btn-primary">Speichern</button>
+        <a href="/reise/{code}/vorschuss" class="btn btn-secondary">Abbrechen</a>
+      </form>
+    </div></div>
+    {_VS_FORM_JS}"""
+
+
+def _vs_pruefe_reise_und_person(db, code: str, kuerzel: str):
+    cur = db.cursor()
+    cur.execute(f"SELECT COUNT(*) FROM reisen WHERE code={ph()}", (code,))
+    reise_da = (cur.fetchone() or [0])[0]
+    cur.close()
+    return bool(reise_da) and bool(kuerzel)
+
+
+@app.get("/reise/{code}/vorschuss/neu", response_class=HTMLResponse)
+def vorschuss_neu(request: Request, code: str, kuerzel: str = "", art: str = "auszahlung"):
+    if not ist_organisator(request):
+        return _vs_kein_zugriff()
+    rcode = code.upper()
+    if art not in ("auszahlung", "rueckgabe"):
+        art = "auszahlung"
+    db = get_db()
+    try:
+        if not _vs_pruefe_reise_und_person(db, rcode, kuerzel):
+            return RedirectResponse(f"/reise/{rcode}/vorschuss", status_code=303)
+        name = _vs_name(db, kuerzel)
+    finally:
+        db.close()
+    d = {"art": art, "kuerzel": kuerzel, "waehrung": "", "datum": date.today().isoformat(), "version": 1}
+    return HTMLResponse(shell("Vorschuss", _vs_org_form_seite(rcode, d, [], None, name, request.session.get("klarname") or request.session.get("kuerzel") or ""), "reisen"))
+
+
+@app.get("/reise/{code}/vorschuss/{bid}/bearbeiten", response_class=HTMLResponse)
+def vorschuss_bearbeiten(request: Request, code: str, bid: int):
+    if not ist_organisator(request):
+        return _vs_kein_zugriff()
+    rcode = code.upper()
+    db = get_db()
+    try:
+        d = vs.laden(db, bid)
+        name = _vs_name(db, d["kuerzel"]) if d else ""
+    finally:
+        db.close()
+    if not d or d["reise_code"] != rcode or d["art"] not in ("auszahlung", "rueckgabe"):
+        return RedirectResponse(f"/reise/{rcode}/vorschuss", status_code=303)
+    if d["status"] != "offen":
+        return RedirectResponse(f"/vorschuss/{bid}", status_code=303)
+    return HTMLResponse(shell("Vorschuss", _vs_org_form_seite(rcode, d, [], bid, name, request.session.get("klarname") or request.session.get("kuerzel") or ""), "reisen"))
+
+
+@app.post("/reise/{code}/vorschuss/speichern")
+async def vorschuss_speichern(request: Request, code: str):
+    if not ist_organisator(request):
+        return _vs_kein_zugriff()
+    rcode = code.upper()
+    form = await request.form()
+    art = form.get("art") or ""
+    if art not in ("auszahlung", "rueckgabe"):
+        return RedirectResponse(f"/reise/{rcode}/vorschuss", status_code=303)
+    try:
+        bid = int(form.get("bid") or 0) or None
+    except ValueError:
+        bid = None
+    kuerzel = (form.get("kuerzel") or "").strip()
+    d = _vs_form_aus_request(form, art)
+    d.update({"reise_code": rcode, "kuerzel": kuerzel, "version": 1,
+              "aussteller_kuerzel": request.session.get("kuerzel"),
+              "aussteller_name": request.session.get("klarname") or request.session.get("kuerzel"),
+              "aussteller_am": bw.jetzt_utc_iso()})
+    db = get_db()
+    try:
+        if not _vs_pruefe_reise_und_person(db, rcode, kuerzel):
+            return RedirectResponse(f"/reise/{rcode}/vorschuss", status_code=303)
+        name = _vs_name(db, kuerzel)
+        if bid:
+            alt = vs.laden(db, bid)
+            if not alt or alt["reise_code"] != rcode or alt["kuerzel"] != kuerzel or alt["status"] != "offen" \
+                    or alt["art"] not in ("auszahlung", "rueckgabe"):
+                return RedirectResponse(f"/reise/{rcode}/vorschuss", status_code=303)
+            d["version"] = alt["version"]
+        fehler = _vs_fehler_sammeln(d)
+        if fehler:
+            return HTMLResponse(shell("Vorschuss", _vs_org_form_seite(rcode, d, fehler, bid, name, request.session.get("klarname") or request.session.get("kuerzel") or ""), "reisen"))
+        vs.speichern(db, d, bid)
+        db.commit()
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">Speichern fehlgeschlagen: {_bw_e(e)}</div>'
+                                  f'<a href="/reise/{rcode}/vorschuss" class="btn btn-secondary">← Zurück</a>'), status_code=500)
+    finally:
+        db.close()
+    return RedirectResponse(f"/reise/{rcode}/vorschuss?ok=gespeichert", status_code=303)
+
+
+@app.post("/reise/{code}/vorschuss/{bid}/loeschen")
+def vorschuss_loeschen(request: Request, code: str, bid: int):
+    if not ist_organisator(request):
+        return _vs_kein_zugriff()
+    rcode = code.upper()
+    db = get_db()
+    try:
+        d = vs.laden(db, bid)
+        if d and d["reise_code"] == rcode and d["status"] == "offen":
+            vs.loeschen(db, bid)
+            db.commit()
+    finally:
+        db.close()
+    return RedirectResponse(f"/reise/{rcode}/vorschuss", status_code=303)
+
+
+@app.post("/reise/{code}/vorschuss/{bid}/korrektur")
+def vorschuss_korrektur(request: Request, code: str, bid: int):
+    if not ist_organisator(request):
+        return _vs_kein_zugriff()
+    rcode = code.upper()
+    db = get_db()
+    try:
+        d = vs.laden(db, bid)
+        if not d or d["reise_code"] != rcode or d["art"] not in ("auszahlung", "rueckgabe"):
+            return RedirectResponse(f"/reise/{rcode}/vorschuss", status_code=303)
+        try:
+            neu = vs.korrektur_starten(db, bid)
+            db.commit()
+        except ValueError:
+            db.rollback()
+            cur = db.cursor()
+            cur.execute(f"SELECT id FROM bargeld_buchungen WHERE ersetzt_id={ph()} AND status='offen'", (bid,))
+            r = cur.fetchone(); cur.close()
+            neu = (r[0] if isinstance(r, tuple) else r["id"]) if r else None
+            if not neu:
+                return RedirectResponse(f"/reise/{rcode}/vorschuss", status_code=303)
+    finally:
+        db.close()
+    return RedirectResponse(f"/reise/{rcode}/vorschuss/{neu}/bearbeiten", status_code=303)
+
+
+@app.post("/reise/{code}/vorschuss/bewerten")
+async def vorschuss_bewerten(request: Request, code: str):
+    if not ist_organisator(request):
+        return _vs_kein_zugriff()
+    rcode = code.upper()
+    form = await request.form()
+    db = get_db()
+    try:
+        vs.belege_bewerten(db, rcode, (form.get("kuerzel") or "").strip(),
+                           (form.get("waehrung") or "").strip().upper(), anwenden=True)
+        db.commit()
+    finally:
+        db.close()
+    return RedirectResponse(f"/reise/{rcode}/vorschuss?ok=bewertet", status_code=303)
+
+
+@app.get("/vorschuss/{bid}", response_class=HTMLResponse)
+def vorschuss_detail(request: Request, bid: int):
+    if not ist_organisator(request):
+        return _vs_kein_zugriff()
+    db = get_db()
+    try:
+        d = vs.laden(db, bid)
+        if not d:
+            return HTMLResponse(shell("Nicht gefunden", '<div class="alert alert-err">Buchung nicht gefunden.</div>'), status_code=404)
+        name = _vs_name(db, d["kuerzel"])
+        alle = vs.versionen(db, d["nummer"])
+    finally:
+        db.close()
+    links = f'<a href="/reise/{_bw_e(d["reise_code"])}/vorschuss" class="btn btn-secondary">← Vorschuss {_bw_e(d["reise_code"])}</a> '
+    if d["beleg_id"]:
+        links += f'<a href="/beleg/{d["beleg_id"]}" class="btn btn-secondary">📎 Beleg #{d["beleg_id"]}</a>'
+    vers = ""
+    if len(alle) > 1:
+        vers = '<h3 style="font-size:14px;margin:16px 0 6px 0">Versionen</h3>' + "".join(
+            f'<div style="font-size:13px;padding:3px 0"><a href="/vorschuss/{v["id"]}">Version {v["version"]}</a> · '
+            f'{_vs_status_badge(v)} · {_bw_e(bw.lokal_text(v["bestaetigt_am"]))} · '
+            f'{"✓ unverändert" if vs.integritaet_ok(v) else ("–" if v["status"] == "offen" else "✖ Prüfsumme weicht ab")}</div>'
+            for v in alle)
+    content = f"""<div style="margin-bottom:14px">{links}</div>
+    <div class="card" style="max-width:760px"><div class="card-body">
+      <h1 class="page-title" style="margin:0 0 12px 0">💵 {_bw_e(d["nummer"])}</h1>
+      {_vs_detail_html(d, name, vs.integritaet_ok(d) if d["status"] != "offen" else None, f"/vorschuss/{bid}/pdf", True)}
+      {vers}
+    </div></div>"""
+    return HTMLResponse(shell(f"Vorschuss {d['nummer']}", content, "reisen"))
+
+
+@app.get("/vorschuss/{bid}/pdf")
+def vorschuss_pdf(request: Request, bid: int):
+    if not ist_organisator(request):
+        return _vs_kein_zugriff()
+    db = get_db()
+    try:
+        d = vs.laden(db, bid)
+    finally:
+        db.close()
+    if not d or not d.get("s3_pdf"):
+        return HTMLResponse(shell("Nicht gefunden", '<div class="alert alert-err">Kein PDF vorhanden.</div>'), status_code=404)
+    return _vs_pdf_antwort(d)
+
+
+# ── Einbindung in Beleg-Detailseite, Abschluss und ToDo ───────────────────────
+def _vorschuss_karte(bid: int) -> str:
+    try:
+        db = get_db()
+        try:
+            liste = vs.zu_beleg(db, bid)
+        finally:
+            db.close()
+    except Exception:
+        return ""
+    if not liste:
+        return ""
+    zeilen = "".join(
+        f'<div style="padding:8px 0;font-size:13px"><a href="/vorschuss/{d["id"]}" style="color:#2563eb"><b>{_bw_e(d["nummer"])}</b></a> '
+        f'· Version {d["version"]} {_vs_status_badge(d)}<br><span style="color:var(--muted);font-size:12px">'
+        f'{_bw_e(vs.ARTEN[d["art"]])} · {bw.datum_de(d["datum"])} · {_bw_e(vs.betrag_text(d["betrag"], d["waehrung"]))}</span></div>'
+        for d in liste)
+    return (f'<div class="card"><div class="card-header"><span class="card-title">💵 Bargeld-Konto</span></div>'
+            f'<div class="card-body">{zeilen}</div></div>')
+
+
+def _vorschuss_sperre(bid: int) -> str:
+    try:
+        db = get_db()
+        try:
+            liste = vs.zu_beleg(db, bid)
+        finally:
+            db.close()
+    except Exception:
+        return ""
+    if not liste:
+        return ""
+    return (f"Dieser Beleg gehört zur Bargeld-Buchung {', '.join(sorted({d['nummer'] for d in liste}))} und kann nicht "
+            f"gelöscht oder einer anderen Reise zugeordnet werden. Zuerst die Buchung klären (Korrektur über die "
+            f"Vorschuss-Seite der Reise).")
+
+
+def _vorschuss_abschluss_html(rcode: str) -> str:
+    try:
+        db = get_db()
+        try:
+            buchungen = vs.liste_reise(db, rcode)
+            erg = vs.abrechnung(db, rcode) if buchungen else None
+        finally:
+            db.close()
+    except Exception:
+        return ""
+    if not buchungen:
+        return ""
+    zeilen = ""
+    for k, p in erg["personen"].items():
+        for c, x in sorted(p["waehrungen"].items()):
+            if not (x["V"] or x["T"] or x["R"] or x["A"]):
+                continue
+            rest = []
+            if x["rueckgabe_offen"] > 0.005:
+                rest.append(f'Rückgabe offen {vs.betrag_text(x["rueckgabe_offen"], c)}')
+            if x["eigenanteil"] > 0.005:
+                rest.append(f'Erstattung {vs.betrag_text(x["eigenanteil"], c)}')
+            if p["offen"]:
+                rest.append("vorläufig, Buchung unbestätigt")
+            zeilen += (f'<tr><td>{_bw_e(p["name"])}</td><td>{c}</td><td style="text-align:right">{_bw_e(vs.betrag_text(x["V"], c))}</td>'
+                       f'<td style="text-align:right">{_bw_e(vs.betrag_text(x["T"], c))}</td>'
+                       f'<td style="text-align:right">{_bw_e(vs.betrag_text(x["R"], c))}</td>'
+                       f'<td style="text-align:right">{_bw_e(vs.betrag_text(x["A"], c))}</td>'
+                       f'<td>{_bw_e(" · ".join(rest) or "ausgeglichen")}</td>'
+                       f'<td style="text-align:right">{_vs_eur_signed(x["kursergebnis"])}</td></tr>')
+    punkte = vs.offene_punkte_aus(erg)
+    warn = ""
+    if punkte:
+        warn = ('<div style="padding:8px 16px;background:#fef2f2;color:#991b1b;font-size:12px;font-weight:600">⚠ '
+                + _bw_e(" · ".join(punkte)) + "</div>")
+    return f"""<div class="card" style="margin-bottom:16px">
+      <div class="card-header"><span class="card-title">💵 Reisevorschuss / Bargeld</span>
+        <a href="/reise/{_bw_e(rcode)}/vorschuss" class="btn btn-secondary btn-sm">Details</a></div>{warn}
+      <div class="table-wrap"><table><thead><tr><th>Mitarbeiter</th><th>Währung</th><th style="text-align:right">Ausgezahlt</th>
+        <th style="text-align:right">Selbst beschafft</th><th style="text-align:right">Zurückgegeben</th>
+        <th style="text-align:right">Bar-Belege</th><th>Stand</th><th style="text-align:right">Kursergebnis</th></tr></thead>
+        <tbody>{zeilen}</tbody></table></div></div>"""
+
+
+def _vorschuss_abschluss_pdf_daten(rcode: str) -> list:
+    """Tabellenzeilen für den Abschluss-PDF (erste Zeile = Kopf), leer wenn kein Bargeld-Konto."""
+    try:
+        db = get_db()
+        try:
+            buchungen = vs.liste_reise(db, rcode)
+            erg = vs.abrechnung(db, rcode) if buchungen else None
+        finally:
+            db.close()
+    except Exception:
+        return []
+    if not buchungen:
+        return []
+    daten = [["Mitarbeiter", "Währ.", "Ausgezahlt", "Selbst besch.", "Zurück", "Bar-Belege", "Stand"]]
+    for k, p in erg["personen"].items():
+        for c, x in sorted(p["waehrungen"].items()):
+            if not (x["V"] or x["T"] or x["R"] or x["A"]):
+                continue
+            rest = []
+            if x["rueckgabe_offen"] > 0.005:
+                rest.append(f'Rückgabe offen {x["rueckgabe_offen"]:.2f}')
+            if x["eigenanteil"] > 0.005:
+                rest.append(f'Erstattung {x["eigenanteil"]:.2f}')
+            if p["offen"]:
+                rest.append("vorläufig")
+            daten.append([p["name"], c, f'{x["V"]:.2f}', f'{x["T"]:.2f}', f'{x["R"]:.2f}', f'{x["A"]:.2f}',
+                          " · ".join(rest) or "ausgeglichen"])
+    return daten if len(daten) > 1 else []
+
+
+def _vorschuss_todo_laden() -> list:
+    """Reisen nach Rückkehr mit offenem Bargeld-Konto (Rückgabe offen, Buchung unbestätigt, Beleg ohne Zuordnung)."""
+    ergebnis = []
+    try:
+        db = get_db()
+        try:
+            cur = db.cursor()
+            cur.execute(f"""SELECT DISTINCT b.reise_code, r.titel, r.rueckkehr FROM bargeld_buchungen b
+                            LEFT JOIN reisen r ON r.code = b.reise_code WHERE b.status != 'ersetzt'""")
+            reisen = cur.fetchall(); cur.close()
+            heute = date.today()
+            for r in reisen:
+                code = r[0] if isinstance(r, tuple) else r["reise_code"]
+                titel = r[1] if isinstance(r, tuple) else r["titel"]
+                rk = r[2] if isinstance(r, tuple) else r["rueckkehr"]
+                try:
+                    rk_d = rk if isinstance(rk, date) else date.fromisoformat(str(rk)[:10])
+                except Exception:
+                    rk_d = None
+                punkte = vs.offene_punkte(db, code)
+                unbestaetigt = [p for p in punkte if "nicht bestätigt" in p]
+                nach_reise = [p for p in punkte if "nicht bestätigt" not in p] if (rk_d and rk_d < heute) else []
+                if unbestaetigt or nach_reise:
+                    ergebnis.append({"reise_code": code, "titel": titel or "", "punkte": unbestaetigt + nach_reise})
+        finally:
+            db.close()
+    except Exception:
+        return []
+    return ergebnis
 
 
 # ── Kreditkarten-Abrechnung (lokal, ohne KI) ──────────────────────────────────
