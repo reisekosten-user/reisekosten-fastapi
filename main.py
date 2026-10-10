@@ -19,7 +19,8 @@ from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schem
 from mod_vma import (VMA_SAETZE, IATA_TO_LAND, LAENDER_LISTE, vma_fuer_land,
                       importiere_aktuelle_saetze, vma_fuer_land_erweitert, STADT_ZU_LAND)
 from mod_anon import anonymisieren
-from mod_kk import (abrechnung_parsen, abrechnung_zuordnen, mitarbeiter_finden,
+from mod_kk import (abrechnung_parsen, abrechnung_zuordnen, mitarbeiter_finden, auswahl_wert,
+                    zuordnungen_laden as kk_zuordnungen_laden,
                     belege_laden as kk_belege_laden, treffer_speichern as kk_treffer_speichern)
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         lade_ma_daten, get_s3, s3_upload, s3_download,
@@ -50,7 +51,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.15"
+APP_VERSION  = "3.15-b"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -7932,6 +7933,7 @@ def _kk_upload_seite(meldung: str = "") -> str:
           <select name="mitarbeiter" style="width:100%">{opts}</select>
         </div>
         <button type="submit" class="btn btn-primary">Abrechnung prüfen</button>
+        <a href="/einstellungen/kreditkarten/zuordnungen" class="btn btn-secondary">📋 Alle Zuordnungen</a>
         <a href="/einstellungen" class="btn btn-secondary">Abbrechen</a>
       </form>
       <p style="font-size:12px;color:var(--muted);margin-top:14px">
@@ -8027,13 +8029,43 @@ async def kk_pruefen(request: Request, datei: UploadFile = File(...), mitarbeite
               <td style="text-align:right">{_kk_betrag(p["betrag_eur"])} €</td>
               <td>{status_zelle(t)}</td></tr>"""
 
-    offen_fremd = [p for p in erg["offen"] if p["waehrung"] != "EUR"]
-    offen_rest = [p for p in erg["offen"] if p["waehrung"] == "EUR"]
+    def vorschlag_zelle(p, vorschlaege):
+        if not vorschlaege:
+            return '<span style="font-size:12px;color:var(--muted)">kein ähnlicher Beleg gefunden</span>'
+        opts = '<option value="">– nicht zuordnen –</option>'
+        for v in vorschlaege:
+            b = v["beleg"]
+            name = str(b.get("hotel_name") or b.get("anbieter") or b.get("tanken_tankstelle")
+                       or b.get("belegart") or "Beleg")
+            if v["betrag_gleich"]:
+                betrag_txt = "Betrag gleich"
+            elif v["diff"] is not None:
+                betrag_txt = "Abweichung " + f"{v['diff']:+.2f}".replace(".", ",")
+            else:
+                betrag_txt = "Betrag nicht vergleichbar"
+            tage_txt = f"{v['tage']} Tage Abstand" if v["tage"] is not None else "ohne Datum"
+            waehr = b.get("waehrung") or "EUR"
+            label = (f"#{b['id']} {name} · {_kk_betrag(b['betrag_brutto'])} {waehr} · "
+                     f"{fmt_date(b.get('belegdatum'))} · Reise {b.get('reise_code')} · "
+                     f"{betrag_txt}, {tage_txt}")
+            opts += f'<option value="{auswahl_wert(p, b)}">{e(label)}</option>'
+        return f'<select name="manuell" style="max-width:460px;font-size:12px">{opts}</select>'
+
+    offen_paare = list(zip(erg["offen"], erg["vorschlaege"]))
+    offen_fremd = [(p, v) for p, v in offen_paare if p["waehrung"] != "EUR"]
+    offen_aehnlich = [(p, v) for p, v in offen_paare if p["waehrung"] == "EUR" and v]
+    offen_rest = [p for p, v in offen_paare if p["waehrung"] == "EUR" and not v]
     zeilen_offen_fremd = "".join(
         f'<tr><td>{fmt_date(p["datum_beleg"])}</td><td>{e(p["text"])}</td>'
         f'<td style="text-align:right">{_kk_betrag(p["betrag_fremd"])} {e(p["waehrung"])}</td>'
-        f'<td style="text-align:right">{_kk_betrag(p["betrag_eur"] + p["entgelt_eur"])} €</td></tr>'
-        for p in offen_fremd)
+        f'<td style="text-align:right">{_kk_betrag(p["betrag_eur"] + p["entgelt_eur"])} €</td>'
+        f'<td>{vorschlag_zelle(p, v)}</td></tr>'
+        for p, v in offen_fremd)
+    zeilen_offen_aehnlich = "".join(
+        f'<tr><td>{fmt_date(p["datum_beleg"])}</td><td>{e(p["text"])}</td>'
+        f'<td style="text-align:right">{_kk_betrag(p["betrag_eur"])} €</td>'
+        f'<td>{vorschlag_zelle(p, v)}</td></tr>'
+        for p, v in offen_aehnlich)
     zeilen_offen_rest = "".join(
         f'<tr><td>{fmt_date(p["datum_beleg"])}</td><td>{e(p["text"])}</td>'
         f'<td style="text-align:right">{_kk_betrag(p["betrag_eur"])} €</td></tr>' for p in offen_rest)
@@ -8065,13 +8097,23 @@ async def kk_pruefen(request: Request, datei: UploadFile = File(...), mitarbeite
         <tr><th></th><th>Beleg</th><th>Abrechnung</th><th style="text-align:right">Betrag</th><th>Status</th></tr>
         {zeilen_eur}</table></div></div></div>""") if zeilen_eur else ""
     tab_offen_fremd = (f"""<div class="card" style="margin-bottom:16px"><div class="card-body">
-        <h3 style="margin-bottom:8px">Fremdwährung ohne passenden Beleg</h3>
-        <p style="font-size:12px;color:var(--muted)">Kein Beleg gefunden. Entweder nicht reisebezogen
-        oder der Beleg fehlt noch.</p>
+        <h3 style="margin-bottom:8px">Fremdwährung ohne exakt passenden Beleg</h3>
+        <p style="font-size:12px;color:var(--muted)">Entweder nicht reisebezogen oder der Beleg fehlt noch.
+        Bei ähnlichem Beleg können Sie ihn wählen: Euro-Betrag und Gebühr der Abrechnung werden dann
+        am Beleg eingetragen.</p>
         <div class="table-wrap"><table>
         <tr><th>Datum</th><th>Abrechnung</th><th style="text-align:right">Betrag</th>
-            <th style="text-align:right">Euro inkl. Gebühr</th></tr>
+            <th style="text-align:right">Euro inkl. Gebühr</th><th>Ähnliche Belege zuordnen</th></tr>
         {zeilen_offen_fremd}</table></div></div></div>""") if zeilen_offen_fremd else ""
+    tab_offen_aehnlich = (f"""<div class="card" style="margin-bottom:16px"><div class="card-body">
+        <h3 style="margin-bottom:8px">Euro-Positionen mit möglichem Beleg</h3>
+        <p style="font-size:12px;color:var(--muted)">Kein sicherer Treffer, aber ein Beleg mit ähnlichem
+        Betrag oder Datum. Weicht der Betrag ab (z. B. Trinkgeld), wird der Betrag der Abrechnung als
+        endgültiger Betrag eingetragen.</p>
+        <div class="table-wrap"><table>
+        <tr><th>Datum</th><th>Abrechnung</th><th style="text-align:right">Betrag</th>
+            <th>Ähnliche Belege zuordnen</th></tr>
+        {zeilen_offen_aehnlich}</table></div></div></div>""") if zeilen_offen_aehnlich else ""
     tab_offen_rest = (f"""<details style="margin-bottom:16px"><summary style="cursor:pointer;font-size:13px">
         {len(offen_rest)} weitere Euro-Positionen ohne Beleg (werden ignoriert und nicht gespeichert)</summary>
         <div class="table-wrap"><table>
@@ -8080,10 +8122,10 @@ async def kk_pruefen(request: Request, datei: UploadFile = File(...), mitarbeite
 
     keine = ""
     if not anzahl_treffer:
-        keine = '<div class="alert alert-warn">Es wurde kein Beleg dieser Abrechnung zugeordnet.</div>'
+        keine = '<div class="alert alert-warn">Es wurde kein Beleg dieser Abrechnung sicher zugeordnet.</div>'
 
     uebernehmen = ""
-    if anzahl_treffer:
+    if anzahl_treffer or offen_fremd or offen_aehnlich:
         uebernehmen = '<button type="submit" class="btn btn-primary">Ausgewählte übernehmen</button> '
 
     content = f"""
@@ -8097,11 +8139,11 @@ async def kk_pruefen(request: Request, datei: UploadFile = File(...), mitarbeite
     <form method="post" action="/einstellungen/kreditkarten/uebernehmen">
       <input type="hidden" name="datum" value="{abr_datum.isoformat()}">
       <input type="hidden" name="kuerzel" value="{e(ma["kuerzel"])}">
-      {tab_fremd}{tab_eur}
+      {tab_fremd}{tab_eur}{tab_offen_fremd}{tab_offen_aehnlich}
       <div style="margin-bottom:20px">{uebernehmen}
         <a href="/einstellungen/kreditkarten" class="btn btn-secondary">Abbrechen</a></div>
     </form>
-    {tab_offen_fremd}{tab_offen_rest}"""
+    {tab_offen_rest}"""
     return HTMLResponse(shell("Abrechnung prüfen", content, "einstellungen"))
 
 
@@ -8116,10 +8158,17 @@ async def kk_uebernehmen(request: Request):
         ma = next((m for m in _kk_mitarbeiter_laden() if m["kuerzel"] == kuerzel), None)
         if not ma:
             raise ValueError("Mitarbeiter unbekannt")
-        eintraege = []
-        for v in form.getlist("auswahl"):
-            bid, fremd, eur, fee = v.split("|")
-            eintraege.append({"beleg_id": int(bid), "fremdwaehrung": fremd == "1",
+        eintraege, gesehen = [], set()
+        werte = list(form.getlist("auswahl")) + [v for v in form.getlist("manuell") if v]
+        for v in werte:
+            bid, setzen, eur, fee = v.split("|")
+            if setzen not in ("0", "1"):
+                raise ValueError("Ungültige Auswahl")
+            if int(bid) in gesehen:
+                raise ValueError(f"Beleg #{int(bid)} wurde mehrfach gewählt. "
+                                 "Bitte jeden Beleg nur einer Position zuordnen.")
+            gesehen.add(int(bid))
+            eintraege.append({"beleg_id": int(bid), "betrag_setzen": setzen == "1",
                               "betrag_eur": round(float(eur), 2), "entgelt_eur": round(float(fee), 2)})
         label_typ = "Privatkreditkarte" if ma["typ"] == "privat" else "Firmenkreditkarte"
         db = get_db()
@@ -8132,8 +8181,88 @@ async def kk_uebernehmen(request: Request):
     <h1 class="page-title">💳 Abrechnung übernommen</h1>
     <div class="alert alert-ok">✔ {n} Beleg(e) aktualisiert (Abrechnung vom {fmt_date(abr_datum)}).</div>
     <a href="/einstellungen/kreditkarten" class="btn btn-primary">Weitere Abrechnung</a>
+    <a href="/einstellungen/kreditkarten/zuordnungen" class="btn btn-secondary">Alle Zuordnungen</a>
     <a href="/einstellungen" class="btn btn-secondary">Einstellungen</a>"""
     return HTMLResponse(shell("Abrechnung übernommen", content, "einstellungen"))
+
+
+@app.get("/einstellungen/kreditkarten/zuordnungen", response_class=HTMLResponse)
+def kk_zuordnungen(request: Request):
+    """Übersicht aller Belege, die mit einer Kreditkartenabrechnung abgeglichen wurden."""
+    from html import escape as e
+    if not ist_organisator(request):
+        return _kk_kein_zugriff()
+    try:
+        db = get_db()
+        rows = kk_zuordnungen_laden(db)
+        db.close()
+    except Exception as ex:
+        return HTMLResponse(shell("Zuordnungen", f'<div class="alert alert-err"><b>Fehler:</b> {e(str(ex))}. '
+                                  'Falls eine Spalte fehlt: einmal /init aufrufen.</div>', "einstellungen"))
+    gruppen = {}
+    for r in rows:
+        gruppen.setdefault(str(r["kk_abrechnung_datum"])[:10], []).append(r)
+    html = ""
+    for datum_s, liste in gruppen.items():
+        summe = 0.0
+        zeilen = ""
+        for r in liste:
+            final = r.get("betrag_eur_final")
+            gebuehr = r.get("kreditkarte_auslandsentgelt_eur")
+            summe += float(final if final is not None else (r["betrag_brutto"] if (r["waehrung"] or "EUR") == "EUR" else 0)) \
+                + float(gebuehr or 0)
+            name = str(r.get("hotel_name") or r.get("anbieter") or r.get("belegart") or "Beleg")
+            waehr = r.get("waehrung") or "EUR"
+            final_txt = (_kk_betrag(final) + " €") if final is not None else "–"
+            gebuehr_txt = (_kk_betrag(gebuehr) + " €") if gebuehr is not None else "–"
+            zeilen += f"""<tr>
+              <td><a href="/beleg/{r["id"]}" target="_blank">#{r["id"]} {e(name)}</a></td>
+              <td>{e(str(r.get("reise_code") or "–"))}</td>
+              <td style="text-align:right">{_kk_betrag(r["betrag_brutto"])} {e(waehr)}</td>
+              <td style="text-align:right">{final_txt}</td>
+              <td style="text-align:right">{gebuehr_txt}</td>
+              <td>{e(str(r.get("kreditkarte_karte") or "–"))}</td>
+              <td><form method="post" action="/einstellungen/kreditkarten/loesen" style="margin:0"
+                        onsubmit="return confirm('Zuordnung lösen? Endgültiger Euro-Betrag und Gebühr werden zurückgesetzt (Gebühr wird wieder berechnet).')">
+                  <input type="hidden" name="beleg_id" value="{r["id"]}">
+                  <button type="submit" class="btn btn-secondary btn-sm">lösen</button></form></td></tr>"""
+        html += f"""<div class="card" style="margin-bottom:16px"><div class="card-body">
+          <h3 style="margin-bottom:8px">Abrechnung vom {fmt_date(datum_s)} · {len(liste)} Beleg(e) · {_kk_betrag(summe)} €</h3>
+          <div class="table-wrap"><table>
+          <tr><th>Beleg</th><th>Reise</th><th style="text-align:right">Betrag Beleg</th>
+              <th style="text-align:right">Euro endgültig</th><th style="text-align:right">Gebühr</th>
+              <th>Karte</th><th></th></tr>{zeilen}</table></div></div></div>"""
+    if not html:
+        html = '<div class="alert alert-warn">Noch keine Zuordnungen vorhanden.</div>'
+    content = f"""
+    <h1 class="page-title">📋 Zuordnungen Kreditkarten-Abrechnung</h1>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
+      Alle Belege, die mit einer Abrechnung abgeglichen wurden. Die Abrechnungsposition selbst
+      wird aus Datenschutzgründen nicht gespeichert.</p>
+    <p><a href="/einstellungen/kreditkarten" class="btn btn-primary">Neue Abrechnung hochladen</a></p>
+    {html}"""
+    return HTMLResponse(shell("Zuordnungen", content, "einstellungen"))
+
+
+@app.post("/einstellungen/kreditkarten/loesen")
+async def kk_zuordnung_loesen(request: Request):
+    """Löst die Zuordnung eines Belegs zur Abrechnung wieder: endgültiger Betrag und
+    Gebühr aus der Abrechnung werden zurückgesetzt, die Gebühr danach wieder berechnet."""
+    if not ist_organisator(request):
+        return _kk_kein_zugriff()
+    form = await request.form()
+    try:
+        bid = int((form.get("beleg_id") or "").strip())
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"""UPDATE belege SET kk_abrechnung_datum=NULL, betrag_eur_final=NULL,
+                        kreditkarte_auslandsentgelt_eur=NULL WHERE id={P}""", (bid,))
+        auslandsentgelt_neu_berechnen(bid, db)
+        db.commit(); cur.close(); db.close()
+    except Exception as ex:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err"><b>Fehler:</b> {ex}</div>'),
+                            status_code=400)
+    return RedirectResponse("/einstellungen/kreditkarten/zuordnungen", status_code=303)
 
 
 @app.get("/einstellungen", response_class=HTMLResponse)

@@ -315,6 +315,76 @@ def _bewerten(pos: dict, b: dict, karteninhaber_tokens: set[str]) -> tuple[int, 
     return score, grund
 
 
+def _zulaessig(b: dict, kuerzel: str | None) -> bool:
+    """Beleg darf mit dieser Karte abgerechnet sein (Zahlungsart und Karte passen)."""
+    zahl = (b.get("zahlungsart") or "").strip()
+    if zahl not in ("", "Kreditkarte", "Unbekannt"):
+        return False
+    karte = (b.get("kreditkarte_karte") or "").strip()
+    if karte and kuerzel and not karte.endswith("-" + kuerzel):
+        return False
+    return True
+
+
+def _aehnlichkeit(pos: dict, b: dict) -> dict | None:
+    """
+    Ähnlichkeit Position <-> Beleg für die Vorschlagsliste (mit Toleranz bei
+    Betrag und Datum). Betrag bis 12 % Abweichung: bis 50 Punkte (Pflicht, ohne
+    ähnlichen Betrag gibt es keinen Vorschlag), Datum bis 15 Tage: bis 30 Punkte,
+    ähnlicher Name: 20 Punkte. Ab 55 Punkten wird vorgeschlagen.
+    """
+    b_betrag = b.get("betrag_brutto")
+    if b_betrag is None:
+        return None
+    b_waehr = (b.get("waehrung") or "EUR").upper()
+    tage = _tage_diff(pos, b)
+    if tage is not None and tage > 45:
+        return None
+    # Betragsvergleich in gleicher Einheit
+    a = c = None
+    if pos["waehrung"] != "EUR" and b_waehr == pos["waehrung"]:
+        a, c = pos["betrag_fremd"], float(b_betrag)
+    elif pos["waehrung"] == "EUR" and b_waehr == "EUR":
+        a, c = pos["betrag_eur"], float(b_betrag)
+    elif b.get("betrag_eur"):
+        a, c = pos["betrag_eur"], float(b["betrag_eur"])      # geschätzter Euro-Wert des Belegs
+    punkte, gleich, diff = 0.0, False, None
+    if a is not None and c is not None:
+        diff = round(c - a, 2)
+        rel = abs(a - c) / max(a, c, 0.01)
+        punkte += max(0.0, 50 * (1 - rel / 0.12))
+        gleich = abs(a - c) <= 0.005
+    if punkte <= 0:
+        return None          # ohne ähnlichen Betrag kein Vorschlag
+    if tage is not None:
+        punkte += max(0, 30 - tage * 2)
+    name = bool(_tokens(pos["text"]) &
+                _tokens(" ".join(str(b.get(k) or "") for k in
+                                 ("anbieter", "hotel_name", "tanken_tankstelle"))))
+    if name:
+        punkte += 20
+    if punkte < 55:
+        return None
+    return {"beleg": b, "punkte": round(punkte), "tage": tage, "diff": diff,
+            "betrag_gleich": gleich, "name": name}
+
+
+def auswahl_wert(pos: dict, b: dict) -> str:
+    """
+    Wert für 'Position diesem Beleg zuordnen': "beleg_id|betrag_setzen|eur|gebuehr".
+    Fremdwährungsposition: Euro-Betrag + echte Gebühr werden eingetragen.
+    Euro-Position: nur wenn der Betrag vom Beleg abweicht, wird er als
+    endgültiger Betrag eingetragen (z. B. Trinkgeld), sonst bleibt er unverändert.
+    """
+    if pos["waehrung"] != "EUR":
+        setzen = True
+    elif (b.get("waehrung") or "EUR").upper() != "EUR":
+        setzen = True
+    else:
+        setzen = abs(float(b["betrag_brutto"]) - pos["betrag_eur"]) > 0.005
+    return f"{b['id']}|{1 if setzen else 0}|{pos['betrag_eur']:.2f}|{pos['entgelt_eur']:.2f}"
+
+
 def abrechnung_zuordnen(positionen: list[dict], belege: list[dict],
                         karteninhaber: str = "", kuerzel: str | None = None) -> dict:
     """
@@ -328,12 +398,8 @@ def abrechnung_zuordnen(positionen: list[dict], belege: list[dict],
         if pos["gutschrift"]:
             continue
         for j, b in enumerate(belege):
-            zahl = (b.get("zahlungsart") or "").strip()
-            if zahl not in ("", "Kreditkarte", "Unbekannt"):
+            if not _zulaessig(b, kuerzel):
                 continue
-            karte = (b.get("kreditkarte_karte") or "").strip()
-            if karte and kuerzel and not karte.endswith("-" + kuerzel):
-                continue     # Beleg gehört zu einer anderen Karte
             erg = _bewerten(pos, b, k_tokens)
             if erg:
                 tage = _tage_diff(pos, b)
@@ -356,8 +422,17 @@ def abrechnung_zuordnen(positionen: list[dict], belege: list[dict],
         treffer.append({"pos": positionen[i], "beleg": belege[j], "score": score,
                         "sicher": score >= 70 and not konkurrenz,
                         "mehrdeutig": konkurrenz, "gruende": gruende})
-    offen = [p for i, p in enumerate(positionen) if i not in zuordnung and not p["gutschrift"]]
-    return {"treffer": treffer, "offen": offen}
+    offen_idx = [i for i in range(len(positionen))
+                 if i not in zuordnung and not positionen[i]["gutschrift"]]
+    offen = [positionen[i] for i in offen_idx]
+    # Vorschlagsliste: ähnlichste noch freie Belege (Betrag/Datum mit Toleranz, Name)
+    freie = [b for j, b in enumerate(belege) if j not in belegt_beleg and _zulaessig(b, kuerzel)]
+    vorschlaege = []
+    for p in offen:
+        liste = [x for x in (_aehnlichkeit(p, b) for b in freie) if x]
+        liste.sort(key=lambda x: (-x["punkte"], x["tage"] if x["tage"] is not None else 999))
+        vorschlaege.append(liste[:5])
+    return {"treffer": treffer, "offen": offen, "vorschlaege": vorschlaege}
 
 
 # ── 4. Datenbank ──────────────────────────────────────────────────────────────
@@ -368,7 +443,7 @@ def _row(r, keys):
 _BELEG_SPALTEN = ["id", "reise_code", "belegart", "anbieter", "hotel_name", "tanken_tankstelle",
                   "reisender", "belegdatum", "event_datum_von", "hotel_checkin_datum",
                   "hotel_checkout_datum", "betrag_brutto", "waehrung", "zahlungsart",
-                  "kreditkarte_karte", "rechnungsnummer", "buchungscode"]
+                  "kreditkarte_karte", "rechnungsnummer", "buchungscode", "betrag_eur"]
 
 
 def belege_laden(db, zeitraum: tuple[date, date] | None) -> list[dict]:
@@ -412,8 +487,8 @@ def treffer_speichern(db, eintraege: list[dict], abrechnungsdatum: date,
                       karten_label: str) -> int:
     """
     Schreibt bestätigte Treffer in die Belege.
-    eintraege: [{"beleg_id", "fremdwaehrung": bool, "betrag_eur", "entgelt_eur"}]
-    Fremdwährung: endgültiger Euro-Betrag + echte Auslandsgebühr.
+    eintraege: [{"beleg_id", "betrag_setzen": bool, "betrag_eur", "entgelt_eur"}]
+    betrag_setzen: endgültiger Euro-Betrag + echte Auslandsgebühr eintragen.
     Immer: Abrechnungsdatum, Zahlungsart/Karte (nur falls noch leer).
     """
     P = ph()
@@ -424,7 +499,7 @@ def treffer_speichern(db, eintraege: list[dict], abrechnungsdatum: date,
                       f"THEN 'Kreditkarte' ELSE zahlungsart END, "
                       f"kreditkarte_karte=CASE WHEN kreditkarte_karte IS NULL OR kreditkarte_karte='' "
                       f"THEN {P} ELSE kreditkarte_karte END")
-        if e["fremdwaehrung"]:
+        if e["betrag_setzen"]:
             cur.execute(f"UPDATE belege SET betrag_eur_final={P}, kreditkarte_auslandsentgelt_eur={P}, "
                         f"kk_abrechnung_datum={P}, {zahl_karte} WHERE id={P}",
                         (e["betrag_eur"], e["entgelt_eur"], abrechnungsdatum.isoformat(),
@@ -435,3 +510,19 @@ def treffer_speichern(db, eintraege: list[dict], abrechnungsdatum: date,
         n += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
     cur.close()
     return n
+
+
+_UEBERSICHT_SPALTEN = ["id", "reise_code", "belegart", "anbieter", "hotel_name", "betrag_brutto",
+                       "waehrung", "betrag_eur_final", "kreditkarte_auslandsentgelt_eur",
+                       "kreditkarte_karte", "kk_abrechnung_datum"]
+
+
+def zuordnungen_laden(db, limit: int = 500) -> list[dict]:
+    """Alle Belege, die mit einer Kreditkartenabrechnung abgeglichen wurden."""
+    cur = db.cursor()
+    cur.execute("SELECT " + ", ".join(_UEBERSICHT_SPALTEN) + " FROM belege "
+                "WHERE kk_abrechnung_datum IS NOT NULL "
+                f"ORDER BY kk_abrechnung_datum DESC, id LIMIT {int(limit)}")
+    rows = [_row(r, _UEBERSICHT_SPALTEN) for r in cur.fetchall()]
+    cur.close()
+    return rows
