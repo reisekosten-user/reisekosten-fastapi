@@ -51,7 +51,7 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.15-c"
+APP_VERSION  = "3.16"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -2230,70 +2230,246 @@ def belege_unzugeordnet():
             f'<pre style="font-size:11px">{traceback.format_exc()[:400]}</pre>'))
 
 
-@app.get("/belege", response_class=HTMLResponse)
-def belege_liste():
+_MONATSNAMEN = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August",
+                "September", "Oktober", "November", "Dezember"]
+
+
+def _beleg_datum(x):
+    """Datum aus date/datetime/Text (SQLite) oder None."""
+    if not x:
+        return None
+    if isinstance(x, datetime):
+        return x.date()
+    if isinstance(x, date):
+        return x
     try:
+        return date.fromisoformat(str(x)[:10])
+    except Exception:
+        return None
+
+
+@app.get("/belege", response_class=HTMLResponse)
+def belege_liste(request: Request):
+    """Belegliste mit Filtern: Jahr, Monat, Reise (auch 'nicht zugeordnet'),
+    Prüfstatus, Problem-Art, Freitextsuche und Sortierung. Gefiltert wird in Python,
+    damit es mit PostgreSQL und SQLite gleich funktioniert."""
+    from html import escape as esc
+    from urllib.parse import urlencode
+    try:
+        qp = request.query_params
+        f_jahr = (qp.get("jahr") or "").strip()
+        f_monat = (qp.get("monat") or "").strip()
+        f_reise = (qp.get("reise") or "").strip()
+        f_geprueft = (qp.get("geprueft") or "").strip()
+        f_problem = (qp.get("problem") or "").strip()
+        f_suche = (qp.get("suche") or "").strip()
+        f_sort = (qp.get("sort") or "neu").strip()
+        f_alle = (qp.get("alle") or "") == "1"
+        if not f_jahr.isdigit():
+            f_jahr = ""
+        if not (f_monat.isdigit() and 1 <= int(f_monat) <= 12):
+            f_monat = ""
+
         db = get_db(); cur = db.cursor()
-        cur.execute("""SELECT b.id, b.reise_code, b.transportart, b.anbieter,
-            b.betrag_brutto, b.waehrung, b.belegdatum, b.status,
-            b.dateiname, b.pflichtfelder_ok, b.fehlende_felder, b.ist_erechnung
-            FROM belege b ORDER BY b.erstellt DESC LIMIT 100""")
+        cur.execute("""SELECT b.id, b.reise_code, b.transportart, b.anbieter, b.betrag_brutto,
+            b.waehrung, b.belegdatum, b.status, b.dateiname, b.pflichtfelder_ok, b.ist_erechnung,
+            b.geprueft, b.zahlungsart, b.belegart, b.aenderung_status, b.event_datum_von,
+            b.erstellt, b.rechnungsnummer
+            FROM belege b ORDER BY b.id DESC""")
         rows = cur.fetchall()
+        cur.execute("SELECT code, titel FROM reisen ORDER BY abreise DESC")
+        reisen = cur.fetchall()
         cur.close(); db.close()
 
-        def get(r,k,i): return r[k] if hasattr(r,'keys') else r[i]
+        # Kreditkarten-Abgleich separat laden: die Spalte entsteht erst mit /init
+        kk_abgeglichen = set()
+        try:
+            db2 = get_db(); cur2 = db2.cursor()
+            cur2.execute("SELECT id FROM belege WHERE kk_abrechnung_datum IS NOT NULL")
+            kk_abgeglichen = {(r[0] if isinstance(r, tuple) else r["id"]) for r in cur2.fetchall()}
+            cur2.close(); db2.close()
+        except Exception:
+            kk_abgeglichen = set()
+
+        def get(r, k, i): return r[k] if hasattr(r, 'keys') else r[i]
+
+        items = []
+        for r in rows:
+            bd = _beleg_datum(get(r, "belegdatum", 6))
+            sortdatum = bd or _beleg_datum(get(r, "event_datum_von", 15)) or _beleg_datum(get(r, "erstellt", 16))
+            items.append({
+                "id": get(r, "id", 0), "reise": get(r, "reise_code", 1), "typ": get(r, "transportart", 2),
+                "anbieter": get(r, "anbieter", 3), "betrag": get(r, "betrag_brutto", 4),
+                "waehrung": get(r, "waehrung", 5), "datum": bd, "sortdatum": sortdatum,
+                "status": get(r, "status", 7), "datei": get(r, "dateiname", 8) or "",
+                "pf_ok": bool(get(r, "pflichtfelder_ok", 9)), "erechnung": bool(get(r, "ist_erechnung", 10)),
+                "geprueft": bool(get(r, "geprueft", 11)), "zahlungsart": get(r, "zahlungsart", 12),
+                "belegart": get(r, "belegart", 13), "aenderung": get(r, "aenderung_status", 14),
+                "rechnungsnr": get(r, "rechnungsnummer", 17) or "",
+            })
+
+        jahre = sorted({it["sortdatum"].year for it in items if it["sortdatum"]}, reverse=True)
+        if f_jahr and int(f_jahr) not in jahre:
+            jahre.append(int(f_jahr)); jahre.sort(reverse=True)
+
+        def passt(it):
+            sd = it["sortdatum"]
+            if f_jahr and (not sd or sd.year != int(f_jahr)):
+                return False
+            if f_monat and (not sd or sd.month != int(f_monat)):
+                return False
+            if f_reise == "_ohne" and it["reise"]:
+                return False
+            if f_reise and f_reise != "_ohne" and it["reise"] != f_reise:
+                return False
+            if f_geprueft == "nein" and it["geprueft"]:
+                return False
+            if f_geprueft == "ja" and not it["geprueft"]:
+                return False
+            if f_problem == "pflicht" and it["pf_ok"]:
+                return False
+            if f_problem == "fehler" and it["status"] != "fehler":
+                return False
+            if f_problem == "zahlungsart" and (it["zahlungsart"] or it["belegart"] == "Buchungsbestaetigung"):
+                return False
+            if f_problem == "kreditkarte" and not (it["zahlungsart"] == "Kreditkarte" and it["id"] not in kk_abgeglichen):
+                return False
+            if f_problem == "aenderung" and it["aenderung"] != "offen":
+                return False
+            if f_suche:
+                s = f_suche.lstrip("#").lower()
+                heu = " ".join([str(it["id"]), it["anbieter"] or "", it["datei"], it["rechnungsnr"],
+                                it["reise"] or ""]).lower()
+                if s not in heu:
+                    return False
+            return True
+
+        treffer = [it for it in items if passt(it)]
+        if f_sort == "datum":
+            treffer.sort(key=lambda it: (it["sortdatum"] or date.min, it["id"]), reverse=True)
+        limit = 300
+        gekuerzt = (not f_alle) and len(treffer) > limit
+        anzeige = treffer if f_alle else treffer[:limit]
 
         typ_farben = {
-            "Flug":"badge-blue","Hotel":"badge-green","Bahn":"badge-blue",
-            "Taxi":"badge-amber","Mietwagen":"badge-red","Tanken":"badge-green",
-            "Verpflegung":"badge-amber","Bewirtung":"badge-amber","Sonstiges":"badge-gray"
+            "Flug": "badge-blue", "Hotel": "badge-green", "Bahn": "badge-blue",
+            "Taxi": "badge-amber", "Mietwagen": "badge-red", "Tanken": "badge-green",
+            "Verpflegung": "badge-amber", "Bewirtung": "badge-amber", "Sonstiges": "badge-gray"
         }
         zeilen = ""
-        for r in rows:
-            bid=get(r,"id",0); rcode=get(r,"reise_code",1); typ=get(r,"transportart",2)
-            vendor=get(r,"anbieter",3); betrag=get(r,"betrag_brutto",4)
-            waehrung=get(r,"waehrung",5); bd=get(r,"belegdatum",6)
-            status=get(r,"status",7); datei=get(r,"dateiname",8)
-            pf_ok=get(r,"pflichtfelder_ok",9); ist_erechnung_r=bool(get(r,"ist_erechnung",10))
-            bc = typ_farben.get(typ or "","badge-gray")
-            bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
-            stat_b = ('<span class="badge badge-green">✓</span>' if status=="ok"
-                      else '<span class="badge badge-red">✗</span>' if status=="fehler"
+        for it in anzeige:
+            bid = it["id"]; rcode = it["reise"]; typ = it["typ"]
+            bc = typ_farben.get(typ or "", "badge-gray")
+            bet_s = f"{float(it['betrag']):.2f} {it['waehrung']}" if it["betrag"] else "–"
+            stat_b = ('<span class="badge badge-green">✓</span>' if it["status"] == "ok"
+                      else '<span class="badge badge-red">✗</span>' if it["status"] == "fehler"
                       else '<span class="badge badge-amber">…</span>')
-            erechnung_badge = ' <span class="badge badge-green" title="eRechnung">📄✓</span>' if ist_erechnung_r else ""
+            geprueft_b = ('<span class="badge badge-green" title="geprüft">✓</span>' if it["geprueft"]
+                          else '<span style="color:var(--muted)">–</span>')
+            erechnung_badge = ' <span class="badge badge-green" title="eRechnung">📄✓</span>' if it["erechnung"] else ""
+            aenderung_badge = (' <span class="badge badge-amber" title="Änderung offen">⚠ Änderung</span>'
+                               if it["aenderung"] == "offen" else "")
+            name = esc((it["anbieter"] or it["datei"] or "")[:30])
+            reise_zelle = (f'<a href="/reise/{esc(rcode)}" style="font-family:monospace;font-size:12px;'
+                           f'color:var(--blue)">{esc(rcode)}</a>') if rcode else (
+                           '<span class="badge badge-amber">nicht zugeordnet</span>')
             zeilen += (f'<tr>'
                 f'<td><a href="/beleg/{bid}" style="color:var(--blue);font-weight:600">#{bid}</a></td>'
-                f'<td><span class="badge {bc}">{typ or "?"}</span>{erechnung_badge}</td>'
-                f'<td style="font-weight:500">{vendor or datei[:30]}</td>'
+                f'<td><span class="badge {bc}">{esc(typ or "?")}</span>{erechnung_badge}{aenderung_badge}</td>'
+                f'<td style="font-weight:500">{name}</td>'
                 f'<td style="font-weight:600;color:var(--green)">{bet_s}</td>'
-                f'<td>{fmt_date(bd)}</td>'
-                f'<td style="font-family:monospace;font-size:12px;color:var(--blue)">{rcode or "–"}</td>'
+                f'<td>{fmt_date(it["datum"])}</td>'
+                f'<td>{reise_zelle}</td>'
                 f'<td>{stat_b}</td>'
+                f'<td>{geprueft_b}</td>'
                 f'<td><a href="/beleg/{bid}" class="btn btn-secondary btn-sm">Detail</a></td>'
                 f'</tr>')
 
+        def sel(name, optionen, aktuell):
+            opts = ""
+            for wert, label in optionen:
+                markiert = " selected" if str(wert) == str(aktuell) else ""
+                opts += f'<option value="{esc(str(wert))}"{markiert}>{esc(label)}</option>'
+            return (f'<select name="{name}" onchange="this.form.submit()" '
+                    f'style="width:auto;max-width:240px;padding:6px 8px;font-size:13px;'
+                    f'border:1px solid var(--border);border-radius:6px;background:white">{opts}</select>')
+
+        jahr_opts = [("", "Alle Jahre")] + [(j, str(j)) for j in jahre]
+        monat_opts = [("", "Alle Monate")] + [(i + 1, n) for i, n in enumerate(_MONATSNAMEN)]
+        reise_opts = [("", "Alle Reisen"), ("_ohne", "Nicht zugeordnet")] + [
+            (get(r, "code", 0), f'{get(r, "code", 0)} – {(get(r, "titel", 1) or "")[:40]}') for r in reisen]
+        pruef_opts = [("", "Prüfung: alle"), ("nein", "Nicht geprüft"), ("ja", "Geprüft")]
+        problem_opts = [("", "Problem: alle"), ("pflicht", "Pflichtfelder fehlen"),
+                        ("fehler", "Fehler bei Analyse"), ("zahlungsart", "Zahlungsart fehlt"),
+                        ("kreditkarte", "Kreditkarte nicht abgeglichen"), ("aenderung", "Änderung offen")]
+        sort_opts = [("neu", "Sortierung: zuletzt eingegangen"), ("datum", "Sortierung: Belegdatum")]
+
+        def chip(label, **params):
+            return (f'<a href="/belege?{urlencode(params)}" class="btn btn-secondary btn-sm">{label}</a>'
+                    if params else f'<a href="/belege" class="btn btn-secondary btn-sm">{label}</a>')
+
+        filter_aktiv = any([f_jahr, f_monat, f_reise, f_geprueft, f_problem, f_suche])
+        filter_html = f"""
+        <form method="get" action="/belege" class="card" style="margin-bottom:16px">
+          <div class="card-body" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+            {sel("jahr", jahr_opts, f_jahr)}
+            {sel("monat", monat_opts, f_monat)}
+            {sel("reise", reise_opts, f_reise)}
+            {sel("geprueft", pruef_opts, f_geprueft)}
+            {sel("problem", problem_opts, f_problem)}
+            {sel("sort", sort_opts, f_sort)}
+            <input type="text" name="suche" value="{esc(f_suche)}" placeholder="Suche: Anbieter, Datei, Nr."
+                   style="width:auto;padding:6px 8px;font-size:13px;border:1px solid var(--border);border-radius:6px;min-width:220px">
+            <button type="submit" class="btn btn-primary btn-sm">Filtern</button>
+            {'<a href="/belege" class="btn btn-secondary btn-sm">Zurücksetzen</a>' if filter_aktiv else ''}
+          </div>
+          <div class="card-body" style="padding-top:0;display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+            <span style="font-size:12px;color:var(--muted)">Schnellauswahl:</span>
+            {chip("Nicht zugeordnet", reise="_ohne")}
+            {chip("Nicht geprüft", geprueft="nein")}
+            {chip("Pflichtfelder fehlen", problem="pflicht")}
+            {chip("Änderung offen", problem="aenderung")}
+            {chip("Kreditkarte nicht abgeglichen", problem="kreditkarte")}
+            {chip("Dieses Jahr", jahr=date.today().year)}
+          </div>
+        </form>"""
+
+        hinweis = ""
+        if gekuerzt:
+            rest_params = {k: v for k, v in (("jahr", f_jahr), ("monat", f_monat), ("reise", f_reise),
+                           ("geprueft", f_geprueft), ("problem", f_problem), ("suche", f_suche),
+                           ("sort", f_sort)) if v}
+            rest_params["alle"] = "1"
+            hinweis = (f'<div class="alert alert-warn" style="margin-bottom:12px">Es werden die ersten {limit} '
+                       f'von {len(treffer)} Treffern angezeigt. '
+                       f'<a href="/belege?{urlencode(rest_params)}">Alle anzeigen</a></div>')
+
+        anzahl_txt = (f"{len(treffer)} von {len(items)}" if filter_aktiv else f"{len(items)}")
         content = f"""
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
-          <h1 class="page-title" style="margin:0">Belege ({len(rows)})</h1>
+          <h1 class="page-title" style="margin:0">Belege ({anzahl_txt})</h1>
           <div style="display:flex;gap:8px">
             <a href="/mails-abrufen" class="btn btn-success">📬 Mails abrufen</a>
             <a href="/beleg/upload" class="btn btn-primary">+ Beleg hochladen</a>
           </div>
         </div>
+        {filter_html}
+        {hinweis}
         <div class="card">
           <div class="table-wrap"><table>
             <thead><tr>
               <th>#</th><th>Typ</th><th>Anbieter</th><th>Betrag</th>
-              <th>Datum</th><th>Reise</th><th>Status</th><th></th>
+              <th>Datum</th><th>Reise</th><th>Status</th><th>Geprüft</th><th></th>
             </tr></thead>
             <tbody>
-              {zeilen or '<tr><td colspan="8"><div class="empty-state">Noch keine Belege – <a href="/beleg/upload">Ersten Beleg hochladen</a></div></td></tr>'}
+              {zeilen or '<tr><td colspan="9"><div class="empty-state">Keine Belege für diese Auswahl.</div></td></tr>'}
             </tbody>
           </table></div>
         </div>"""
-        return HTMLResponse(shell("Belege", content))
-    except Exception as e:
-        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+        return HTMLResponse(shell("Belege", content, "belege"))
+    except Exception as ex:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{ex}</div>'))
+
 
 @app.get("/debug-anon")
 def debug_anon():
