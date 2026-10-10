@@ -279,10 +279,10 @@ def _bewerten(pos: dict, b: dict, karteninhaber_tokens: set[str]) -> tuple[int, 
     if pos["waehrung"] != "EUR":
         if b_waehr != pos["waehrung"] or abs(float(b_betrag) - pos["betrag_fremd"]) > 0.005:
             return None
-        if tage is not None and tage > 60 and not ticket_treffer:
-            return None
         score = 60
         grund.append(f"{pos['betrag_fremd']:.2f} {pos['waehrung']} gleich")
+        if tage is not None and tage > 60 and not ticket_treffer:
+            score -= 30      # sehr weit weg: nie "sicher", aber weiterhin vorgeschlagen
     else:
         if b_waehr != "EUR" or abs(float(b_betrag) - pos["betrag_eur"]) > 0.005:
             return None
@@ -331,15 +331,15 @@ def _aehnlichkeit(pos: dict, b: dict) -> dict | None:
     Ähnlichkeit Position <-> Beleg für die Vorschlagsliste (mit Toleranz bei
     Betrag und Datum). Betrag bis 12 % Abweichung: bis 50 Punkte (Pflicht, ohne
     ähnlichen Betrag gibt es keinen Vorschlag), Datum bis 15 Tage: bis 30 Punkte,
-    ähnlicher Name: 20 Punkte. Ab 55 Punkten wird vorgeschlagen.
+    ähnlicher Name: 20 Punkte. Ab 55 Punkten wird vorgeschlagen. Exakt gleicher Betrag
+    wird auch bei großem Datumsabstand vorgeschlagen (Fremdwährung immer, Euro nur
+    bei ähnlichem Namen).
     """
     b_betrag = b.get("betrag_brutto")
     if b_betrag is None:
         return None
     b_waehr = (b.get("waehrung") or "EUR").upper()
     tage = _tage_diff(pos, b)
-    if tage is not None and tage > 45:
-        return None
     # Betragsvergleich in gleicher Einheit
     a = c = None
     if pos["waehrung"] != "EUR" and b_waehr == pos["waehrung"]:
@@ -363,6 +363,14 @@ def _aehnlichkeit(pos: dict, b: dict) -> dict | None:
                                  ("anbieter", "hotel_name", "tanken_tankstelle"))))
     if name:
         punkte += 20
+    fremd = pos["waehrung"] != "EUR"
+    if tage is not None and tage > 45:
+        # Weit entfernte Belege (z. B. früh gebuchtes Hotel oder Ticket): nur bei exaktem
+        # Betrag und (Fremdwährung oder ähnlichem Namen), sonst zu viele Zufallstreffer
+        if not (gleich and (fremd or name)):
+            return None
+    if gleich and (fremd or name):
+        punkte = max(punkte, 55)
     if punkte < 55:
         return None
     return {"beleg": b, "punkte": round(punkte), "tage": tage, "diff": diff,
@@ -457,7 +465,7 @@ def belege_laden(db, zeitraum: tuple[date, date] | None) -> list[dict]:
     belege = [_row(r, _BELEG_SPALTEN) for r in cur.fetchall()]
     cur.close()
     if zeitraum:
-        von, bis = zeitraum[0] - timedelta(days=120), zeitraum[1] + timedelta(days=60)
+        von, bis = zeitraum[0] - timedelta(days=365), zeitraum[1] + timedelta(days=120)
         def im_fenster(b):
             ds = [_datum(b.get(k)) for k in ("belegdatum", "event_datum_von",
                                               "hotel_checkin_datum", "hotel_checkout_datum")]
