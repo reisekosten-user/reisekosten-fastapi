@@ -40,8 +40,9 @@ BELEGARTEN = {"auszahlung": "Vorschussquittung",
               "eigenbeschaffung": "Bargeldbeschaffung",
               "rueckgabe": "Rueckgabequittung"}
 QUELLEN = ["Geldautomat", "Wechselstube", "Bank", "Sonstiges"]
-WAEHRUNGEN = ["EUR", "USD", "GBP", "CHF", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF",
-              "JPY", "CAD", "AUD", "AED", "TRY", "CNY", "INR", "MXN", "BRL", "ZAR"]
+WAEHRUNGEN = ["EUR", "USD", "GBP", "CHF", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF", "RON", "BGN", "ISK", "TRY",
+              "CAD", "MXN", "BRL", "ARS", "CLP", "COP", "PEN", "AUD", "NZD", "JPY", "CNY", "HKD", "SGD", "KRW",
+              "TWD", "INR", "THB", "MYR", "IDR", "PHP", "VND", "AED", "SAR", "QAR", "ILS", "EGP", "MAD", "ZAR", "KES"]
 
 SPALTEN = ["id", "reise_code", "kuerzel", "nummer", "version", "ersetzt_id", "status", "art",
            "datum", "waehrung", "betrag", "kurs", "eur_betrag", "quelle_txt", "notiz",

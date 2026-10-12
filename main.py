@@ -53,7 +53,24 @@ IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
-APP_VERSION  = "3.18"
+
+# Versionsverlauf (neueste zuerst). Bei jedem Release OBEN einen Eintrag ergänzen:
+# "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
+# zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
+VERSIONEN = [
+    {"version": "3.19", "zeit": "2026-10-12 08:01", "aenderungen": [
+        "Währungsliste erweitert (u. a. MXN) und aus dem gewählten Beleg übernommen.",
+        "Beim Bestätigen ist der Name mit dem angemeldeten Mitarbeiter vorausgefüllt.",
+        "Neu: Kachel „Versionen“ in den Einstellungen mit diesem Änderungsverlauf."]},
+    {"version": "3.18", "zeit": "2026-10-11 01:07", "aenderungen": [
+        "Neu: Reisevorschuss / Bargeld-Konto (Auszahlung, Rückgabe, Geldautomat, Kurse von Hand, Bestätigung im Portal).",
+        "Bewirtung: Hinweis ab 250 €, Warnung bei mehr als 14 Tagen, Querverweis im Prüf-Deckblatt.",
+        "Datensicherung enthält jetzt Bewirtungsbelege und Bargeld-Buchungen."]},
+    {"version": "3.17", "zeit": "2026-10-11 00:22", "aenderungen": [
+        "Neu: Bewirtungsbeleg im Portal (Eigenbeleg mit elektronischer Bestätigung, PDF, Versionen, Prüfsumme).",
+        "Bewirtungsbelege erscheinen in Prüfung, ToDo-Liste und Abschluss."]},
+]
+APP_VERSION  = VERSIONEN[0]["version"]
 
 # Belegarten, die der Organisator prüft (Prüf-Deckblatt) und die an die DMS-Stelle (Habel) gehen
 PRUEF_BELEGARTEN = ("Rechnung", "Quittung", "Bewirtungsbeleg",
@@ -8118,8 +8135,7 @@ def cron_backup_route(key: str = ""):
 # und bestätigen die Richtigkeit elektronisch. Danach ist er gesperrt; Änderungen
 # nur als neue Version. Fachlogik steht in mod_bewirtung.py.
 
-_BW_WAEHRUNGEN = ["EUR", "USD", "GBP", "CHF", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF",
-                  "JPY", "CAD", "AUD", "AED", "TRY"]
+_BW_WAEHRUNGEN = list(vs.WAEHRUNGEN)      # eine gemeinsame Liste (mod_vorschuss.py)
 
 _BW_CSS = """<style>
 .bw-tn-row{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px}
@@ -8146,9 +8162,14 @@ _BW_FORM_JS = """<script>
   var sel=document.getElementById('bw_hauptbeleg');
   if(sel){ sel.addEventListener('change',function(){
     var o=sel.options[sel.selectedIndex]; if(!o||!o.value) return;
-    function fill(id,v){var f=document.getElementById(id); if(f && !f.value && v) f.value=v;}
+    function fill(id,v){var f=document.getElementById(id); if(f && v) f.value=v;}
     fill('bw_datum',o.dataset.datum); fill('bw_ort',o.dataset.ort); fill('bw_betrag',o.dataset.betrag);
-    var w=document.getElementById('bw_waehrung'); if(w && o.dataset.waehrung) w.value=o.dataset.waehrung;
+    var w=document.getElementById('bw_waehrung'); var cur=o.dataset.waehrung;
+    if(w && cur){
+      var da=false; for(var i=0;i<w.options.length;i++){ if(w.options[i].value===cur){da=true;break;} }
+      if(!da){ var op=document.createElement('option'); op.value=cur; op.textContent=cur; w.insertBefore(op,w.firstChild); }
+      w.value=cur;
+    }
   }); }
   var add=document.getElementById('bw_tn_add');
   if(add){ add.addEventListener('click',function(){
@@ -8368,7 +8389,7 @@ def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | Non
           <div class="form-group"><label style="font-size:12px">Betrag laut Beleg</label>
             <input type="text" inputmode="decimal" name="betrag" id="bw_betrag" value="{betrag_wert}"
                    placeholder="z. B. 86,40"></div>
-          <div class="form-group"><label style="font-size:12px">Währung</label>
+          <div class="form-group"><label style="font-size:12px">Währung <span style="color:var(--muted)">(wird aus dem Beleg übernommen)</span></label>
             <select name="waehrung" id="bw_waehrung">{waehr_opts}</select></div>
           <div class="form-group"><label style="font-size:12px">Trinkgeld, falls nicht auf dem Beleg (optional)</label>
             <input type="text" inputmode="decimal" name="trinkgeld" value="{tg_wert}" placeholder="z. B. 5,00"></div>
@@ -8527,8 +8548,16 @@ async def portal_bewirtung_speichern(token: str, request: Request):
             warnung = warnung or "Der gewählte Beleg ist nicht verfügbar. Bitte einen anderen wählen."
         if d["hauptbeleg_id"]:
             for b in belege:
-                if b["id"] == d["hauptbeleg_id"] and b["waehrung"]:
-                    d["waehrung"] = b["waehrung"]
+                if b["id"] == d["hauptbeleg_id"]:
+                    # Währung kommt immer aus dem Beleg; leere Felder werden aus dem Beleg ergänzt
+                    if b["waehrung"]:
+                        d["waehrung"] = b["waehrung"]
+                    if not d["datum"] and b["datum"]:
+                        d["datum"] = b["datum"]
+                    if not d["ort"] and b["anbieter"]:
+                        d["ort"] = b["anbieter"]
+                    if d["betrag"] is None and b["betrag"] is not None:
+                        d["betrag"] = b["betrag"]
 
         if aktion == "weiter":
             fehler = bw.validieren(d)
@@ -8644,7 +8673,7 @@ def _bw_bestaetigen_seite(token: str, info: dict, d: dict, haupt: dict | None, f
           geschäftlich veranlasst war.</label>
         <div class="form-group" style="margin-top:8px"><label style="font-size:12px">
           Vollständiger Name als Bestätigung <span class="required">*</span></label>
-          <input type="text" name="name_eingabe" value="{_bw_e(name_wert)}" autocomplete="off"
+          <input type="text" name="name_eingabe" value="{_bw_e(name_wert or info["klarname"])}" autocomplete="off"
                  placeholder="{_bw_e(info["klarname"])}"></div>
         <div class="form-group"><label style="font-size:12px">Unterschrift (optional, mit Finger oder Maus)</label>
           <canvas id="bw_sig" class="bw-sig" width="600" height="200"></canvas>
@@ -9356,7 +9385,7 @@ def _vs_bestaetigen_seite(token: str, info: dict, d: dict, fehler: str = "", nam
         <label class="bw-opt"><input type="checkbox" name="haken" value="1"> {_bw_e(text)}</label>
         <div class="form-group" style="margin-top:8px"><label style="font-size:12px">
           Vollständiger Name als Bestätigung <span class="required">*</span></label>
-          <input type="text" name="name_eingabe" value="{_bw_e(name_wert)}" autocomplete="off"
+          <input type="text" name="name_eingabe" value="{_bw_e(name_wert or info["klarname"])}" autocomplete="off"
                  placeholder="{_bw_e(info["klarname"])}"></div>
         <div class="form-group"><label style="font-size:12px">Unterschrift (optional, mit Finger oder Maus)</label>
           <canvas id="bw_sig" class="bw-sig" width="600" height="200"></canvas>
@@ -10444,6 +10473,42 @@ async def kk_zuordnung_loesen(request: Request):
     return RedirectResponse("/einstellungen/kreditkarten/zuordnungen", status_code=303)
 
 
+def _version_zeit_text(zeit: str) -> str:
+    """'2026-10-12 08:20' -> '12.10.2026, 08:20 Uhr'"""
+    try:
+        d, t = zeit.split(" ")
+        j, m, tg = d.split("-")
+        return f"{tg}.{m}.{j}, {t} Uhr"
+    except Exception:
+        return zeit
+
+
+@app.get("/einstellungen/versionen", response_class=HTMLResponse)
+def versionen_seite(request: Request):
+    """Änderungsverlauf: je Version Datum/Uhrzeit und 2-3 Zeilen, was sich zur Vorgängerversion geändert hat."""
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren haben Zugriff auf die Einstellungen.</div>'), status_code=403)
+    karten = ""
+    for i, v in enumerate(VERSIONEN):
+        punkte = "".join(f"<li>{_bw_e(t)}</li>" for t in v["aenderungen"])
+        aktuell = ' <span style="font-size:11px;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px">aktuell</span>' if i == 0 else ""
+        karten += f"""<div class="card" style="margin-bottom:12px">
+          <div class="card-header"><span class="card-title">Version {_bw_e(v["version"])}{aktuell}</span>
+            <span style="font-size:12px;color:var(--muted)">{_bw_e(_version_zeit_text(v["zeit"]))}</span></div>
+          <div class="card-body"><ul style="margin:0 0 0 18px;padding:0;font-size:13px;line-height:1.6">{punkte}</ul></div>
+        </div>"""
+    content = f"""
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+      <a href="/einstellungen" class="btn btn-secondary">← Einstellungen</a>
+      <h1 class="page-title" style="margin:0">🆕 Versionen</h1>
+    </div>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:16px">Was sich in jeder Version gegenüber der Vorgängerversion geändert hat
+      (neueste oben, Ortszeit der Auslieferung).</p>
+    {karten}"""
+    return HTMLResponse(shell("Versionen", content))
+
+
 @app.get("/einstellungen", response_class=HTMLResponse)
 def einstellungen_uebersicht(request: Request):
     """
@@ -10456,7 +10521,11 @@ def einstellungen_uebersicht(request: Request):
         return HTMLResponse(shell("Kein Zugriff",
             '<div class="alert alert-err">Nur Organisatoren haben Zugriff auf die Einstellungen.</div>'), status_code=403)
 
+    neu = VERSIONEN[0]
+    versions_text = (f'<b>Version {_bw_e(neu["version"])}</b> · {_bw_e(_version_zeit_text(neu["zeit"]))}<br>'
+                     + "<br>".join("• " + _bw_e(t) for t in neu["aenderungen"]))
     karten = [
+        ("🆕", "Versionen", versions_text, "/einstellungen/versionen"),
         ("📋", "Offene Aufgaben", "Belege ohne Prüfung/finalen Betrag, unversendete Belege, "
          "nicht abgerechnete Reisen – alles an einem Ort.", "/todo"),
         ("✈", "Flug-/Bahn-Alerts", "Prüfplan, Testlauf, Diagnose der Verspätungs-Überwachung.",
