@@ -58,6 +58,10 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.20.1", "zeit": "2026-10-12 09:35", "aenderungen": [
+        "Fehler behoben: Bewirtungs- und Vorschussbelege wurden nach „Daten nachtragen“ fälschlich als „Pflichtfelder fehlen“ (Betrag, Eventdatum) markiert.",
+        "Bereits falsch markierte Belege werden beim Start bzw. über /init automatisch wieder auf vollständig gesetzt.",
+        "Bei diesen selbst erzeugten Belegen entfallen die KI-Knöpfe und das Wechselkurs-Formular."]},
     {"version": "3.20", "zeit": "2026-10-12 08:33", "aenderungen": [
         "Bewirtungsbeleg vereinfacht: nur Beleg wählen, Anlass und Gast eintragen. Tag, Ort, Betrag und Währung kommen aus dem Beleg.",
         "Die Versionsnummer in der oberen Leiste ist jetzt ein Link zu dieser Änderungsliste."]},
@@ -82,6 +86,10 @@ APP_VERSION  = VERSIONEN[0]["version"]
 PRUEF_BELEGARTEN = ("Rechnung", "Quittung", "Bewirtungsbeleg",
                     "Vorschussquittung", "Rueckgabequittung", "Bargeldbeschaffung")
 PRUEF_SQL = "(" + ",".join(f"'{a}'" for a in PRUEF_BELEGARTEN) + ")"
+
+# Von der App selbst erzeugte Belege (Eigenbelege): kein Betrag, keine KI-Analyse, keine Rechnungs-Pflichtfelder
+EIGENBELEG_ARTEN = ("Bewirtungsbeleg", "Vorschussquittung", "Rueckgabequittung", "Bargeldbeschaffung")
+EIGENBELEG_SQL = "(" + ",".join(f"'{a}'" for a in EIGENBELEG_ARTEN) + ")"
 
 # ── CSS + HTML Shell ──────────────────────────────────────────────────────────
 # ── CSS + HTML Shell ───────────────────────────────────────────────────────────
@@ -498,6 +506,7 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
 @app.on_event("startup")
 async def startup():
     print(f"[Startup] Herrhammer Reisekosten {APP_VERSION} gestartet")
+    eigenbelege_pflichtfelder_reparieren()
 
 if not os.path.exists("static"):
     os.makedirs("static", exist_ok=True)
@@ -515,6 +524,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.on_event("startup")
 async def startup():
     print(f"[Startup] Herrhammer Reisekosten {APP_VERSION} gestartet")
+    eigenbelege_pflichtfelder_reparieren()
 
 if not os.path.exists("static"):
     os.makedirs("static", exist_ok=True)
@@ -1058,7 +1068,7 @@ def beleg_detail(bid: int, request: Request):
                 <a href="/beleg/{bid2}/pdf/analyse" target="_blank"
                    class="btn btn-secondary">🔍 Analyse-PDF öffnen</a>
               </div>
-              <form method="post" action="/beleg/{bid2}/neu-anonymisieren" style="margin-top:8px">
+              {"" if belegart in EIGENBELEG_ARTEN else f'''<form method="post" action="/beleg/{bid2}/neu-anonymisieren" style="margin-top:8px">
                 <button type="submit" class="btn btn-secondary" style="width:100%">
                   🔄 Neu anonymisieren
                 </button>
@@ -1067,7 +1077,7 @@ def beleg_detail(bid: int, request: Request):
                 <button type="submit" class="btn btn-secondary" style="width:100%">
                   🧠 Neu analysieren
                 </button>
-              </form>
+              </form>'''}
               <a href="/beleg/{bid2}/loeschen" class="btn btn-secondary"
                  style="display:block;margin-top:8px;text-align:center;color:#b91c1c;border-color:#fca5a5"
                  onclick="return confirm('Diesen Beleg unwiderruflich löschen?')">
@@ -1083,7 +1093,7 @@ def beleg_detail(bid: int, request: Request):
                   Speichern
                 </button>
               </form>
-              {"" if waehrung == "EUR" else f'''
+              {"" if waehrung == "EUR" or belegart in EIGENBELEG_ARTEN else f'''
               <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
               <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px">
                 💱 Wechselkurs ({waehrung} → EUR)
@@ -1363,6 +1373,9 @@ async def beleg_daten_bearbeiten(bid: int, request: Request):
             pflicht = list(pflicht_werte.keys())
             if g("belegart",6) == "Buchungsbestaetigung":
                 pflicht = [f for f in pflicht if f not in ("betrag_brutto","waehrung","zahlungsart")]
+            elif g("belegart",6) in EIGENBELEG_ARTEN:
+                # Eigenbelege (Bewirtung, Vorschuss) sind von der App vollständig erzeugt: nur Datum und Titel nötig
+                pflicht = [f for f in pflicht if f in ("belegdatum","anbieter")]
             fehlend = [f for f in pflicht if not pflicht_werte.get(f)]
             pflicht_ok = len(fehlend) == 0
             status = "ok" if pflicht_ok else "fehlerhaft"
@@ -4207,6 +4220,20 @@ async def setup_post(request: Request):
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
+def eigenbelege_pflichtfelder_reparieren() -> None:
+    """Setzt Eigenbelege (Bewirtung, Vorschuss), die fälschlich als 'fehlende Pflichtfelder' markiert wurden,
+    wieder auf vollständig. Idempotent, ändert nur diese Belegarten."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"""UPDATE belege SET pflichtfelder_ok = {'TRUE' if is_postgres() else '1'},
+                        fehlende_felder = '[]', status = 'ok'
+                        WHERE belegart IN {EIGENBELEG_SQL}
+                        AND pflichtfelder_ok = {'FALSE' if is_postgres() else '0'}""")
+        db.commit(); cur.close(); db.close()
+    except Exception:
+        pass
+
+
 @app.get("/init")
 def init():
     """Legt Tabellen an. Bestehende Tabellen werden NICHT gelöscht."""
@@ -4224,6 +4251,7 @@ def init():
         cur.close(); db.close()
         repair_legacy_columns()
         migriere_verknuepfungen_zu_gruppen()
+        eigenbelege_pflichtfelder_reparieren()
         return {"status": "ok", "version": APP_VERSION,
                 "db": "postgresql" if is_postgres() else "sqlite"}
     except Exception as e:
