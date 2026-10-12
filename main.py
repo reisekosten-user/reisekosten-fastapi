@@ -58,6 +58,9 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.20", "zeit": "2026-10-12 08:33", "aenderungen": [
+        "Bewirtungsbeleg vereinfacht: nur Beleg wählen, Anlass und Gast eintragen. Tag, Ort, Betrag und Währung kommen aus dem Beleg.",
+        "Die Versionsnummer in der oberen Leiste ist jetzt ein Link zu dieser Änderungsliste."]},
     {"version": "3.19.1", "zeit": "2026-10-12 08:20", "aenderungen": [
         "Fehler behoben: Kurs nachtragen bei Belegen ohne Betrag (z. B. Quittungen) brach mit „float() … NoneType“ ab.",
         "Belege ohne Betrag zeigen keinen Hinweis „Kurs fehlt“ mehr."]},
@@ -370,7 +373,7 @@ def shell(title: str, content: str, page: str = "") -> str:
   {nav("mails", "📬 Mails", "/mails-abrufen")}
   {nav("vma", "VMA-Sätze", "/vma")}
   {nav("einstellungen", "⚙", "/einstellungen")}
-  <div class="nav-right">v{APP_VERSION} &nbsp;·&nbsp; <a href="/logout" style="color:inherit">🚪 Logout</a></div>
+  <div class="nav-right"><a href="/einstellungen/versionen" title="Änderungsverlauf" style="color:inherit">v{APP_VERSION}</a> &nbsp;·&nbsp; <a href="/logout" style="color:inherit">🚪 Logout</a></div>
 </nav>
 <main>
 {content}
@@ -8160,9 +8163,20 @@ _BW_FORM_JS = """<script>
     ['beleg','upload','eigen'].forEach(function(k){
       var el=document.getElementById('bwq_'+k); if(el) el.style.display=(k===q)?'block':'none';
     });
+    var det=document.getElementById('bw_details'); if(det && q==='eigen') det.open=true;
   }
+  function wert(id){var f=document.getElementById(id); return f?(f.value||''):'';}
+  function datum_de(v){var p=v.split('-'); return p.length===3?p[2]+'.'+p[1]+'.'+p[0]:'';}
+  function vorschau(){
+    var el=document.getElementById('bw_vorschau'); if(!el) return;
+    var t=[datum_de(wert('bw_datum')), wert('bw_ort'), wert('bw_betrag')?(wert('bw_betrag')+' '+wert('bw_waehrung')):''].filter(function(x){return x;});
+    el.textContent=t.length?t.join(' · '):'Wird aus dem Beleg übernommen.';
+  }
+  ['bw_datum','bw_ort','bw_betrag','bw_waehrung'].forEach(function(id){
+    var f=document.getElementById(id); if(f){f.addEventListener('input',vorschau); f.addEventListener('change',vorschau);}
+  });
   form.querySelectorAll('input[name=quelle]').forEach(function(r){r.addEventListener('change',umschalten);});
-  umschalten();
+  umschalten(); vorschau();
   var sel=document.getElementById('bw_hauptbeleg');
   if(sel){ sel.addEventListener('change',function(){
     var o=sel.options[sel.selectedIndex]; if(!o||!o.value) return;
@@ -8174,13 +8188,14 @@ _BW_FORM_JS = """<script>
       if(!da){ var op=document.createElement('option'); op.value=cur; op.textContent=cur; w.insertBefore(op,w.firstChild); }
       w.value=cur;
     }
+    vorschau();
   }); }
   var add=document.getElementById('bw_tn_add');
   if(add){ add.addEventListener('click',function(){
     var box=document.getElementById('bw_tn'); var n=box.children.length+1;
     var row=document.createElement('div'); row.className='bw-tn-row';
-    row.innerHTML='<input type="text" name="tn_name" placeholder="Name '+n+'" maxlength="120">'
-      +'<input type="text" name="tn_firma" placeholder="Firma / Funktion" maxlength="120">';
+    row.innerHTML='<input type="text" name="tn_name" placeholder="Name des Gastes" maxlength="120">'
+      +'<input type="text" name="tn_firma" placeholder="Firma (optional)" maxlength="120">';
     box.appendChild(row);
   }); }
 })();
@@ -8316,13 +8331,17 @@ def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | Non
     tn = list(d.get("teilnehmer") or [])
     if not tn:
         tn = [{"name": info["klarname"], "firma": ""}]
-    while len(tn) < 4:
+    while len(tn) < 2:
         tn.append({"name": "", "firma": ""})
     tn_html = "".join(
         f'<div class="bw-tn-row"><input type="text" name="tn_name" value="{_bw_e(p.get("name"))}" '
-        f'placeholder="Name {i}" maxlength="120"><input type="text" name="tn_firma" '
-        f'value="{_bw_e(p.get("firma"))}" placeholder="Firma / Funktion" maxlength="120"></div>'
+        f'placeholder="{"Dein Name" if i == 1 else "Name des Gastes"}" maxlength="120">'
+        f'<input type="text" name="tn_firma" value="{_bw_e(p.get("firma"))}" '
+        f'placeholder="Firma (optional)" maxlength="120"></div>'
         for i, p in enumerate(tn, start=1))
+    # Tag/Ort/Betrag kommen aus dem Beleg und bleiben eingeklappt; nur bei Eigenbeleg oder Fehlern offen
+    daten_offen = quelle == "eigen" or any(("Datum" in f or "Ort" in f or "Betrag" in f) for f in fehler)
+    daten_offen_attr = " open" if daten_offen else ""
 
     fehler_html = ""
     if fehler:
@@ -8380,30 +8399,43 @@ def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | Non
             placeholder="Warum gibt es keinen Beleg?">{_bw_e(d.get("eigenbeleg_begruendung"))}</textarea>
         </div>
 
-        <h3 style="font-size:14px;margin:18px 0 8px 0">2. Angaben zur Bewirtung</h3>
-        <div class="form-grid form-grid-2">
-          <div class="form-group"><label style="font-size:12px">Tag der Bewirtung</label>
-            <input type="date" name="datum" id="bw_datum" value="{_bw_e(d.get("datum"))}"></div>
-          <div class="form-group"><label style="font-size:12px">Ort / Restaurant</label>
-            <input type="text" name="ort" id="bw_ort" value="{_bw_e(d.get("ort"))}" maxlength="160"
-                   placeholder="z. B. Restaurant Adler, Würzburg"></div>
-          <div class="form-group full"><label style="font-size:12px">Anlass der Bewirtung</label>
-            <input type="text" name="anlass" value="{_bw_e(d.get("anlass"))}" maxlength="300"
-                   placeholder="z. B. Projektbesprechung Neuanlage mit Firma Muster"></div>
-          <div class="form-group"><label style="font-size:12px">Betrag laut Beleg</label>
-            <input type="text" inputmode="decimal" name="betrag" id="bw_betrag" value="{betrag_wert}"
-                   placeholder="z. B. 86,40"></div>
-          <div class="form-group"><label style="font-size:12px">Währung <span style="color:var(--muted)">(wird aus dem Beleg übernommen)</span></label>
-            <select name="waehrung" id="bw_waehrung">{waehr_opts}</select></div>
-          <div class="form-group"><label style="font-size:12px">Trinkgeld, falls nicht auf dem Beleg (optional)</label>
-            <input type="text" inputmode="decimal" name="trinkgeld" value="{tg_wert}" placeholder="z. B. 5,00"></div>
+        <div style="margin-top:10px;padding:10px;background:#f1f5f9;border-radius:8px;font-size:13px">
+          <b>Aus dem Beleg:</b> <span id="bw_vorschau">Wird aus dem Beleg übernommen.</span>
+          <details id="bw_details"{daten_offen_attr} style="margin-top:6px">
+            <summary style="cursor:pointer;font-size:12px;color:var(--muted)">Tag, Ort oder Betrag ändern</summary>
+            <div class="form-grid form-grid-2" style="margin-top:8px">
+              <div class="form-group"><label style="font-size:12px">Tag der Bewirtung</label>
+                <input type="date" name="datum" id="bw_datum" value="{_bw_e(d.get("datum"))}"></div>
+              <div class="form-group"><label style="font-size:12px">Ort / Restaurant</label>
+                <input type="text" name="ort" id="bw_ort" value="{_bw_e(d.get("ort"))}" maxlength="160"
+                       placeholder="z. B. Restaurant Adler, Würzburg"></div>
+              <div class="form-group"><label style="font-size:12px">Betrag</label>
+                <input type="text" inputmode="decimal" name="betrag" id="bw_betrag" value="{betrag_wert}"
+                       placeholder="z. B. 86,40"></div>
+              <div class="form-group"><label style="font-size:12px">Währung</label>
+                <select name="waehrung" id="bw_waehrung">{waehr_opts}</select></div>
+              <div class="form-group"><label style="font-size:12px">Trinkgeld, falls nicht auf dem Beleg</label>
+                <input type="text" inputmode="decimal" name="trinkgeld" value="{tg_wert}" placeholder="optional"></div>
+            </div>
+          </details>
         </div>
-        <p style="font-size:12px;color:var(--muted);margin:0">Bei Rechnungen ab 250 € muss auf der Rechnung der Name
+        <p style="font-size:12px;color:var(--muted);margin:6px 0 0 0">Bei Rechnungen ab 250 € muss auf der Rechnung der Name
           des Bewirtenden (unsere Firma) stehen. Bitte vor dem Bezahlen prüfen lassen.</p>
+
+        <h3 style="font-size:14px;margin:18px 0 8px 0">2. Anlass der Bewirtung</h3>
+        <input type="text" name="anlass" list="bw_anlaesse" value="{_bw_e(d.get("anlass"))}" maxlength="300"
+               style="width:100%" placeholder="z. B. Projektbesprechung mit Firma Muster" autocomplete="off">
+        <datalist id="bw_anlaesse">
+          <option value="Projektbesprechung mit Kunde">
+          <option value="Vertragsverhandlung mit Kunde">
+          <option value="Kundenpflege / Geschäftsessen">
+          <option value="Besprechung mit Lieferant">
+          <option value="Teamessen mit Gästen">
+        </datalist>
 
         <h3 style="font-size:14px;margin:18px 0 4px 0">3. Teilnehmer</h3>
         <p style="font-size:12px;color:var(--muted);margin:0 0 8px 0">
-          Alle Personen mit Namen, auch du selbst. Bei Gästen die Firma angeben.</p>
+          Du bist schon eingetragen. Trage mindestens einen Gast ein, die Firma ist optional.</p>
         <div id="bw_tn">{tn_html}</div>
         <button type="button" id="bw_tn_add" class="btn btn-secondary btn-sm">+ Teilnehmer</button>
 
