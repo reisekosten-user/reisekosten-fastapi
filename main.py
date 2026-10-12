@@ -58,6 +58,9 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.19.1", "zeit": "2026-10-12 08:20", "aenderungen": [
+        "Fehler behoben: Kurs nachtragen bei Belegen ohne Betrag (z. B. Quittungen) brach mit „float() … NoneType“ ab.",
+        "Belege ohne Betrag zeigen keinen Hinweis „Kurs fehlt“ mehr."]},
     {"version": "3.19", "zeit": "2026-10-12 08:01", "aenderungen": [
         "Währungsliste erweitert (u. a. MXN) und aus dem gewählten Beleg übernommen.",
         "Beim Bestätigen ist der Name mit dem angemeldeten Mitarbeiter vorausgefüllt.",
@@ -1022,7 +1025,7 @@ def beleg_detail(bid: int, request: Request):
                 <dd style="font-family:monospace">{buchungscode or "–"}</dd>
                 <dt style="color:var(--muted);font-size:12px">Rechnungsnr.</dt>
                 <dd style="font-family:monospace">{rechnr or "–"}</dd>
-                {f'<dt style="color:var(--muted);font-size:12px">Betrag in Euro (geschätzt)</dt><dd style="font-weight:600;color:var(--green)">{float(betrag_eur):.2f} EUR</dd>' if betrag_eur else ('<dt style="color:var(--amber);font-size:12px">Betrag in Euro (geschätzt)</dt><dd style="color:var(--amber);font-size:12px">⚠ Kurs fehlt – bitte nachtragen</dd>' if waehrung and waehrung != "EUR" else "")}
+                {f'<dt style="color:var(--muted);font-size:12px">Betrag in Euro (geschätzt)</dt><dd style="font-weight:600;color:var(--green)">{float(betrag_eur):.2f} EUR</dd>' if betrag_eur else ('<dt style="color:var(--amber);font-size:12px">Betrag in Euro (geschätzt)</dt><dd style="color:var(--amber);font-size:12px">⚠ Kurs fehlt – bitte nachtragen</dd>' if waehrung and waehrung != "EUR" and betrag_brutto else "")}
                 {f'<dt style="color:var(--muted);font-size:12px">Kurs</dt><dd style="font-family:monospace">{kurs_eur} ({kurs_datum or ""} {kurs_quelle or ""})</dd>' if kurs_eur else ""}
                 {f'<dt style="color:var(--muted);font-size:12px">Hotel</dt><dd style="font-weight:600">{hotel_name}</dd>' if hotel_name else ""}
                 {f'<dt style="color:var(--muted);font-size:12px">Check-in</dt><dd>{fmt_date(hotel_ci_dat)} {hotel_ci_zeit or ""}</dd>' if hotel_ci_dat else ""}
@@ -2938,7 +2941,8 @@ async def beleg_kurs_speichern(bid: int, request: Request):
         # Betrag_eur berechnen
         cur.execute(f"SELECT betrag_brutto FROM belege WHERE id={P}", (bid,))
         r = cur.fetchone()
-        brutto = float(r[0] if isinstance(r,tuple) else r["betrag_brutto"]) if r else 0
+        roh = (r[0] if isinstance(r,tuple) else r["betrag_brutto"]) if r else None
+        brutto = float(roh) if roh is not None else 0     # Belege ohne Betrag (z. B. Quittungen): nur Kurs speichern
         betrag_eur = round(brutto * kurs, 2) if kurs and brutto else None
         cur.execute(f"""UPDATE belege SET
             kurs_eur={P}, betrag_eur={P}, kurs_datum={P}, kurs_quelle={P}
