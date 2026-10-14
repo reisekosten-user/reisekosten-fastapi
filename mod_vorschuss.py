@@ -417,6 +417,49 @@ def bestaetigen(db, bid: int, klarname: str, name_eingabe: str, haken: bool,
     return {"beleg_id": beleg_id, "pruefsumme": d["pruefsumme"], "nummer": d["nummer"]}
 
 
+_ANALYSE_SPALTEN = ("rohtext", "anon_text", "s3_anon", "s3_analyse", "event_datum_von", "event_datum_bis",
+                    "event_ort_von", "event_ort_bis", "buchungscode", "rechnungsnummer", "land_beleg",
+                    "kurs_eur", "kurs_datum", "kurs_quelle", "betrag_eur", "betrag_eur_final", "betrag_brutto")
+
+
+def eigenbelege_wiederherstellen(db) -> int:
+    """Stellt Vorschuss-/Rückgabequittungen und Bargeldbeschaffungs-Belege wieder her, deren Felder überschrieben
+    wurden (z. B. durch eine KI-Analyse). Gesunde Belege bleiben unberührt; eine einzige Abfrage findet die
+    beschädigten. Commit macht der Aufrufer."""
+    P = ph()
+    falsch = "FALSE" if is_postgres() else "0"
+    arten = ",".join("'%s'" % a for a in BELEGARTEN.values())
+    cur = db.cursor()
+    cur.execute(f"""SELECT w.beleg_id, w.art, w.datum, w.betrag, w.waehrung, w.bestaetigt_name, w.s3_pdf
+                    FROM bargeld_buchungen w JOIN belege b ON b.id = w.beleg_id
+                    WHERE w.status='bestaetigt'
+                    AND (b.belegart IS NULL OR b.belegart NOT IN ({arten})
+                         OR b.transportart IS NULL OR b.transportart = '' OR b.anbieter IS NULL OR b.anbieter = ''
+                         OR b.belegdatum IS NULL OR b.status IS NULL OR b.status <> 'ok'
+                         OR b.pflichtfelder_ok IS NULL OR b.pflichtfelder_ok = {falsch}
+                         OR (w.s3_pdf IS NOT NULL AND (b.s3_original IS NULL OR b.s3_original <> w.s3_pdf)))""")
+    n = 0
+    for z in cur.fetchall():
+        g = lambda k, i: z[k] if hasattr(z, "keys") else z[i]
+        art = g("art", 1)
+        if art not in BELEGARTEN:
+            continue
+        waehrung, s3_pdf = g("waehrung", 4), g("s3_pdf", 6)
+        werte = {"belegart": BELEGARTEN[art], "transportart": "Sonstiges", "belegdatum": g("datum", 2),
+                 "anbieter": f"{ARTEN[art]} {betrag_text(float(g('betrag', 3)), waehrung)}",
+                 "reisender": g("bestaetigt_name", 5), "waehrung": waehrung, "zahlungsart": "Bar", "status": "ok",
+                 "pflichtfelder_ok": True, "fehlende_felder": "[]", "ki_json": "{}"}
+        if s3_pdf:
+            werte["s3_original"] = s3_pdf
+        for sp in _ANALYSE_SPALTEN:
+            werte[sp] = None
+        cur.execute("UPDATE belege SET " + ", ".join("%s=%s" % (k, P) for k in werte) + f" WHERE id={P}",
+                    tuple(werte.values()) + (g("beleg_id", 0),))
+        n += 1
+    cur.close()
+    return n
+
+
 def pdf_laden(d: dict) -> bytes:
     import mod_beleg
     if not d.get("s3_pdf"):

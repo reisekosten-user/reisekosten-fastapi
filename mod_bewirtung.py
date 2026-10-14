@@ -524,7 +524,7 @@ def bestaetigen(db, bid: int, klarname: str, name_eingabe: str, haken: bool,
     P = ph()
     cur = db.cursor()
     dateiname = f"Bewirtungsbeleg_{d['nummer']}.pdf"
-    betrag_beleg = d["betrag"] if d["eigenbeleg"] else None    # Nebenbeleg: Kosten stehen am Rechnungsbeleg
+    betrag_beleg = kosten_betrag(d)    # Trinkgeld (beim Eigenbeleg Betrag + Trinkgeld); Rechnung steht am Hauptbeleg
     zahlungsart = (haupt or {}).get("zahlungsart")
     if d.get("ersetzt_id"):
         alt = laden(db, d["ersetzt_id"])
@@ -562,7 +562,107 @@ def bestaetigen(db, bid: int, klarname: str, name_eingabe: str, haken: bool,
     if d.get("ersetzt_id"):
         cur.execute(f"UPDATE bewirtungen SET status='ersetzt' WHERE id={P}", (d["ersetzt_id"],))
     cur.close()
+    kosten_abgleichen(db, bid)
     return {"beleg_id": beleg_id, "pruefsumme": d["pruefsumme"], "nummer": d["nummer"]}
+
+
+_ANALYSE_SPALTEN = ("rohtext", "anon_text", "s3_anon", "s3_analyse", "event_datum_von", "event_datum_bis",
+                    "event_ort_von", "event_ort_bis", "buchungscode", "rechnungsnummer", "land_beleg",
+                    "kurs_eur", "kurs_datum", "kurs_quelle", "betrag_eur", "betrag_eur_final", "betrag_brutto")
+
+
+def eigenbelege_wiederherstellen(db) -> int:
+    """Stellt Bewirtungsbelege wieder her, deren Felder überschrieben wurden (z. B. durch eine KI-Analyse):
+    Belegart, Datum, Ort, Name, Währung kommen aus der bestätigten Bewirtung. Gesunde Belege bleiben unberührt.
+    Eine einzige Abfrage findet die beschädigten Belege (läuft nach jeder Änderung, muss günstig sein).
+    Commit macht der Aufrufer. Gibt die Zahl reparierter Belege zurück."""
+    P = ph()
+    falsch = "FALSE" if is_postgres() else "0"
+    cur = db.cursor()
+    cur.execute(f"""SELECT w.beleg_id, w.hauptbeleg_id, w.datum, w.ort, w.bestaetigt_name, w.waehrung, w.s3_pdf, b.zahlungsart
+                    FROM bewirtungen w JOIN belege b ON b.id = w.beleg_id
+                    WHERE w.status='bestaetigt'
+                    AND (b.belegart IS NULL OR b.belegart <> 'Bewirtungsbeleg'
+                         OR b.transportart IS NULL OR b.transportart = '' OR b.anbieter IS NULL OR b.anbieter = ''
+                         OR b.belegdatum IS NULL OR b.status IS NULL OR b.status <> 'ok'
+                         OR b.pflichtfelder_ok IS NULL OR b.pflichtfelder_ok = {falsch}
+                         OR (w.s3_pdf IS NOT NULL AND (b.s3_original IS NULL OR b.s3_original <> w.s3_pdf)))""")
+    n = 0
+    for z in cur.fetchall():
+        g = lambda k, i: z[k] if hasattr(z, "keys") else z[i]
+        beleg_id, s3_pdf = g("beleg_id", 0), g("s3_pdf", 6)
+        zahlungsart = g("zahlungsart", 7)
+        if not zahlungsart and g("hauptbeleg_id", 1):
+            h = beleg_kurz(db, g("hauptbeleg_id", 1))
+            zahlungsart = (h or {}).get("zahlungsart")
+        werte = {"belegart": "Bewirtungsbeleg", "transportart": "Bewirtung", "belegdatum": g("datum", 2),
+                 "anbieter": g("ort", 3), "reisender": g("bestaetigt_name", 4), "waehrung": g("waehrung", 5) or "EUR",
+                 "zahlungsart": zahlungsart, "status": "ok", "pflichtfelder_ok": True, "fehlende_felder": "[]",
+                 "ki_json": "{}"}
+        if s3_pdf:
+            werte["s3_original"] = s3_pdf
+        for sp in _ANALYSE_SPALTEN:
+            werte[sp] = None
+        cur.execute("UPDATE belege SET " + ", ".join("%s=%s" % (k, P) for k in werte) + f" WHERE id={P}",
+                    tuple(werte.values()) + (beleg_id,))
+        n += 1
+    cur.close()
+    return n
+
+
+def kosten_betrag(d: dict) -> float | None:
+    """Kosten, die am Bewirtungsbeleg selbst zählen: das Trinkgeld (steht nicht auf der Rechnung);
+    beim Eigenbeleg ohne Rechnung zusätzlich der Betrag. None, wenn nichts anfällt."""
+    summe = float(d.get("betrag") or 0) if d.get("eigenbeleg") else 0.0
+    summe += float(d.get("trinkgeld") or 0)
+    return round(summe, 2) if summe > 0.004 else None
+
+
+def kosten_abgleichen(db, bid: int | None = None) -> int:
+    """Hält die Kosten am Bewirtungsbeleg aktuell (idempotent, Commit macht der Aufrufer):
+    - Betrag und Währung = Trinkgeld (Eigenbeleg: Betrag + Trinkgeld), damit es in der Reisekostenabrechnung zählt;
+    - bei Fremdwährung der Euro-Wert nach dem Kurs des Rechnungsbelegs (zieht bei Kursänderung nach).
+    Bar bezahlte Belege bewertet das Bargeld-Konto, sie bleiben unangetastet.
+    Eine einzige Abfrage (Bewirtung, Nebenbeleg, Rechnungsbeleg); geschrieben wird nur bei Abweichung.
+    Gibt die Zahl geänderter Belege zurück."""
+    P = ph()
+    cur = db.cursor()
+    cur.execute("""SELECT w.id, w.beleg_id, w.hauptbeleg_id, w.eigenbeleg, w.betrag, w.trinkgeld, w.waehrung,
+                          b.betrag_brutto, b.waehrung, b.betrag_eur, b.betrag_eur_final, b.kurs_quelle, b.zahlungsart,
+                          h.betrag_brutto, h.waehrung, h.betrag_eur, h.betrag_eur_final
+                   FROM bewirtungen w JOIN belege b ON b.id = w.beleg_id LEFT JOIN belege h ON h.id = w.hauptbeleg_id
+                   WHERE w.status='bestaetigt'""" + (f" AND w.id={P}" if bid else ""), (bid,) if bid else ())
+    zeilen = cur.fetchall()
+    geaendert = 0
+    for z in zeilen:
+        v = [z[i] for i in range(17)]
+        d = {"eigenbeleg": bool(v[3]), "betrag": _num(v[4]), "trinkgeld": _num(v[5])}
+        waehrung, beleg_id, haupt_id = v[6] or "EUR", v[1], v[2]
+        ist, ist_w, eur, eur_final = _num(v[7]), v[8] or "EUR", _num(v[9]), _num(v[10])
+        quelle, zahlungsart = v[11] or "", v[12]
+        soll = kosten_betrag(d)
+        neu = {}
+        if (soll is None) != (ist is None) or (soll is not None and abs(soll - ist) > 0.004) or (soll is not None and ist_w != waehrung):
+            neu["betrag_brutto"], neu["waehrung"] = soll, waehrung
+        abgeleitet = quelle.startswith("wie Hauptbeleg")
+        bar = (zahlungsart == "Bar") or quelle.startswith("Bargeld-Konto")
+        if soll is None or waehrung == "EUR":
+            if abgeleitet and (eur is not None or eur_final is not None):
+                neu.update({"betrag_eur": None, "betrag_eur_final": None, "kurs_quelle": None})
+        elif not bar and not d["eigenbeleg"] and haupt_id and (eur_final is None or abgeleitet):
+            hb, hw, h_est, h_fin = _num(v[13]), v[14] or "EUR", _num(v[15]), _num(v[16])
+            if hb and hb > 0 and hw == waehrung and (h_fin is not None or h_est is not None):
+                n_fin = round(soll * h_fin / hb, 2) if h_fin is not None else None
+                n_est = round(soll * (h_fin if h_fin is not None else h_est) / hb, 2)
+                marke = "wie Hauptbeleg #%s" % haupt_id
+                if eur != n_est or eur_final != n_fin or quelle != marke:
+                    neu.update({"betrag_eur": n_est, "betrag_eur_final": n_fin, "kurs_quelle": marke})
+        if neu:
+            cur.execute("UPDATE belege SET " + ", ".join("%s=%s" % (k, P) for k in neu) + f" WHERE id={P}",
+                        tuple(neu.values()) + (beleg_id,))
+            geaendert += 1
+    cur.close()
+    return geaendert
 
 
 def _verknuepfen(db, cur, beleg_a: int, beleg_b: int) -> None:

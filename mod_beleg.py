@@ -648,6 +648,32 @@ def lade_ma_daten() -> tuple:
         return [], []
 
 
+APP_BELEGARTEN = ("Bewirtungsbeleg", "Vorschussquittung", "Rueckgabequittung", "Bargeldbeschaffung")
+APP_BELEG_HINWEIS = ("Dieser Beleg wurde von der App selbst erzeugt (Bewirtung bzw. Vorschuss/Bargeld) und wird "
+                     "nicht per KI analysiert. Änderungen bitte über die Bewirtung bzw. das Bargeld-Konto vornehmen.")
+
+
+def ist_app_erzeugt(cur, bid: int) -> bool:
+    """True für Belege, die die App selbst erzeugt hat (Bewirtungsbeleg, Vorschuss-/Rückgabequittung,
+    Bargeldbeschaffung). Erkennt sie auch dann, wenn die Belegart überschrieben wurde (Verknüpfung zur Buchung)."""
+    P = ph()
+    cur.execute(f"SELECT belegart FROM belege WHERE id={P}", (bid,))
+    r = cur.fetchone()
+    if r and (r[0] if isinstance(r, tuple) else r["belegart"]) in APP_BELEGARTEN:
+        return True
+    for tabelle in ("bewirtungen", "bargeld_buchungen"):
+        try:
+            cur.execute(f"SELECT 1 FROM {tabelle} WHERE beleg_id={P}", (bid,))
+            if cur.fetchone():
+                return True
+        except Exception:
+            try:
+                cur.connection.rollback()
+            except Exception:
+                pass
+    return False
+
+
 async def beleg_neu_analysieren(bid: int) -> dict:
     """
     Führt die KI-Analyse für einen bereits gespeicherten Beleg erneut aus
@@ -675,6 +701,9 @@ async def beleg_neu_analysieren(bid: int) -> dict:
                               "Bitte die Änderungen übernehmen oder verwerfen."}
     except Exception:
         db.rollback()
+    if ist_app_erzeugt(cur, bid):
+        cur.close(); db.close()
+        return {"fehler": APP_BELEG_HINWEIS}
     cur.execute(f"SELECT rohtext, s3_original, dateiname FROM belege WHERE id={P}", (bid,))
     row = cur.fetchone()
     if not row:
@@ -808,6 +837,9 @@ async def beleg_neu_anonymisieren(bid: int) -> dict:
     """
     P = ph()
     db = get_db(); cur = db.cursor()
+    if ist_app_erzeugt(cur, bid):
+        cur.close(); db.close()
+        return {"fehler": APP_BELEG_HINWEIS}
     cur.execute(f"SELECT rohtext, dateiname, s3_anon FROM belege WHERE id={P}", (bid,))
     row = cur.fetchone()
     if not row:

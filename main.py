@@ -59,6 +59,10 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.21.1", "zeit": "2026-10-14 10:20", "aenderungen": [
+        "Das Trinkgeld einer Bewirtung zählt jetzt in der Reisekostenabrechnung. Bei Fremdwährung wird der Euro-Wert nach dem Kurs des Rechnungsbelegs gerechnet und folgt automatisch, wenn dieser Kurs später geändert wird.",
+        "Selbst erzeugte Belege (Bewirtung, Vorschuss, Bargeld) lassen sich nicht mehr per KI neu analysieren oder anonymisieren – das hatte den Bewirtungsbeleg überschrieben.",
+        "Bereits überschriebene Bewirtungs- und Vorschussbelege werden beim Start, über /init und nach jeder Änderung automatisch aus den Buchungsdaten wiederhergestellt."]},
     {"version": "3.21", "zeit": "2026-10-14 10:05", "aenderungen": [
         "Neu: Im Profil gibt es den Haken „Reisetermine als Outlook-Einladung senden“. Dann bekommt der Reisende für jeden Flug, Zug und manuellen Termin eine Einladung (Zeiten, Nummer, Sitz, Terminal/Gleis).",
         "Änderungen und Stornos werden automatisch nachgeführt (aktualisierter bzw. abgesagter Termin). Je Reise: Seite „Outlook-Einladungen“ mit Status und Knopf „Jetzt senden“.",
@@ -490,6 +494,17 @@ app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 
 @app.middleware("http")
 async def login_erforderlich(request: Request, call_next):
+    antwort = await _zugang_pruefen(request, call_next)
+    if request.method == "POST" and antwort.status_code < 400 and not request.url.path.startswith("/cron"):
+        try:   # Euro-Wert des Trinkgelds folgt dem Kurs des Rechnungsbelegs; beschädigte App-Belege werden zurückgesetzt
+            from starlette.concurrency import run_in_threadpool
+            await run_in_threadpool(bewirtung_kosten_reparieren)
+        except Exception:
+            pass
+    return antwort
+
+
+async def _zugang_pruefen(request: Request, call_next):
     pfad = request.url.path
     if pfad_ist_offen(pfad):
         return await call_next(request)
@@ -512,6 +527,7 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
 async def startup():
     print(f"[Startup] Herrhammer Reisekosten {APP_VERSION} gestartet")
     eigenbelege_pflichtfelder_reparieren()
+    bewirtung_kosten_reparieren()
 
 if not os.path.exists("static"):
     os.makedirs("static", exist_ok=True)
@@ -530,6 +546,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def startup():
     print(f"[Startup] Herrhammer Reisekosten {APP_VERSION} gestartet")
     eigenbelege_pflichtfelder_reparieren()
+    bewirtung_kosten_reparieren()
 
 if not os.path.exists("static"):
     os.makedirs("static", exist_ok=True)
@@ -4245,6 +4262,26 @@ def eigenbelege_pflichtfelder_reparieren() -> None:
         pass
 
 
+def bewirtung_kosten_reparieren() -> None:
+    """Hält die selbst erzeugten Belege in Ordnung (idempotent, günstig):
+    1. beschädigte Bewirtungs-/Vorschussbelege aus den Buchungsdaten wiederherstellen,
+    2. Trinkgeld und dessen Euro-Wert am Bewirtungsbeleg nachziehen (siehe bw.kosten_abgleichen)."""
+    try:
+        db = get_db()
+        try:
+            bw.eigenbelege_wiederherstellen(db)
+            vs.eigenbelege_wiederherstellen(db)
+            bw.kosten_abgleichen(db)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+    except Exception:
+        pass
+
+
 @app.get("/init")
 def init():
     """Legt Tabellen an. Bestehende Tabellen werden NICHT gelöscht."""
@@ -4263,6 +4300,7 @@ def init():
         repair_legacy_columns()
         migriere_verknuepfungen_zu_gruppen()
         eigenbelege_pflichtfelder_reparieren()
+        bewirtung_kosten_reparieren()
         return {"status": "ok", "version": APP_VERSION,
                 "db": "postgresql" if is_postgres() else "sqlite"}
     except Exception as e:
@@ -4328,7 +4366,8 @@ def todo_liste_laden() -> list:
     try:
         # 1. Betrag final noch nicht bestätigt (Fremdwährung, nur Schätzung vorhanden)
         cur.execute(f"""SELECT COUNT(*) FROM belege
-            WHERE waehrung != 'EUR' AND betrag_eur_final IS NULL AND betrag_brutto IS NOT NULL""")
+            WHERE waehrung != 'EUR' AND betrag_eur_final IS NULL AND betrag_brutto IS NOT NULL
+            AND COALESCE(kurs_quelle,'') NOT LIKE 'wie Hauptbeleg%'""")
         n = cur.fetchone()[0]
         if n:
             aufgaben.append({"icon": "💶", "prio": "warn",
@@ -4417,7 +4456,7 @@ def todo_belege_laden() -> list:
 
     cur.execute(f"""SELECT b.id, b.reise_code, b.anbieter, b.betrag_brutto, b.waehrung,
             b.belegdatum, b.betrag_eur_final, b.geprueft, b.dms_versendet_am,
-            b.pflichtfelder_ok, b.belegart, r.rueckkehr
+            b.pflichtfelder_ok, b.belegart, r.rueckkehr, b.kurs_quelle
         FROM belege b LEFT JOIN reisen r ON r.code = b.reise_code
         ORDER BY b.erstellt DESC""")
     rows = cur.fetchall()
@@ -4436,8 +4475,9 @@ def todo_belege_laden() -> list:
         pflicht_ok = g(r,"pflichtfelder_ok",9)
         belegart = g(r,"belegart",10) or ""
         rueckkehr = g(r,"rueckkehr",11)
+        abgeleitet = str(g(r,"kurs_quelle",12) or "").startswith("wie Hauptbeleg")
 
-        if waehrung != "EUR" and betrag_eur_final is None and betrag_brutto is not None:
+        if waehrung != "EUR" and betrag_eur_final is None and betrag_brutto is not None and not abgeleitet:
             probleme.append("💶 Betrag final offen")
         if belegart in PRUEF_BELEGARTEN:
             rueckkehr_d = rueckkehr
