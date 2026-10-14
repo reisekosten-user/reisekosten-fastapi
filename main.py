@@ -34,7 +34,7 @@ from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         OPENAI_KEY, OPENAI_MODEL, OPENAI_URL,
                         S3_ENDPOINT, S3_BUCKET,
                         _gleicher_reisender, _SEG_FELDER, _wert_gleich)
-from mod_mail import fetch_mails, sende_dms_mail
+from mod_mail import fetch_mails, sende_dms_mail, dms_konfiguriert, DMS_EMAIL_TO
 from mod_vma_tage import (vma_berechnen, land_fuer_tag, trennungspauschale_berechnen,
                            fruehstueck_aus_beleg, vma_tage_generieren, land_fuer_letzten_tag)
 from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
@@ -47,6 +47,8 @@ from mod_flugalert import (konfiguration_laden,
                             cron_flug_alerts, offene_alerts_fuer_dashboard)
 from mod_geo import koordinaten_fuer_land, adresse_geokodieren
 CRON_SECRET = os.getenv("CRON_SECRET", "")
+# Größte erlaubte Habel-Mail (Summe aller PDF-Anhänge in MB; Base64 macht die Mail ca. ein Drittel größer)
+HABEL_MAX_MB = float(os.getenv("HABEL_MAX_MB", "15") or 15)
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "")
 
 # ── Konfiguration ─────────────────────────────────────────────────────────────
@@ -60,6 +62,10 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.22", "zeit": "2026-10-14 16:10", "aenderungen": [
+        "Habel-Übergabe neu: Eine E-Mail je Reise mit der Reisekostenabrechnung und jedem Beleg als eigenem PDF (mit Prüf-Deckblatt). Der Knopf „An Habel“ sitzt jetzt auf der Reise-Seite neben „Abschluss“.",
+        "Vor dem Senden zeigt die Seite, welche Belege geprüft sind. Solange ein Beleg nicht geprüft ist oder das Original fehlt, ist das Senden gesperrt. Erneutes Senden braucht einen Haken.",
+        "Der Einzel-Knopf „Jetzt an Habel übertragen“ am Beleg entfällt; der Beleg zeigt nur noch den Status und führt zur Reise-Übergabe. Grenze für die Mailgröße: HABEL_MAX_MB (Standard 15)."]},
     {"version": "3.21.3", "zeit": "2026-10-14 15:30", "aenderungen": [
         "Dashboard und Abrechnung: „Auslandsbeleg ohne Wechselkurs – Kurs nachtragen“ erscheint nur noch, wenn wirklich ein Kurs nachzutragen ist.",
         "Nicht mehr gemeldet werden: Bewirtungs- und Vorschussbelege (haben keinen eigenen Kurs) sowie Belege, deren Euro-Betrag schon bestätigt ist."]},
@@ -904,8 +910,7 @@ def beleg_detail(bid: int, request: Request):
             verknuepfung_html += (
                 f'<div style="font-size:11px;color:var(--muted);margin-bottom:8px">'
                 f'Dieser Beleg gehört zu einer Gruppe von {len(gruppen_mitglieder)+1} Belegen. '
-                f'Beim Senden an Habel werden alle geprüften Umsatzbelege dieser Gruppe automatisch '
-                f'zusammen verschickt.</div>{mitglieder_html}')
+                f'Beim Senden an Habel geht jeder Beleg einzeln als eigenes PDF in der Mail der Reise mit.</div>{mitglieder_html}')
         if kandidaten_html:
             verknuepfung_html += (f'<div style="font-size:11px;color:var(--muted);margin:10px 0 6px">'
                                   f'{"Weiteren" if mitglieder_html else "Beleg dieser Reise"} hinzufügen:</div>{kandidaten_html}')
@@ -941,20 +946,18 @@ def beleg_detail(bid: int, request: Request):
                 f'style="width:100%;text-align:center;display:block;margin-bottom:8px">'
                 f'👁 Prüf-PDF ansehen (Deckblatt + Original)</a>') if geprueft else ""
 
+            habel_knopf_html = (
+                f'<a href="/reise/{rcode}/habel" class="btn btn-secondary" style="width:100%;text-align:center;display:block;margin-top:8px">'
+                f'📤 Übergabe an Habel (ganze Reise)</a>' if rcode else
+                '<div style="font-size:11px;color:var(--muted);margin-top:6px">Beleg zuerst einer Reise zuordnen.</div>')
             if dms_versendet_am:
-                dms_block_html = ('<div class="alert alert-ok" style="font-size:12px">📤 An Habel übertragen am '
-                                   + fmt_zeitstempel(dms_versendet_am) + '</div>')
+                dms_block_html = (f'{pruef_pdf_link_html}<div class="alert alert-ok" style="font-size:12px">📤 An Habel übertragen am '
+                                   + fmt_zeitstempel(dms_versendet_am) + f'</div>{habel_knopf_html}')
             else:
-                darf_senden = bool(geprueft and rcode)
-                disabled_attr = "" if darf_senden else "disabled"
-                hinweis_html = ("" if darf_senden else
-                    '<div style="font-size:11px;color:var(--muted);margin-top:6px">'
-                    'Voraussetzung: geprüft + Reise zugeordnet.</div>')
                 dms_block_html = (
                     f'{pruef_pdf_link_html}'
-                    f'<form method="post" action="/beleg/{bid2}/dms-senden">'
-                    f'<button type="submit" class="btn btn-success" style="width:100%" {disabled_attr}>'
-                    f'📤 Jetzt an Habel übertragen</button></form>{hinweis_html}')
+                    f'<div style="font-size:12px;color:var(--muted)">Wird zusammen mit allen Belegen der Reise in '
+                    f'<b>einer</b> Mail an Habel gesendet – sobald alle Belege geprüft sind.</div>{habel_knopf_html}')
 
             pruef_button_text = "✓ Prüfung aktualisieren" if geprueft else "✓ Als geprüft markieren"
             pruef_karte_html = f"""<div class="card">
@@ -1975,90 +1978,212 @@ def beleg_aus_gruppe_entfernen(bid: int, ziel_id: int):
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
-@app.post("/beleg/{bid}/dms-senden")
-async def beleg_dms_senden(bid: int):
-    """Schickt einen geprüften, reise-zugeordneten Umsatzbeleg per Mail an Habel.
-    Gehört der Beleg zu einer Gruppe (z.B. Buchungsbestätigung + Rechnung + weitere),
-    werden alle GEPRÜFTEN Gruppenmitglieder automatisch zusammen in einer Mail
-    verschickt."""
+# ── Habel-Übergabe: EINE E-Mail je Reise (Reisekostenabrechnung + jeder Beleg einzeln als PDF) ───────────
+# Gesendet wird von der Reise-Seite aus (Knopf neben „Abschluss“). Vorher prüft die Seite, ob alle Belege
+# geprüft sind; sonst ist das Senden gesperrt. Welche Belege mitgehen, bestimmt PRUEF_BELEGARTEN.
+
+def _datei_ascii(text, maxlen: int) -> str:
+    import unicodedata
+    t = str(text or "").translate(str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "Ä": "Ae", "Ö": "Oe", "Ü": "Ue", "ß": "ss"}))
+    t = unicodedata.normalize("NFKD", t).encode("ascii", "ignore").decode()
+    t = re.sub(r"[^A-Za-z0-9]+", "_", t).strip("_")
+    return t[:maxlen].strip("_") or "Beleg"
+
+
+_ART_KURZ = {"Bewirtungsbeleg": "Bewirtung", "Vorschussquittung": "Vorschuss", "Rueckgabequittung": "Rueckgabe",
+            "Bargeldbeschaffung": "Bargeld"}
+
+
+def habel_paket_pruefen(rcode: str) -> dict:
+    """Liest, welche Belege der Reise an Habel gehen und ob alles bereit ist (ändert nichts)."""
+    P = ph()
+    db = get_db(); cur = db.cursor()
     try:
-        P = ph()
-        db = get_db(); cur = db.cursor()
-        cur.execute(f"""SELECT reise_code, dateiname, s3_original, anbieter, betrag_brutto,
-                        waehrung, belegdatum, belegart, zahlungsart, pruef_vermerk,
-                        geprueft, geprueft_von, geprueft_am, beleg_gruppe_id
-                        FROM belege WHERE id={P}""", (bid,))
+        cur.execute(f"SELECT code, titel, abreise, rueckkehr FROM reisen WHERE code={P}", (rcode,))
         r = cur.fetchone()
         if not r:
-            cur.close(); db.close()
-            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Beleg nicht gefunden.</div>'))
-        g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
-        rcode = g("reise_code",0); dateiname = g("dateiname",1); s3o = g("s3_original",2)
-        anbieter = g("anbieter",3) or "–"; betrag = g("betrag_brutto",4); waehrung = g("waehrung",5) or "EUR"
-        belegdat = g("belegdatum",6); belegart_v = g("belegart",7)
-        zahlungsart_v = g("zahlungsart",8) or "–"; vermerk = g("pruef_vermerk",9) or "–"
-        geprueft_v = bool(g("geprueft",10)); geprueft_von_v = g("geprueft_von",11) or "–"
-        gid = g("beleg_gruppe_id",13)
-
-        weitere_anhaenge = []
-        mitversendete_ids = []
-        verk_hinweis = ""
-        if gid:
-            cur.execute(f"""SELECT id, dateiname, s3_original, belegart, geprueft
-                            FROM belege WHERE beleg_gruppe_id={P} AND id!={P}""", (gid, bid))
-            gruppen_mitglieder = cur.fetchall()
-            geprueft_liste = []; offen_liste = []
-            for vr in gruppen_mitglieder:
-                vg = lambda k,i: vr[k] if hasattr(vr,'keys') else vr[i]
-                v_id = vg("id",0); v_dateiname = vg("dateiname",1); v_s3o = vg("s3_original",2)
-                v_belegart = vg("belegart",3); v_geprueft = bool(vg("geprueft",4))
-                if v_geprueft and v_s3o:
-                    weitere_anhaenge.append((pruef_pdf_fuer_beleg(v_id), v_dateiname or f"beleg_{v_id}.pdf"))
-                    mitversendete_ids.append(v_id)
-                    geprueft_liste.append(f"#{v_id} ({v_belegart})")
-                else:
-                    offen_liste.append(f"#{v_id} ({v_belegart})")
-            if geprueft_liste:
-                verk_hinweis += f"\nGruppen-Belege im Anhang mitgeschickt: {', '.join(geprueft_liste)}\n"
-            if offen_liste:
-                verk_hinweis += f"\nHinweis: noch nicht geprüft, daher nicht mitgeschickt: {', '.join(offen_liste)}\n"
+            return {"reise": None}
+        g = lambda row, k, i: row[k] if hasattr(row, "keys") else row[i]
+        reise = {"code": g(r, "code", 0), "titel": g(r, "titel", 1) or "", "abreise": g(r, "abreise", 2),
+                 "rueckkehr": g(r, "rueckkehr", 3)}
+        cur.execute(f"""SELECT m.klarname FROM mitarbeiter m JOIN reise_mitarbeiter rm ON rm.kuerzel=m.kuerzel
+                        WHERE rm.reise_code={P} ORDER BY m.klarname""", (rcode,))
+        namen = [g(x, "klarname", 0) for x in cur.fetchall()]
+        cur.execute(f"""SELECT id, belegart, anbieter, belegdatum, betrag_brutto, waehrung, geprueft, s3_original,
+                        dms_versendet_am FROM belege WHERE reise_code={P} AND belegart IN {PRUEF_SQL}
+                        ORDER BY belegdatum NULLS LAST, id""", (rcode,))
+        zeilen = cur.fetchall()
+    finally:
         cur.close(); db.close()
+    belege = []
+    for nr, z in enumerate(zeilen, start=1):
+        bid, art, anb = g(z, "id", 0), g(z, "belegart", 1) or "", g(z, "anbieter", 2) or ""
+        datum = str(g(z, "belegdatum", 3) or "")[:10]
+        belege.append({
+            "id": bid, "art": art, "anbieter": anb, "datum": datum, "betrag": g(z, "betrag_brutto", 4),
+            "waehrung": g(z, "waehrung", 5) or "EUR", "geprueft": bool(g(z, "geprueft", 6)),
+            "original": bool(g(z, "s3_original", 7)), "gesendet_am": g(z, "dms_versendet_am", 8),
+            "name": f"{nr:02d}_{_datei_ascii(_ART_KURZ.get(art, art), 14)}_{_datei_ascii(anb, 22)}_{datum}_Nr{bid}.pdf".replace("__", "_")})
+    offen = [b for b in belege if not b["geprueft"]]
+    ohne_original = [b for b in belege if b["geprueft"] and not b["original"]]
+    return {"reise": reise, "mitarbeiter": namen, "belege": belege, "offen": offen, "ohne_original": ohne_original,
+            "bereits": bool(belege) and all(b["gesendet_am"] for b in belege)}
 
-        if not geprueft_v or not rcode:
-            return HTMLResponse(shell("Fehler",
-                '<div class="alert alert-err">Beleg muss geprüft und einer Reise zugeordnet sein.</div>'
-                f'<a href="/beleg/{bid}" class="btn btn-secondary">Zurück</a>'))
-        if not s3o:
-            return HTMLResponse(shell("Fehler",
-                '<div class="alert alert-err">Kein Original-Dokument in S3 vorhanden.</div>'
-                f'<a href="/beleg/{bid}" class="btn btn-secondary">Zurück</a>'))
 
-        pdf_bytes = pruef_pdf_fuer_beleg(bid)
-        betreff = f"Reisekosten-Beleg {rcode} – {anbieter} – {betrag or ''} {waehrung}".strip()
-        text = (f"Beleg #{bid} zur Archivierung\n\n"
-                f"Reise: {rcode}\nAnbieter: {anbieter}\nBetrag: {betrag} {waehrung}\n"
-                f"Belegdatum: {fmt_date(belegdat)}\nBelegart: {belegart_v}\nZahlungsart: {zahlungsart_v}\n"
-                f"Geprüft von: {geprueft_von_v}\nPrüfvermerk: {vermerk}\n{verk_hinweis}")
-        anhang_name = dateiname or f"beleg_{bid}.pdf"
-        result = sende_dms_mail(betreff, text, pdf_bytes, anhang_name, weitere_anhaenge=weitere_anhaenge)
+def habel_hindernisse(info: dict) -> list:
+    """Gründe, warum jetzt nicht gesendet werden darf (leer = bereit)."""
+    h = []
+    if not dms_konfiguriert():
+        h.append("Der Mail-Versand an Habel ist nicht eingerichtet (SMTP_HOST, SMTP_USER, SMTP_PASS oder DMS_EMAIL_TO fehlen).")
+    if info["offen"]:
+        h.append("Es sind noch nicht alle Belege geprüft (%d offen: %s)."
+                 % (len(info["offen"]), ", ".join("#%s" % b["id"] for b in info["offen"])))
+    if info["ohne_original"]:
+        h.append("Für diese Belege ist kein Original-Dokument gespeichert: %s."
+                 % ", ".join("#%s" % b["id"] for b in info["ohne_original"]))
+    return h
 
-        if result.get("fehler"):
-            return HTMLResponse(shell("Fehler",
-                f'<div class="alert alert-err">DMS-Versand fehlgeschlagen: {result["fehler"]}</div>'
-                f'<a href="/beleg/{bid}" class="btn btn-secondary">Zurück</a>'))
 
+def habel_paket_bauen(info: dict) -> list:
+    """Erzeugt die Mail-Anhänge [(bytes, dateiname)]: Reisekostenabrechnung + jeder Beleg einzeln (mit Prüf-Deckblatt).
+    Wirft ValueError mit lesbarer Meldung."""
+    rcode = info["reise"]["code"]
+    namen = {b["id"]: b["name"] for b in info["belege"]}
+    antwort = abschluss_pdf_antwort(rcode, mit_originalen=False, anlagen_namen=namen)
+    if getattr(antwort, "media_type", "") != "application/pdf":
+        raise ValueError("Die Reisekostenabrechnung konnte nicht erzeugt werden.")
+    anhaenge = [(antwort.body, f"Reisekostenabrechnung_{rcode}.pdf")]
+    for b in info["belege"]:
+        try:
+            anhaenge.append((pruef_pdf_fuer_beleg(b["id"]), b["name"]))
+        except Exception as e:
+            raise ValueError(f"Beleg #{b['id']} konnte nicht vorbereitet werden: {e}")
+    groesse = sum(len(x[0]) for x in anhaenge)
+    if groesse > HABEL_MAX_MB * 1024 * 1024:
+        raise ValueError(f"Die Mail wäre {groesse / 1048576:.1f} MB groß (Grenze {HABEL_MAX_MB:g} MB). "
+                         "Bitte besonders große Belege verkleinern oder die Grenze (HABEL_MAX_MB) anheben.")
+    return anhaenge
+
+
+def _habel_seite(info: dict, fehler: list | None = None, ok: bool = False, versendet: int = 0) -> str:
+    from html import escape as e
+    reise = info["reise"]; rcode = reise["code"]
+    hind = habel_hindernisse(info)
+    zeilen = ""
+    for b in info["belege"]:
+        pruef = ('<span style="color:#166534">✓ geprüft</span>' if b["geprueft"] else
+                 f'<a href="/beleg/{b["id"]}" style="color:#b91c1c;font-weight:600">✗ nicht geprüft – jetzt prüfen</a>')
+        if b["geprueft"] and not b["original"]:
+            pruef = '<span style="color:#b91c1c">✗ kein Original gespeichert</span>'
+        bet = f'{float(b["betrag"]):.2f} {e(b["waehrung"])}' if b["betrag"] else "–"
+        gesendet = fmt_date(b["gesendet_am"]) if b["gesendet_am"] else "–"
+        zeilen += (f'<tr><td><a href="/beleg/{b["id"]}">#{b["id"]}</a></td><td>{e(b["art"])}</td>'
+                   f'<td>{e(b["anbieter"] or "–")}</td><td>{fmt_date(b["datum"]) if b["datum"] else "–"}</td>'
+                   f'<td style="text-align:right">{bet}</td><td>{pruef}</td>'
+                   f'<td style="font-size:12px;color:var(--muted)">{gesendet}</td></tr>')
+    if not zeilen:
+        zeilen = ('<tr><td colspan="7"><div class="empty-state">Keine Belege zum Senden. '
+                  'Es geht nur die Reisekostenabrechnung raus.</div></td></tr>')
+    n = len(info["belege"]); n_ok = sum(1 for b in info["belege"] if b["geprueft"])
+    banner = ""
+    if ok:
+        banner += ('<div class="alert alert-ok" style="margin-bottom:16px">✓ Gesendet an <b>%s</b>: '
+                   'Reisekostenabrechnung und %d Beleg%s als einzelne PDF-Dateien in einer E-Mail.</div>'
+                   % (e(DMS_EMAIL_TO or "Habel"), n, "" if n == 1 else "e"))
+    if fehler:
+        banner += ('<div class="alert alert-err" style="margin-bottom:16px"><b>Nicht gesendet:</b>%s</div>'
+                   % "".join("<div>• %s</div>" % e(x) for x in fehler))
+    elif hind and not ok:
+        banner += ('<div class="alert alert-warn" style="margin-bottom:16px"><b>Senden noch gesperrt:</b>%s</div>'
+                   % "".join("<div>• %s</div>" % e(x) for x in hind))
+    erneut = ""
+    if info["bereits"]:
+        erneut = ('<label style="display:block;margin:10px 0;font-size:13px"><input type="checkbox" name="erneut" value="1" '
+                  'style="width:auto;margin-right:6px"> Alle Belege sind schon einmal gesendet worden – '
+                  'trotzdem erneut senden</label>')
+    teilweise = ""
+    if not info["bereits"] and any(b["gesendet_am"] for b in info["belege"]):
+        teilweise = ('<div style="font-size:12px;color:var(--muted);margin-top:8px">Ein Teil der Belege wurde früher schon '
+                     'gesendet. Die Mail enthält trotzdem immer alle Belege der Reise.</div>')
+    knopf_attr = ('disabled title="Erst alle Hinweise oben erledigen" style="width:100%;opacity:.4;cursor:not-allowed"'
+                  if hind else 'style="width:100%"')
+    dateien = n + 1
+    content = (
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">'
+        f'<div><h1 class="page-title" style="margin:0">📤 Übergabe an Habel {e(rcode)}</h1>'
+        f'<div style="color:var(--muted);font-size:13px">{e(reise["titel"])}</div></div>'
+        '<div style="display:flex;gap:8px">'
+        f'<a href="/reise/{e(rcode)}" class="btn btn-secondary">← Reise</a>'
+        f'<a href="/reise/{e(rcode)}/abschluss" class="btn btn-secondary">🧾 Abschluss</a></div></div>'
+        f'{banner}'
+        '<div class="card" style="margin-bottom:16px"><div class="card-header">'
+        f'<span class="card-title">1. Sind alle Belege geprüft? ({n_ok} von {n})</span></div>'
+        '<div class="table-wrap"><table><thead><tr><th>Beleg</th><th>Art</th><th>Anbieter</th><th>Datum</th>'
+        '<th style="text-align:right">Betrag</th><th>Prüfung</th><th>Früher gesendet</th></tr></thead>'
+        f'<tbody>{zeilen}</tbody></table></div></div>'
+        '<div class="card"><div class="card-header"><span class="card-title">2. Senden</span></div><div class="card-body">'
+        f'<p style="margin:0 0 8px 0;font-size:13px">Eine E-Mail an <b>{e(DMS_EMAIL_TO or "– nicht eingerichtet –")}</b> '
+        f'mit <b>{dateien} PDF-Datei{"" if dateien == 1 else "en"}</b>: die Reisekostenabrechnung '
+        'und jeder Beleg einzeln (mit Prüf-Deckblatt).</p>'
+        f'<form method="post" action="/reise/{e(rcode)}/habel/senden" style="margin:0">{erneut}'
+        f'<button type="submit" class="btn btn-success" {knopf_attr}>📤 Jetzt an Habel senden</button></form>'
+        f'{teilweise}'
+        '</div></div>')
+    return shell("Übergabe an Habel %s" % rcode, content, "reisen")
+
+
+@app.get("/reise/{code}/habel", response_class=HTMLResponse)
+def reise_habel_anzeigen(code: str, request: Request, ok: str = ""):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    info = habel_paket_pruefen(code.upper())
+    if not info["reise"]:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden.</div>'), status_code=404)
+    return HTMLResponse(_habel_seite(info, ok=bool(ok)))
+
+
+@app.post("/reise/{code}/habel/senden")
+def reise_habel_senden(code: str, request: Request, erneut: str = Form("")):
+    """Eine Mail an Habel: Reisekostenabrechnung + jeder Beleg einzeln. Geprüft wird hier erneut (nicht nur auf der Seite)."""
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    rcode = code.upper()
+    info = habel_paket_pruefen(rcode)
+    if not info["reise"]:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden.</div>'), status_code=404)
+    fehler = habel_hindernisse(info)
+    if not fehler and info["bereits"] and not erneut:
+        fehler.append("Diese Reise wurde schon an Habel gesendet. Zum erneuten Senden bitte den Haken setzen.")
+    anhaenge = []
+    if not fehler:
+        try:
+            anhaenge = habel_paket_bauen(info)
+        except ValueError as ex:
+            fehler.append(str(ex))
+    if fehler:
+        return HTMLResponse(_habel_seite(info, fehler=fehler), status_code=409)
+    reise = info["reise"]; n = len(info["belege"])
+    liste = "\n".join(" - %s  (%s, %s, %s, %s)" % (
+        b["name"], b["art"], b["anbieter"] or "–", fmt_date(b["datum"]) if b["datum"] else "ohne Datum",
+        ("%.2f %s" % (float(b["betrag"]), b["waehrung"])) if b["betrag"] else "ohne Betrag") for b in info["belege"])
+    betreff = "Reisekostenabrechnung %s – %s (%d Beleg%s)" % (rcode, reise["titel"], n, "" if n == 1 else "e")
+    text = ("Reisekostenabrechnung %s – %s\nZeitraum: %s – %s\nReisende: %s\n\n"
+            "Anhänge (%d PDF-Dateien):\n - %s  (Abrechnung)\n%s\n\n"
+            "Alle Belege sind geprüft (Prüf-Deckblatt im jeweiligen PDF).\n"
+            % (rcode, reise["titel"], fmt_date(reise["abreise"]), fmt_date(reise["rueckkehr"]),
+               ", ".join(info["mitarbeiter"]) or "–", len(anhaenge), anhaenge[0][1], liste))
+    ergebnis = sende_dms_mail(betreff, text, anhaenge[0][0], anhaenge[0][1], weitere_anhaenge=anhaenge[1:])
+    if ergebnis.get("fehler"):
+        return HTMLResponse(_habel_seite(info, fehler=["Der Versand ist fehlgeschlagen: %s" % ergebnis["fehler"]]), status_code=502)
+    if info["belege"]:
         P = ph()
         db = get_db(); cur = db.cursor()
-        alle_ids = [bid] + mitversendete_ids
-        for versendete_id in alle_ids:
-            if is_postgres():
-                cur.execute(f"UPDATE belege SET dms_versendet_am=NOW() WHERE id={P}", (versendete_id,))
-            else:
-                cur.execute(f"UPDATE belege SET dms_versendet_am=datetime('now') WHERE id={P}", (versendete_id,))
+        jetzt = "NOW()" if is_postgres() else "datetime('now')"
+        for b in info["belege"]:
+            cur.execute(f"UPDATE belege SET dms_versendet_am={jetzt} WHERE id={P}", (b["id"],))
         db.commit(); cur.close(); db.close()
-        return RedirectResponse(f"/beleg/{bid}", status_code=303)
-    except Exception as e:
-        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+    return RedirectResponse(f"/reise/{rcode}/habel?ok=1", status_code=303)
+
 
 @app.post("/beleg/{bid}/zahlungsart")
 async def beleg_zahlungsart_speichern(bid: int, request: Request):
@@ -3729,6 +3854,7 @@ def reise_abschluss(code: str):
             <a href="/reise/{rcode}/abschluss/pdf" class="btn btn-primary">
               📄 PDF-Export
             </a>
+            <a href="/reise/{rcode}/habel" class="btn btn-secondary">📤 An Habel</a>
             <a href="/reise/{rcode}" class="btn btn-secondary">← Reise</a>
           </div>
         </div>
@@ -3830,6 +3956,12 @@ def reise_abschluss(code: str):
 @app.get("/reise/{code}/abschluss/pdf")
 def reise_abschluss_pdf(code: str):
     """Erzeugt den Abschlussbericht (VMA + Kosten) als PDF zum Download/Öffnen."""
+    return abschluss_pdf_antwort(code)
+
+
+def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen: dict | None = None):
+    """Abschlussbericht als PDF-Antwort. mit_originalen=False: nur der Bericht, die Belege liegen dann als eigene
+    Dateien bei (Habel-Mail); anlagen_namen = {beleg_id: Dateiname} für das Anlagenverzeichnis."""
     rcode = code.upper()
     try:
         db = get_db(); cur = db.cursor()
@@ -3921,6 +4053,9 @@ def reise_abschluss_pdf(code: str):
         def esc(s):
             return (str(s) if s is not None else "–").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
+        def zelle(s):    # Tabellenzellen sind reiner Text (kein Markup): nicht escapen, sonst steht „&amp;“ im PDF
+            return str(s) if s is not None else "–"
+
         def tbl_style(fusszeile=True):
             style = [
                 ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f1f5f9")),
@@ -3968,7 +4103,7 @@ def reise_abschluss_pdf(code: str):
             zeiten_daten = [["Datum","Kürzel","Reisezeit","Arbeitszeit"]]
             for z in zeiten_rows:
                 zeiten_daten.append([
-                    fmt_date(g(z,"datum",1)), esc(g(z,"kuerzel",0)),
+                    fmt_date(g(z,"datum",1)), zelle(g(z,"kuerzel",0)),
                     f"{g(z,'reise_beginn',2) or '–'} – {g(z,'reise_ende',3) or '–'}",
                     f"{g(z,'arbeit_beginn',4) or '–'} – {g(z,'arbeit_ende',5) or '–'}"])
             zeiten_tbl = Table(zeiten_daten, colWidths=[28*mm,20*mm,45*mm,45*mm])
@@ -3983,7 +4118,7 @@ def reise_abschluss_pdf(code: str):
             for k in km_rows:
                 km_wert = float(g(k,"km",3) or 0); km_summe_pdf += km_wert
                 km_daten.append([
-                    esc(g(k,"kuerzel",0)), esc(g(k,"kennzeichen",2)), f"{km_wert:.0f} km"])
+                    zelle(g(k,"kuerzel",0)), zelle(g(k,"kennzeichen",2)), f"{km_wert:.0f} km"])
             km_daten.append(["", "Gesamt:", f"{km_summe_pdf:.0f} km"])
             km_tbl = Table(km_daten, colWidths=[30*mm,50*mm,38*mm])
             km_tbl.setStyle(tbl_style())
@@ -4003,7 +4138,7 @@ def reise_abschluss_pdf(code: str):
             trenn = float(g(v,"trennungspauschale",10) or 0)
             abz = [x for x, ok in (("F",frueh),("M",mitt),("A",abend)) if ok]
             vma_daten.append([
-                dat.strftime("%d.%m.%Y") if dat else "–", esc(lcode),
+                dat.strftime("%d.%m.%Y") if dat else "–", zelle(lcode),
                 f"{'½ ' if ist_halb else ''}{(halb if ist_halb else voll):.2f} €",
                 "/".join(abz) if abz else "–", f"{netto:.2f} €",
                 f"{trenn:.2f} €" if trenn else "–"
@@ -4046,7 +4181,7 @@ def reise_abschluss_pdf(code: str):
                 else:
                     final_txt = "✗"
                 kosten_daten.append([bd.strftime("%d.%m.%Y") if bd else "–",
-                                      esc(g(b,"anbieter",2) or "–"), bet_txt, mwst_txt,
+                                      zelle(g(b,"anbieter",2) or "–"), bet_txt, mwst_txt,
                                       final_txt, "✓" if geprueft_b else "✗"])
             kosten_daten.append(["", "Gesamt:", f"{kosten_eur:.2f} €", "", "", ""])
             kosten_tbl = Table(kosten_daten, colWidths=[22*mm,58*mm,38*mm,18*mm,16*mm,18*mm])
@@ -4074,17 +4209,24 @@ def reise_abschluss_pdf(code: str):
         ohne_original = [b for b in rechnungen if not g(b,"s3_original",8)]
         if anhaenge or ohne_original:
             story.append(Spacer(1, 10*mm))
-            story.append(Paragraph("Anlagen: Original-Belege", styles["Heading2"]))
-            anlagen_daten = [["Nr.", "Anbieter", "Betrag", "Seite folgt"]]
+            namen_mail = anlagen_namen or {}
+            story.append(Paragraph("Anlagen: Original-Belege" if mit_originalen
+                                   else "Anlagen: Belege als eigene PDF-Dateien in dieser E-Mail", styles["Heading2"]))
+            anlagen_daten = [["Nr.", "Anbieter", "Betrag", "Seite folgt" if mit_originalen else "Datei in dieser E-Mail"]]
             for idx, b in enumerate(anhaenge, start=1):
                 brutto = g(b,"betrag_brutto",4); waehrung = g(b,"waehrung",5) or "EUR"
                 bet_s = f"{float(brutto):.2f} {waehrung}" if brutto else "–"
-                anlagen_daten.append([str(idx), esc(g(b,"anbieter",2) or "–"), bet_s, "ja"])
+                if mit_originalen:
+                    letzte = "ja"
+                else:
+                    letzte = zelle(namen_mail.get(g(b,"id",0)) or "nicht in dieser E-Mail")
+                anlagen_daten.append([str(idx), zelle(g(b,"anbieter",2) or "–"), bet_s, letzte])
             for b in ohne_original:
                 brutto = g(b,"betrag_brutto",4); waehrung = g(b,"waehrung",5) or "EUR"
                 bet_s = f"{float(brutto):.2f} {waehrung}" if brutto else "–"
-                anlagen_daten.append(["–", esc(g(b,"anbieter",2) or "–"), bet_s, "kein Original vorhanden"])
-            anlagen_tbl = Table(anlagen_daten, colWidths=[15*mm,80*mm,35*mm,40*mm])
+                anlagen_daten.append(["–", zelle(g(b,"anbieter",2) or "–"), bet_s, "kein Original vorhanden"])
+            anlagen_tbl = Table(anlagen_daten, colWidths=([15*mm,80*mm,35*mm,40*mm] if mit_originalen
+                                                          else [10*mm,46*mm,28*mm,82*mm]))
             anlagen_tbl.setStyle(tbl_style(fusszeile=False))
             story.append(anlagen_tbl)
 
@@ -4097,7 +4239,7 @@ def reise_abschluss_pdf(code: str):
         for seite in pypdf.PdfReader(io.BytesIO(report_bytes)).pages:
             writer.add_page(seite)
         anhang_fehler = []
-        for b in anhaenge:
+        for b in (anhaenge if mit_originalen else []):
             try:
                 original_bytes = s3_download(g(b,"s3_original",8))
                 for seite in pypdf.PdfReader(io.BytesIO(original_bytes)).pages:
@@ -7207,6 +7349,7 @@ def reise_detail(code: str):
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <a href="/reise/{rcode}/abschluss" class="btn btn-primary">🧾 Abschluss</a>
+            <a href="/reise/{rcode}/habel" class="btn btn-secondary">📤 An Habel</a>
             <a href="/reise/{rcode}/vorschuss" class="btn btn-secondary">💵 Vorschuss</a>
             <a href="/reise/{rcode}/reiseplan" class="btn btn-secondary">🗺 Reiseplan</a>
             <a href="/reise/{rcode}/kalender" class="btn btn-secondary">📅 Outlook</a>
