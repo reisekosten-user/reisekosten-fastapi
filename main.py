@@ -60,6 +60,9 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.21.3", "zeit": "2026-10-14 15:30", "aenderungen": [
+        "Dashboard und Abrechnung: „Auslandsbeleg ohne Wechselkurs – Kurs nachtragen“ erscheint nur noch, wenn wirklich ein Kurs nachzutragen ist.",
+        "Nicht mehr gemeldet werden: Bewirtungs- und Vorschussbelege (haben keinen eigenen Kurs) sowie Belege, deren Euro-Betrag schon bestätigt ist."]},
     {"version": "3.21.2", "zeit": "2026-10-14 15:10", "aenderungen": [
         "Bewirtungsbeleg: Er braucht immer einen Originalbeleg (auch einen selbst erstellten Eigenbeleg). Die Option „kein Originalbeleg“ und das Feld Trinkgeld entfallen; Betrag, Trinkgeld und Wechselkurs stehen nur am Originalbeleg. Der Bewirtungsbeleg hat keinen eigenen Betrag und keinen eigenen Kurs mehr.",
         "Wechselkurs der KI-Schätzung war verdreht gespeichert (18,2 MXN je EUR statt 0,0549 EUR je MXN). Neue Analysen speichern ihn richtig, bestehende Belege werden automatisch korrigiert.",
@@ -3418,6 +3421,13 @@ def reise_abschluss(code: str):
         def ist_belegart_final(art: str) -> bool:
             return "buchungsbest" not in (art or "").lower()
 
+        def kurs_fehlt_bei(b) -> bool:
+            """Kurs nachzutragen? Nur bei Fremdwährung mit Betrag, ohne Kurs und ohne bestätigten Euro-Betrag.
+            Selbst erzeugte Belege (Bewirtungsbeleg, Vorschuss) haben keinen eigenen Kurs."""
+            return bool((g(b,"waehrung",10) or "EUR") != "EUR" and not g(b,"kurs_eur",13)
+                        and g(b,"betrag_brutto",7) and g(b,"betrag_eur_final",19) is None
+                        and (g(b,"belegart",1) or "") not in EIGENBELEG_ARTEN)
+
         gruppen_hat_finale = {}
         for b in belege:
             gid = g(b,"beleg_gruppe_id",18)
@@ -3432,7 +3442,7 @@ def reise_abschluss(code: str):
             waehrung = g(b,"waehrung",10) or "EUR"
             if ist_belegart_final(art):
                 rechnungen.append(b)
-                if waehrung != "EUR" and not g(b,"kurs_eur",13):
+                if kurs_fehlt_bei(b):
                     kurs_fehlt.append(b)
                 continue
 
@@ -3442,7 +3452,7 @@ def reise_abschluss(code: str):
             betrag = g(b,"betrag_brutto",7)
             if betrag:
                 vorlaeufig.append(b)
-                if waehrung != "EUR" and not g(b,"kurs_eur",13):
+                if kurs_fehlt_bei(b):
                     kurs_fehlt.append(b)
             else:
                 bestaetigung.append(b)
@@ -4778,8 +4788,10 @@ def dashboard(request: Request):
         except: pass
         try:
             cur2.execute(
-                """SELECT id FROM belege
+                f"""SELECT id FROM belege
                    WHERE waehrung != 'EUR' AND (kurs_eur IS NULL OR kurs_eur = 0)
+                   AND betrag_brutto IS NOT NULL AND betrag_eur_final IS NULL
+                   AND COALESCE(belegart,'') NOT IN {EIGENBELEG_SQL}
                    ORDER BY erstellt DESC""")
             kurs_ids = [row[0] for row in cur2.fetchall()]
             n_kurs = len(kurs_ids)
