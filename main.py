@@ -62,6 +62,9 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.22.1", "zeit": "2026-10-14 16:40", "aenderungen": [
+        "Habel-Übergabe: Neuer Knopf „Vorschau: Dateien der Mail“. Die Seite zeigt Empfänger, Betreff und Text und listet alle Dateien der Mail zum Anklicken (mit Seiten und Größe) – ohne etwas zu senden. Funktioniert auch, solange noch nicht alle Belege geprüft sind.",
+        "Prüf-Deckblatt: „&“ in Anbieternamen wird richtig dargestellt (stand zuvor als „&amp;“)."]},
     {"version": "3.22", "zeit": "2026-10-14 16:10", "aenderungen": [
         "Habel-Übergabe neu: Eine E-Mail je Reise mit der Reisekostenabrechnung und jedem Beleg als eigenem PDF (mit Prüf-Deckblatt). Der Knopf „An Habel“ sitzt jetzt auf der Reise-Seite neben „Abschluss“.",
         "Vor dem Senden zeigt die Seite, welche Belege geprüft sind. Solange ein Beleg nicht geprüft ist oder das Original fehlt, ist das Senden gesperrt. Erneutes Senden braucht einen Haken.",
@@ -2044,7 +2047,7 @@ def habel_hindernisse(info: dict) -> list:
     return h
 
 
-def habel_paket_bauen(info: dict) -> list:
+def habel_paket_bauen(info: dict, grenze_pruefen: bool = True) -> list:
     """Erzeugt die Mail-Anhänge [(bytes, dateiname)]: Reisekostenabrechnung + jeder Beleg einzeln (mit Prüf-Deckblatt).
     Wirft ValueError mit lesbarer Meldung."""
     rcode = info["reise"]["code"]
@@ -2059,10 +2062,26 @@ def habel_paket_bauen(info: dict) -> list:
         except Exception as e:
             raise ValueError(f"Beleg #{b['id']} konnte nicht vorbereitet werden: {e}")
     groesse = sum(len(x[0]) for x in anhaenge)
-    if groesse > HABEL_MAX_MB * 1024 * 1024:
+    if grenze_pruefen and groesse > HABEL_MAX_MB * 1024 * 1024:
         raise ValueError(f"Die Mail wäre {groesse / 1048576:.1f} MB groß (Grenze {HABEL_MAX_MB:g} MB). "
                          "Bitte besonders große Belege verkleinern oder die Grenze (HABEL_MAX_MB) anheben.")
     return anhaenge
+
+
+def habel_mail_inhalt(info: dict) -> tuple:
+    """Betreff und Text der Habel-Mail (wird beim Senden und in der Vorschau gleich verwendet)."""
+    reise = info["reise"]; rcode = reise["code"]; n = len(info["belege"])
+    abr_name = f"Reisekostenabrechnung_{rcode}.pdf"
+    liste = "\n".join(" - %s  (%s, %s, %s, %s)" % (
+        b["name"], b["art"], b["anbieter"] or "–", fmt_date(b["datum"]) if b["datum"] else "ohne Datum",
+        ("%.2f %s" % (float(b["betrag"]), b["waehrung"])) if b["betrag"] else "ohne Betrag") for b in info["belege"])
+    betreff = "Reisekostenabrechnung %s – %s (%d Beleg%s)" % (rcode, reise["titel"], n, "" if n == 1 else "e")
+    text = ("Reisekostenabrechnung %s – %s\nZeitraum: %s – %s\nReisende: %s\n\n"
+            "Anhänge (%d PDF-Dateien):\n - %s  (Abrechnung)\n%s\n\n"
+            "Alle Belege sind geprüft (Prüf-Deckblatt im jeweiligen PDF).\n"
+            % (rcode, reise["titel"], fmt_date(reise["abreise"]), fmt_date(reise["rueckkehr"]),
+               ", ".join(info["mitarbeiter"]) or "–", n + 1, abr_name, liste))
+    return betreff, text
 
 
 def _habel_seite(info: dict, fehler: list | None = None, ok: bool = False, versendet: int = 0) -> str:
@@ -2112,7 +2131,8 @@ def _habel_seite(info: dict, fehler: list | None = None, ok: bool = False, verse
         '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">'
         f'<div><h1 class="page-title" style="margin:0">📤 Übergabe an Habel {e(rcode)}</h1>'
         f'<div style="color:var(--muted);font-size:13px">{e(reise["titel"])}</div></div>'
-        '<div style="display:flex;gap:8px">'
+        '<div style="display:flex;gap:8px;flex-wrap:wrap">'
+        f'<a href="/reise/{e(rcode)}/habel/vorschau" class="btn btn-primary">👁 Vorschau: Dateien der Mail</a>'
         f'<a href="/reise/{e(rcode)}" class="btn btn-secondary">← Reise</a>'
         f'<a href="/reise/{e(rcode)}/abschluss" class="btn btn-secondary">🧾 Abschluss</a></div></div>'
         f'{banner}'
@@ -2142,6 +2162,107 @@ def reise_habel_anzeigen(code: str, request: Request, ok: str = ""):
     return HTMLResponse(_habel_seite(info, ok=bool(ok)))
 
 
+def _habel_vorschau_seite(info: dict) -> str:
+    """Zeigt Mail (Empfänger, Betreff, Text) und alle Dateien zum Anklicken – ohne etwas zu senden."""
+    from html import escape as e
+    import pypdf
+    rcode = info["reise"]["code"]
+    betreff, text = habel_mail_inhalt(info)
+    zeilen = ""; gesamt = 0; fehler_html = ""
+    try:
+        anhaenge = habel_paket_bauen(info, grenze_pruefen=False)
+    except ValueError as ex:
+        anhaenge = []
+        fehler_html = '<div class="alert alert-err" style="margin-bottom:16px">%s</div>' % e(str(ex))
+    for i, (daten, name) in enumerate(anhaenge):
+        gesamt += len(daten)
+        try:
+            seiten = len(pypdf.PdfReader(io.BytesIO(daten)).pages)
+        except Exception:
+            seiten = "?"
+        if i == 0:
+            link, was, hinweis = f"/reise/{e(rcode)}/habel/datei/abrechnung", "Reisekostenabrechnung", ""
+        else:
+            b = info["belege"][i - 1]
+            link = f"/reise/{e(rcode)}/habel/datei/{b['id']}"
+            bet = ("%.2f %s" % (float(b["betrag"]), b["waehrung"])) if b["betrag"] else "ohne Betrag"
+            was = "%s · %s · %s" % (e(b["art"]), e(b["anbieter"] or "–"), bet)
+            hinweis = "" if b["geprueft"] else '<span style="color:#b91c1c">noch nicht geprüft</span>'
+        zeilen += ('<tr><td>%d</td><td><a href="%s" target="_blank" style="font-family:monospace;font-size:12px">%s</a></td>'
+                   '<td style="font-size:12px">%s</td><td style="text-align:right">%s</td>'
+                   '<td style="text-align:right;font-size:12px">%.0f KB</td><td style="font-size:12px">%s</td></tr>'
+                   % (i + 1, link, e(name), was, seiten, len(daten) / 1024, hinweis))
+    grenze = HABEL_MAX_MB * 1024 * 1024
+    gr_txt = ("%s von höchstens %g MB" % (("%.1f MB" % (gesamt / 1048576)) if gesamt >= 1048576 else ("%.0f KB" % (gesamt / 1024)),
+                                         HABEL_MAX_MB))
+    gr_farbe = "#b91c1c" if gesamt > grenze else "var(--muted)"
+    offen = ""
+    if info["offen"] or info["ohne_original"]:
+        offen = ('<div class="alert alert-warn" style="margin-bottom:16px">Vorschau – gesendet werden darf erst, wenn alle Belege '
+                 'geprüft sind (noch offen: %s).</div>'
+                 % e(", ".join("#%s" % b["id"] for b in info["offen"] + info["ohne_original"])))
+    content = (
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">'
+        f'<div><h1 class="page-title" style="margin:0">👁 Vorschau Habel-Mail {e(rcode)}</h1>'
+        f'<div style="color:var(--muted);font-size:13px">{e(info["reise"]["titel"])}</div></div>'
+        '<div style="display:flex;gap:8px">'
+        f'<a href="/reise/{e(rcode)}/habel" class="btn btn-secondary">← Übergabe an Habel</a>'
+        f'<a href="/reise/{e(rcode)}" class="btn btn-secondary">Reise</a></div></div>'
+        '<div class="alert alert-ok" style="margin-bottom:16px">Nur eine Vorschau: Es wird nichts gesendet. '
+        'Die Dateien sind genau die, die später in der Mail hängen.</div>'
+        f'{offen}{fehler_html}'
+        '<div class="card" style="margin-bottom:16px"><div class="card-header"><span class="card-title">Die Mail</span></div>'
+        '<div class="card-body" style="font-size:13px">'
+        f'<div><b>An:</b> {e(DMS_EMAIL_TO or "– nicht eingerichtet –")}</div>'
+        f'<div style="margin-top:4px"><b>Betreff:</b> {e(betreff)}</div>'
+        f'<pre style="margin:10px 0 0 0;padding:10px;background:#f8fafc;border:1px solid var(--border);border-radius:8px;'
+        f'white-space:pre-wrap;font-size:12px">{e(text)}</pre></div></div>'
+        '<div class="card"><div class="card-header">'
+        f'<span class="card-title">Dateien in der Mail ({len(anhaenge)}) – zum Öffnen anklicken</span>'
+        f'<span style="font-size:12px;color:{gr_farbe}">Gesamt {gr_txt}</span></div>'
+        '<div class="table-wrap"><table><thead><tr><th>Nr.</th><th>Datei</th><th>Inhalt</th>'
+        '<th style="text-align:right">Seiten</th><th style="text-align:right">Größe</th><th></th></tr></thead>'
+        f'<tbody>{zeilen}</tbody></table></div></div>')
+    return shell("Vorschau Habel-Mail %s" % rcode, content, "reisen")
+
+
+@app.get("/reise/{code}/habel/vorschau", response_class=HTMLResponse)
+def reise_habel_vorschau(code: str, request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    info = habel_paket_pruefen(code.upper())
+    if not info["reise"]:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden.</div>'), status_code=404)
+    return HTMLResponse(_habel_vorschau_seite(info))
+
+
+@app.get("/reise/{code}/habel/datei/{datei}")
+def reise_habel_datei(code: str, datei: str, request: Request):
+    """Eine Datei der Habel-Mail zur Ansicht ('abrechnung' oder Beleg-Nr.). Nur Belege, die auch gesendet würden."""
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    rcode = code.upper()
+    info = habel_paket_pruefen(rcode)
+    if not info["reise"]:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden.</div>'), status_code=404)
+    from fastapi.responses import Response
+    try:
+        if datei == "abrechnung":
+            namen = {b["id"]: b["name"] for b in info["belege"]}
+            antwort = abschluss_pdf_antwort(rcode, mit_originalen=False, anlagen_namen=namen)
+            if getattr(antwort, "media_type", "") != "application/pdf":
+                raise ValueError("Die Reisekostenabrechnung konnte nicht erzeugt werden.")
+            daten, name = antwort.body, f"Reisekostenabrechnung_{rcode}.pdf"
+        else:
+            b = next((x for x in info["belege"] if str(x["id"]) == datei), None)
+            if not b:
+                return HTMLResponse(shell("Nicht gefunden", '<div class="alert alert-err">Diese Datei gehört nicht zur Habel-Mail dieser Reise.</div>'), status_code=404)
+            daten, name = pruef_pdf_fuer_beleg(b["id"]), b["name"]
+    except Exception as ex:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{ex}</div>'), status_code=500)
+    return Response(content=daten, media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="{name}"'})
+
+
 @app.post("/reise/{code}/habel/senden")
 def reise_habel_senden(code: str, request: Request, erneut: str = Form("")):
     """Eine Mail an Habel: Reisekostenabrechnung + jeder Beleg einzeln. Geprüft wird hier erneut (nicht nur auf der Seite)."""
@@ -2162,16 +2283,7 @@ def reise_habel_senden(code: str, request: Request, erneut: str = Form("")):
             fehler.append(str(ex))
     if fehler:
         return HTMLResponse(_habel_seite(info, fehler=fehler), status_code=409)
-    reise = info["reise"]; n = len(info["belege"])
-    liste = "\n".join(" - %s  (%s, %s, %s, %s)" % (
-        b["name"], b["art"], b["anbieter"] or "–", fmt_date(b["datum"]) if b["datum"] else "ohne Datum",
-        ("%.2f %s" % (float(b["betrag"]), b["waehrung"])) if b["betrag"] else "ohne Betrag") for b in info["belege"])
-    betreff = "Reisekostenabrechnung %s – %s (%d Beleg%s)" % (rcode, reise["titel"], n, "" if n == 1 else "e")
-    text = ("Reisekostenabrechnung %s – %s\nZeitraum: %s – %s\nReisende: %s\n\n"
-            "Anhänge (%d PDF-Dateien):\n - %s  (Abrechnung)\n%s\n\n"
-            "Alle Belege sind geprüft (Prüf-Deckblatt im jeweiligen PDF).\n"
-            % (rcode, reise["titel"], fmt_date(reise["abreise"]), fmt_date(reise["rueckkehr"]),
-               ", ".join(info["mitarbeiter"]) or "–", len(anhaenge), anhaenge[0][1], liste))
+    betreff, text = habel_mail_inhalt(info)
     ergebnis = sende_dms_mail(betreff, text, anhaenge[0][0], anhaenge[0][1], weitere_anhaenge=anhaenge[1:])
     if ergebnis.get("fehler"):
         return HTMLResponse(_habel_seite(info, fehler=["Der Versand ist fehlgeschlagen: %s" % ergebnis["fehler"]]), status_code=502)

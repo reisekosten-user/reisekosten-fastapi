@@ -195,10 +195,10 @@ def pruefkopf_pdf_erzeugen(reise_code: str, geprueft_von: str, geprueft_am, prue
     # Bemerkung als Absatz, damit lange Texte (z. B. Verweis auf einen Bewirtungsbeleg) umbrechen
     vermerk_absatz = Paragraph(esc(pruef_vermerk).replace("\n", "<br/>"), styles["Normal"])
     daten = [
-        ["Geprüft am / durch:", f"{fmt_date(geprueft_am)} · {esc(geprueft_von)}"],
+        ["Geprüft am / durch:", f"{fmt_date(geprueft_am)} · {geprueft_von or '–'}"],
         ["Bemerkung:", vermerk_absatz],
-        ["Reise-ID:", esc(reise_code)],
-        ["Anbieter:", esc(anbieter)],
+        ["Reise-ID:", reise_code or "–"],
+        ["Anbieter:", anbieter or "–"],
         ["Betrag:", f"{betrag:.2f} {waehrung}" if betrag else "–"],
         ["Belegdatum:", fmt_date(belegdatum)],
     ]
