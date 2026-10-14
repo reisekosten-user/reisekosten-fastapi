@@ -41,7 +41,7 @@ from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
                        hat_bereits_passwoerter, pfad_ist_offen, ist_organisator)
 from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_token,
                          tage_sicherstellen, tage_laden, tag_speichern,
-                         reisende_der_reise, zugaenge_der_reise, portal_mail_senden,
+                         reisende_der_reise, zugaenge_der_reise, portal_mail_senden, portal_test_senden,
                          cron_portal_mails, PORTAL_TAGE_VORHER)
 from mod_flugalert import (konfiguration_laden,
                             cron_flug_alerts, offene_alerts_fuer_dashboard)
@@ -62,6 +62,10 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.23", "zeit": "2026-10-14 16:20", "aenderungen": [
+        "Neu: Seite „Testversand“ je Reise (Knopf „🧪 Test“ auf der Reise-Seite). Sie nutzt die vorhandenen Reisen und Belege aus dem IMAP-Bestand und schickt alles nur an eine Testadresse (vorausgefüllt mit Ihrer eigenen).",
+        "Outlook-Test: alle Flüge, Züge und Termine der Reise als Test-Einladung – unabhängig vom Haken im Profil. Portal-Test: die Portal-Mail jedes Reisenden mit dessen echtem Link.",
+        "Der echte Versandstatus bleibt unberührt: nichts wird als „gesendet“ vermerkt, der automatische Versand läuft später normal."]},
     {"version": "3.22.1", "zeit": "2026-10-14 16:40", "aenderungen": [
         "Habel-Übergabe: Neuer Knopf „Vorschau: Dateien der Mail“. Die Seite zeigt Empfänger, Betreff und Text und listet alle Dateien der Mail zum Anklicken (mit Seiten und Größe) – ohne etwas zu senden. Funktioniert auch, solange noch nicht alle Belege geprüft sind.",
         "Prüf-Deckblatt: „&“ in Anbieternamen wird richtig dargestellt (stand zuvor als „&amp;“)."]},
@@ -7465,6 +7469,7 @@ def reise_detail(code: str):
             <a href="/reise/{rcode}/vorschuss" class="btn btn-secondary">💵 Vorschuss</a>
             <a href="/reise/{rcode}/reiseplan" class="btn btn-secondary">🗺 Reiseplan</a>
             <a href="/reise/{rcode}/kalender" class="btn btn-secondary">📅 Outlook</a>
+            <a href="/reise/{rcode}/test" class="btn btn-secondary">🧪 Test</a>
             <a href="/reise/{rcode}/vma-generieren" class="btn btn-secondary">🔄 VMA neu berechnen</a>
             <a href="/reise/{rcode}/vma-debug" class="btn btn-secondary">🔍 VMA-Debug</a>
             <a href="/reise/{rcode}/bearbeiten" class="btn btn-secondary">✏ Bearbeiten</a>
@@ -8580,6 +8585,138 @@ def reise_kalender_senden(code: str, request: Request):
     except Exception as ex:
         return HTMLResponse(shell("Fehler", '<div class="alert alert-err">%s</div>' % ex, "reisen"))
     return HTMLResponse(_kalender_seite(code.upper(), erg))
+
+
+# ── Testversand (Outlook + Portal) mit Bestandsdaten, nur an eine Testadresse ──
+_MAIL_FORM = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
+
+
+def _eigene_mail(request: Request) -> str:
+    """E-Mail-Adresse 1 des angemeldeten Mitarbeiters (Vorbelegung der Testadresse)."""
+    kz = request.session.get("kuerzel")
+    if not kz:
+        return ""
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT email FROM mitarbeiter WHERE kuerzel={P}", (kz,))
+        r = cur.fetchone()
+        cur.close(); db.close()
+        if not r:
+            return ""
+        return ((r["email"] if hasattr(r, "keys") else r[0]) or "").strip()
+    except Exception:
+        return ""
+
+
+def _testversand_seite(rcode: str, test_mail: str, banner: str = "") -> str:
+    from html import escape as e
+    d = kal.test_ereignisse(rcode)
+    if not d:
+        return shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden.</div>', "reisen")
+    reise = d["reise"]
+    zl = ""
+    for i, x in enumerate(d["liste"]):
+        grau = ' style="color:var(--muted)"' if i >= kal.TEST_MAX else ""
+        zl += ('<tr%s><td>%s</td><td>%s</td><td style="font-size:12px">%s</td></tr>'
+               % (grau, e(x["name"]), e(x["titel"]), e(x["start"])))
+    if d["liste"]:
+        zl_html = ('<div class="table-wrap"><table><thead><tr><th>Reisender</th><th>Termin</th><th>Start</th></tr></thead>'
+                   '<tbody>%s</tbody></table></div>' % zl)
+    else:
+        zl_html = '<div class="empty-state">Keine Flüge, Züge oder Termine in dieser Reise.</div>'
+    zu_viele = ""
+    if len(d["liste"]) > kal.TEST_MAX:
+        zu_viele = ('<p style="font-size:12px;color:var(--muted)">Je Klick werden höchstens %d Einladungen gesendet '
+                    '(graue Zeilen entfallen).</p>' % kal.TEST_MAX)
+    probleme = "".join("<div>• %s</div>" % e(p) for p in d["probleme"])
+    probleme = ('<div class="alert alert-warn" style="margin:12px 16px"><b>Nicht zuordenbar:</b>%s</div>' % probleme) if probleme else ""
+
+    zugaenge = zugaenge_der_reise(rcode)
+    pr = ""
+    for ma in reisende_der_reise(rcode):
+        kz = ma[0] if isinstance(ma, tuple) else ma["kuerzel"]
+        nm = ma[1] if isinstance(ma, tuple) else ma["klarname"]
+        ml = ma[2] if isinstance(ma, tuple) else ma["email"]
+        z = zugaenge.get(kz)
+        if z:
+            link = portal_link(z["token"])
+            oeffnen = ('<a href="%s" target="_blank" class="btn btn-secondary btn-sm">🔗 Portal öffnen</a>' % e(link))
+        else:
+            oeffnen = '<span style="font-size:12px;color:var(--muted)">Link wird beim Test erstellt</span>'
+        pr += ('<tr><td>%s – %s</td><td style="font-size:12px;color:var(--muted)">%s</td><td>%s</td>'
+               '<td><button type="submit" name="aktion" value="portal:%s" class="btn btn-secondary btn-sm">'
+               '📧 Portal-Mail testen</button></td></tr>'
+               % (e(kz), e(nm), e(ml or "keine E-Mail"), oeffnen, e(kz)))
+    pr_html = ('<div class="table-wrap"><table><thead><tr><th>Reisender</th><th>Echte Adresse</th><th>Portal</th><th></th></tr></thead>'
+               '<tbody>%s</tbody></table></div>' % pr) if pr else '<div class="empty-state">Der Reise ist noch kein Reisender zugeordnet.</div>'
+
+    content = (
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'
+        '<div><h1 class="page-title" style="margin:0">🧪 Testversand %s</h1>'
+        '<div style="color:var(--muted);font-size:13px">%s</div></div>'
+        '<a href="/reise/%s" class="btn btn-secondary">← Reise</a></div>'
+        '%s'
+        '<div class="alert alert-info" style="margin-bottom:16px">Nutzt die vorhandenen Daten dieser Reise (IMAP-Bestand). '
+        'Alles geht <b>nur an die Testadresse</b>. Es wird nichts als „gesendet“ vermerkt – die echten Einladungen und '
+        'Portal-Mails laufen unabhängig davon später normal.</div>'
+        '<form method="post" action="/reise/%s/test/senden">'
+        '<div class="card" style="margin-bottom:16px"><div class="card-header"><span class="card-title">Testadresse</span></div>'
+        '<div class="card-body"><input type="email" name="test_mail" value="%s" required placeholder="name@firma.de" style="max-width:420px">'
+        '<div class="form-hint">Vorausgefüllt mit Ihrer E-Mail-Adresse aus dem Profil.</div></div></div>'
+        '<div class="card" style="margin-bottom:16px"><div class="card-header"><span class="card-title">📅 Outlook-Einladungen</span>'
+        '<button type="submit" name="aktion" value="outlook" class="btn btn-primary btn-sm"%s>Alle %d Termine als Test senden</button></div>'
+        '%s%s'
+        '<div class="card-body" style="padding-top:0">%s</div></div>'
+        '<div class="card"><div class="card-header"><span class="card-title">🔗 Portal-Link</span></div>%s'
+        '<div class="card-body" style="padding-top:0"><p style="font-size:12px;color:var(--muted);margin:0">Der Link in der Test-Mail ist '
+        'der <b>echte</b> Link des Reisenden. Eingaben im Portal ändern die echten Daten dieser Reise.</p></div></div>'
+        '</form>'
+        % (e(reise["code"]), e(reise["titel"]), e(reise["code"]), banner, e(reise["code"]), e(test_mail),
+           "" if d["liste"] else " disabled", min(len(d["liste"]), kal.TEST_MAX), zl_html, probleme, zu_viele, pr_html))
+    return shell("Testversand %s" % rcode, content, "reisen")
+
+
+@app.get("/reise/{code}/test", response_class=HTMLResponse)
+def reise_test_anzeigen(code: str, request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    return HTMLResponse(_testversand_seite(code.upper(), _eigene_mail(request)))
+
+
+@app.post("/reise/{code}/test/senden", response_class=HTMLResponse)
+def reise_test_senden(code: str, request: Request, test_mail: str = Form(""), aktion: str = Form("")):
+    from html import escape as e
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    rcode = code.upper()
+    test_mail = (test_mail or "").strip()
+
+    def meldung(ok: bool, html: str) -> str:
+        return '<div class="alert %s" style="margin-bottom:16px">%s</div>' % ("alert-ok" if ok else "alert-err", html)
+
+    if not _MAIL_FORM.match(test_mail):
+        return HTMLResponse(_testversand_seite(rcode, test_mail, meldung(False, "Bitte eine gültige Testadresse eintragen (eine Adresse).")))
+    try:
+        if aktion == "outlook":
+            erg = kal.kalender_test(rcode, test_mail)
+            teile = ["%d von %d Test-Einladungen an %s gesendet" % (erg["gesendet"], erg["gesamt"], e(test_mail))]
+            if erg["nicht_gesendet"]:
+                teile.append("%d weitere über der Grenze von %d nicht gesendet" % (erg["nicht_gesendet"], kal.TEST_MAX))
+            fehl = "".join("<div>⚠ %s</div>" % e(f) for f in erg["fehler"])
+            banner = meldung(not erg["fehler"] and erg["gesendet"] > 0, " · ".join(teile) + fehl)
+        elif aktion.startswith("portal:"):
+            kz = aktion[len("portal:"):].strip().upper()
+            res = portal_test_senden(rcode, kz, test_mail)
+            if res.get("ok"):
+                banner = meldung(True, "Portal-Test-Mail für %s an %s gesendet." % (e(kz), e(test_mail)))
+            else:
+                banner = meldung(False, "Portal-Test fehlgeschlagen: %s" % e(str(res.get("fehler"))))
+        else:
+            banner = meldung(False, "Unbekannte Aktion.")
+    except Exception as ex:
+        banner = meldung(False, "Fehler: %s" % e(str(ex)))
+    return HTMLResponse(_testversand_seite(rcode, test_mail, banner))
 
 
 @app.get("/cron/backup")

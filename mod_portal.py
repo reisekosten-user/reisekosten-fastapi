@@ -203,18 +203,55 @@ def zugaenge_der_reise(reise_code: str) -> dict:
     return out
 
 
-def portal_mail_senden(reise_code: str, kuerzel: str, klarname: str, email: str,
-                        reise_titel: str, abreise, rueckkehr) -> dict:
-    if not email:
-        return {"fehler": "Keine E-Mail-Adresse hinterlegt"}
-    token = zugang_holen_oder_erstellen(reise_code, kuerzel)
-    link = portal_link(token)
+def _portal_mail_text(reise_code: str, klarname: str, reise_titel: str, abreise, rueckkehr, link: str) -> tuple:
+    """Betreff und Text der Portal-Mail (gemeinsam für echten Versand und Testversand)."""
     betreff = f"Deine Reise {reise_code} – Zeiten & Verpflegung eintragen"
     text = (f"Hallo {klarname},\n\n"
             f"für deine Reise {reise_code} ({reise_titel}, {fmt_date(abreise)} – {fmt_date(rueckkehr)}) "
             f"kannst du hier deine Reise-/Arbeitszeiten und Verpflegung eintragen:\n\n{link}\n\n"
             f"Der Link ist persönlich und nur für dich bestimmt – bitte nicht weitergeben.\n\n"
             f"Viele Grüße")
+    return betreff, text
+
+
+def portal_test_senden(reise_code: str, kuerzel: str, test_mail: str) -> dict:
+    """Testversand: die Portal-Mail eines Reisenden aus dem Bestand geht NUR an test_mail.
+    Der Link ist der echte Link des Reisenden. Es wird NICHT als gesendet vermerkt (email_gesendet_am bleibt),
+    der automatische Versand 5 Tage vor Abreise bleibt unberührt."""
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    cur.execute(f"SELECT titel, abreise, rueckkehr FROM reisen WHERE code={P}", (reise_code,))
+    r = cur.fetchone()
+    cur.execute(f"""SELECT m.klarname, m.email FROM reise_mitarbeiter rm
+                    JOIN mitarbeiter m ON m.kuerzel = rm.kuerzel
+                    WHERE rm.reise_code={P} AND rm.kuerzel={P}""", (reise_code, kuerzel))
+    m = cur.fetchone()
+    cur.close(); db.close()
+    if not r or not m:
+        return {"fehler": "Reise oder Reisender nicht gefunden"}
+    g = lambda row, k, i: row[k] if hasattr(row, "keys") else row[i]
+    klarname = g(m, "klarname", 0) or kuerzel
+    orig_mail = g(m, "email", 1) or "keine E-Mail hinterlegt"
+    token = zugang_holen_oder_erstellen(reise_code, kuerzel)
+    link = portal_link(token)
+    betreff, text = _portal_mail_text(reise_code, klarname, g(r, "titel", 0), g(r, "abreise", 1),
+                                      g(r, "rueckkehr", 2), link)
+    text = (f"TESTVERSAND – diese Mail wäre regulär an {klarname} ({orig_mail}) gegangen. "
+            f"Du hast sie nur als Test erhalten; es wurde nichts als gesendet vermerkt. "
+            f"Achtung: Der Link ist der echte Link des Reisenden – Eingaben im Portal ändern die echten Daten.\n\n{text}")
+    res = sende_mail(test_mail, "[TEST] " + betreff, text)
+    if res.get("ok"):
+        res["link"] = link
+    return res
+
+
+def portal_mail_senden(reise_code: str, kuerzel: str, klarname: str, email: str,
+                        reise_titel: str, abreise, rueckkehr) -> dict:
+    if not email:
+        return {"fehler": "Keine E-Mail-Adresse hinterlegt"}
+    token = zugang_holen_oder_erstellen(reise_code, kuerzel)
+    link = portal_link(token)
+    betreff, text = _portal_mail_text(reise_code, klarname, reise_titel, abreise, rueckkehr, link)
     result = sende_mail(email, betreff, text)
     if result.get("ok"):
         P = ph()

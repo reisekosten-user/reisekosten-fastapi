@@ -430,8 +430,9 @@ def _lade_teilnehmer(cur, code: str) -> list:
     return out
 
 
-def _lade_soll(cur, code: str) -> dict | None:
-    """Liefert {'reise','teilnehmer','soll': {(kuerzel,schluessel): ev},'probleme'} oder None."""
+def _lade_soll(cur, code: str, alle: bool = False) -> dict | None:
+    """Liefert {'reise','teilnehmer','soll': {(kuerzel,schluessel): ev},'probleme'} oder None.
+    alle=True (nur Testversand): jeder aktive Teilnehmer gilt als eingeladen, unabhängig vom Haken im Profil."""
     P = ph()
     cur.execute("SELECT code, titel, abreise, rueckkehr FROM reisen WHERE code=" + P, (code,))
     r = cur.fetchone()
@@ -440,6 +441,9 @@ def _lade_soll(cur, code: str) -> dict | None:
     reise = {"code": _g(r, "code", 0), "titel": _g(r, "titel", 1) or "",
              "abreise": _g(r, "abreise", 2), "rueckkehr": _g(r, "rueckkehr", 3)}
     teilnehmer = [t for t in _lade_teilnehmer(cur, code) if t["aktiv"]]
+    if alle:
+        for t in teilnehmer:
+            t["haken"] = True
     probleme, ankuenfte, ereignisse = [], [], []
     cur.execute("SELECT id, transportart, anbieter, reisender, ki_json FROM belege "
                 "WHERE reise_code=" + P + " AND transportart IN ('Flug','Bahn') "
@@ -526,8 +530,10 @@ def _uid(code: str, kuerzel: str, schluessel: str) -> str:
 
 
 def _sende_einladung(person: dict, reise: dict, z: dict, inhalt: dict, sequence: int, methode: str,
-                     aktualisierung: bool) -> dict:
+                     aktualisierung: bool, test_an: str | None = None) -> dict:
+    """test_an: Testversand – Einladung geht NUR an diese Adresse (Betreff mit [TEST], Hinweis im Text)."""
     org_mail, org_name = _absender()
+    ziel = test_an or person["email"]
     if inhalt["ganztag"]:
         start, ende = date.fromisoformat(inhalt["start"]), date.fromisoformat(inhalt["ende"])
     else:
@@ -536,7 +542,7 @@ def _sende_einladung(person: dict, reise: dict, z: dict, inhalt: dict, sequence:
                        start=start, ende=ende, ganztag=inhalt["ganztag"], location=inhalt["location"],
                        description=inhalt["description"], erinnerung_min=inhalt["erinnerung"],
                        organisator_mail=org_mail, organisator_name=org_name,
-                       teilnehmer_mail=person["email"], teilnehmer_name=person["klarname"])
+                       teilnehmer_mail=ziel, teilnehmer_name=person["klarname"])
     vorname = (person["klarname"].split() or [""])[0]
     betreff = "%s (%s)" % (inhalt["summary"], inhalt["start_text"])
     if methode == "CANCEL":
@@ -552,7 +558,11 @@ def _sende_einladung(person: dict, reise: dict, z: dict, inhalt: dict, sequence:
         fuss = "Bitte in Outlook annehmen. Bei Änderungen der Buchung wird der Termin automatisch aktualisiert."
     text = "Hallo %s,\n\n%s\n\n%s\n\n%s\n\n%s\n\nViele Grüße" % (
         vorname, kopf, inhalt["summary"], inhalt["description"], fuss)
-    return sende_mail(person["email"], betreff, text, ics=ics, ics_methode=methode)
+    if test_an:
+        betreff = "[TEST] " + betreff
+        text = ("TESTVERSAND – diese Einladung wäre regulär an %s (%s) gegangen. Du hast sie nur als Test erhalten; "
+                "es wurde nichts als gesendet vermerkt.\n\n%s" % (person["klarname"], person["email"] or "keine E-Mail", text))
+    return sende_mail(ziel, betreff, text, ics=ics, ics_methode=methode)
 
 
 def _ruhe_vorbei(db, cur, code, z, ziel_hash, jetzt, sofort) -> bool:
@@ -681,6 +691,68 @@ def kalender_abgleich(reise_code: str | None = None, sofort: bool = False, jetzt
             pass
         cur.close()
         db.close()
+
+
+# ── Testversand (Bestandsdaten, nur an eine Testadresse) ──────────────────────
+TEST_MAX = 25                                                # höchstens so viele Test-Einladungen je Klick
+
+
+def test_ereignisse(reise_code: str) -> dict | None:
+    """Alle Termine einer Reise aus dem Bestand (Flüge, Züge, manuelle Termine) – je Termin EINMAL,
+    unabhängig vom Haken im Profil. Schreibt nichts."""
+    code = reise_code.upper()
+    db = get_db()
+    cur = db.cursor()
+    try:
+        daten = _lade_soll(cur, code, alle=True)
+    finally:
+        cur.close()
+        db.close()
+    if not daten:
+        return None
+    reise = daten["reise"]
+    personen = {t["kuerzel"]: t for t in daten["teilnehmer"]}
+    liste, gesehen = [], set()
+    for (kz, key), ev in sorted(daten["soll"].items(), key=lambda kv: (str(kv[0][1]), kv[0][0])):
+        if ev["art"] == "Termin":                            # gemeinsamer Termin: nur einmal testen
+            if key in gesehen:
+                continue
+            gesehen.add(key)                                 # Flüge/Züge dagegen je Person (eigene Sitzplätze)
+        person = personen[kz]
+        inhalt = _inhalt(ev, reise, person["klarname"])
+        liste.append({"kuerzel": kz, "name": person["klarname"], "email": person["email"], "person": person,
+                      "key": key, "inhalt": inhalt, "titel": inhalt["summary"], "start": inhalt["start_text"]})
+    liste.sort(key=lambda x: (x["inhalt"]["start"], x["kuerzel"]))
+    return {"reise": reise, "liste": liste, "probleme": daten["probleme"], "teilnehmer": daten["teilnehmer"]}
+
+
+def kalender_test(reise_code: str, test_mail: str, jetzt: datetime | None = None) -> dict:
+    """Schickt die Einladungen der Reise NUR an test_mail. Es wird nichts in kalender_versand gespeichert,
+    die echten Einladungen (Haken im Profil, Cron) bleiben unberührt. Gleiche UID je Termin: ein
+    erneuter Test aktualisiert den Eintrag in Outlook statt einen weiteren anzulegen."""
+    jetzt = jetzt or _jetzt_utc()
+    erg = {"gesendet": 0, "gesamt": 0, "nicht_gesendet": 0, "fehler": [], "probleme": []}
+    d = test_ereignisse(reise_code)
+    if not d:
+        erg["fehler"].append("Reise nicht gefunden")
+        return erg
+    erg["probleme"] = list(d["probleme"])
+    erg["gesamt"] = len(d["liste"])
+    code = d["reise"]["code"]
+    seq = int(jetzt.timestamp() // 60)                       # wächst mit jedem Test -> Outlook übernimmt die neue Fassung
+    for i, x in enumerate(d["liste"]):
+        if i >= TEST_MAX:
+            erg["nicht_gesendet"] = len(d["liste"]) - TEST_MAX
+            break
+        z = {"uid": _uid("TEST-" + code, x["kuerzel"], x["key"])}
+        res = _sende_einladung(x["person"], d["reise"], z, x["inhalt"], seq, "REQUEST", False, test_an=test_mail)
+        if res.get("ok"):
+            erg["gesendet"] += 1
+        else:
+            erg["fehler"].append("%s: %s" % (x["titel"], str(res.get("fehler") or "unbekannter Fehler")[:200]))
+            if erg["fehler"] and "SMTP nicht konfiguriert" in erg["fehler"][-1]:
+                break                                        # sinnlos, weiter zu versuchen
+    return erg
 
 
 # ── Übersicht für die Oberfläche ──────────────────────────────────────────────
