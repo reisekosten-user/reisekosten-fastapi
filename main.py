@@ -25,6 +25,7 @@ from mod_kk import (abrechnung_parsen, abrechnung_zuordnen, mitarbeiter_finden, 
 import mod_bewirtung as bw
 import mod_vorschuss as vs
 import mod_kalender as kal
+import mod_beleg
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         lade_ma_daten, get_s3, s3_upload, s3_download,
                         bild_zu_pdf, text_zu_pdf, pdf_text_lesen,
@@ -59,6 +60,10 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.21.2", "zeit": "2026-10-14 15:10", "aenderungen": [
+        "Bewirtungsbeleg: Er braucht immer einen Originalbeleg (auch einen selbst erstellten Eigenbeleg). Die Option „kein Originalbeleg“ und das Feld Trinkgeld entfallen; Betrag, Trinkgeld und Wechselkurs stehen nur am Originalbeleg. Der Bewirtungsbeleg hat keinen eigenen Betrag und keinen eigenen Kurs mehr.",
+        "Wechselkurs der KI-Schätzung war verdreht gespeichert (18,2 MXN je EUR statt 0,0549 EUR je MXN). Neue Analysen speichern ihn richtig, bestehende Belege werden automatisch korrigiert.",
+        "Reste aus 3.21.1 (Trinkgeld als Betrag am Bewirtungsbeleg) werden beim Start, über /init und nach jeder Änderung entfernt."]},
     {"version": "3.21.1", "zeit": "2026-10-14 10:20", "aenderungen": [
         "Das Trinkgeld einer Bewirtung zählt jetzt in der Reisekostenabrechnung. Bei Fremdwährung wird der Euro-Wert nach dem Kurs des Rechnungsbelegs gerechnet und folgt automatisch, wenn dieser Kurs später geändert wird.",
         "Selbst erzeugte Belege (Bewirtung, Vorschuss, Bargeld) lassen sich nicht mehr per KI neu analysieren oder anonymisieren – das hatte den Bewirtungsbeleg überschrieben.",
@@ -496,7 +501,7 @@ app = FastAPI(title="Herrhammer Reisekosten", version=APP_VERSION)
 async def login_erforderlich(request: Request, call_next):
     antwort = await _zugang_pruefen(request, call_next)
     if request.method == "POST" and antwort.status_code < 400 and not request.url.path.startswith("/cron"):
-        try:   # Euro-Wert des Trinkgelds folgt dem Kurs des Rechnungsbelegs; beschädigte App-Belege werden zurückgesetzt
+        try:   # beschädigte App-Belege zurücksetzen, Kurs-Schreibweise vereinheitlichen
             from starlette.concurrency import run_in_threadpool
             await run_in_threadpool(bewirtung_kosten_reparieren)
         except Exception:
@@ -4263,15 +4268,17 @@ def eigenbelege_pflichtfelder_reparieren() -> None:
 
 
 def bewirtung_kosten_reparieren() -> None:
-    """Hält die selbst erzeugten Belege in Ordnung (idempotent, günstig):
+    """Hält Belege in Ordnung (idempotent, günstig):
     1. beschädigte Bewirtungs-/Vorschussbelege aus den Buchungsdaten wiederherstellen,
-    2. Trinkgeld und dessen Euro-Wert am Bewirtungsbeleg nachziehen (siehe bw.kosten_abgleichen)."""
+    2. Bewirtungsbeleg ohne eigenen Betrag/Kurs (siehe bw.kosten_abgleichen),
+    3. Wechselkurse in der Schreibweise 'Fremdwährung je 1 EUR' auf 'EUR je 1 Fremdwährung' umstellen."""
     try:
         db = get_db()
         try:
             bw.eigenbelege_wiederherstellen(db)
             vs.eigenbelege_wiederherstellen(db)
             bw.kosten_abgleichen(db)
+            mod_beleg.kurse_vereinheitlichen(db)
             db.commit()
         except Exception:
             db.rollback()
@@ -4366,8 +4373,7 @@ def todo_liste_laden() -> list:
     try:
         # 1. Betrag final noch nicht bestätigt (Fremdwährung, nur Schätzung vorhanden)
         cur.execute(f"""SELECT COUNT(*) FROM belege
-            WHERE waehrung != 'EUR' AND betrag_eur_final IS NULL AND betrag_brutto IS NOT NULL
-            AND COALESCE(kurs_quelle,'') NOT LIKE 'wie Hauptbeleg%'""")
+            WHERE waehrung != 'EUR' AND betrag_eur_final IS NULL AND betrag_brutto IS NOT NULL""")
         n = cur.fetchone()[0]
         if n:
             aufgaben.append({"icon": "💶", "prio": "warn",
@@ -4456,7 +4462,7 @@ def todo_belege_laden() -> list:
 
     cur.execute(f"""SELECT b.id, b.reise_code, b.anbieter, b.betrag_brutto, b.waehrung,
             b.belegdatum, b.betrag_eur_final, b.geprueft, b.dms_versendet_am,
-            b.pflichtfelder_ok, b.belegart, r.rueckkehr, b.kurs_quelle
+            b.pflichtfelder_ok, b.belegart, r.rueckkehr
         FROM belege b LEFT JOIN reisen r ON r.code = b.reise_code
         ORDER BY b.erstellt DESC""")
     rows = cur.fetchall()
@@ -4475,9 +4481,8 @@ def todo_belege_laden() -> list:
         pflicht_ok = g(r,"pflichtfelder_ok",9)
         belegart = g(r,"belegart",10) or ""
         rueckkehr = g(r,"rueckkehr",11)
-        abgeleitet = str(g(r,"kurs_quelle",12) or "").startswith("wie Hauptbeleg")
 
-        if waehrung != "EUR" and betrag_eur_final is None and betrag_brutto is not None and not abgeleitet:
+        if waehrung != "EUR" and betrag_eur_final is None and betrag_brutto is not None:
             probleme.append("💶 Betrag final offen")
         if belegart in PRUEF_BELEGARTEN:
             rueckkehr_d = rueckkehr
@@ -8330,8 +8335,8 @@ def cron_backup_route(key: str = ""):
 
 # ── Bewirtungsbeleg (Eigenbeleg mit elektronischer Bestätigung) ───────────────
 # Reisende füllen den Beleg über ihren Portal-Link aus (Anlass, Teilnehmer, Betrag),
-# ordnen ihn einem Rechnungs-/Kassenbeleg zu (oder begründen die Ausnahme "Eigenbeleg")
-# und bestätigen die Richtigkeit elektronisch. Danach ist er gesperrt; Änderungen
+# ordnen ihn immer einem Originalbeleg zu (auch ein selbst erstellter Eigenbeleg ist als
+# Original möglich) und bestätigen die Richtigkeit elektronisch. Danach ist er gesperrt; Änderungen
 # nur als neue Version. Fachlogik steht in mod_bewirtung.py.
 
 _BW_WAEHRUNGEN = list(vs.WAEHRUNGEN)      # eine gemeinsame Liste (mod_vorschuss.py)
@@ -8352,10 +8357,9 @@ _BW_FORM_JS = """<script>
   var form=document.getElementById('bwform'); if(!form) return;
   function umschalten(){
     var r=form.querySelector('input[name=quelle]:checked'); var q=r?r.value:'';
-    ['beleg','upload','eigen'].forEach(function(k){
+    ['beleg','upload'].forEach(function(k){
       var el=document.getElementById('bwq_'+k); if(el) el.style.display=(k===q)?'block':'none';
     });
-    var det=document.getElementById('bw_details'); if(det && q==='eigen') det.open=true;
   }
   function wert(id){var f=document.getElementById(id); return f?(f.value||''):'';}
   function datum_de(v){var p=v.split('-'); return p.length===3?p[2]+'.'+p[1]+'.'+p[0]:'';}
@@ -8531,8 +8535,8 @@ def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | Non
         f'<input type="text" name="tn_firma" value="{_bw_e(p.get("firma"))}" '
         f'placeholder="Firma (optional)" maxlength="120"></div>'
         for i, p in enumerate(tn, start=1))
-    # Tag/Ort/Betrag kommen aus dem Beleg und bleiben eingeklappt; nur bei Eigenbeleg oder Fehlern offen
-    daten_offen = quelle == "eigen" or any(("Datum" in f or "Ort" in f or "Betrag" in f) for f in fehler)
+    # Tag/Ort/Betrag kommen aus dem Originalbeleg und bleiben eingeklappt; nur bei Fehlern offen
+    daten_offen = any(("Datum" in f or "Ort" in f or "Betrag" in f) for f in fehler)
     daten_offen_attr = " open" if daten_offen else ""
 
     fehler_html = ""
@@ -8546,7 +8550,6 @@ def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | Non
         return " checked" if quelle == k else ""
 
     betrag_wert = "" if d.get("betrag") is None else f'{float(d["betrag"]):.2f}'.replace(".", ",")
-    tg_wert = "" if d.get("trinkgeld") is None else f'{float(d["trinkgeld"]):.2f}'.replace(".", ",")
     titel = "Bewirtungsbeleg bearbeiten" if bid else "Neuer Bewirtungsbeleg"
     version_hinweis = (f' <span style="font-size:12px;color:var(--muted)">(Korrektur, Version {d["version"]})</span>'
                        if d.get("version", 1) > 1 else "")
@@ -8567,28 +8570,19 @@ def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | Non
       {fehler_html}{warn_html}
       <form method="post" action="/portal/{token}/bewirtung/speichern" enctype="multipart/form-data" id="bwform">
         {bid_feld}
-        <h3 style="font-size:14px;margin:0 0 4px 0">1. Zu welchem Beleg gehört die Bewirtung?</h3>
+        <h3 style="font-size:14px;margin:0 0 4px 0">1. Originalbeleg der Bewirtung</h3>
+        <p style="font-size:12px;color:var(--muted);margin:0 0 6px 0">Jede Bewirtung braucht einen Originalbeleg
+          (Rechnung, Kassenbon oder selbst erstellter Eigenbeleg). Betrag, Trinkgeld und Wechselkurs stehen dort.</p>
         <label class="bw-opt"><input type="radio" name="quelle" value="beleg"{chk("beleg")}>
           Zu einem Beleg, der schon hochgeladen ist</label>
         <div id="bwq_beleg" class="bw-box">
           <select name="hauptbeleg_id" id="bw_hauptbeleg" style="width:100%">{opts}</select>
         </div>
         <label class="bw-opt"><input type="radio" name="quelle" value="upload"{chk("upload")}>
-          Beleg (Rechnung/Kassenbon) jetzt hochladen</label>
+          Beleg (Rechnung, Kassenbon oder Eigenbeleg) jetzt hochladen</label>
         <div id="bwq_upload" class="bw-box">
           <input type="file" name="datei" accept=".pdf,.jpg,.jpeg,.png,.heic,.webp">
           <p style="font-size:12px;color:var(--muted);margin:6px 0 0 0">Das Hochladen kann einen Moment dauern.</p>
-        </div>
-        <label class="bw-opt"><input type="radio" name="quelle" value="eigen"{chk("eigen")}>
-          Es gibt keinen Originalbeleg <span style="color:#b45309">(nur Ausnahme)</span></label>
-        <div id="bwq_eigen" class="bw-box">
-          <div class="alert alert-warn" style="font-size:12px;margin:0 0 8px 0">
-            In einer Gaststätte muss die <b>echte Rechnung</b> vorliegen – ein Eigenbeleg ersetzt sie nicht.
-            Nur bei echten Ausnahmen (z. B. Beleg verloren, Bewirtung im privaten Rahmen). Das wird vermerkt und
-            vom Organisator geprüft.</div>
-          <label style="font-size:12px">Begründung <span class="required">*</span></label>
-          <textarea name="eigenbeleg_begruendung" rows="2" style="width:100%"
-            placeholder="Warum gibt es keinen Beleg?">{_bw_e(d.get("eigenbeleg_begruendung"))}</textarea>
         </div>
 
         <div style="margin-top:10px;padding:10px;background:#f1f5f9;border-radius:8px;font-size:13px">
@@ -8606,8 +8600,6 @@ def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | Non
                        placeholder="z. B. 86,40"></div>
               <div class="form-group"><label style="font-size:12px">Währung</label>
                 <select name="waehrung" id="bw_waehrung">{waehr_opts}</select></div>
-              <div class="form-group"><label style="font-size:12px">Trinkgeld, falls nicht auf dem Beleg</label>
-                <input type="text" inputmode="decimal" name="trinkgeld" value="{tg_wert}" placeholder="optional"></div>
             </div>
           </details>
         </div>
@@ -8646,6 +8638,8 @@ def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | Non
 def _bw_form_aus_request(form, info: dict) -> dict:
     """Formularwerte in ein Bewirtungs-Dict übersetzen."""
     quelle = (form.get("quelle") or "beleg")
+    if quelle not in ("beleg", "upload"):
+        quelle = "beleg"          # alte Seite mit der früheren Option 'Eigenbeleg' -> Originalbeleg wählen
     hb = None
     try:
         hb = int(form.get("hauptbeleg_id") or 0) or None
@@ -8660,12 +8654,11 @@ def _bw_form_aus_request(form, info: dict) -> dict:
     return {
         "reise_code": info["reise_code"], "kuerzel": info["kuerzel"],
         "quelle": quelle, "hauptbeleg_id": hb if quelle in ("beleg", "upload") else None,
-        "eigenbeleg": quelle == "eigen",
-        "eigenbeleg_begruendung": (form.get("eigenbeleg_begruendung") or "").strip() if quelle == "eigen" else "",
+        "eigenbeleg": False, "eigenbeleg_begruendung": "",
         "datum": datum, "ort": (form.get("ort") or "").strip(),
         "anlass": (form.get("anlass") or "").strip(),
         "teilnehmer": bw.teilnehmer_aus_formular(form.getlist("tn_name"), form.getlist("tn_firma")),
-        "betrag": bw.zahl_parsen(form.get("betrag")), "trinkgeld": bw.zahl_parsen(form.get("trinkgeld")),
+        "betrag": bw.zahl_parsen(form.get("betrag")), "trinkgeld": None,
         "waehrung": waehrung,
     }
 
@@ -8705,7 +8698,7 @@ def portal_bewirtung_bearbeiten(token: str, bid: int):
         belege = bw.belege_zur_auswahl(db, info["reise_code"], info["klarname"], d["nummer"], d["hauptbeleg_id"])
     finally:
         db.close()
-    quelle = "eigen" if d["eigenbeleg"] else ("beleg" if d["hauptbeleg_id"] else ("beleg" if belege else "upload"))
+    quelle = "beleg" if (d["hauptbeleg_id"] or belege) else "upload"
     return HTMLResponse(portal_shell(f"Bewirtungsbeleg {d['nummer']}",
                         _bw_form_seite(token, info, d, [], bid, quelle, belege)))
 
@@ -8825,8 +8818,6 @@ def _bw_detail_html(d: dict, klarname: str, haupt: dict | None, integritaet: boo
                      f'{bw.datum_de(haupt["datum"])}, {_bw_betrag_txt(haupt["betrag"], haupt["waehrung"])}')
     else:
         beleg_txt = "–"
-    tg = (f'<dt>Trinkgeld</dt><dd>{_bw_betrag_txt(d["trinkgeld"], d["waehrung"])} (zusätzlich)</dd>'
-          if d.get("trinkgeld") else "")
     best = ""
     if d["status"] in ("bestaetigt", "ersetzt"):
         integ = ""
@@ -8858,7 +8849,7 @@ def _bw_detail_html(d: dict, klarname: str, haupt: dict | None, integritaet: boo
         <dt>Tag</dt><dd>{bw.datum_de(d["datum"])}</dd>
         <dt>Ort / Restaurant</dt><dd>{_bw_e(d["ort"])}</dd>
         <dt>Anlass</dt><dd>{_bw_e(d["anlass"])}</dd>
-        <dt>Betrag</dt><dd><b>{_bw_betrag_txt(d["betrag"], d["waehrung"])}</b></dd>{tg}
+        <dt>Betrag</dt><dd><b>{_bw_betrag_txt(d["betrag"], d["waehrung"])}</b></dd>
         <dt>Zugehöriger Beleg</dt><dd>{beleg_txt}</dd>
         <dt>Teilnehmer</dt><dd><ol style="margin:0;padding-left:18px">{tn}</ol></dd>
       </dl>{best}{pdf_btn}"""

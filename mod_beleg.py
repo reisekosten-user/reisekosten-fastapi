@@ -648,6 +648,52 @@ def lade_ma_daten() -> tuple:
         return [], []
 
 
+def _zahl(x) -> float | None:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def kurs_je_einheit(kurs_ki, brutto, eur) -> float | None:
+    """Wechselkurs in der Schreibweise der App: EUR je 1 Fremdwährung (z. B. 1 MXN = 0,0549 EUR).
+    Die KI nennt ihn als 'Fremdwährung je 1 EUR' (1 EUR = 18,2 MXN), manchmal auch umgekehrt.
+    Maßgeblich ist der Euro-Gegenwert: Passt der Kehrwert des KI-Kurses (oder der Kurs selbst) auf ±5 % zu
+    Euro-Betrag / Brutto-Betrag, gilt dieser, sonst der Quotient selbst. Ohne Beträge gilt der Kehrwert."""
+    k, b, e = _zahl(kurs_ki), _zahl(brutto), _zahl(eur)
+    if b and e:
+        quotient = e / b
+        for kand in ((1.0 / k, k) if k else ()):
+            if abs(kand - quotient) / quotient <= 0.05:
+                return round(kand, 6)
+        return round(quotient, 6)
+    return round(1.0 / k, 6) if k else None
+
+
+def kurse_vereinheitlichen(db) -> int:
+    """Stellt KI-geschätzte Wechselkurse, die als 'Fremdwährung je 1 EUR' gespeichert wurden (z. B. 18.2 MXN),
+    auf 'EUR je 1 Fremdwährung' um (0.0549). Erkennung: Der Kehrwert passt zum Euro-Gegenwert, der Kurs selbst nicht.
+    Idempotent, Commit macht der Aufrufer. Gibt die Zahl korrigierter Belege zurück."""
+    P = ph()
+    cur = db.cursor()
+    cur.execute("""SELECT id, kurs_eur, betrag_brutto, betrag_eur FROM belege
+                   WHERE kurs_quelle = 'KI-geschätzt' AND kurs_eur IS NOT NULL AND betrag_brutto IS NOT NULL
+                   AND betrag_eur IS NOT NULL""")
+    n = 0
+    for z in cur.fetchall():
+        bid, k, b, e = (z[i] for i in range(4))
+        k, b, e = _zahl(k), _zahl(b), _zahl(e)
+        if not (k and b and e):
+            continue
+        quotient = e / b
+        if abs(k - quotient) / quotient > 0.05 and abs(1.0 / k - quotient) / quotient <= 0.05:
+            cur.execute(f"UPDATE belege SET kurs_eur={P} WHERE id={P}", (round(1.0 / k, 6), bid))
+            n += 1
+    cur.close()
+    return n
+
+
 APP_BELEGARTEN = ("Bewirtungsbeleg", "Vorschussquittung", "Rueckgabequittung", "Bargeldbeschaffung")
 APP_BELEG_HINWEIS = ("Dieser Beleg wurde von der App selbst erzeugt (Bewirtung bzw. Vorschuss/Bargeld) und wird "
                      "nicht per KI analysiert. Änderungen bitte über die Bewirtung bzw. das Bargeld-Konto vornehmen.")
@@ -789,7 +835,8 @@ async def beleg_neu_analysieren(bid: int) -> dict:
     kurs_update_vals = ()
     if betrag_eur_geschaetzt is not None and kurs_ueberschreibbar:
         kurs_update_sql = f", betrag_eur={P}, kurs_eur={P}, kurs_datum={P}, kurs_quelle={P}"
-        kurs_update_vals = (betrag_eur_geschaetzt, kurs_geschaetzt,
+        kurs_update_vals = (betrag_eur_geschaetzt,
+                            kurs_je_einheit(kurs_geschaetzt, pn("betrag_brutto"), betrag_eur_geschaetzt),
                             pd("belegdatum"), "KI-geschätzt")
 
     cur.execute(f"""UPDATE belege SET
@@ -1316,7 +1363,7 @@ async def beleg_verarbeiten(
         ki_result.get("tanken_einheit"), pn("tanken_preis_pro_einheit"),
         ki_result.get("tanken_tankstelle"), ki_result.get("tanken_kennzeichen"),
         status, erechnung_info["ist_erechnung"], erechnung_info["format"], s3_erechnung_xml,
-        betrag_eur_geschaetzt, kurs_geschaetzt,
+        betrag_eur_geschaetzt, kurs_je_einheit(kurs_geschaetzt, pn("betrag_brutto"), betrag_eur_geschaetzt),
         pd("belegdatum") if betrag_eur_geschaetzt else None,
         "KI-geschätzt" if betrag_eur_geschaetzt else None)
 
