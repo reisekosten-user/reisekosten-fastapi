@@ -31,7 +31,7 @@ TABELLEN = [
     "mitarbeiter", "reisen", "reise_mitarbeiter", "reise_laender",
     "belege", "beleg_gruppen", "vma_tage", "termine", "reisetage_person",
     "flug_status", "alert_konfiguration", "reise_zugang", "vma_saetze",
-    "bewirtungen", "bargeld_buchungen",
+    "bewirtungen", "bargeld_buchungen", "kalender_versand",
 ]
 
 BACKUP_PREFIX = "backups/"

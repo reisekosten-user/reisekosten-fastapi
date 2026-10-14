@@ -23,13 +23,31 @@ from mod_beleg import beleg_verarbeiten, get_s3, s3_download, lade_ma_daten
 from mod_anon import anonymisieren
 
 
+def _kalender_nachricht(text: str, ics: str, methode: str) -> MIMEMultipart:
+    """Outlook-/Exchange-taugliche Einladung (wie Google Kalender sie sendet):
+    mixed[ alternative[ text/plain, text/calendar;method=… ], invite.ics ]."""
+    msg = MIMEMultipart("mixed")
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(text, "plain", "utf-8"))
+    kal = MIMEText(ics, "calendar", "utf-8")
+    kal.replace_header("Content-Type", 'text/calendar; charset="UTF-8"; method=%s' % methode)
+    alt.attach(kal)
+    msg.attach(alt)
+    anhang = MIMEApplication(ics.encode("utf-8"), "ics", Name="invite.ics")
+    anhang["Content-Disposition"] = 'attachment; filename="invite.ics"'
+    msg.attach(anhang)
+    return msg
+
+
 def sende_mail(empfaenger: str, betreff: str, text: str,
                 anhang_bytes: bytes | None = None, anhang_name: str | None = None,
-                anhaenge: list | None = None) -> dict:
+                anhaenge: list | None = None,
+                ics: str | None = None, ics_methode: str = "REQUEST") -> dict:
     """
     Generischer SMTP-Versand (Text-Mail, optional mit Anhängen).
     anhaenge: Liste von (bytes, dateiname)-Tupeln für mehrere Anhänge.
     anhang_bytes/anhang_name: Abkürzung für genau einen Anhang (Rückwärtskompatibilität).
+    ics: iCalendar-Text -> Mail wird als Kalendereinladung gesendet (ics_methode: REQUEST oder CANCEL).
     Benötigt SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS als Umgebungsvariablen.
     """
     if not (SMTP_HOST and SMTP_USER and SMTP_PASS):
@@ -39,11 +57,17 @@ def sende_mail(empfaenger: str, betreff: str, text: str,
         if anhang_bytes is not None:
             alle_anhaenge.append((anhang_bytes, anhang_name or "anhang.pdf"))
 
-        msg = MIMEMultipart()
+        if ics:
+            from email.utils import formatdate, make_msgid
+            msg = _kalender_nachricht(text, ics, ics_methode)
+            msg["Date"] = formatdate(localtime=False)
+            msg["Message-ID"] = make_msgid(domain="reisekosten.herrhammer")
+        else:
+            msg = MIMEMultipart()
+            msg.attach(MIMEText(text, "plain", "utf-8"))
         msg["From"] = SMTP_USER
         msg["To"] = empfaenger
         msg["Subject"] = betreff
-        msg.attach(MIMEText(text, "plain", "utf-8"))
 
         for daten, name in alle_anhaenge:
             part = MIMEApplication(daten, Name=name or "anhang.pdf")

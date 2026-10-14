@@ -328,6 +328,25 @@ def get_schema() -> list[str]:
                 alert_gesendet_am   TIMESTAMP,
                 UNIQUE(beleg_id, segment_index)
             )""",
+            """CREATE TABLE IF NOT EXISTS kalender_versand (
+                id            SERIAL PRIMARY KEY,
+                reise_code    TEXT NOT NULL REFERENCES reisen(code) ON DELETE CASCADE,
+                kuerzel       TEXT NOT NULL,
+                schluessel    TEXT NOT NULL,
+                uid           TEXT NOT NULL,
+                seq_nr        INTEGER DEFAULT -1,
+                status        TEXT DEFAULT 'wartend',
+                inhalt_hash   TEXT,
+                titel         TEXT,
+                start_text    TEXT,
+                daten         TEXT,
+                offen_hash    TEXT,
+                offen_seit    TEXT,
+                gesendet_am   TEXT,
+                empfaenger    TEXT,
+                letzter_fehler TEXT,
+                UNIQUE(reise_code, kuerzel, schluessel)
+            )""",
         ]
     else:
         return [
@@ -585,6 +604,25 @@ def get_schema() -> list[str]:
                 alert_gesendet_am   TEXT,
                 UNIQUE(beleg_id, segment_index)
             )""",
+            """CREATE TABLE IF NOT EXISTS kalender_versand (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                reise_code    TEXT REFERENCES reisen(code) ON DELETE CASCADE,
+                kuerzel       TEXT NOT NULL,
+                schluessel    TEXT NOT NULL,
+                uid           TEXT NOT NULL,
+                seq_nr        INTEGER DEFAULT -1,
+                status        TEXT DEFAULT 'wartend',
+                inhalt_hash   TEXT,
+                titel         TEXT,
+                start_text    TEXT,
+                daten         TEXT,
+                offen_hash    TEXT,
+                offen_seit    TEXT,
+                gesendet_am   TEXT,
+                empfaenger    TEXT,
+                letzter_fehler TEXT,
+                UNIQUE(reise_code, kuerzel, schluessel)
+            )""",
         ]
 
 def get_migrations() -> list[str]:
@@ -658,6 +696,7 @@ def get_migrations() -> list[str]:
         "UPDATE alert_konfiguration SET intervall_24h_min=60 WHERE intervall_24h_min IS NULL",
         "UPDATE alert_konfiguration SET intervall_4h_min=30 WHERE intervall_4h_min=5",
         "UPDATE alert_konfiguration SET intervall_1h_min=15 WHERE intervall_1h_min IS NULL",
+        "ALTER TABLE mitarbeiter ADD COLUMN IF NOT EXISTS kalender_mail BOOLEAN DEFAULT FALSE",
     ]
 
 def repair_legacy_columns():

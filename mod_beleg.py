@@ -582,6 +582,7 @@ JSON-Format:
       "transport_name": "Lufthansa|Swiss|ITA Airways|DB",
       "transport_nummer": "LH3463|AZ123|ICE123",
       "klasse": "Economy|Business|1.Klasse",
+      "sitzplatz": "z.B. 12A (Bahn: Wagen 23, Platz 61) – nur wenn auf dem Beleg angegeben, sonst null",
       "hinweis": "z.B. operated by Edelweiss"
     }
   ],
@@ -867,7 +868,7 @@ _SEG_FELDER = [
     ("abreise_datum", "Abreisedatum"), ("abreise_zeit", "Abreisezeit"),
     ("ankunft_datum", "Ankunftsdatum"), ("ankunft_zeit", "Ankunftszeit"),
     ("abreise_terminal", "Abreise-Terminal/Gleis"), ("ankunft_terminal", "Ankunfts-Terminal/Gleis"),
-    ("klasse", "Klasse"),
+    ("klasse", "Klasse"), ("sitzplatz", "Sitzplatz"),
 ]
 _TOP_FELDER = [
     ("betrag_brutto", "Betrag brutto"), ("waehrung", "Währung"),

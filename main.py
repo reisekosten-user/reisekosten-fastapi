@@ -24,6 +24,7 @@ from mod_kk import (abrechnung_parsen, abrechnung_zuordnen, mitarbeiter_finden, 
                     belege_laden as kk_belege_laden, treffer_speichern as kk_treffer_speichern)
 import mod_bewirtung as bw
 import mod_vorschuss as vs
+import mod_kalender as kal
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         lade_ma_daten, get_s3, s3_upload, s3_download,
                         bild_zu_pdf, text_zu_pdf, pdf_text_lesen,
@@ -58,6 +59,10 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.21", "zeit": "2026-10-14 10:05", "aenderungen": [
+        "Neu: Im Profil gibt es den Haken „Reisetermine als Outlook-Einladung senden“. Dann bekommt der Reisende für jeden Flug, Zug und manuellen Termin eine Einladung (Zeiten, Nummer, Sitz, Terminal/Gleis).",
+        "Änderungen und Stornos werden automatisch nachgeführt (aktualisierter bzw. abgesagter Termin). Je Reise: Seite „Outlook-Einladungen“ mit Status und Knopf „Jetzt senden“.",
+        "Sitzplatz wird von der KI aus dem Beleg gelesen und lässt sich bei der Umbuchung eintragen. Beim Kürzel-Ändern bleiben jetzt Rollen und Kartendaten erhalten."]},
     {"version": "3.20.1", "zeit": "2026-10-12 09:35", "aenderungen": [
         "Fehler behoben: Bewirtungs- und Vorschussbelege wurden nach „Daten nachtragen“ fälschlich als „Pflichtfelder fehlen“ (Betrag, Eventdatum) markiert.",
         "Bereits falsch markierte Belege werden beim Start bzw. über /init automatisch wieder auf vollständig gesetzt.",
@@ -722,6 +727,8 @@ def beleg_detail(bid: int, request: Request):
                 an_dat   = s.get("ankunft_datum","") or ab_dat
                 an_zeit  = s.get("ankunft_zeit","") or ""
                 klasse   = s.get("klasse","") or ""
+                if s.get("sitzplatz"):
+                    klasse = (klasse + " · " if klasse else "") + "Sitz " + str(s.get("sitzplatz"))
                 hinweis  = s.get("hinweis","") or ""
                 rows += (f'<tr>'
                     f'<td style="text-align:center;color:var(--muted);font-size:12px">{s.get("nr","")}</td>'
@@ -1532,7 +1539,10 @@ def beleg_segment_umbuchen_form(bid: int, idx: int):
                   <label>{"IATA-Code" if typ=="Flug" else "Bahnhof"} – nach</label>
                   <input type="text" name="nach_ort" class="inp" value="{v('nach_ort')}" required>
                 </div>
-                <div class="form-group"></div>
+                <div class="form-group">
+                  <label>Sitzplatz (optional)</label>
+                  <input type="text" name="sitzplatz" class="inp" value="{v('sitzplatz')}" placeholder="z.B. 12A oder Wagen 23, Platz 61">
+                </div>
                 <div class="form-group">
                   <label>Neues Abreisedatum</label>
                   <input type="text" name="abreise_datum" class="inp" placeholder="TT.MM.JJJJ" value="{v('abreise_datum')}" required>
@@ -1592,7 +1602,7 @@ async def beleg_segment_umbuchen_speichern(bid: int, idx: int, request: Request)
 
         s = segs[idx]
         for feld in ("transport_name", "transport_nummer", "von_ort", "nach_ort",
-                     "abreise_datum", "abreise_zeit", "ankunft_datum", "ankunft_zeit"):
+                     "abreise_datum", "abreise_zeit", "ankunft_datum", "ankunft_zeit", "sitzplatz"):
             wert = (form.get(feld) or "").strip()
             if wert: s[feld] = wert
         # Zeitzonen-Offsets/Koordinaten/IATA-Codes zurücksetzen – die galten für
@@ -3144,6 +3154,7 @@ def reiseplan_anzeigen(code: str):
         <a href="/reise/{rcode}/termin/neu?zurueck=reiseplan" class="btn btn-primary">+ Ereignis</a>
         <a href="/reise/{rcode}/reiseplan/pdf" class="btn btn-secondary">📄 PDF für Reisemappe Mitarbeiter</a>
         <a href="/reise/{rcode}/reiseplan/pdf?ohne_buchungscode=1" class="btn btn-secondary">📄 PDF zum Emailversand</a>
+        <a href="/reise/{rcode}/kalender" class="btn btn-secondary">📅 Outlook-Einladungen</a>
         <a href="/reise/{rcode}" class="btn btn-secondary">← Reise</a>
       </div>
     </div>
@@ -5568,11 +5579,11 @@ def mitarbeiter_liste():
     try:
         db = get_db(); cur = db.cursor()
         cur.execute("""SELECT m.kuerzel, m.klarname, m.email, m.email2, m.email3, m.rolle, m.aktiv,
-                       COUNT(rm.reise_code) as reise_count, m.ist_reisender, m.ist_organisator
+                       COUNT(rm.reise_code) as reise_count, m.ist_reisender, m.ist_organisator, m.kalender_mail
                        FROM mitarbeiter m
                        LEFT JOIN reise_mitarbeiter rm ON rm.kuerzel = m.kuerzel
                        GROUP BY m.kuerzel, m.klarname, m.email, m.email2, m.email3, m.rolle, m.aktiv,
-                                m.ist_reisender, m.ist_organisator
+                                m.ist_reisender, m.ist_organisator, m.kalender_mail
                        ORDER BY m.klarname""")
         rows = cur.fetchall()
         cur.close(); db.close()
@@ -5595,6 +5606,7 @@ def mitarbeiter_liste():
             rolle_badges = []
             if is_reisend: rolle_badges.append('<span class="badge badge-blue">✈ Reisender</span>')
             if is_org: rolle_badges.append('<span class="badge badge-purple">📋 Organisator</span>')
+            if get(r,"kalender_mail",10): rolle_badges.append('<span class="badge badge-gray">📅 Outlook</span>')
             rolle_badge = " ".join(rolle_badges) or '<span class="badge badge-gray">–</span>'
             zeilen += f"""<tr>
                 <td class="td-mono" style="font-weight:700">{kuerzel}</td>
@@ -5666,6 +5678,13 @@ def mitarbeiter_neu_form():
               <input type="email" name="email3" placeholder="optional">
             </div>
             <div class="form-group full">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" name="kalender_mail" value="1" style="width:auto;margin:0">
+                📅 Reisetermine als Outlook-Einladung senden
+              </label>
+              <div class="form-hint">Für jeden Flug, Zug und manuell angelegten Termin geht eine Kalender-Einladung an E-Mail-Adresse 1 (Zeiten, Nummer, Sitz, Terminal/Gleis). Änderungen und Stornierungen werden automatisch nachgeführt.</div>
+            </div>
+            <div class="form-group full">
               <label>Rolle <span class="required">*</span></label>
               <div style="display:flex;gap:16px;margin-top:4px">
                 <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400">
@@ -5710,6 +5729,7 @@ async def mitarbeiter_neu(request: Request):
     email3  = (form.get("email3") or "").strip() or None
     ist_reisender = bool(form.get("ist_reisender"))
     ist_organisator = bool(form.get("ist_organisator"))
+    kalender_mail = bool(form.get("kalender_mail"))
     kreditkarten_typ = (form.get("kreditkarten_typ") or "privat").strip()
     try:
         kreditkarten_auslandsentgelt_prozent = float(form.get("kreditkarten_auslandsentgelt_prozent") or 1.5)
@@ -5729,10 +5749,10 @@ async def mitarbeiter_neu(request: Request):
         rolle_txt = "beides" if (ist_reisender and ist_organisator) else ("organisator" if ist_organisator else "reisender")
         cur.execute(f"""INSERT INTO mitarbeiter
             (kuerzel, klarname, email, email2, email3, rolle, ist_reisender, ist_organisator, kreditkarten_typ,
-             kreditkarten_auslandsentgelt_prozent)
-            VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P})""",
+             kreditkarten_auslandsentgelt_prozent, kalender_mail)
+            VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})""",
                     (kuerzel, klarname, email, email2, email3, rolle_txt, ist_reisender, ist_organisator,
-                     kreditkarten_typ, kreditkarten_auslandsentgelt_prozent))
+                     kreditkarten_typ, kreditkarten_auslandsentgelt_prozent, kalender_mail))
         db.commit(); cur.close(); db.close()
         return RedirectResponse("/mitarbeiter", status_code=303)
     except Exception as e:
@@ -5750,7 +5770,7 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
-        cur.execute(f"SELECT kuerzel, klarname, email, rolle, aktiv, email2, email3, ist_reisender, ist_organisator, kreditkarten_typ, kreditkarten_auslandsentgelt_prozent FROM mitarbeiter WHERE kuerzel={P}",
+        cur.execute(f"SELECT kuerzel, klarname, email, rolle, aktiv, email2, email3, ist_reisender, ist_organisator, kreditkarten_typ, kreditkarten_auslandsentgelt_prozent, kalender_mail FROM mitarbeiter WHERE kuerzel={P}",
                     (kuerzel.upper(),))
         r = cur.fetchone()
         cur.close(); db.close()
@@ -5768,6 +5788,7 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
         kk_typ = (r[9] if isinstance(r, tuple) else r.get("kreditkarten_typ")) or "privat"
         kk_prozent = r[10] if isinstance(r, tuple) else r.get("kreditkarten_auslandsentgelt_prozent")
         if kk_prozent is None: kk_prozent = 1.5
+        kal_mail = bool(r[11] if isinstance(r, tuple) else r["kalender_mail"])
         aktiv_check = "checked" if a else ""
         content = f"""
         <h1 class="page-title">Mitarbeiter bearbeiten</h1>
@@ -5796,6 +5817,14 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
                 <div class="form-group">
                   <label>E-Mail-Adresse 3</label>
                   <input type="email" name="email3" value="{em3}" placeholder="optional">
+                </div>
+                <div class="form-group full">
+                  <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                    <input type="checkbox" name="kalender_mail" value="1" {"checked" if kal_mail else ""}
+                           style="width:auto;margin:0">
+                    📅 Reisetermine als Outlook-Einladung senden
+                  </label>
+                  <div class="form-hint">Für jeden Flug, Zug und manuell angelegten Termin geht eine Kalender-Einladung an E-Mail-Adresse 1 (Zeiten, Nummer, Sitz, Terminal/Gleis). Änderungen und Stornierungen werden automatisch nachgeführt.</div>
                 </div>
                 <div class="form-group full">
                   <label>Rolle</label>
@@ -5909,7 +5938,9 @@ async def mitarbeiter_kuerzel_aendern(kuerzel: str, request: Request):
                 f'<div class="alert alert-err">Kürzel {neu} ist bereits vergeben.</div>'
                 f'<a href="/mitarbeiter/{alt}/bearbeiten" class="btn btn-secondary">Zurück</a>'))
 
-        cur.execute(f"""SELECT klarname, email, email2, email3, rolle, aktiv, passwort_hash
+        cur.execute(f"""SELECT klarname, email, email2, email3, rolle, aktiv, passwort_hash,
+                               ist_reisender, ist_organisator, kreditkarten_typ,
+                               kreditkarten_auslandsentgelt_prozent, kalender_mail
                         FROM mitarbeiter WHERE kuerzel={P}""", (alt,))
         r = cur.fetchone()
         if not r:
@@ -5918,14 +5949,18 @@ async def mitarbeiter_kuerzel_aendern(kuerzel: str, request: Request):
         g = lambda k,i: r[k] if hasattr(r,'keys') else r[i]
 
         cur.execute(f"""INSERT INTO mitarbeiter
-            (kuerzel, klarname, email, email2, email3, rolle, aktiv, passwort_hash)
-            VALUES ({P},{P},{P},{P},{P},{P},{P},{P})""",
+            (kuerzel, klarname, email, email2, email3, rolle, aktiv, passwort_hash,
+             ist_reisender, ist_organisator, kreditkarten_typ, kreditkarten_auslandsentgelt_prozent, kalender_mail)
+            VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})""",
             (neu, g("klarname",0), g("email",1), g("email2",2), g("email3",3),
-             g("rolle",4), g("aktiv",5), g("passwort_hash",6)))
+             g("rolle",4), g("aktiv",5), g("passwort_hash",6), g("ist_reisender",7),
+             g("ist_organisator",8), g("kreditkarten_typ",9), g("kreditkarten_auslandsentgelt_prozent",10),
+             g("kalender_mail",11)))
 
         cur.execute(f"UPDATE reise_mitarbeiter SET kuerzel={P} WHERE kuerzel={P}", (neu, alt))
         cur.execute(f"UPDATE reise_zugang SET kuerzel={P} WHERE kuerzel={P}", (neu, alt))
         cur.execute(f"UPDATE reisetage_person SET kuerzel={P} WHERE kuerzel={P}", (neu, alt))
+        cur.execute(f"UPDATE kalender_versand SET kuerzel={P} WHERE kuerzel={P}", (neu, alt))
         cur.execute(f"DELETE FROM mitarbeiter WHERE kuerzel={P}", (alt,))
 
         db.commit(); cur.close(); db.close()
@@ -5965,6 +6000,7 @@ async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
     email3   = (form.get("email3") or "").strip() or None
     ist_reisender = bool(form.get("ist_reisender"))
     ist_organisator = bool(form.get("ist_organisator"))
+    kalender_mail = bool(form.get("kalender_mail"))
     kreditkarten_typ = (form.get("kreditkarten_typ") or "privat").strip()
     try:
         kreditkarten_auslandsentgelt_prozent = float(form.get("kreditkarten_auslandsentgelt_prozent") or 1.5)
@@ -5982,10 +6018,10 @@ async def mitarbeiter_bearbeiten(kuerzel: str, request: Request):
         rolle_txt = "beides" if (ist_reisender and ist_organisator) else ("organisator" if ist_organisator else "reisender")
         cur.execute(f"""UPDATE mitarbeiter SET klarname={P}, email={P}, email2={P}, email3={P},
                         rolle={P}, ist_reisender={P}, ist_organisator={P}, kreditkarten_typ={P},
-                        kreditkarten_auslandsentgelt_prozent={P},
+                        kreditkarten_auslandsentgelt_prozent={P}, kalender_mail={P},
                         aktiv={P} WHERE kuerzel={P}""",
                     (klarname, email, email2, email3, rolle_txt, ist_reisender, ist_organisator,
-                     kreditkarten_typ, kreditkarten_auslandsentgelt_prozent,
+                     kreditkarten_typ, kreditkarten_auslandsentgelt_prozent, kalender_mail,
                      aktiv_val if aktiv else inaktiv_val, kuerzel.upper()))
         db.commit(); cur.close(); db.close()
         return RedirectResponse("/mitarbeiter", status_code=303)
@@ -7116,6 +7152,7 @@ def reise_detail(code: str):
             <a href="/reise/{rcode}/abschluss" class="btn btn-primary">🧾 Abschluss</a>
             <a href="/reise/{rcode}/vorschuss" class="btn btn-secondary">💵 Vorschuss</a>
             <a href="/reise/{rcode}/reiseplan" class="btn btn-secondary">🗺 Reiseplan</a>
+            <a href="/reise/{rcode}/kalender" class="btn btn-secondary">📅 Outlook</a>
             <a href="/reise/{rcode}/vma-generieren" class="btn btn-secondary">🔄 VMA neu berechnen</a>
             <a href="/reise/{rcode}/vma-debug" class="btn btn-secondary">🔍 VMA-Debug</a>
             <a href="/reise/{rcode}/bearbeiten" class="btn btn-secondary">✏ Bearbeiten</a>
@@ -8143,7 +8180,94 @@ def cron_flug_alerts_route(key: str = ""):
     if not CRON_SECRET or key != CRON_SECRET:
         return JSONResponse({"fehler": "Ungültiger oder fehlender Schlüssel"}, status_code=403)
     result = cron_flug_alerts()
+    try:   # Outlook-Einladungen im selben Takt abgleichen (keine zusätzliche Cron-Einrichtung nötig)
+        result["kalender"] = kal.kalender_abgleich()
+    except Exception as e:
+        result["kalender"] = {"fehler": str(e)}
     return JSONResponse(result)
+
+
+@app.get("/cron/kalender")
+def cron_kalender_route(key: str = ""):
+    """Outlook-Einladungen abgleichen (läuft ohnehin im Flug-Alert-Cron mit; hier auch einzeln aufrufbar)."""
+    if not CRON_SECRET or key != CRON_SECRET:
+        return JSONResponse({"fehler": "Ungültiger oder fehlender Schlüssel"}, status_code=403)
+    try:
+        return JSONResponse(kal.kalender_abgleich())
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+
+
+def _kalender_seite(rcode: str, ergebnis: dict | None = None) -> str:
+    from html import escape as e
+    ue = kal.kalender_uebersicht(rcode)
+    if not ue:
+        return shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden.</div>', "reisen")
+    reise = ue["reise"]
+    tn = ""
+    for t in ue["teilnehmer"]:
+        if t["haken"]:
+            st = '<span class="badge badge-green">✔ aktiv</span>'
+        elif not t["email"]:
+            st = '<span class="badge badge-gray">keine E-Mail im Profil</span>'
+        else:
+            st = '<span class="badge badge-gray">nicht aktiviert</span>'
+        tn += ('<tr><td>%s</td><td style="font-size:12px;color:var(--muted)">%s</td><td>%s</td>'
+               '<td><a href="/mitarbeiter/%s/bearbeiten" style="font-size:12px">Profil</a></td></tr>'
+               % (e(t["klarname"]), e(t["email"] or "–"), st, e(t["kuerzel"])))
+    zl = ""
+    for z in ue["zeilen"]:
+        fehler = ('<div style="color:#b91c1c;font-size:11px">⚠ %s</div>' % e(z["fehler"])) if z["fehler"] else ""
+        zl += ('<tr><td>%s</td><td>%s<div style="font-size:11px;color:var(--muted)">%s</div></td>'
+               '<td>%s%s</td><td style="font-size:12px;color:var(--muted)">%s</td></tr>'
+               % (e(z["name"]), e(z["titel"]), e(z["start"]), e(z["status"]), fehler, e(z["gesendet_am"] or "–")))
+    banner = ""
+    if ergebnis is not None:
+        teile = ["Neu gesendet: %d" % ergebnis["gesendet"], "Aktualisiert: %d" % ergebnis["aktualisiert"],
+                 "Abgesagt: %d" % ergebnis["abgesagt"]]
+        klasse = "alert-ok" if not ergebnis["fehler"] else "alert-err"
+        fehl = "".join("<div>⚠ %s</div>" % e(f) for f in ergebnis["fehler"])
+        banner = '<div class="alert %s" style="margin-bottom:16px">%s%s</div>' % (klasse, " · ".join(teile), fehl)
+    probleme = "".join("<div>• %s</div>" % e(p) for p in ue["probleme"])
+    probleme = ('<div class="alert alert-warn" style="margin-bottom:16px"><b>Nicht berücksichtigt:</b>%s</div>' % probleme) if probleme else ""
+    content = (
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'
+        '<div><h1 class="page-title" style="margin:0">📅 Outlook-Einladungen %s</h1>'
+        '<div style="color:var(--muted);font-size:13px">%s</div></div>'
+        '<a href="/reise/%s/reiseplan" class="btn btn-secondary">← Reiseplan</a></div>'
+        '%s%s'
+        '<div class="card" style="margin-bottom:16px"><div class="card-header"><span class="card-title">Teilnehmer</span></div>'
+        '<div class="table-wrap"><table><thead><tr><th>Name</th><th>E-Mail</th><th>Kalender-Einladungen</th><th></th></tr></thead>'
+        '<tbody>%s</tbody></table></div></div>'
+        '<div class="card"><div class="card-header"><span class="card-title">Termine</span>'
+        '<form method="post" action="/reise/%s/kalender/senden" style="margin:0">'
+        '<button type="submit" class="btn btn-primary btn-sm">Jetzt senden / aktualisieren</button></form></div>'
+        '<div class="table-wrap"><table><thead><tr><th>Reisender</th><th>Termin</th><th>Status</th><th>Zuletzt gesendet</th></tr></thead>'
+        '<tbody>%s</tbody></table></div></div>'
+        '<p style="font-size:12px;color:var(--muted);margin-top:12px">Neue und geänderte Termine gehen automatisch '
+        'ca. 2–4 Minuten nach der letzten Änderung raus; „Jetzt senden“ erledigt es sofort. Entfallene Flüge/Züge/Termine '
+        'werden in Outlook abgesagt. Eingeladen wird an E-Mail-Adresse 1 des Profils.</p>'
+        % (e(reise["code"]), e(reise["titel"]), e(reise["code"]), banner, probleme, tn, e(reise["code"]),
+           zl or '<tr><td colspan="4"><div class="empty-state">Keine Termine – oder bei niemandem ist die Einladung aktiviert.</div></td></tr>'))
+    return shell("Outlook-Einladungen %s" % rcode, content, "reisen")
+
+
+@app.get("/reise/{code}/kalender", response_class=HTMLResponse)
+def reise_kalender_anzeigen(code: str, request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    return HTMLResponse(_kalender_seite(code.upper()))
+
+
+@app.post("/reise/{code}/kalender/senden", response_class=HTMLResponse)
+def reise_kalender_senden(code: str, request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    try:
+        erg = kal.kalender_abgleich(code.upper(), sofort=True)
+    except Exception as ex:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">%s</div>' % ex, "reisen"))
+    return HTMLResponse(_kalender_seite(code.upper(), erg))
 
 
 @app.get("/cron/backup")
