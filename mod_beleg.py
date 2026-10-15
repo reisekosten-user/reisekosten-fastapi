@@ -1105,7 +1105,7 @@ async def beleg_verarbeiten(
         original_pdf = text_zu_pdf(xml_text, f"XRechnung: {dateiname}")
         erechnung_info = {"ist_erechnung": True, "format": "XRechnung (eigenständig)",
                            "xml_bytes": datei_bytes, "xml_name": dateiname}
-    elif content_type in ("image/jpeg", "image/jpg", "image/png", "image/heic"):
+    elif content_type in ("image/jpeg", "image/jpg", "image/png", "image/heic", "image/heif", "image/webp"):
         original_pdf = bild_zu_pdf(datei_bytes, dateiname)
         erechnung_info = {"ist_erechnung": False, "format": None, "xml_bytes": None, "xml_name": None}
     elif content_type == "application/pdf":

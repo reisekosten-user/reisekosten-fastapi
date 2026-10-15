@@ -302,6 +302,46 @@ def decode_mime_header(val: str) -> str:
             result.append(str(part))
     return "".join(result)
 
+_ENDUNG_ZU_TYP = {".pdf": "application/pdf", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                  ".heic": "image/heic", ".heif": "image/heic", ".webp": "image/webp", ".xml": "application/xml"}
+_TYP_ZU_ENDUNG = {"application/pdf": ".pdf", "image/jpeg": ".jpg", "image/png": ".png",
+                  "image/heic": ".heic", "image/webp": ".webp", "application/xml": ".xml"}
+
+
+def _anhang_typ(payload: bytes, fn: str, ct: str):
+    """Erkennt, ob ein MIME-Teil ein Beleg-Anhang ist, und gibt den MIME-Typ zurück (sonst None).
+    Maßgeblich ist der INHALT (PDF/JPG/PNG/WEBP/HEIC erkennt man an den ersten Bytes), erst danach die
+    Dateiendung. Der von der Mail angegebene Typ zählt nicht: Handy-Apps und Weiterleitungen schreiben
+    dort oft nur "application/octet-stream"."""
+    if payload[:1024].find(b"%PDF") >= 0:
+        return "application/pdf"
+    if payload[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if payload[:4] == b"\x89PNG":
+        return "image/png"
+    if payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        return "image/webp"
+    if payload[4:8] == b"ftyp" and payload[8:12] in (b"heic", b"heix", b"hevc", b"mif1", b"msf1", b"heif"):
+        return "image/heic"
+    endung = os.path.splitext((fn or "").lower().strip())[1]
+    return _ENDUNG_ZU_TYP.get(endung)
+
+
+def mail_teile_uebersicht(msg) -> list:
+    """Alle MIME-Teile einer Mail als (Typ, Dateiname, Anzeige, Größe in Bytes) – zur Fehlersuche."""
+    out = []
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        fn = part.get_filename()
+        cd = str(part.get("Content-Disposition") or "").split(";")[0].strip().lower() or "-"
+        if part.get("Content-ID") and cd == "-":
+            cd = "cid"
+        out.append((part.get_content_type(), decode_mime_header(fn).strip() if fn else "", cd,
+                    len(part.get_payload(decode=True) or b"")))
+    return out
+
+
 def mail_body_text(msg) -> tuple:
     """
     Extrahiert Text-Body und Anhänge aus einer Mail.
@@ -313,17 +353,21 @@ def mail_body_text(msg) -> tuple:
 
     if msg.is_multipart():
         for part in msg.walk():
+            if part.is_multipart():
+                continue          # Container (auch eine als Anhang weitergeleitete Mail): walk() besucht die Teile darin selbst
             ct = part.get_content_type()
             cd = str(part.get("Content-Disposition") or "")
             content_id = part.get("Content-ID")
             fn = part.get_filename()
             payload = part.get_payload(decode=True)
             if not payload: continue
+            fn = decode_mime_header(fn).strip() if fn else ""
 
-            if fn:
-                fn = decode_mime_header(fn)
-                fn_lower = fn.lower()
-                # WICHTIG: In HTML-Mails eingebettete Bilder (Logos, Icons,
+            if fn or not ct.startswith("text/"):
+                typ = _anhang_typ(payload, fn, ct)
+                if typ is None:
+                    continue      # kein Beleg (z.B. .ics, .vcf, .gif, Signatur-Grafiken anderer Art)
+                # WICHTIG: In HTML-Mails eingebettete BILDER (Logos, Icons,
                 # Deko-Grafiken, Tracking-Pixel) kommen technisch auch als
                 # MIME-Teil MIT Dateinamen daher (oft generisch wie
                 # "image001.png") – erkennbar an Content-Disposition: inline
@@ -337,16 +381,19 @@ def mail_body_text(msg) -> tuple:
                 # Deshalb zusätzlich die Dateigröße heranziehen: echte Logos/
                 # Icons/Tracking-Pixel sind fast immer winzig (wenige KB),
                 # eine echte Handyfoto-Aufnahme praktisch nie unter ~40 KB.
+                # NUR FÜR BILDER: Ein PDF (oder eine XML-Rechnung) ist nie ein Logo.
+                # Weitergeleitete Rechnungen (v.a. vom Handy) sind oft "inline"
+                # markiert und klein – die wurden früher fälschlich verworfen.
+                ist_bild = typ.startswith("image/")
                 ist_inline = cd.lower().startswith("inline") or bool(content_id)
-                ist_winzig = len(payload) < 40_000
-                if ist_inline and ist_winzig:
+                if ist_bild and ist_inline and len(payload) < 40_000:
                     continue
-                # Nicht-Beleg-Dateien überspringen
-                if fn_lower.endswith((".ics",".vcf",".emz",".wmz",".gif")): continue
-                # Nur echte Beleg-Dateien (.xml = eigenständige XRechnung)
-                if not fn_lower.endswith((".pdf",".jpg",".jpeg",".png",".heic",".webp",".xml")):
-                    continue
-                attachments.append((fn, payload, ct))
+                if ist_bild and not fn and ist_inline:
+                    continue      # unbenanntes eingebettetes Bild = Deko
+                name = fn or "anhang"
+                if os.path.splitext(name.lower())[1] not in _ENDUNG_ZU_TYP:
+                    name += _TYP_ZU_ENDUNG[typ]
+                attachments.append((name, payload, typ))
             elif ct == "text/plain" and not body:
                 body = payload.decode(errors="ignore")
             elif ct == "text/html" and not html_body:
@@ -384,6 +431,7 @@ async def fetch_mails() -> dict:
     importiert = 0
     belege_erstellt = 0
     fehler_liste = []
+    hinweise = []
     duplikate = 0
 
     try:
@@ -450,6 +498,17 @@ async def fetch_mails() -> dict:
                         belege_erstellt += 1
             else:
                 # Kein Anhang – Mail-Body selbst ist der Beleg
+                # Fehlersuche: Steht im Text etwas von einem Anhang oder hat die Mail weitere Teile,
+                # zeigen wir die Teile an, damit sichtbar ist, warum nichts erkannt wurde.
+                if msg.is_multipart():
+                    teile = mail_teile_uebersicht(msg)
+                    weitere = [t for t in teile if t[1] or not t[0].startswith("text/")]
+                    nennt_anhang = re.search(r"anbei|angeh[aä]ngt|anhang|attach|beigef", body, re.I)
+                    if weitere or nennt_anhang:
+                        hinweise.append(
+                            f"„{betreff[:70]}“: kein Beleg-Anhang erkannt, der Mailtext wurde als Beleg angelegt. "
+                            "Teile der Mail: " + ("; ".join(f"{t[0]}" + (f" „{t[1]}“" if t[1] else "") + f" [{t[2]}, {max(1, t[3] // 1024)} KB]"
+                                                   for t in teile) or "nur Text"))
                 if body and len(body.strip()) > 50:
                     # Betreff anonymisieren für Dateinamen
                     ma_namen_tmp, ma_mails_tmp = lade_ma_daten()
@@ -499,7 +558,8 @@ async def fetch_mails() -> dict:
         "belege_erstellt": belege_erstellt,
         "duplikate": duplikate,
         "fehler": len(fehler_liste),
-        "fehler_details": fehler_liste
+        "fehler_details": fehler_liste,
+        "hinweise": hinweise
     }
 
 

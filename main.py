@@ -63,6 +63,10 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.24.4", "zeit": "2026-10-15 15:30", "aenderungen": [
+        "Mail-Abruf: Ein weitergeleitetes PDF wurde nicht als Anhang erkannt (Fall IndiGo-Rechnung), stattdessen wurde nur der Mailtext zum Beleg. Ursache: Kleine Anhänge, die die Mail als „inline“ markiert (typisch bei Weiterleitung vom Handy), wurden wie Signatur-Logos verworfen. Diese Regel gilt jetzt nur noch für Bilder, nicht mehr für PDF und XML.",
+        "Anhänge werden jetzt am Inhalt erkannt (PDF, JPG, PNG, WEBP, HEIC), auch mit falschem Mail-Typ, fehlender Endung oder fehlendem Namen. WEBP- und HEIF-Bilder werden korrekt als Bild verarbeitet.",
+        "Neu: Wird nur der Mailtext zum Beleg, obwohl die Mail weitere Teile hat oder im Text einen Anhang nennt, zeigt „Mails abrufen“ die Teile der Mail (Typ, Name, Größe) an."]},
     {"version": "3.24.3", "zeit": "2026-10-15 14:50", "aenderungen": [
         "Abschluss (Seite und PDF): neue Summe der geflogenen Flugsegmente, mit Liste (Datum, Reisender, Flug, Strecke) und Aufteilung je Reisendem. Zugfahrten zählen nicht – auch nicht mit LH-Nummer (Lufthansa Express Rail / Rail&Fly, erkannt an Bahnhof im Ortsnamen, Bahnhofs-Code wie QKL/ZWS oder Zug in der Gesellschaft). Stornierte Flüge zählen nicht.",
         "Der automatische Portal-Link (Cron) geht nur noch an Reisen, die ab dem 16.10.2026 angelegt wurden. Bestandsreisen bekommen keine automatische Mail. Von Hand senden geht weiter."]},
@@ -2992,6 +2996,11 @@ async def mails_abrufen():
             items = "".join(f'<li style="white-space:pre-wrap;font-family:monospace;font-size:12px">{d}</li>'
                              for d in result["fehler_details"])
             fehler_html = f'<div class="alert alert-warn" style="margin-top:12px"><b>Fehlerdetails:</b><ul>{items}</ul></div>'
+        if result.get("hinweise"):
+            from html import escape as _he
+            items_h = "".join(f'<li style="margin:4px 0;font-size:12px">{_he(d)}</li>' for d in result["hinweise"])
+            fehler_html += (f'<div class="alert alert-warn" style="margin-top:12px"><b>⚠ Mails ohne erkannten Anhang:</b>'
+                            f'<ul style="padding-left:16px">{items_h}</ul></div>')
 
         body = f'''
         <h1 class="page-title">📬 Mails abgerufen</h1>
