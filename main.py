@@ -34,7 +34,7 @@ from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         OPENAI_KEY, OPENAI_MODEL, OPENAI_URL,
                         S3_ENDPOINT, S3_BUCKET,
                         _gleicher_reisender, _SEG_FELDER, _wert_gleich)
-from mod_mail import fetch_mails, sende_dms_mail, dms_konfiguriert, DMS_EMAIL_TO
+from mod_mail import fetch_mails, sende_dms_mail, dms_konfiguriert, DMS_EMAIL_TO, smtp_diagnose
 from mod_vma_tage import (vma_berechnen, land_fuer_tag, trennungspauschale_berechnen,
                            fruehstueck_aus_beleg, vma_tage_generieren, land_fuer_letzten_tag)
 from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
@@ -62,6 +62,10 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.23.2", "zeit": "2026-10-15 13:05", "aenderungen": [
+        "Neu: Seite „Mail-Diagnose“ (Knopf auf der Testversand-Seite). Sie prüft Schritt für Schritt Servername, Erreichbarkeit der Postausgangs-Ports, Anmeldename und Anmeldung und nennt am Ende die wahrscheinliche Ursache. Es wird keine Mail gesendet.",
+        "Ist der Mailserver nicht erreichbar, bricht der Versand nach dem ersten Fehler ab (statt je Termin 30 Sekunden zu warten). Die SMTP-Verbindung wird nach jedem Versand sauber geschlossen.",
+        "Optional: SMTP_TIMEOUT (Sekunden, Standard 30)."]},
     {"version": "3.23.1", "zeit": "2026-10-15 14:35", "aenderungen": [
         "Mailversand: Fehlt eine Einstellung, nennt die Meldung jetzt genau, welche (SMTP_HOST, SMTP_USER/IMAP_USER, SMTP_PASS/IMAP_PASS, bei Habel auch DMS_EMAIL_TO). Vorher stand nur „SMTP nicht konfiguriert“.",
         "Gilt für Outlook-Einladungen, Portal-Mails, Testversand und die Habel-Übergabe."]},
@@ -8658,7 +8662,8 @@ def _testversand_seite(rcode: str, test_mail: str, banner: str = "") -> str:
         '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'
         '<div><h1 class="page-title" style="margin:0">🧪 Testversand %s</h1>'
         '<div style="color:var(--muted);font-size:13px">%s</div></div>'
-        '<a href="/reise/%s" class="btn btn-secondary">← Reise</a></div>'
+        '<div style="display:flex;gap:8px"><a href="/einstellungen/mail-diagnose" class="btn btn-secondary">🔧 Mail-Diagnose</a>'
+        '<a href="/reise/%s" class="btn btn-secondary">← Reise</a></div></div>'
         '%s'
         '<div class="alert alert-info" style="margin-bottom:16px">Nutzt die vorhandenen Daten dieser Reise (IMAP-Bestand). '
         'Alles geht <b>nur an die Testadresse</b>. Es wird nichts als „gesendet“ vermerkt – die echten Einladungen und '
@@ -8706,6 +8711,9 @@ def reise_test_senden(code: str, request: Request, test_mail: str = Form(""), ak
             teile = ["%d von %d Test-Einladungen an %s gesendet" % (erg["gesendet"], erg["gesamt"], e(test_mail))]
             if erg["nicht_gesendet"]:
                 teile.append("%d weitere über der Grenze von %d nicht gesendet" % (erg["nicht_gesendet"], kal.TEST_MAX))
+            if erg["abgebrochen"]:
+                teile.append("Abbruch nach dem ersten Verbindungsfehler – %d weitere nicht versucht. Siehe 🔧 Mail-Diagnose"
+                             % erg["abgebrochen"])
             fehl = "".join("<div>⚠ %s</div>" % e(f) for f in erg["fehler"])
             banner = meldung(not erg["fehler"] and erg["gesendet"] > 0, " · ".join(teile) + fehl)
         elif aktion.startswith("portal:"):
@@ -8720,6 +8728,46 @@ def reise_test_senden(code: str, request: Request, test_mail: str = Form(""), ak
     except Exception as ex:
         banner = meldung(False, "Fehler: %s" % e(str(ex)))
     return HTMLResponse(_testversand_seite(rcode, test_mail, banner))
+
+
+def _mail_diagnose_seite(ergebnis: dict | None = None) -> str:
+    from html import escape as e
+    inhalt = ""
+    if ergebnis:
+        icon = {"ok": "✔", "fehler": "✖", "warn": "⚠", "info": "ℹ"}
+        farbe = {"ok": "#166534", "fehler": "#b91c1c", "warn": "#92400e", "info": "var(--muted)"}
+        zeilen = "".join('<tr><td style="color:%s;width:28px;font-weight:700">%s</td><td>%s</td></tr>'
+                         % (farbe[st], icon[st], e(tx)) for st, tx in ergebnis["zeilen"])
+        fazit = "".join("<div>%s</div>" % e(t) for t in ergebnis["fazit"])
+        inhalt = ('<div class="card" style="margin-bottom:16px"><div class="table-wrap"><table><tbody>%s</tbody></table></div></div>'
+                  '%s' % (zeilen, ('<div class="alert alert-info"><b>Ergebnis:</b> %s</div>' % fazit) if fazit else ""))
+    content = (
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'
+        '<h1 class="page-title" style="margin:0">🔧 Mail-Diagnose</h1>'
+        '<a href="/einstellungen" class="btn btn-secondary">← Einstellungen</a></div>'
+        '<p style="font-size:13px;color:var(--muted)">Prüft den Mail-Postausgang Schritt für Schritt. Es wird keine Mail gesendet, '
+        'die Prüfung dauert bis zu einer Minute.</p>'
+        '<form method="post" action="/einstellungen/mail-diagnose" style="margin-bottom:16px">'
+        '<button type="submit" class="btn btn-primary">Diagnose starten</button></form>%s' % inhalt)
+    return shell("Mail-Diagnose", content, "einstellungen")
+
+
+@app.get("/einstellungen/mail-diagnose", response_class=HTMLResponse)
+def mail_diagnose_anzeigen(request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    return HTMLResponse(_mail_diagnose_seite())
+
+
+@app.post("/einstellungen/mail-diagnose", response_class=HTMLResponse)
+def mail_diagnose_starten(request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    try:
+        erg = smtp_diagnose()
+    except Exception as ex:
+        erg = {"zeilen": [("fehler", "Diagnose abgebrochen: %s" % ex)], "fazit": []}
+    return HTMLResponse(_mail_diagnose_seite(erg))
 
 
 @app.get("/cron/backup")

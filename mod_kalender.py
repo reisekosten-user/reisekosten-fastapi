@@ -577,6 +577,8 @@ def _ruhe_vorbei(db, cur, code, z, ziel_hash, jetzt, sofort) -> bool:
 
 
 def _reise_abgleichen(db, cur, code: str, sofort: bool, jetzt: datetime, erg: dict) -> None:
+    if erg.get("abbruch"):                                   # Mailserver war in diesem Lauf nicht erreichbar
+        return
     if not any(t["haken"] and t["aktiv"] for t in _lade_teilnehmer(cur, code)):
         return                                               # niemand mit Haken: nichts zu tun
     daten = _lade_soll(cur, code)
@@ -623,7 +625,11 @@ def _reise_abgleichen(db, cur, code: str, sofort: bool, jetzt: datetime, erg: di
         else:
             z["letzter_fehler"] = str(res.get("fehler") or "unbekannter Fehler")[:300]
             erg["fehler"].append("%s/%s %s: %s" % (code, kz, inhalt["summary"], z["letzter_fehler"]))
+            if res.get("verbindung"):
+                erg["abbruch"] = True
         _speichern(db, cur, code, z)
+        if erg["abbruch"]:
+            return
 
     for (kz, key), z in list(ist.items()):
         if kz not in personen or (kz, key) in soll:
@@ -647,7 +653,11 @@ def _reise_abgleichen(db, cur, code: str, sofort: bool, jetzt: datetime, erg: di
         else:
             z["letzter_fehler"] = str(res.get("fehler") or "unbekannter Fehler")[:300]
             erg["fehler"].append("%s/%s Absage %s: %s" % (code, kz, z.get("titel"), z["letzter_fehler"]))
+            if res.get("verbindung"):
+                erg["abbruch"] = True
         _speichern(db, cur, code, z)
+        if erg["abbruch"]:
+            return
 
 
 def kalender_abgleich(reise_code: str | None = None, sofort: bool = False, jetzt: datetime | None = None) -> dict:
@@ -655,7 +665,7 @@ def kalender_abgleich(reise_code: str | None = None, sofort: bool = False, jetzt
     reise_code=None: alle Reisen, die noch nicht beendet sind (für den Cron-Aufruf)."""
     jetzt = jetzt or _jetzt_utc()
     erg = {"reisen": 0, "gesendet": 0, "aktualisiert": 0, "abgesagt": 0, "wartend": 0,
-           "fehler": [], "probleme": []}
+           "fehler": [], "probleme": [], "abbruch": False}
     db = get_db()
     cur = db.cursor()
     gesperrt = False
@@ -731,7 +741,7 @@ def kalender_test(reise_code: str, test_mail: str, jetzt: datetime | None = None
     die echten Einladungen (Haken im Profil, Cron) bleiben unberührt. Gleiche UID je Termin: ein
     erneuter Test aktualisiert den Eintrag in Outlook statt einen weiteren anzulegen."""
     jetzt = jetzt or _jetzt_utc()
-    erg = {"gesendet": 0, "gesamt": 0, "nicht_gesendet": 0, "fehler": [], "probleme": []}
+    erg = {"gesendet": 0, "gesamt": 0, "nicht_gesendet": 0, "abgebrochen": 0, "fehler": [], "probleme": []}
     d = test_ereignisse(reise_code)
     if not d:
         erg["fehler"].append("Reise nicht gefunden")
@@ -750,8 +760,9 @@ def kalender_test(reise_code: str, test_mail: str, jetzt: datetime | None = None
             erg["gesendet"] += 1
         else:
             erg["fehler"].append("%s: %s" % (x["titel"], str(res.get("fehler") or "unbekannter Fehler")[:200]))
-            if erg["fehler"] and "SMTP nicht konfiguriert" in erg["fehler"][-1]:
-                break                                        # sinnlos, weiter zu versuchen
+            if res.get("verbindung") or "SMTP nicht konfiguriert" in erg["fehler"][-1]:
+                erg["abgebrochen"] = max(0, min(len(d["liste"]), TEST_MAX) - i - 1)
+                break                                        # Server nicht erreichbar: weitere Versuche sind sinnlos
     return erg
 
 

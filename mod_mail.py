@@ -2,7 +2,7 @@
 mod_mail.py – IMAP Mail-Import + SMTP-Versand (DMS-Archivierung)
 """
 from __future__ import annotations
-import imaplib, smtplib, email as _email_mod, re, json, os
+import imaplib, smtplib, socket, ssl, time, email as _email_mod, re, json, os
 from email.header import decode_header as _decode_header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -17,6 +17,7 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "465") or "465")
 SMTP_USER = os.getenv("SMTP_USER", "") or IMAP_USER
 SMTP_PASS = os.getenv("SMTP_PASS", "") or IMAP_PASS
 DMS_EMAIL_TO = os.getenv("DMS_EMAIL_TO", "")
+SMTP_TIMEOUT = int(os.getenv("SMTP_TIMEOUT", "30") or "30")
 
 from mod_db import get_db, ph, is_postgres
 from mod_beleg import beleg_verarbeiten, get_s3, s3_download, lade_ma_daten
@@ -49,6 +50,109 @@ def smtp_fehlende() -> list:
     if not SMTP_PASS:
         fehlt.append("SMTP_PASS (oder ersatzweise IMAP_PASS)")
     return fehlt
+
+
+def _ist_verbindungsfehler(e: Exception) -> bool:
+    """True, wenn der Mailserver gar nicht erreicht wurde (Zeitüberschreitung, Abbruch, DNS) –
+    dann ist es sinnlos, weitere Mails im selben Lauf zu versuchen."""
+    return isinstance(e, (socket.timeout, TimeoutError, ConnectionError, socket.gaierror, ssl.SSLError,
+                          smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError))
+
+
+def _tcp_test(host: str, port: int, timeout: float = 6.0) -> tuple:
+    """(ok, Text) – reiner Verbindungstest ohne Anmeldung."""
+    t0 = time.time()
+    try:
+        ips = sorted({x[4][0] for x in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
+    except Exception as e:
+        return False, "Servername nicht auflösbar (%s)" % e
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            pass
+        return True, "erreichbar (%d ms, %s)" % (int((time.time() - t0) * 1000), ips[0])
+    except Exception as e:
+        return False, "keine Verbindung nach %d s: %s (%s)" % (int(time.time() - t0), e or type(e).__name__, ips[0])
+
+
+def _login_test() -> tuple:
+    """(ok, Text) – Verbindung, Verschlüsselung und Anmeldung am eingestellten Postausgang, ohne Mail zu senden."""
+    server = None
+    try:
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT)
+        else:
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT)
+            server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+        return True, "Anmeldung erfolgreich"
+    except Exception as e:
+        return False, "%s: %s" % (type(e).__name__, e)
+    finally:
+        if server is not None:
+            try:
+                server.quit()
+            except Exception:
+                try:
+                    server.close()
+                except Exception:
+                    pass
+
+
+def smtp_diagnose() -> dict:
+    """Prüft schrittweise, wo der Mailversand scheitert. Sendet nichts.
+    Liefert {'zeilen': [(status, text)], 'fazit': [text]} – status: ok, fehler, warn, info."""
+    from concurrent.futures import ThreadPoolExecutor
+    zeilen, fazit = [], []
+    z = lambda status, text: zeilen.append((status, text))
+    z("info", "Einstellung: SMTP_HOST = %s · SMTP_PORT = %s" % (SMTP_HOST or "(leer)", SMTP_PORT))
+    if not SMTP_USER:
+        z("fehler", "Anmeldename (SMTP_USER / IMAP_USER) fehlt")
+    elif "@" in SMTP_USER:
+        z("ok", "Anmeldename ist eine volle E-Mail-Adresse: %s" % SMTP_USER)
+    else:
+        z("warn", "Anmeldename „%s“ ist keine E-Mail-Adresse. Er dient auch als Absender – UDAG verlangt dafür "
+                  "eine volle Adresse." % SMTP_USER)
+    z("ok" if SMTP_PASS else "fehler", "Passwort ist gesetzt" if SMTP_PASS else "Passwort (SMTP_PASS / IMAP_PASS) fehlt")
+
+    hosts = []
+    for h in (SMTP_HOST, "smtp.udag.de", "smtps.udag.de"):
+        if h and h not in hosts:
+            hosts.append(h)
+    ziele = [(h, p) for h in hosts for p in (465, 587)]
+    if IMAP_HOST:
+        ziele.append((IMAP_HOST, 993))                        # Vergleich: dieser Weg funktioniert (Mail-Import)
+    with ThreadPoolExecutor(max_workers=max(1, len(ziele))) as ex:
+        ergebnisse = list(ex.map(lambda t: _tcp_test(t[0], t[1]), ziele))
+    smtp_ok, imap_ok = [], None
+    for (h, p), (ok, txt) in zip(ziele, ergebnisse):
+        name = "Mail-Eingang (Vergleich) %s:%d" % (h, p) if p == 993 else "Postausgang %s:%d" % (h, p)
+        z("ok" if ok else "fehler", "%s – %s" % (name, txt))
+        if p == 993:
+            imap_ok = ok
+        elif ok:
+            smtp_ok.append((h, p))
+
+    if SMTP_HOST and SMTP_USER and SMTP_PASS and (SMTP_HOST, SMTP_PORT) in smtp_ok:
+        ok, txt = _login_test()
+        z("ok" if ok else "fehler", "Anmeldung an %s:%d – %s" % (SMTP_HOST, SMTP_PORT, txt))
+        if ok:
+            fazit.append("Verbindung und Anmeldung funktionieren. Fehlt noch etwas, liegt es an der Absenderadresse "
+                         "(siehe oben) oder an einzelnen Mails.")
+        else:
+            fazit.append("Der Server ist erreichbar, aber die Anmeldung scheitert. Prüfen Sie SMTP_USER (volle E-Mail-Adresse) "
+                         "und SMTP_PASS.")
+    elif smtp_ok:
+        h, p = smtp_ok[0]
+        fazit.append("Erreichbar ist %s:%d. Stellen Sie SMTP_HOST auf %s und SMTP_PORT auf %d." % (h, p, h, p))
+    elif ziele:
+        if imap_ok:
+            fazit.append("Alle Postausgänge sind von hier aus nicht erreichbar, der Mail-Eingang (993) aber schon. "
+                         "Das spricht dafür, dass der Hoster (z. B. Render beim kostenlosen Web Service) die "
+                         "Versandports 465 und 587 sperrt. Lösung: bezahlte Instanz oder Versand über einen "
+                         "Mail-Dienst mit Web-Schnittstelle.")
+        else:
+            fazit.append("Kein Server ist erreichbar, auch der Mail-Eingang nicht. Bitte Servernamen und Netzwerk prüfen.")
+    return {"zeilen": zeilen, "fazit": fazit}
 
 
 def sende_mail(empfaenger: str, betreff: str, text: str,
@@ -88,16 +192,25 @@ def sende_mail(empfaenger: str, betreff: str, text: str,
             msg.attach(part)
 
         if SMTP_PORT == 465:
-            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT)
         else:
-            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
-            server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.sendmail(SMTP_USER, [empfaenger], msg.as_string())
-        server.quit()
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT)
+        try:
+            if SMTP_PORT != 465:
+                server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_USER, [empfaenger], msg.as_string())
+        finally:                                             # Verbindung immer sauber schließen
+            try:
+                server.quit()
+            except Exception:
+                try:
+                    server.close()
+                except Exception:
+                    pass
         return {"ok": True}
     except Exception as e:
-        return {"fehler": str(e)}
+        return {"fehler": str(e), "verbindung": _ist_verbindungsfehler(e)}
 
 
 def dms_konfiguriert() -> bool:
