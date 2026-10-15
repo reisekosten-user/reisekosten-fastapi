@@ -2,7 +2,7 @@
 mod_mail.py – IMAP Mail-Import + SMTP-Versand (DMS-Archivierung)
 """
 from __future__ import annotations
-import imaplib, smtplib, socket, ssl, time, email as _email_mod, re, json, os
+import imaplib, smtplib, socket, ssl, threading, time, email as _email_mod, re, json, os
 from email.header import decode_header as _decode_header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -17,7 +17,8 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "465") or "465")
 SMTP_USER = os.getenv("SMTP_USER", "") or IMAP_USER
 SMTP_PASS = os.getenv("SMTP_PASS", "") or IMAP_PASS
 DMS_EMAIL_TO = os.getenv("DMS_EMAIL_TO", "")
-SMTP_TIMEOUT = int(os.getenv("SMTP_TIMEOUT", "30") or "30")
+SMTP_TIMEOUT = int(os.getenv("SMTP_TIMEOUT", "30") or "30")      # Wartezeit beim Senden (große Anhänge)
+SMTP_VERBINDUNG_TIMEOUT = 15                                      # Wartezeit für Verbindungsaufbau und Anmeldung
 
 from mod_db import get_db, ph, is_postgres
 from mod_beleg import beleg_verarbeiten, get_s3, s3_download, lade_ma_daten
@@ -78,12 +79,7 @@ def _login_test() -> tuple:
     """(ok, Text) – Verbindung, Verschlüsselung und Anmeldung am eingestellten Postausgang, ohne Mail zu senden."""
     server = None
     try:
-        if SMTP_PORT == 465:
-            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT)
-        else:
-            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT)
-            server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
+        server = _verbinden()
         return True, "Anmeldung erfolgreich"
     except Exception as e:
         return False, "%s: %s" % (type(e).__name__, e)
@@ -155,6 +151,79 @@ def smtp_diagnose() -> dict:
     return {"zeilen": zeilen, "fazit": fazit}
 
 
+# ── Versand über EINE Verbindung für mehrere Mails (Sitzung) ───────────────────
+_SITZUNG = threading.local()
+
+
+def _verbinden():
+    """Neue, angemeldete SMTP-Verbindung."""
+    if SMTP_PORT == 465:
+        server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_VERBINDUNG_TIMEOUT)
+    else:
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_VERBINDUNG_TIMEOUT)
+    try:
+        if SMTP_PORT != 465:
+            server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+        try:
+            server.sock.settimeout(SMTP_TIMEOUT)             # ab jetzt längere Wartezeit fürs Senden
+        except Exception:
+            pass
+    except Exception:
+        _schliessen(server)
+        raise
+    return server
+
+
+def _schliessen(server) -> None:
+    if server is None:
+        return
+    try:
+        server.quit()
+    except Exception:
+        try:
+            server.close()
+        except Exception:
+            pass
+
+
+class smtp_sitzung:
+    """with smtp_sitzung(): ...  – alle Mails im Block laufen über eine einzige Verbindung (eine Anmeldung statt
+    einer je Mail; manche Anbieter bremsen viele Anmeldungen kurz hintereinander)."""
+    def __enter__(self):
+        _SITZUNG.aktiv, _SITZUNG.verbindung = True, None
+        return self
+
+    def __exit__(self, *exc):
+        _schliessen(getattr(_SITZUNG, "verbindung", None))
+        _SITZUNG.aktiv, _SITZUNG.verbindung = False, None
+        return False
+
+
+def _versenden(empfaenger: str, nachricht: str) -> None:
+    """Sendet eine Nachricht. Bricht die Verbindung ab, wird einmal mit einer neuen Verbindung wiederholt."""
+    in_sitzung = bool(getattr(_SITZUNG, "aktiv", False))
+    for versuch in (0, 1):
+        server = getattr(_SITZUNG, "verbindung", None) if in_sitzung else None
+        try:
+            if server is None:
+                server = _verbinden()
+                if in_sitzung:
+                    _SITZUNG.verbindung = server
+            server.sendmail(SMTP_USER, [empfaenger], nachricht)
+            if not in_sitzung:
+                _schliessen(server)
+            return
+        except Exception as e:
+            _schliessen(server)                              # Verbindung ist unbrauchbar oder soll nicht bleiben
+            if in_sitzung:
+                _SITZUNG.verbindung = None
+            if versuch == 0 and _ist_verbindungsfehler(e):
+                time.sleep(1.0)
+                continue
+            raise
+
+
 def sende_mail(empfaenger: str, betreff: str, text: str,
                 anhang_bytes: bytes | None = None, anhang_name: str | None = None,
                 anhaenge: list | None = None,
@@ -191,23 +260,7 @@ def sende_mail(empfaenger: str, betreff: str, text: str,
             part["Content-Disposition"] = f'attachment; filename="{name or "anhang.pdf"}"'
             msg.attach(part)
 
-        if SMTP_PORT == 465:
-            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT)
-        else:
-            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT)
-        try:
-            if SMTP_PORT != 465:
-                server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(SMTP_USER, [empfaenger], msg.as_string())
-        finally:                                             # Verbindung immer sauber schließen
-            try:
-                server.quit()
-            except Exception:
-                try:
-                    server.close()
-                except Exception:
-                    pass
+        _versenden(empfaenger, msg.as_string())
         return {"ok": True}
     except Exception as e:
         return {"fehler": str(e), "verbindung": _ist_verbindungsfehler(e)}

@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 from mod_db import get_db, ph, is_postgres, fmt_date
 from mod_vma_tage import land_fuer_tag, vma_berechnen
 from mod_vma import VMA_SAETZE
-from mod_mail import sende_mail
+from mod_mail import sende_mail, smtp_sitzung
 
 PORTAL_BASE_URL = os.getenv("PORTAL_BASE_URL", "").rstrip("/")
 PORTAL_TAGE_VORHER = int(os.getenv("PORTAL_TAGE_VORHER", "5") or "5")
@@ -281,24 +281,25 @@ def cron_portal_mails() -> dict:
     cur.close(); db.close()
 
     gesendet = 0; fehler = []
-    for r in reisen:
-        code = r[0] if isinstance(r, tuple) else r["code"]
-        titel = r[1] if isinstance(r, tuple) else r["titel"]
-        abreise = r[2] if isinstance(r, tuple) else r["abreise"]
-        rueckkehr = r[3] if isinstance(r, tuple) else r["rueckkehr"]
+    with smtp_sitzung():                                     # alle Portal-Mails über eine Mail-Verbindung
+        for r in reisen:
+            code = r[0] if isinstance(r, tuple) else r["code"]
+            titel = r[1] if isinstance(r, tuple) else r["titel"]
+            abreise = r[2] if isinstance(r, tuple) else r["abreise"]
+            rueckkehr = r[3] if isinstance(r, tuple) else r["rueckkehr"]
 
-        bereits = zugaenge_der_reise(code)
-        for ma in reisende_der_reise(code):
-            kuerzel = ma[0] if isinstance(ma, tuple) else ma["kuerzel"]
-            klarname = ma[1] if isinstance(ma, tuple) else ma["klarname"]
-            email = ma[2] if isinstance(ma, tuple) else ma["email"]
-            info = bereits.get(kuerzel)
-            if info and info.get("email_gesendet_am"):
-                continue
-            result = portal_mail_senden(code, kuerzel, klarname, email, titel, abreise, rueckkehr)
-            if result.get("ok"):
-                gesendet += 1
-            else:
-                fehler.append(f"{code}/{kuerzel}: {result.get('fehler')}")
+            bereits = zugaenge_der_reise(code)
+            for ma in reisende_der_reise(code):
+                kuerzel = ma[0] if isinstance(ma, tuple) else ma["kuerzel"]
+                klarname = ma[1] if isinstance(ma, tuple) else ma["klarname"]
+                email = ma[2] if isinstance(ma, tuple) else ma["email"]
+                info = bereits.get(kuerzel)
+                if info and info.get("email_gesendet_am"):
+                    continue
+                result = portal_mail_senden(code, kuerzel, klarname, email, titel, abreise, rueckkehr)
+                if result.get("ok"):
+                    gesendet += 1
+                else:
+                    fehler.append(f"{code}/{kuerzel}: {result.get('fehler')}")
 
     return {"ziel_datum": ziel_datum, "gesendet": gesendet, "fehler": fehler}

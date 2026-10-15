@@ -682,16 +682,17 @@ def kalender_abgleich(reise_code: str | None = None, sofort: bool = False, jetzt
             cur.execute("SELECT code FROM reisen WHERE rueckkehr >= " + P + " ORDER BY abreise",
                         (jetzt.date().isoformat(),))
         codes = [_g(r, "code", 0) for r in cur.fetchall()]
-        for code in codes:
-            try:
-                _reise_abgleichen(db, cur, code, sofort, jetzt, erg)
-                erg["reisen"] += 1
-            except Exception as e:                           # eine Reise darf die anderen nicht blockieren
+        with mod_mail.smtp_sitzung():                        # alle Einladungen über eine Mail-Verbindung
+            for code in codes:
                 try:
-                    db.rollback()
-                except Exception:
-                    pass
-                erg["fehler"].append("%s: %s" % (code, e))
+                    _reise_abgleichen(db, cur, code, sofort, jetzt, erg)
+                    erg["reisen"] += 1
+                except Exception as e:                       # eine Reise darf die anderen nicht blockieren
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    erg["fehler"].append("%s: %s" % (code, e))
         return erg
     finally:
         try:
@@ -750,19 +751,20 @@ def kalender_test(reise_code: str, test_mail: str, jetzt: datetime | None = None
     erg["gesamt"] = len(d["liste"])
     code = d["reise"]["code"]
     seq = int(jetzt.timestamp() // 60)                       # wächst mit jedem Test -> Outlook übernimmt die neue Fassung
-    for i, x in enumerate(d["liste"]):
-        if i >= TEST_MAX:
-            erg["nicht_gesendet"] = len(d["liste"]) - TEST_MAX
-            break
-        z = {"uid": _uid("TEST-" + code, x["kuerzel"], x["key"])}
-        res = _sende_einladung(x["person"], d["reise"], z, x["inhalt"], seq, "REQUEST", False, test_an=test_mail)
-        if res.get("ok"):
-            erg["gesendet"] += 1
-        else:
-            erg["fehler"].append("%s: %s" % (x["titel"], str(res.get("fehler") or "unbekannter Fehler")[:200]))
-            if res.get("verbindung") or "SMTP nicht konfiguriert" in erg["fehler"][-1]:
-                erg["abgebrochen"] = max(0, min(len(d["liste"]), TEST_MAX) - i - 1)
-                break                                        # Server nicht erreichbar: weitere Versuche sind sinnlos
+    with mod_mail.smtp_sitzung():                            # alle Test-Einladungen über eine Mail-Verbindung
+        for i, x in enumerate(d["liste"]):
+            if i >= TEST_MAX:
+                erg["nicht_gesendet"] = len(d["liste"]) - TEST_MAX
+                break
+            z = {"uid": _uid("TEST-" + code, x["kuerzel"], x["key"])}
+            res = _sende_einladung(x["person"], d["reise"], z, x["inhalt"], seq, "REQUEST", False, test_an=test_mail)
+            if res.get("ok"):
+                erg["gesendet"] += 1
+            else:
+                erg["fehler"].append("%s: %s" % (x["titel"], str(res.get("fehler") or "unbekannter Fehler")[:200]))
+                if res.get("verbindung") or "SMTP nicht konfiguriert" in erg["fehler"][-1]:
+                    erg["abgebrochen"] = max(0, min(len(d["liste"]), TEST_MAX) - i - 1)
+                    break                                    # Server nicht erreichbar: weitere Versuche sind sinnlos
     return erg
 
 

@@ -62,6 +62,9 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.23.3", "zeit": "2026-10-15 13:25", "aenderungen": [
+        "Mailversand: Alle Einladungen und Portal-Mails eines Laufs gehen jetzt über eine einzige Verbindung (eine Anmeldung statt einer je Mail). Vorher bremste UDAG nach den ersten Mails mit „timed out“.",
+        "Bricht die Verbindung ab, wird die Mail einmal mit einer neuen Verbindung wiederholt. Verbindungsaufbau wartet höchstens 15 Sekunden, das Senden selbst weiter SMTP_TIMEOUT (Standard 30)."]},
     {"version": "3.23.2", "zeit": "2026-10-15 13:05", "aenderungen": [
         "Neu: Seite „Mail-Diagnose“ (Knopf auf der Testversand-Seite). Sie prüft Schritt für Schritt Servername, Erreichbarkeit der Postausgangs-Ports, Anmeldename und Anmeldung und nennt am Ende die wahrscheinliche Ursache. Es wird keine Mail gesendet.",
         "Ist der Mailserver nicht erreichbar, bricht der Versand nach dem ersten Fehler ab (statt je Termin 30 Sekunden zu warten). Die SMTP-Verbindung wird nach jedem Versand sauber geschlossen.",
