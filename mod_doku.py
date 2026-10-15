@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.24.4"
+DOKU_GEPRUEFT_FUER = "3.25"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -108,6 +108,8 @@ _ERSATZ_EINSTELLUNG = {"SMTP_USER": "IMAP_USER", "SMTP_PASS": "IMAP_PASS"}
 CRON = [
     ("/cron/flug-alerts?key=…", "jede Minute",
      "Prüft Flüge und Züge auf Verspätung (feste Prüfzeitpunkte) und gleicht die Outlook-Einladungen ab. Die feinste Stufe (15 Minuten vor Abflug) greift nur bei minütlichem Aufruf."),
+    ("/cron/mails?key=…", "alle 5 Minuten",
+     "Holt neue Belege aus dem Reisekosten-Postfach, genau wie der Knopf „📬 Mails abrufen“. Es läuft immer nur ein Abruf gleichzeitig."),
     ("/cron/portal-mails?key=…", "einmal täglich",
      "Schickt den Portal-Link an alle Reisenden, deren Reise in PORTAL_TAGE_VORHER Tagen beginnt und die noch keinen Link bekommen haben. Bestandsreisen (angelegt vor dem 16.10.2026) werden übersprungen."),
     ("/cron/backup?key=…", "einmal täglich (nachts)",
@@ -201,6 +203,7 @@ SEITEN = [
     ("/portal/{token}/vorschuss/{bid}", "Bestätigte Bargeld-Buchung ansehen", "a-bargeld"),
     ("/portal/{token}/vorschuss/{bid}/pdf", "Bargeld-Quittung als PDF", "a-bargeld"),
     ("/cron/flug-alerts", "Automatik: Verspätungsprüfung und Outlook-Abgleich", "c-cron"),
+    ("/cron/mails", "Automatik: Mails abrufen und als Belege anlegen", "c-cron"),
     ("/cron/portal-mails", "Automatik: Portal-Links verschicken", "c-cron"),
     ("/cron/kalender", "Automatik: Outlook-Einladungen abgleichen", "c-cron"),
     ("/cron/backup", "Automatik: Datensicherung", "c-cron"),
@@ -433,7 +436,8 @@ KAPITEL = [
         ("h3", "1. Per E-Mail an das Reisekosten-Postfach"),
         ("ul", [
             "Der Reisecode (z. B. `26-007`) muss im Betreff oder Text stehen. Nur eine bestehende Reise gilt als Treffer.",
-            "Abruf von Hand über **📬 Mails** (Menü, Dashboard oder Belegliste). Es gibt keinen automatischen Abruf.",
+            "Abruf von Hand über **📬 Mails** (Menü, Dashboard oder Belegliste) **oder automatisch alle 5 Minuten** über den Cron (Teil C, „Automatische Aufgaben“). "
+            "Es läuft immer nur ein Abruf; ein zweiter Klick während eines Laufs zeigt einen Hinweis.",
             "Geholt werden nur **ungelesene** Mails. Jeder Anhang (PDF, JPG, JPEG, PNG, HEIC, WEBP, XML) wird ein eigener Beleg. "
             "Ohne Anhang wird der Mailtext (mehr als 50 Zeichen) selbst zum Beleg.",
             "Ob ein Anhang ein Beleg ist, entscheidet sein **Inhalt** (PDF, JPG, PNG, WEBP, HEIC), nicht die Angabe der Mail. Auch kleine, vom Handy weitergeleitete PDFs werden erkannt. "
@@ -465,7 +469,9 @@ KAPITEL = [
             "**📎 Dokumente:** Original-PDF, 🔒 Anonymisiert, 🔍 Analyse-PDF; Knöpfe zum erneuten Analysieren und erneuten Anonymisieren; Beleg löschen; Reise zuordnen.",
             "**🔗 Verknüpfte Belege:** Zusammengehörige Belege (z. B. Rechnung und Buchungsbestätigung) lassen sich verknüpfen und wieder trennen.",
             "**💰 Eurobetrag – Endabrechnung** und Kurs (siehe „Beträge, Fremdwährung und Kurse“).",
-            "**✅ Prüfung & Archivierung:** Prüfvermerk eintragen und bestätigen. Danach steht dort „Geprüft von …“, und das Prüf-Deckblatt ist als PDF abrufbar.",
+            "**✅ Prüfung & Übergabe an Habel:** Prüfvermerk eintragen und bestätigen. Danach steht dort „Geprüft von …“, und das Prüf-Deckblatt ist als PDF abrufbar. "
+            "Darunter der **Habel-Stand der ganzen Reise**: Fortschrittsbalken („n von m Belegen geprüft“), noch offene Belege als Links und der Knopf zur Reise-Übergabe. "
+            "Einzelne Belege werden nicht an Habel gesendet.",
         ]),
         ("hinweis", "Von der App selbst erzeugte Belege (Bewirtungsbeleg, Vorschuss-, Rückgabequittung, Bargeldbeschaffung) lassen sich nicht neu analysieren oder anonymisieren "
                     "und brauchen keine Rechnungs-Pflichtfelder."),
@@ -641,7 +647,9 @@ KAPITEL = [
             "**Vorschau: Dateien der Mail:** zeigt Empfänger, Betreff, Text und alle Dateien zum Anklicken (Seiten, Größe) – ohne etwas zu senden. Funktioniert auch, solange noch nicht alles geprüft ist.",
             "Größtes erlaubtes Mailvolumen: [[habel_max_mb]] MB (Summe aller PDF-Anhänge, Einstellung HABEL_MAX_MB).",
         ]),
-        ("p", "Am Beleg selbst steht nur der Status („An Habel übertragen am …“) mit Link zur Reise-Übergabe."),
+        ("p", "Am Beleg steht der Stand der ganzen Reise: Fortschritt der Prüfung, noch offene Belege und der Link zur Übergabe. Nach dem Senden steht dort „Mit der Reise an Habel gesendet am …“."),
+        ("p", "Auf dem **Dashboard** und unter **📋 Offene Aufgaben** erscheinen Reisen, die zur Übergabe bereit sind (zurückgekehrt, alle Belege geprüft, noch nicht gesendet). "
+              "Die Liste der abgeschlossenen Reisen zeigt je Reise den Habel-Stand und einen Knopf „📤 Habel“."),
     ]},
     {"id": "b-kk", "teil": "B", "titel": "Kreditkarten-Abrechnung einspielen", "bloecke": [
         ("p", "**Einstellungen › 💳 Kreditkarten-Abrechnung.** Die Monatsabrechnung der Karte (PDF, Format qards BusinessCard / Sparkasse) wird mit den Belegen abgeglichen. "
@@ -661,7 +669,7 @@ KAPITEL = [
               "Hinweise (z. B. Kurs nachtragen), Anzahl Belege im Posteingang und der Knopf **📬 Mails abrufen**."),
         ("h3", "📋 Offene Aufgaben (`/todo`)"),
         ("p", "Alles, was vor der finalen Abrechnung noch offen ist, über alle Reisen: Beträge in Fremdwährung ohne bestätigten Euro-Betrag, Belege ohne Prüfung, "
-              "unversendete Belege (Habel), nicht abgerechnete Reisen."),
+              "nicht abgerechnete Reisen mit dem Habel-Stand je Reise (geprüft, bereit, gesendet)."),
         ("h3", "🗺 Karte (`/maps`)"),
         ("p", "Zeigt, wo sich zugeordnete Mitarbeiter bei laufenden Reisen aktuell befinden."),
     ]},
@@ -692,6 +700,15 @@ KAPITEL = [
               "Jede Adresse braucht den Schlüssel: `https://IHRE-APP/cron/…?key=IHR_CRON_SECRET`."),
         ("live", "cron"),
         ("p", "Ohne gesetztes `CRON_SECRET` oder mit falschem Schlüssel antwortet die App mit „Ungültiger oder fehlender Schlüssel“."),
+        ("h3", "Mails alle 5 Minuten abholen"),
+        ("p", "Läuft ein eigener Server (z. B. bei Hetzner), reicht eine Zeile in dessen `crontab -e`:"),
+        ("p", "`*/5 * * * * curl -fsS -m 300 \"https://IHRE-APP/cron/mails?key=IHR_CRON_SECRET\" > /dev/null`"),
+        ("ul", [
+            "**Kosten und Datenverkehr:** Ein Abruf ohne neue Mails kostet fast nichts (wenige KB, eine kurze Anfrage an das Postfach). 288 Abrufe am Tag sind vernachlässigbar. "
+            "Kosten entstehen nur je verarbeitetem Beleg (KI-Analyse), genau wie beim Knopf.",
+            "Die Adresse antwortet mit dem Ergebnis (verarbeitet, Belege erstellt, Duplikate, Fehler). Bei einem Fehler, etwa wenn das Postfach nicht erreichbar ist, antwortet sie mit HTTP 500; ein Cron-Dienst wie cron-job.org kann das melden.",
+            "Läuft ein Abruf noch, wenn der nächste startet, antwortet die App „läuft noch“ und tut nichts. So werden Mails nie doppelt verarbeitet.",
+        ]),
     ]},
     {"id": "c-mail", "teil": "C", "titel": "Mail-Versand und Mail-Diagnose", "bloecke": [
         ("p", "**Eingang** (IMAP): holt Belege aus dem Reisekosten-Postfach. **Ausgang** (SMTP): sendet Outlook-Einladungen, Portal-Links, Verspätungsalarme "

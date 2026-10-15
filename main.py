@@ -63,6 +63,9 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.25", "zeit": "2026-10-15 15:50", "aenderungen": [
+        "Neu: Die Adresse /cron/mails holt neue Belege aus dem Postfach (gedacht für einen Cron-Aufruf alle 5 Minuten, z. B. per crontab auf dem Hetzner-Server). Gleiche Verarbeitung wie der Knopf „Mails abrufen“. Es läuft immer nur ein Abruf; bei einem Fehler antwortet die Adresse mit HTTP 500, damit der Cron-Dienst es meldet.",
+        "Habel-Info neu gestaltet: Am Beleg steht jetzt der Stand der ganzen Reise (Fortschrittsbalken „n von m Belegen geprüft“, noch offene Belege als Links, Knopf zur Reise-Übergabe). Dashboard und „Offene Aufgaben“ melden Reisen, die zur Übergabe bereit sind, statt einzelner ungesendeter Belege. Die Liste der abgeschlossenen Reisen zeigt den Habel-Stand je Reise."]},
     {"version": "3.24.4", "zeit": "2026-10-15 15:30", "aenderungen": [
         "Mail-Abruf: Ein weitergeleitetes PDF wurde nicht als Anhang erkannt (Fall IndiGo-Rechnung), stattdessen wurde nur der Mailtext zum Beleg. Ursache: Kleine Anhänge, die die Mail als „inline“ markiert (typisch bei Weiterleitung vom Handy), wurden wie Signatur-Logos verworfen. Diese Regel gilt jetzt nur noch für Bilder, nicht mehr für PDF und XML.",
         "Anhänge werden jetzt am Inhalt erkannt (PDF, JPG, PNG, WEBP, HEIC), auch mit falschem Mail-Typ, fehlender Endung oder fehlendem Namen. WEBP- und HEIF-Bilder werden korrekt als Bild verarbeitet.",
@@ -1104,22 +1107,18 @@ def beleg_detail(bid: int, request: Request):
                 f'style="width:100%;text-align:center;display:block;margin-bottom:8px">'
                 f'👁 Prüf-PDF ansehen (Deckblatt + Original)</a>') if geprueft else ""
 
-            habel_knopf_html = (
-                f'<a href="/reise/{rcode}/habel" class="btn btn-secondary" style="width:100%;text-align:center;display:block;margin-top:8px">'
-                f'📤 Übergabe an Habel (ganze Reise)</a>' if rcode else
-                '<div style="font-size:11px;color:var(--muted);margin-top:6px">Beleg zuerst einer Reise zuordnen.</div>')
             if dms_versendet_am:
-                dms_block_html = (f'{pruef_pdf_link_html}<div class="alert alert-ok" style="font-size:12px">📤 An Habel übertragen am '
-                                   + fmt_zeitstempel(dms_versendet_am) + f'</div>{habel_knopf_html}')
+                gesendet_text = fmt_zeitstempel(dms_versendet_am)
             else:
-                dms_block_html = (
-                    f'{pruef_pdf_link_html}'
-                    f'<div style="font-size:12px;color:var(--muted)">Wird zusammen mit allen Belegen der Reise in '
-                    f'<b>einer</b> Mail an Habel gesendet – sobald alle Belege geprüft sind.</div>{habel_knopf_html}')
+                gesendet_text = ""
+            dms_block_html = pruef_pdf_link_html + (
+                habel_beleg_block_html(bid2, rcode, gesendet_text) if rcode else
+                '<div style="font-size:12px;color:var(--muted)">Beleg zuerst einer Reise zuordnen. '
+                'Die Übergabe an Habel erfolgt für die ganze Reise.</div>')
 
             pruef_button_text = "✓ Prüfung aktualisieren" if geprueft else "✓ Als geprüft markieren"
             pruef_karte_html = f"""<div class="card">
-            <div class="card-header"><span class="card-title">✅ Prüfung & Archivierung</span></div>
+            <div class="card-header"><span class="card-title">✅ Prüfung & Übergabe an Habel</span></div>
             <div class="card-body">
               {pruef_status_html}
               <form method="post" action="/beleg/{bid2}/pruefen" style="margin-top:10px">
@@ -2202,6 +2201,69 @@ def habel_hindernisse(info: dict) -> list:
     return h
 
 
+def habel_beleg_block_html(bid: int, rcode: str, gesendet_text: str = "") -> str:
+    """Habel-Info am einzelnen Beleg. Einzelne Belege gehen nicht an Habel: Die Übergabe erfolgt einmal für die
+    ganze Reise, sobald alle prüfpflichtigen Belege geprüft sind. Der Block zeigt den Stand der Reise."""
+    from html import escape as e
+    try:
+        info = habel_paket_pruefen(rcode)
+    except Exception:
+        return ""
+    if not info.get("reise"):
+        return ""
+    n = len(info["belege"]); n_ok = sum(1 for b in info["belege"] if b["geprueft"])
+    prozent = int(round(100 * n_ok / n)) if n else 0
+    bereit = n > 0 and not info["offen"] and not info["ohne_original"]
+    def link(b):
+        mark = " (dieser Beleg)" if b["id"] == bid else ""
+        return f'<a href="/beleg/{b["id"]}" style="color:#2563eb">#{b["id"]}</a>{mark}'
+    if gesendet_text:
+        status = ('<div class="alert alert-ok" style="font-size:12px;margin:8px 0">📤 Mit der Reise an Habel gesendet am '
+                  f'<b>{e(gesendet_text)}</b></div>')
+    elif bereit:
+        status = ('<div class="alert alert-ok" style="font-size:12px;margin:8px 0">✓ Alle Belege der Reise sind geprüft. '
+                  'Die Reise kann jetzt an Habel übergeben werden.</div>')
+    else:
+        punkte = ""
+        if info["offen"]:
+            punkte += ('<div>• %d Beleg%s noch nicht geprüft: %s</div>'
+                       % (len(info["offen"]), "" if len(info["offen"]) == 1 else "e", ", ".join(link(b) for b in info["offen"])))
+        if info["ohne_original"]:
+            punkte += '<div>• Kein Original gespeichert: %s</div>' % ", ".join(link(b) for b in info["ohne_original"])
+        if not punkte:
+            punkte = "<div>• Die Reise hat noch keine prüfpflichtigen Belege.</div>"
+        status = ('<div class="alert alert-warn" style="font-size:12px;margin:8px 0"><b>Übergabe noch nicht möglich:</b>%s</div>' % punkte)
+    knopf_klasse = "btn-primary" if (bereit and not gesendet_text) else "btn-secondary"
+    return (
+        f'<div style="font-weight:700;font-size:13px;margin-bottom:4px">📤 Übergabe an Habel – Reise {e(rcode)}</div>'
+        '<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Einzelne Belege gehen nicht an Habel. '
+        'Sind alle Belege der Reise geprüft, geht die ganze Reise in <b>einer</b> Mail raus: '
+        'Reisekostenabrechnung und jeder Beleg als eigenes PDF.</div>'
+        '<div style="background:var(--bg);border-radius:6px;height:8px;overflow:hidden">'
+        f'<div style="width:{prozent}%;height:8px;background:#16a34a"></div></div>'
+        f'<div style="font-size:12px;margin-top:4px">{n_ok} von {n} Belegen der Reise geprüft</div>'
+        f'{status}'
+        f'<a href="/reise/{e(rcode)}/habel" class="btn {knopf_klasse}" '
+        'style="width:100%;text-align:center;display:block;margin-top:8px">'
+        f'📤 {"Zur Übergabe an Habel" if (bereit and not gesendet_text) else "Übergabe ansehen"}</a>')
+
+
+def habel_reise_status_html(code: str) -> str:
+    """Kurzer Habel-Stand einer Reise (für die Liste „Offene Aufgaben“)."""
+    try:
+        info = habel_paket_pruefen(code)
+    except Exception:
+        return "–"
+    if not info.get("reise") or not info["belege"]:
+        return '<span style="color:var(--muted)">keine prüfpflichtigen Belege</span>'
+    n = len(info["belege"]); n_ok = sum(1 for b in info["belege"] if b["geprueft"])
+    if info["bereits"]:
+        return '<span style="color:#166534">✓ an Habel gesendet</span>'
+    if n_ok == n and not info["ohne_original"]:
+        return '<span style="color:#166534;font-weight:600">✓ bereit zur Übergabe</span>'
+    return f'<span style="color:#b45309">{n_ok} von {n} Belegen geprüft</span>'
+
+
 def habel_paket_bauen(info: dict, grenze_pruefen: bool = True) -> list:
     """Erzeugt die Mail-Anhänge [(bytes, dateiname)]: Reisekostenabrechnung + jeder Beleg einzeln (mit Prüf-Deckblatt).
     Wirft ValueError mit lesbarer Meldung."""
@@ -2979,10 +3041,31 @@ from email.header import decode_header as _decode_header
 
 
 # ── Mail-Route ────────────────────────────────────────────────────────────────
+_MAIL_ABRUF = {"aktiv": False}
+
+
+async def _mail_abruf_ausfuehren():
+    """Holt die Mails. Es läuft immer nur EIN Abruf (Knopf und Cron teilen sich die Sperre), sonst würden zwei
+    Läufe dieselben Mails gleichzeitig verarbeiten. Gibt None zurück, wenn schon ein Abruf läuft."""
+    if _MAIL_ABRUF["aktiv"]:
+        return None
+    _MAIL_ABRUF["aktiv"] = True
+    try:
+        return await fetch_mails()
+    finally:
+        _MAIL_ABRUF["aktiv"] = False
+
+
 @app.get("/mails-abrufen", response_class=HTMLResponse)
 async def mails_abrufen():
     """Holt ungelesene Mails und verarbeitet sie als Belege."""
-    result = await fetch_mails()
+    result = await _mail_abruf_ausfuehren()
+    if result is None:
+        return HTMLResponse(shell("Mails abrufen",
+            '<h1 class="page-title">📬 Mails abrufen</h1>'
+            '<div class="alert alert-warn">Es läuft gerade schon ein Abruf (z. B. der automatische). '
+            'Bitte in einer Minute noch einmal versuchen.</div>'
+            '<a href="/belege" class="btn btn-secondary">← Zurück</a>'))
 
     if "fehler" in result and "importiert" not in result:
         body = f'''
@@ -4891,15 +4974,22 @@ def todo_liste_laden() -> list:
     except Exception: pass
 
     try:
-        # 3. Geprüfte Belege, die noch nicht an Habel gesendet wurden
-        cur.execute(f"""SELECT COUNT(*) FROM belege
-            WHERE geprueft = {'TRUE' if is_postgres() else '1'} AND dms_versendet_am IS NULL""")
-        n = cur.fetchone()[0]
-        if n:
+        # 3. Reisen, bei denen alle prüfpflichtigen Belege geprüft sind, die aber noch nicht an Habel gesendet wurden
+        #    (an Habel geht die ganze Reise in einer Mail, nicht der einzelne Beleg)
+        cur.execute(f"""SELECT r.code FROM reisen r
+            WHERE r.rueckkehr < {P}
+            AND EXISTS (SELECT 1 FROM belege b WHERE b.reise_code = r.code
+                        AND b.belegart IN {PRUEF_SQL} AND b.dms_versendet_am IS NULL)
+            AND NOT EXISTS (SELECT 1 FROM belege b WHERE b.reise_code = r.code
+                        AND b.belegart IN {PRUEF_SQL} AND b.geprueft = {'FALSE' if is_postgres() else '0'})
+            ORDER BY r.rueckkehr""", (today,))
+        codes_habel = [(x[0] if isinstance(x, tuple) else x["code"]) for x in cur.fetchall()]
+        if codes_habel:
+            n_h = len(codes_habel)
             aufgaben.append({"icon": "📤", "prio": "info",
-                "text": f'Geprüfte Belege noch nicht an Habel gesendet ({n})',
-                "sub": "",
-                "url": "/todo"})
+                "text": f'{n_h} Reise{"n" if n_h != 1 else ""} bereit zur Übergabe an Habel',
+                "sub": ", ".join(codes_habel[:5]) + (" …" if n_h > 5 else ""),
+                "url": f"/reise/{codes_habel[0]}/habel" if n_h == 1 else "/todo"})
     except Exception: pass
 
     try:
@@ -4985,8 +5075,6 @@ def todo_belege_laden() -> list:
                 except Exception: rueckkehr_d = None
             if not geprueft and rueckkehr_d and rueckkehr_d < date.today():
                 probleme.append("✅ Nicht geprüft")
-            if geprueft and not dms_versendet:
-                probleme.append("📤 Nicht an Habel gesendet")
         if pflicht_ok is False or pflicht_ok == 0:
             probleme.append("⚠ Pflichtfelder fehlen")
 
@@ -5063,7 +5151,10 @@ def todo_seite(request: Request):
                     text-decoration:none">{code}</a></td>
                 <td>{titel}</td>
                 <td>{fmt_date(rueckkehr)}</td>
-                <td><a href="/reise/{code}/abschluss" class="btn btn-secondary btn-sm">Abschluss ansehen</a></td>
+                <td style="font-size:12px">{habel_reise_status_html(code)}</td>
+                <td style="white-space:nowrap">
+                  <a href="/reise/{code}/abschluss" class="btn btn-secondary btn-sm">Abschluss ansehen</a>
+                  <a href="/reise/{code}/habel" class="btn btn-secondary btn-sm">📤 Habel</a></td>
             </tr>"""
 
         content = f"""
@@ -5103,9 +5194,9 @@ def todo_seite(request: Request):
           <div class="card-header"><span class="card-title">Reisen abgeschlossen, aber noch nicht final abgerechnet ({len(reisen)})</span></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Reise</th><th>Titel</th><th>Rückkehr</th><th></th></tr></thead>
+              <thead><tr><th>Reise</th><th>Titel</th><th>Rückkehr</th><th>Übergabe an Habel</th><th></th></tr></thead>
               <tbody>
-                {reisen_zeilen or '<tr><td colspan="4" class="empty-state">Keine offenen Reisen 🎉</td></tr>'}
+                {reisen_zeilen or '<tr><td colspan="5" class="empty-state">Keine offenen Reisen 🎉</td></tr>'}
               </tbody>
             </table>
           </div>
@@ -8712,6 +8803,24 @@ def cron_portal_mails_route(key: str = ""):
     if not CRON_SECRET or key != CRON_SECRET:
         return JSONResponse({"fehler": "Ungültiger oder fehlender Schlüssel"}, status_code=403)
     result = cron_portal_mails()
+    return JSONResponse(result)
+
+
+@app.get("/cron/mails")
+async def cron_mails_route(key: str = ""):
+    """Holt neue Belege aus dem Reisekosten-Postfach (gedacht für einen Aufruf alle 5 Minuten).
+    Gleiche Verarbeitung wie der Knopf „Mails abrufen“. Bei Fehlern (z. B. IMAP nicht erreichbar)
+    antwortet die Adresse mit HTTP 500, damit der Cron-Dienst es meldet."""
+    if not CRON_SECRET or key != CRON_SECRET:
+        return JSONResponse({"fehler": "Ungültiger oder fehlender Schlüssel"}, status_code=403)
+    try:
+        result = await _mail_abruf_ausfuehren()
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+    if result is None:
+        return JSONResponse({"status": "läuft noch", "hinweis": "Der vorige Abruf ist noch nicht fertig."})
+    if "fehler" in result and "importiert" not in result:
+        return JSONResponse(result, status_code=500)
     return JSONResponse(result)
 
 
