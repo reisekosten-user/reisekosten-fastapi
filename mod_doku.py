@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.24"
+DOKU_GEPRUEFT_FUER = "3.24.1"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -121,12 +121,12 @@ CRON = [
 # ══════════════════════════════════════════════════════════════════════════════
 SEITEN = [
     ("/", "Dashboard: Reisen (aktiv, geplant, abgeschlossen), offene Alerts, Posteingang, Mails abrufen", "b-dashboard"),
-    ("/login", "Anmeldung mit Kürzel und Passwort", "b-rollen"),
+    ("/login", "Anmeldung der Organisatoren mit Kürzel und Passwort", "b-rollen"),
     ("/logout", "Abmelden", "b-rollen"),
     ("/setup", "Ersteinrichtung: erstes Passwort setzen (nur solange noch niemand eines hat)", "b-rollen"),
     ("/mitarbeiter", "Liste aller Mitarbeiter", "b-mitarbeiter"),
     ("/mitarbeiter/neu", "Mitarbeiter anlegen", "b-mitarbeiter"),
-    ("/mitarbeiter/{kuerzel}/bearbeiten", "Mitarbeiter bearbeiten, Kürzel ändern, Passwort setzen", "b-mitarbeiter"),
+    ("/mitarbeiter/{kuerzel}/bearbeiten", "Mitarbeiter bearbeiten, Kürzel ändern, Passwort setzen (nur Organisatoren)", "b-mitarbeiter"),
     ("/reisen", "Liste aller Reisen", "b-reise"),
     ("/reisen/neu", "Neue Reise anlegen", "b-reise"),
     ("/reisen/naechster-code", "Hilfsadresse: nächster freier Reisecode (technisch)", "b-reise"),
@@ -339,14 +339,15 @@ KAPITEL = [
 
     # ────────────────────── TEIL B – Organisatoren (Sie) ──────────────────────
     {"id": "b-rollen", "teil": "B", "titel": "Anmeldung, Rollen und Zugriff", "bloecke": [
-        ("p", "Jeder Mitarbeiter meldet sich mit **Kürzel und Passwort** an. Die Anmeldung bleibt 14 Tage bestehen. "
-              "Reisende arbeiten normalerweise nur mit ihrem Portal-Link und brauchen keine Anmeldung."),
+        ("p", "In die App anmelden (mit **Kürzel und Passwort**) können sich nur **Organisatoren**. Die Anmeldung bleibt 14 Tage bestehen. "
+              "**Reisende bekommen kein Passwort**, sondern nur ihren persönlichen Portal-Link (per Mail)."),
+        ("hinweis", "Vergeben Sie Passwörter deshalb nur an Organisatoren. Ein Mitarbeiter ohne Passwort kann sich nicht anmelden."),
         ("h3", "Erstes Passwort"),
         ("p", "Solange noch niemand ein Passwort hat, führt die App automatisch auf `/setup`. Dort wird das erste Passwort gesetzt. "
-              "Danach vergibt ein Organisator weitere Passwörter: Mitarbeiter bearbeiten › „🔒 Login-Passwort“ (mindestens 8 Zeichen)."),
+              "Danach setzt ein Organisator die Passwörter der weiteren Organisatoren: Mitarbeiter bearbeiten › „🔒 Login-Passwort“ (mindestens 8 Zeichen)."),
         ("h3", "Rollen"),
         ("tab", ["Rolle", "Bedeutung"], [
-            ["✈ Reisender", "Fährt selbst. Bekommt Portal-Link, Outlook-Einladungen und Verspätungs-Alarme. Wird bei Reisen als Teilnehmer ausgewählt."],
+            ["✈ Reisender", "Fährt selbst. Meldet sich nicht an, sondern bekommt nur den Portal-Link sowie Outlook-Einladungen und Verspätungs-Alarme. Wird bei Reisen als Teilnehmer ausgewählt."],
             ["📋 Organisator", "Bucht für andere. Darf Beleg-Daten nachtragen, Belege prüfen, Vorschuss erfassen, an Habel übergeben, Outlook-Einladungen steuern "
                               "und alle Einstellungen verwenden. Erhält Verspätungs-Alarme aller Reisen."],
         ], [24, 76]),
@@ -379,7 +380,7 @@ KAPITEL = [
             ["Kreditkartentyp", "Privat- oder Firmenkreditkarte. Bei Bezahlart „Kreditkarte“ wird die Karte als „Privatkreditkarte-KÜRZEL“ bzw. „Firmenkreditkarte-KÜRZEL“ angeboten."],
             ["Auslandseinsatzentgelt (%)", "Gebühr der Bank bei Zahlungen in Fremdwährung (Standard 1,5). Wird bei Kreditkartenbelegen in Fremdwährung automatisch berechnet und zum Betrag addiert. 0, wenn die Karte keine Gebühr hat."],
             ["Mitarbeiter aktiv", "Inaktive Mitarbeiter können sich nicht anmelden und stehen bei neuen Reisen nicht zur Auswahl. Statt Löschen deaktivieren."],
-            ["🔒 Login-Passwort", "Setzt ein neues Passwort (mindestens 8 Zeichen, überschreibt das alte)."],
+            ["🔒 Login-Passwort", "Nur für Organisatoren. Setzt ein neues Passwort (mindestens 8 Zeichen, überschreibt das alte). Reisende erhalten kein Passwort."],
         ], [28, 72]),
     ]},
     {"id": "b-reise", "teil": "B", "titel": "Reisen anlegen und bearbeiten", "bloecke": [

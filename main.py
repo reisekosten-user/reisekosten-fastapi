@@ -63,6 +63,9 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.24.1", "zeit": "2026-10-15 14:35", "aenderungen": [
+        "Handbuch korrigiert: Anmelden können sich nur Organisatoren. Reisende bekommen kein Passwort, sondern nur ihren Portal-Link. Betrifft die Kapitel „Anmeldung, Rollen und Zugriff“, „Mitarbeiter verwalten“ und das Seitenverzeichnis.",
+        "Sonst keine Änderung am Programm."]},
     {"version": "3.24", "zeit": "2026-10-15 14:20", "aenderungen": [
         "Neu: Handbuch unter Einstellungen › „📖 Dokumentation“ – als Seite und als PDF. Teil A für Reisende (im Portal über „📖 Anleitung“ und als eigene PDF zum Weitergeben), Teil B für Organisatoren, Teil C Einstellungen und Betrieb mit dem aktuellen Stand aller Einstellungen, Cron-Aufgaben, Fehlersuche, Änderungsverlauf und Seitenverzeichnis.",
         "Das Handbuch wird bei jedem Release mitgepflegt. Automatische Tests schlagen fehl, wenn eine neue Einstellung oder Seite nicht darin steht.",
