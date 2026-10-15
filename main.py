@@ -34,7 +34,7 @@ from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         pruefkopf_pdf_erzeugen, beleg_mit_pruefkopf,
                         OPENAI_KEY, OPENAI_MODEL, OPENAI_URL,
                         S3_ENDPOINT, S3_BUCKET,
-                        _gleicher_reisender, _SEG_FELDER, _wert_gleich)
+                        _gleicher_reisender, _namens_tokens, _SEG_FELDER, _wert_gleich)
 from mod_mail import fetch_mails, sende_dms_mail, dms_konfiguriert, DMS_EMAIL_TO, smtp_diagnose
 from mod_vma_tage import (vma_berechnen, land_fuer_tag, trennungspauschale_berechnen,
                            fruehstueck_aus_beleg, vma_tage_generieren, land_fuer_letzten_tag)
@@ -63,6 +63,12 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.24.3", "zeit": "2026-10-15 14:50", "aenderungen": [
+        "Abschluss (Seite und PDF): neue Summe der geflogenen Flugsegmente, mit Liste (Datum, Reisender, Flug, Strecke) und Aufteilung je Reisendem. Zugfahrten zählen nicht – auch nicht mit LH-Nummer (Lufthansa Express Rail / Rail&Fly, erkannt an Bahnhof im Ortsnamen, Bahnhofs-Code wie QKL/ZWS oder Zug in der Gesellschaft). Stornierte Flüge zählen nicht.",
+        "Der automatische Portal-Link (Cron) geht nur noch an Reisen, die ab dem 16.10.2026 angelegt wurden. Bestandsreisen bekommen keine automatische Mail. Von Hand senden geht weiter."]},
+    {"version": "3.24.2", "zeit": "2026-10-15 14:40", "aenderungen": [
+        "Portal-Link beginnt jetzt immer mit https:// (aus PORTAL_BASE_URL, sonst aus der von Render gesetzten Adresse, sonst aus der Adresse der aufgerufenen Seite). Vorher stand nur „/portal/…“ in Mail und Reise-Seite. Auf der Reise-Seite ist der Link anklickbar.",
+        "Alle Mails tragen jetzt Datum und eine eindeutige Message-ID. Ein erneut gesendeter Portal-Link kam bisher nicht an, vermutlich weil der Empfänger-Server ihn als Doppeltes verworfen hat. „Erneut senden“ setzt zusätzlich „Erneut:“ vor den Betreff."]},
     {"version": "3.24.1", "zeit": "2026-10-15 14:35", "aenderungen": [
         "Handbuch korrigiert: Anmelden können sich nur Organisatoren. Reisende bekommen kein Passwort, sondern nur ihren Portal-Link. Betrifft die Kapitel „Anmeldung, Rollen und Zugriff“, „Mitarbeiter verwalten“ und das Seitenverzeichnis.",
         "Sonst keine Änderung am Programm."]},
@@ -453,6 +459,129 @@ def segmente_aus_ki_json(ki_json_str: str | None) -> list:
         return json.loads(ki_json_str).get("segmente") or []
     except Exception:
         return []
+
+
+# ── Geflogene Flugsegmente (Summe im Abschluss) ───────────────────────────────
+# Rail&Fly / Lufthansa Express Rail: Die Bahnstrecke steht im Beleg als "Flug"
+# mit LH-Nummer (Zug mit Flugnummer). Sie ist KEIN Flug. Ein Segment gilt als
+# Zug, sobald EINE dieser Bedingungen zutrifft:
+#   1. Belegart ist "Bahn"
+#   2. Gesellschaft nennt Bahn/Rail/Zug/ICE/TGV usw.  (nur transport_name, nicht Freitext)
+#   3. Zugnummer beginnt mit ICE/TGV/RJ(X)
+#   4. Von-/Nach-Ort ist ein Bahnhof (Hbf, Bahnhof, Bf, Gare, Centraal, Station)
+#   5. Von-/Nach-IATA ist ein Bahnhofs-Code (QKL Köln Hbf, ZWS Stuttgart Hbf usw.)
+_ZUG_NAME = re.compile(r"\b(bahn|train|zug|rail|sncf|ice|tgv|railjet|intercity|eurostar|thalys|flixtrain)\b", re.I)
+_ZUG_NUMMER = re.compile(r"^(ICE|TGV|RJX?)\s*\d", re.I)
+_BAHNHOF_ORT = re.compile(r"(hbf|bahnhof|\bbf\b|\bgare\b|centraal|railway|\bstation\b)", re.I)
+_BAHNHOF_IATA = {"QKL", "QDU", "ZVR", "ZMB", "XIT", "ZMU", "ZAQ", "ZWS", "XIR", "QPP", "ZQU", "ZBA"}
+
+
+def segment_ist_zug(s: dict, transportart: str = "Flug") -> bool:
+    """True, wenn das Segment eine Zugfahrt ist (auch mit LH-Nummer)."""
+    if (transportart or "") == "Bahn":
+        return True
+    if _ZUG_NAME.search(str(s.get("transport_name") or "")):
+        return True
+    if _ZUG_NUMMER.search(str(s.get("transport_nummer") or "").strip()):
+        return True
+    if _BAHNHOF_ORT.search(f'{s.get("von_ort") or ""} {s.get("nach_ort") or ""}'):
+        return True
+    for k in ("von_iata", "nach_iata"):
+        if str(s.get(k) or "").strip().upper() in _BAHNHOF_IATA:
+            return True
+    return False
+
+
+def _flug_ort_text(s: dict, p: str) -> str:
+    ort = str(s.get(f"{p}_ort") or "").strip()
+    iata = str(s.get(f"{p}_iata") or "").strip().upper()
+    if ort and iata:
+        return f"{ort} ({iata})"
+    return ort or iata or "?"
+
+
+def flugsegmente_zaehlen(reise_code: str) -> dict:
+    """
+    Zählt die tatsächlich GEFLOGENEN Flugsegmente einer Reise (für den Abschluss).
+    Nicht gezählt: Zugfahrten (auch mit LH-Nummer, siehe segment_ist_zug),
+    stornierte Flüge (Status "cancel" aus der Flugüberwachung), Änderungs-Belege
+    (deren Daten stehen nach dem Übernehmen im Original-Beleg).
+    Dubletten aus mehreren Belegen werden NICHT automatisch entfernt, sondern über
+    die Überschneidungs-Prüfung der Reise geklärt (ueberschneidungen = Anzahl offener Fälle).
+    Rückgabe: {summe, je_person [(Name, Anzahl)], gezaehlt [..], zuege, storniert, ueberschneidungen}
+    """
+    P = ph()
+    leer = {"summe": 0, "je_person": [], "gezaehlt": [], "zuege": 0, "storniert": 0, "ueberschneidungen": 0}
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"""SELECT id, transportart, reisender, ki_json FROM belege
+                        WHERE reise_code={P} AND transportart IN ('Flug','Bahn')
+                        AND aenderung_status IS NULL ORDER BY id""", (reise_code,))
+        rows = cur.fetchall()
+        cur.execute(f"""SELECT fs.beleg_id, fs.segment_index, fs.status FROM flug_status fs
+                        JOIN belege b ON b.id = fs.beleg_id WHERE b.reise_code={P}""", (reise_code,))
+        stati = {(r[0] if isinstance(r, tuple) else r["beleg_id"],
+                  r[1] if isinstance(r, tuple) else r["segment_index"]):
+                 str((r[2] if isinstance(r, tuple) else r["status"]) or "").lower()
+                 for r in cur.fetchall()}
+        cur.execute(f"""SELECT m.klarname FROM mitarbeiter m JOIN reise_mitarbeiter rm ON rm.kuerzel=m.kuerzel
+                        WHERE rm.reise_code={P}""", (reise_code,))
+        mitarbeiter = [(r[0] if isinstance(r, tuple) else r["klarname"]) for r in cur.fetchall()]
+        cur.close(); db.close()
+    except Exception:
+        return leer
+
+    gezaehlt, zuege, storniert = [], 0, 0
+    for r in rows:
+        g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
+        bid, art = g("id", 0), g("transportart", 1)
+        try:
+            ki = json.loads(g("ki_json", 3) or "{}")
+        except Exception:
+            continue
+        reisender = (g("reisender", 2) or ki.get("reisender") or "").strip()
+        for idx, s in enumerate(ki.get("segmente") or []):
+            if segment_ist_zug(s, art):
+                zuege += 1
+                continue
+            if "cancel" in stati.get((bid, idx), ""):
+                storniert += 1
+                continue
+            d = _datum_parsen(s.get("abreise_datum"))
+            gezaehlt.append({"beleg": bid, "idx": idx, "datum": d, "zeit": str(s.get("abreise_zeit") or ""),
+                             "nummer": str(s.get("transport_nummer") or "").strip(),
+                             "von": _flug_ort_text(s, "von"), "nach": _flug_ort_text(s, "nach"),
+                             "reisender": reisender,
+                             "iata_fehlt": not (str(s.get("von_iata") or "").strip()
+                                                and str(s.get("nach_iata") or "").strip())})
+    gezaehlt.sort(key=lambda x: (x["datum"] or date.max, x["zeit"], x["beleg"], x["idx"]))
+
+    # Je Person zusammenfassen: Name aus der Reise-Zuordnung, sonst der Name vom Beleg
+    gruppen = []                                   # [Anzeigename, Namensteile, Anzahl]
+    for f in gezaehlt:
+        tok = _namens_tokens(f["reisender"])
+        anzeige = f["reisender"] or "ohne Namen"
+        if not tok and len(mitarbeiter) == 1:         # Beleg ohne Namen, Reise mit nur einer Person
+            anzeige = mitarbeiter[0]; tok = _namens_tokens(anzeige)
+        ziel = None
+        for gr in gruppen:
+            if (tok and gr[1] and (tok & gr[1])) or (not tok and not gr[1]):
+                ziel = gr; break
+        if ziel is None:
+            for kl in mitarbeiter:
+                if tok & _namens_tokens(kl):
+                    anzeige = kl; break
+            ziel = [anzeige, set(tok), 0]
+            gruppen.append(ziel)
+        ziel[2] += 1
+        f["person"] = ziel[0]
+
+    try:
+        offen = len(_segment_ueberschneidungen(reise_code))
+    except Exception:
+        offen = 0
+    return {"summe": len(gezaehlt), "je_person": [(gr[0], gr[2]) for gr in gruppen],
+            "gezaehlt": gezaehlt, "zuege": zuege, "storniert": storniert, "ueberschneidungen": offen}
 
 
 def gesamtbetrag_berechnen(betrag_brutto, waehrung, betrag_eur_geschaetzt,
@@ -3970,6 +4099,49 @@ def reise_abschluss(code: str):
               </div>
             </div>"""
 
+        # Geflogene Flugsegmente (ohne Züge, auch nicht mit LH-Nummer)
+        from html import escape as _h
+        flug = flugsegmente_zaehlen(rcode)
+        flug_html = ""
+        if flug["summe"] or flug["zuege"] or flug["storniert"]:
+            zeilen_f = ""
+            for f in flug["gezaehlt"]:
+                warn = (' <span style="color:#b45309;font-size:11px">⚠ Flughafencode fehlt – bitte prüfen</span>'
+                        if f["iata_fehlt"] else "")
+                zeilen_f += f"""<tr>
+                    <td>{fdat(f["datum"])} {_h(f["zeit"])}</td>
+                    <td>{_h(f["person"])}</td>
+                    <td style="font-family:monospace">{_h(f["nummer"]) or "–"}</td>
+                    <td>{_h(f["von"])} → {_h(f["nach"])}{warn}</td>
+                    <td><a href="/beleg/{f["beleg"]}" style="color:var(--blue);font-weight:600;
+                        text-decoration:none">#{f["beleg"]}</a></td>
+                </tr>"""
+            je_person_f = " · ".join(f"{_h(n)}: {c}" for n, c in flug["je_person"]) if len(flug["je_person"]) > 1 else ""
+            nicht_f = []
+            if flug["zuege"]:
+                nicht_f.append(f'{flug["zuege"]} Zugfahrt{"en" if flug["zuege"] != 1 else ""} (auch mit LH-Nummer)')
+            if flug["storniert"]:
+                nicht_f.append("1 stornierter Flug" if flug["storniert"] == 1
+                               else f'{flug["storniert"]} stornierte Flüge')
+            ueb_f = (f'<div style="padding:8px 16px;background:#fef2f2;color:#991b1b;font-size:12px;font-weight:600">'
+                     f'⚠ {flug["ueberschneidungen"]} ungeklärte Überschneidung(en) – die Summe kann Dubletten enthalten. '
+                     f'<a href="/reise/{rcode}/ueberschneidungen" style="color:#991b1b">Jetzt klären →</a></div>'
+                     if flug["ueberschneidungen"] else "")
+            flug_html = f"""<div class="card" style="margin-bottom:16px">
+              <div class="card-header">
+                <span class="card-title">✈ Geflogene Flugsegmente</span>
+                <span style="font-size:13px;font-weight:600">{flug["summe"]} gesamt{f" · {je_person_f}" if je_person_f else ""}</span>
+              </div>
+              {ueb_f}
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Abflug</th><th>Reisender</th><th>Flug</th><th>Strecke</th><th>Beleg</th></tr></thead>
+                  <tbody>{zeilen_f or '<tr><td colspan="5" class="empty-state">Keine Flugsegmente</td></tr>'}</tbody>
+                </table>
+              </div>
+              {f'<div style="padding:8px 16px;font-size:12px;color:var(--muted)">Nicht mitgezählt: {", ".join(nicht_f)}</div>' if nicht_f else ''}
+            </div>"""
+
         content = f"""
         <div style="display:flex;align-items:flex-start;justify-content:space-between;
                     margin-bottom:20px;flex-wrap:wrap;gap:12px">
@@ -3980,7 +4152,7 @@ def reise_abschluss(code: str):
               <h1 class="page-title" style="margin:4px 0">{titel}</h1>
               <div style="font-size:13px;color:#64748b">
                 🚀 Start: {start_txt} &nbsp;·&nbsp; 🏁 Ende: {ende_txt}<br>
-                👤 {ma_str}
+                👤 {ma_str}{f" &nbsp;·&nbsp; ✈ {flug['summe']} Flugsegment{'e' if flug['summe'] != 1 else ''}" if flug["summe"] else ""}
               </div>
             </div>
           </div>
@@ -4018,6 +4190,7 @@ def reise_abschluss(code: str):
         {best_html}
         {zeiten_html}
         {km_html}
+        {flug_html}
         {_vorschuss_abschluss_html(rcode)}
 
         <!-- VMA-Tabelle -->
@@ -4257,6 +4430,32 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
             km_tbl = Table(km_daten, colWidths=[30*mm,50*mm,38*mm])
             km_tbl.setStyle(tbl_style())
             story.append(km_tbl)
+            story.append(Spacer(1, 5*mm))
+
+        flug_pdf = flugsegmente_zaehlen(rcode)
+        if flug_pdf["summe"] or flug_pdf["zuege"] or flug_pdf["storniert"]:
+            story.append(Paragraph("Geflogene Flugsegmente", styles["Heading2"]))
+            flug_daten = [["Abflug","Reisender","Flug","Strecke"]]
+            for f in flug_pdf["gezaehlt"]:
+                flug_daten.append([
+                    (fmt_date(f["datum"]) if f["datum"] else "–") + (f" {f['zeit']}" if f["zeit"] else ""),
+                    zelle(f["person"]), zelle(f["nummer"] or "–"), zelle(f"{f['von']} – {f['nach']}")])
+            je_p = " · ".join(f"{n}: {c}" for n, c in flug_pdf["je_person"]) if len(flug_pdf["je_person"]) > 1 else ""
+            flug_daten.append(["", "", "Gesamt:", f"{flug_pdf['summe']} Flugsegmente" + (f" ({je_p})" if je_p else "")])
+            flug_tbl = Table(flug_daten, colWidths=[30*mm,38*mm,20*mm,90*mm])
+            flug_tbl.setStyle(tbl_style())
+            flug_tbl.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"LEFT")]))
+            story.append(flug_tbl)
+            hinweise_f = []
+            if flug_pdf["zuege"]:
+                hinweise_f.append(f"{flug_pdf['zuege']} Zugfahrt(en), auch mit LH-Nummer")
+            if flug_pdf["storniert"]:
+                hinweise_f.append(f"{flug_pdf['storniert']} stornierte(r) Flug/Flüge")
+            if hinweise_f:
+                story.append(Paragraph("Nicht mitgezählt: " + esc(", ".join(hinweise_f)), styles["Normal"]))
+            if flug_pdf["ueberschneidungen"]:
+                story.append(Paragraph(f"Hinweis: {flug_pdf['ueberschneidungen']} Überschneidung(en) ungeklärt – "
+                                       "die Summe kann Dubletten enthalten.", styles["Normal"]))
             story.append(Spacer(1, 5*mm))
 
         story.append(Paragraph("Verpflegungsmehraufwand", styles["Heading2"]))
@@ -6992,7 +7191,7 @@ def _aenderungs_banner_fuer_reise(rcode: str) -> str:
 
 
 @app.get("/reise/{code}", response_class=HTMLResponse)
-def reise_detail(code: str):
+def reise_detail(code: str, request: Request):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
@@ -7078,10 +7277,11 @@ def reise_detail(code: str):
                 me = ma[2] if isinstance(ma, tuple) else ma["email"]
                 info_z = bestehende_zugaenge.get(mk)
                 if info_z:
-                    link_txt = portal_link(info_z["token"])
+                    link_txt = portal_link(info_z["token"], _basis_aus_anfrage(request))
                     status_txt = (f'✓ gesendet am {fmt_date(info_z["email_gesendet_am"])}'
                                    if info_z.get("email_gesendet_am") else "Link erstellt, noch nicht gesendet")
-                    link_html = f'<div style="font-size:11px;color:var(--muted);word-break:break-all">{link_txt}</div>'
+                    link_html = (f'<div style="font-size:11px;color:var(--muted);word-break:break-all">'
+                                 f'<a href="{link_txt}" style="color:inherit">{link_txt}</a></div>')
                 else:
                     status_txt = "Noch kein Zugang erstellt"
                     link_html = ""
@@ -7100,7 +7300,7 @@ def reise_detail(code: str):
                 <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
                   Jeder Reisende bekommt einen persönlichen Link zum Eintragen von
                   Verpflegung und Reise-/Arbeitszeiten. Automatischer Versand {PORTAL_TAGE_VORHER}
-                  Tage vor Abreise (falls Cron eingerichtet ist), oder hier manuell.</p>
+                  Tage vor Abreise (falls Cron eingerichtet ist; nicht bei Bestandsreisen), oder hier manuell.</p>
                 {zugaenge_rows}
               </div>
             </div>"""
@@ -11381,8 +11581,18 @@ def alert_testlauf(request: Request):
 
 
 
+def _basis_aus_anfrage(request: Request) -> str:
+    """Adresse der App aus der aktuellen Anfrage (Ersatz, falls weder PORTAL_BASE_URL noch RENDER_EXTERNAL_URL gesetzt sind)."""
+    try:
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+        proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
+        return f"{proto}://{host}"
+    except Exception:
+        return ""
+
+
 @app.post("/reise/{code}/zugang/{kuerzel}/senden")
-def reise_zugang_senden(code: str, kuerzel: str):
+def reise_zugang_senden(code: str, kuerzel: str, request: Request):
     rcode = code.upper(); kuerzel = kuerzel.upper()
     try:
         P = ph()
@@ -11397,7 +11607,8 @@ def reise_zugang_senden(code: str, kuerzel: str):
         g = lambda row, i: row[i]
         titel, abreise, rueckkehr = g(r,0), g(r,1), g(r,2)
         klarname, email = g(m,0), g(m,1)
-        result = portal_mail_senden(rcode, kuerzel, klarname, email, titel, abreise, rueckkehr)
+        result = portal_mail_senden(rcode, kuerzel, klarname, email, titel, abreise, rueckkehr,
+                                    _basis_aus_anfrage(request))
         if result.get("fehler"):
             return HTMLResponse(shell("Fehler",
                 f'<div class="alert alert-err">Versand fehlgeschlagen: {result["fehler"]}</div>'

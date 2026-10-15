@@ -41,6 +41,11 @@ def _kalender_nachricht(text: str, ics: str, methode: str) -> MIMEMultipart:
     return msg
 
 
+def _absender_domain() -> str:
+    """Domain der Absenderadresse (für die Message-ID); Ersatz, falls SMTP_USER keine Adresse ist."""
+    return SMTP_USER.split("@", 1)[1] if "@" in (SMTP_USER or "") else "reisekosten.herrhammer"
+
+
 def smtp_fehlende() -> list:
     """Namen der Einstellungen (Render → Environment), die für den Mailversand noch fehlen."""
     fehlt = []
@@ -249,8 +254,13 @@ def sende_mail(empfaenger: str, betreff: str, text: str,
             msg["Date"] = formatdate(localtime=False)
             msg["Message-ID"] = make_msgid(domain="reisekosten.herrhammer")
         else:
+            from email.utils import formatdate, make_msgid
             msg = MIMEMultipart()
             msg.attach(MIMEText(text, "plain", "utf-8"))
+            # Datum und eindeutige Message-ID gehören in jede Mail. Ohne sie können Empfänger-Server gleiche Mails
+            # (z. B. ein erneut gesendeter Portal-Link) als Doppelte verwerfen oder in den Spam sortieren.
+            msg["Date"] = formatdate(usegmt=True)
+            msg["Message-ID"] = make_msgid(domain=_absender_domain())
         msg["From"] = SMTP_USER
         msg["To"] = empfaenger
         msg["Subject"] = betreff

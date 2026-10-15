@@ -13,6 +13,11 @@ from mod_mail import sende_mail, smtp_sitzung
 PORTAL_BASE_URL = os.getenv("PORTAL_BASE_URL", "").rstrip("/")
 PORTAL_TAGE_VORHER = int(os.getenv("PORTAL_TAGE_VORHER", "5") or "5")
 
+# Bestandsreisen: Reisen, die VOR diesem Datum angelegt wurden (Einführung der
+# automatischen Portal-Mails), bekommen vom Cron KEINE Mail. Der Link lässt sich
+# dort weiterhin von Hand auf der Reise-Seite senden.
+PORTAL_AUTOMATIK_AB = "2026-10-16"
+
 
 def token_erzeugen() -> str:
     return secrets.token_urlsafe(24)
@@ -37,9 +42,21 @@ def zugang_holen_oder_erstellen(reise_code: str, kuerzel: str) -> str:
     return token
 
 
-def portal_link(token: str) -> str:
-    base = PORTAL_BASE_URL or ""
-    return f"{base}/portal/{token}"
+def basis_url(ersatz: str = "") -> str:
+    """Öffentliche Adresse der App, immer mit http(s):// am Anfang.
+    Reihenfolge: PORTAL_BASE_URL, die von Render gesetzte RENDER_EXTERNAL_URL, sonst `ersatz`
+    (z. B. die Adresse der aktuellen Anfrage). Leer, wenn nichts davon bekannt ist."""
+    for wert in (PORTAL_BASE_URL, os.getenv("RENDER_EXTERNAL_URL", ""), ersatz):
+        wert = (wert or "").strip().rstrip("/")
+        if wert:
+            if not wert.lower().startswith(("http://", "https://")):
+                wert = "https://" + wert
+            return wert
+    return ""
+
+
+def portal_link(token: str, ersatz: str = "") -> str:
+    return f"{basis_url(ersatz)}/portal/{token}"
 
 
 def zugang_aus_token(token: str) -> dict | None:
@@ -215,12 +232,15 @@ def _portal_mail_text(reise_code: str, klarname: str, reise_titel: str, abreise,
 
 
 def portal_mail_senden(reise_code: str, kuerzel: str, klarname: str, email: str,
-                        reise_titel: str, abreise, rueckkehr) -> dict:
+                        reise_titel: str, abreise, rueckkehr, basis: str = "") -> dict:
     if not email:
         return {"fehler": "Keine E-Mail-Adresse hinterlegt"}
     token = zugang_holen_oder_erstellen(reise_code, kuerzel)
-    link = portal_link(token)
+    schon_gesendet = bool((zugaenge_der_reise(reise_code).get(kuerzel) or {}).get("email_gesendet_am"))
+    link = portal_link(token, basis)
     betreff, text = _portal_mail_text(reise_code, klarname, reise_titel, abreise, rueckkehr, link)
+    if schon_gesendet:
+        betreff = "Erneut: " + betreff                       # erneut gesendete Mail soll nicht wie ein Doppeltes aussehen
     result = sende_mail(email, betreff, text)
     if result.get("ok"):
         P = ph()
@@ -239,23 +259,28 @@ def cron_portal_mails() -> dict:
     """
     Für alle Reisen, deren Abreise in genau PORTAL_TAGE_VORHER Tagen liegt:
     an alle zugeordneten Reisenden ohne bisherigen Mailversand den Portal-Link schicken.
+    Bestandsreisen (angelegt vor PORTAL_AUTOMATIK_AB) werden übersprungen.
     Für einen täglichen externen Cron-Aufruf gedacht (z.B. Render Cron Job oder
     ein kostenloser externer Pinger auf /cron/portal-mails?key=...).
     """
     ziel_datum = (date.today() + timedelta(days=PORTAL_TAGE_VORHER)).isoformat()
     P = ph()
     db = get_db(); cur = db.cursor()
-    cur.execute(f"SELECT code, titel, abreise, rueckkehr FROM reisen WHERE abreise={P}", (ziel_datum,))
+    cur.execute(f"SELECT code, titel, abreise, rueckkehr, erstellt FROM reisen WHERE abreise={P}", (ziel_datum,))
     reisen = cur.fetchall()
     cur.close(); db.close()
 
-    gesendet = 0; fehler = []
+    gesendet = 0; bestand = 0; fehler = []
     with smtp_sitzung():                                     # alle Portal-Mails über eine Mail-Verbindung
         for r in reisen:
             code = r[0] if isinstance(r, tuple) else r["code"]
             titel = r[1] if isinstance(r, tuple) else r["titel"]
             abreise = r[2] if isinstance(r, tuple) else r["abreise"]
             rueckkehr = r[3] if isinstance(r, tuple) else r["rueckkehr"]
+            erstellt = r[4] if isinstance(r, tuple) else r["erstellt"]
+            if not erstellt or str(erstellt)[:10] < PORTAL_AUTOMATIK_AB:
+                bestand += 1                                 # Bestandsreise: kein automatischer Versand
+                continue
 
             bereits = zugaenge_der_reise(code)
             for ma in reisende_der_reise(code):
@@ -271,4 +296,4 @@ def cron_portal_mails() -> dict:
                 else:
                     fehler.append(f"{code}/{kuerzel}: {result.get('fehler')}")
 
-    return {"ziel_datum": ziel_datum, "gesendet": gesendet, "fehler": fehler}
+    return {"ziel_datum": ziel_datum, "gesendet": gesendet, "bestandsreisen_uebersprungen": bestand, "fehler": fehler}

@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.24.1"
+DOKU_GEPRUEFT_FUER = "3.24.3"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -42,8 +42,10 @@ UMGEBUNG = [
      "Geheimer Schlüssel für die Anmeldung (Login-Cookie). Lang und zufällig wählen. Ohne ihn gilt ein unsicherer Standardwert.", True),
     ("CRON_SECRET", "Grundbetrieb", "ja", "",
      "Passwort für die automatischen Aufgaben (Adressen /cron/…?key=…). Ohne ihn lehnen alle Cron-Adressen ab.", True),
-    ("PORTAL_BASE_URL", "Grundbetrieb", "ja", "",
-     "Öffentliche Adresse der App (z. B. https://reisekosten.onrender.com), ohne Schrägstrich am Ende. Daraus werden die Portal-Links in den Mails gebaut.", False),
+    ("PORTAL_BASE_URL", "Grundbetrieb", "nein", "",
+     "Öffentliche Adresse der App (z. B. https://reisekosten.onrender.com). Daraus werden die Portal-Links gebaut. Fehlt sie, nimmt die App die von Render gesetzte Adresse. Bei eigener Domain hier eintragen.", False),
+    ("RENDER_EXTERNAL_URL", "Grundbetrieb", "nein", "",
+     "Wird von Render automatisch gesetzt (Adresse des Dienstes) und dient als Ersatz für PORTAL_BASE_URL. Nicht selbst eintragen.", False),
     ("OPENAI_API_KEY", "KI-Belegauswertung", "ja", "",
      "Zugangsschlüssel zu OpenAI. Ohne ihn werden Belege nicht ausgelesen.", True),
     ("OPENAI_MODEL", "KI-Belegauswertung", "nein", "gpt-4o",
@@ -107,7 +109,7 @@ CRON = [
     ("/cron/flug-alerts?key=…", "jede Minute",
      "Prüft Flüge und Züge auf Verspätung (feste Prüfzeitpunkte) und gleicht die Outlook-Einladungen ab. Die feinste Stufe (15 Minuten vor Abflug) greift nur bei minütlichem Aufruf."),
     ("/cron/portal-mails?key=…", "einmal täglich",
-     "Schickt den Portal-Link an alle Reisenden, deren Reise in PORTAL_TAGE_VORHER Tagen beginnt und die noch keinen Link bekommen haben."),
+     "Schickt den Portal-Link an alle Reisenden, deren Reise in PORTAL_TAGE_VORHER Tagen beginnt und die noch keinen Link bekommen haben. Bestandsreisen (angelegt vor dem 16.10.2026) werden übersprungen."),
     ("/cron/backup?key=…", "einmal täglich (nachts)",
      "Sichert alle Tabellen komprimiert in den S3-Speicher. Die letzten 30 Sicherungen bleiben erhalten."),
     ("/cron/kalender?key=…", "optional",
@@ -420,7 +422,10 @@ KAPITEL = [
         ]),
         ("p", "**📧 Link senden** verschickt die Mail sofort. Der Knopf ist gesperrt, solange keine E-Mail-Adresse 1 hinterlegt ist."),
         ("p", "**Automatisch:** Der tägliche Aufruf von `/cron/portal-mails` verschickt den Link [[portal_tage]] Tage vor der Abreise an alle Reisenden, "
-              "die ihn noch nicht bekommen haben (Teil C, „Automatische Aufgaben“). Die Links werden mit `PORTAL_BASE_URL` gebaut."),
+              "die ihn noch nicht bekommen haben (Teil C, „Automatische Aufgaben“). Das gilt nur für Reisen, die **ab dem 16.10.2026** angelegt wurden. "
+              "**Bestandsreisen** (früher angelegt) bekommen keine automatische Mail; dort bleibt **📧 Link senden** von Hand. "
+              "Der Link beginnt immer mit `https://`: Er wird aus `PORTAL_BASE_URL` gebaut, sonst aus der von Render gesetzten Adresse."),
+        ("p", "**Erneut senden** verschickt dieselbe Mail noch einmal, der Betreff beginnt dann mit „Erneut:“."),
     ]},
     {"id": "b-eingang", "teil": "B", "titel": "Belege hereinbekommen", "bloecke": [
         ("p", "Belege kommen auf drei Wegen in die App. Jeder Beleg wird ausgelesen: Text lesen, Namen und Mailadressen der Mitarbeiter unkenntlich machen "
@@ -613,8 +618,14 @@ KAPITEL = [
             "**🌍 Verpflegungsmehraufwand:** Datum, Land, Satz, Abzüge, Netto je Tag (plus Trennungspauschale).",
             "**🧾 Belege (Rechnungen & Quittungen):** Datum, Art, Anbieter, Rechnungsnr., Betrag, MwSt, Hinweis, Final (Euro-Betrag bestätigt), Geprüft, Beleg.",
             "**⏱ Reise-/Arbeitszeiten** und **🚗 Gefahrene Kilometer** aus den Eingaben der Reisenden im Portal.",
+            "**✈ Geflogene Flugsegmente:** Summe, Liste (Abflug, Reisender, Flug, Strecke) und Aufteilung je Reisendem – auch im PDF.",
             "Gelbe/rote Hinweise zeigen, was noch offen ist (z. B. ungeprüfte Belege, fehlende Kurse).",
         ]),
+        ("p", "**Was als Flugsegment zählt:** Jede Teilstrecke eines Flugbelegs. **Nicht gezählt** werden Zugfahrten – auch Rail&Fly und Lufthansa Express Rail, die eine LH-Nummer tragen. "
+              "Ein Segment gilt als Zug, wenn die Gesellschaft Bahn/Rail/ICE o. ä. nennt, der Ort ein Bahnhof ist (z. B. „Köln Hbf“) oder der Code ein Bahnhofs-Code ist (z. B. QKL, ZWS, QDU). "
+              "Stornierte Flüge (Status aus der Flugüberwachung) zählen ebenfalls nicht. Unter der Liste steht, wie viele Zugfahrten und stornierte Flüge nicht gezählt wurden."),
+        ("p", "Fehlt bei einem Flug ein Flughafen-Code, wird er mitgezählt und mit „⚠ Flughafencode fehlt – bitte prüfen“ markiert. "
+              "Stehen dieselben Flüge in zwei Belegen, entfernt die App sie **nicht** selbst: Ein roter Hinweis führt zu **Überschneidungen klären** (siehe Reiseplan), erst danach stimmt die Summe."),
         ("p", "**PDF** erzeugt die Reisekostenabrechnung. **📤 An Habel** führt zur Übergabe."),
     ]},
     {"id": "b-habel", "teil": "B", "titel": "Übergabe an Habel (DMS)", "bloecke": [
@@ -730,6 +741,8 @@ KAPITEL = [
             ["Beleg: „Fehlende Pflichtfelder“", "Auf der Beleg-Seite „✏ Daten nachtragen“."],
             ["Beleg wird nicht ausgelesen", "OPENAI_API_KEY prüfen; `/test-openai` aufrufen."],
             ["Portal-Link „ungültig“", "Kürzel wurde geändert. Link auf der Reise-Seite neu senden."],
+            ["Portal-Link beginnt nicht mit https://", "Weder PORTAL_BASE_URL noch die Render-Adresse sind bekannt. PORTAL_BASE_URL in Render eintragen (z. B. https://reisekosten.onrender.com)."],
+            ["Mail „gesendet“, kommt aber nicht an", "Spam-/Junk-Ordner und Quarantäne des Empfängers prüfen. Jede Mail trägt Datum und eine eindeutige Message-ID. Postausgang mit der Mail-Diagnose prüfen."],
             ["„Link senden“ gesperrt", "Beim Mitarbeiter fehlt E-Mail-Adresse 1."],
             ["Outlook-Einladung fehlt", "Haken im Profil? E-Mail-Adresse 1? Termin schon vorbei? Mail-Diagnose starten."],
             ["„An Habel“ gesperrt", "Ein Beleg ist nicht geprüft oder das Original fehlt. DMS_EMAIL_TO gesetzt?"],
