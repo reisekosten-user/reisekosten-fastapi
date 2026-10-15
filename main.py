@@ -62,6 +62,9 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.23.1", "zeit": "2026-10-15 14:35", "aenderungen": [
+        "Mailversand: Fehlt eine Einstellung, nennt die Meldung jetzt genau, welche (SMTP_HOST, SMTP_USER/IMAP_USER, SMTP_PASS/IMAP_PASS, bei Habel auch DMS_EMAIL_TO). Vorher stand nur „SMTP nicht konfiguriert“.",
+        "Gilt für Outlook-Einladungen, Portal-Mails, Testversand und die Habel-Übergabe."]},
     {"version": "3.23", "zeit": "2026-10-14 16:20", "aenderungen": [
         "Neu: Seite „Testversand“ je Reise (Knopf „🧪 Test“ auf der Reise-Seite). Sie nutzt die vorhandenen Reisen und Belege aus dem IMAP-Bestand und schickt alles nur an eine Testadresse (vorausgefüllt mit Ihrer eigenen).",
         "Outlook-Test: alle Flüge, Züge und Termine der Reise als Test-Einladung – unabhängig vom Haken im Profil. Portal-Test: die Portal-Mail jedes Reisenden mit dessen echtem Link.",

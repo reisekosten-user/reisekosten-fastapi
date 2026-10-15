@@ -39,6 +39,18 @@ def _kalender_nachricht(text: str, ics: str, methode: str) -> MIMEMultipart:
     return msg
 
 
+def smtp_fehlende() -> list:
+    """Namen der Einstellungen (Render → Environment), die für den Mailversand noch fehlen."""
+    fehlt = []
+    if not SMTP_HOST:
+        fehlt.append("SMTP_HOST")
+    if not SMTP_USER:
+        fehlt.append("SMTP_USER (oder ersatzweise IMAP_USER)")
+    if not SMTP_PASS:
+        fehlt.append("SMTP_PASS (oder ersatzweise IMAP_PASS)")
+    return fehlt
+
+
 def sende_mail(empfaenger: str, betreff: str, text: str,
                 anhang_bytes: bytes | None = None, anhang_name: str | None = None,
                 anhaenge: list | None = None,
@@ -50,8 +62,9 @@ def sende_mail(empfaenger: str, betreff: str, text: str,
     ics: iCalendar-Text -> Mail wird als Kalendereinladung gesendet (ics_methode: REQUEST oder CANCEL).
     Benötigt SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS als Umgebungsvariablen.
     """
-    if not (SMTP_HOST and SMTP_USER and SMTP_PASS):
-        return {"fehler": "SMTP nicht konfiguriert (SMTP_HOST/USER/PASS fehlen)"}
+    fehlt = smtp_fehlende()
+    if fehlt:
+        return {"fehler": "SMTP nicht konfiguriert – es fehlt: " + ", ".join(fehlt)}
     try:
         alle_anhaenge = list(anhaenge or [])
         if anhang_bytes is not None:
@@ -95,7 +108,8 @@ def sende_dms_mail(betreff: str, text: str, anhang_bytes: bytes, anhang_name: st
                     weitere_anhaenge: list | None = None) -> dict:
     """Verschickt einen (oder mehrere verknüpfte) Beleg(e) per E-Mail an Habel (DMS_EMAIL_TO)."""
     if not dms_konfiguriert():
-        return {"fehler": "DMS-Mailversand nicht konfiguriert (SMTP_HOST/USER/PASS/DMS_EMAIL_TO fehlen)"}
+        fehlt = smtp_fehlende() + ([] if DMS_EMAIL_TO else ["DMS_EMAIL_TO"])
+        return {"fehler": "DMS-Mailversand nicht konfiguriert – es fehlt: " + ", ".join(fehlt)}
     anhaenge = [(anhang_bytes, anhang_name)] + list(weitere_anhaenge or [])
     return sende_mail(DMS_EMAIL_TO, betreff, text, anhaenge=anhaenge)
 
