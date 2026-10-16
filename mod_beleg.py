@@ -66,6 +66,7 @@ S3_SECRET_KEY= os.getenv("S3_SECRET_KEY", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 
 from mod_db import get_db, ph, is_postgres, fmt_date
+from mod_belegdeckung import auto_verknuepfen
 from mod_anon import anonymisieren
 from mod_geo import adresse_geokodieren
 from mod_vma import IATA_KOORDINATEN
@@ -999,6 +1000,54 @@ def _wert_gleich(feld: str, a, b) -> bool:
     return sa == sb
 
 
+def _dup_zeilen(zeilen) -> list:
+    """DB-Zeilen (id, ki_json, belegart, rechnungsnummer, betrag_brutto) als dicts."""
+    namen = ("id", "ki_json", "belegart", "rechnungsnummer", "betrag_brutto")
+    return [{n: (z[n] if hasattr(z, "keys") else z[i]) for i, n in enumerate(namen)} for z in zeilen]
+
+
+def _beleg_klasse(art) -> str:
+    a = (art or "").lower()
+    if "buchungsbest" in a:
+        return "buchung"
+    if "aenderung" in a or "änderung" in a:
+        return "aenderung"
+    return "beleg"
+
+
+def _gleiche_beleg_klasse(art_alt, art_neu) -> bool:
+    """Buchungsbestätigung und Rechnung/Quittung sind verschiedene Belegklassen. Änderungs-Dokumente
+    (z. B. Flugänderung) passen zu jeder Klasse."""
+    k1, k2 = _beleg_klasse(art_alt), _beleg_klasse(art_neu)
+    return k1 == k2 or "aenderung" in (k1, k2)
+
+
+def _ist_derselbe_beleg(alt: dict, ki: dict) -> bool:
+    """
+    Gleicher Buchungscode/gleiche Nummer + gleicher Anbieter: ist das wirklich derselbe Beleg
+    (Duplikat oder Änderung) – oder ein anderer Beleg derselben Buchung?
+    - Buchungsbestätigung und Rechnung/Quittung sind verschiedene Belege (Buchung x, Rechnungen x1 + x2).
+    - Zwei Rechnungen sind nur dann derselbe Beleg, wenn die Rechnungsnummer übereinstimmt
+      (fehlt sie, entscheidet der Betrag; fehlt auch der, gilt vorsichtig "derselbe").
+    - Ein Änderungs-Dokument (z. B. Flugänderung) gehört immer zum vorhandenen Beleg.
+    """
+    k_alt, k_neu = _beleg_klasse(alt.get("belegart")), _beleg_klasse(ki.get("belegart"))
+    if "aenderung" in (k_alt, k_neu):
+        return True
+    if k_alt != k_neu:
+        return False
+    if k_neu == "buchung":
+        return True
+    rn_alt = re.sub(r"\s+", "", str(alt.get("rechnungsnummer") or "")).lower()
+    rn_neu = re.sub(r"\s+", "", str(ki.get("rechnungsnummer") or "")).lower()
+    if rn_alt and rn_neu:
+        return rn_alt == rn_neu
+    try:
+        return abs(float(alt.get("betrag_brutto")) - float(ki.get("betrag_brutto"))) < 0.005
+    except (TypeError, ValueError):
+        return True
+
+
 def _seg_titel(s: dict) -> str:
     return (f'{s.get("transport_nummer") or s.get("transport_name") or "Segment"} '
             f'{s.get("von_ort") or "?"}→{s.get("nach_ort") or "?"}').strip()
@@ -1143,39 +1192,44 @@ async def beleg_verarbeiten(
     # werden. Deshalb Inhalt vergleichen: identisch = echtes Duplikat (z.B.
     # mehrfach weitergeleitet), abweichend = Änderungs-Beleg, der die
     # Unterschiede zur manuellen Klärung bereithält (siehe aenderung_*-Spalten).
+    # WICHTIG: Gleicher Code heißt auch NICHT "gleicher Beleg", wenn es eine andere Art von Beleg ist:
+    # Buchungsbestätigung (Betrag x) und die dazugehörigen Rechnungen (x1 + x2 = x) tragen oft denselben
+    # Buchungscode. Die sind getrennte Belege und werden stattdessen verknüpft (mod_belegdeckung).
     aenderung_info = None
     dup_code = ki_result.get("buchungscode") or ki_result.get("rechnungsnummer")
     if dup_code and ki_result.get("anbieter"):
         db_dup = get_db(); cur_dup = db_dup.cursor(); P_dup = ph()
         try:
-            cur_dup.execute(f"""SELECT id, ki_json FROM belege
+            cur_dup.execute(f"""SELECT id, ki_json, belegart, rechnungsnummer, betrag_brutto FROM belege
                 WHERE (buchungscode={P_dup} OR rechnungsnummer={P_dup}) AND anbieter={P_dup}
                 AND aenderung_status IS NULL
-                ORDER BY id LIMIT 1""", (dup_code, dup_code, ki_result.get("anbieter")))
+                ORDER BY id LIMIT 30""", (dup_code, dup_code, ki_result.get("anbieter")))
         except Exception:
             # Spalte aenderung_status fehlt noch (/init nicht gelaufen) -> altes Verhalten
             db_dup.rollback()
-            cur_dup.execute(f"""SELECT id, ki_json FROM belege
+            cur_dup.execute(f"""SELECT id, ki_json, belegart, rechnungsnummer, betrag_brutto FROM belege
                 WHERE (buchungscode={P_dup} OR rechnungsnummer={P_dup}) AND anbieter={P_dup}
-                ORDER BY id LIMIT 1""", (dup_code, dup_code, ki_result.get("anbieter")))
-        vorhanden = cur_dup.fetchone()
+                ORDER BY id LIMIT 30""", (dup_code, dup_code, ki_result.get("anbieter")))
+        treffer = _dup_zeilen(cur_dup.fetchall())
         # Rückfall: Die Anbieter-Schreibweise kann zwischen Original und Änderung
         # abweichen ("Lufthansa" / "Deutsche Lufthansa AG"). Bei Flug/Bahn ist der
         # Buchungscode innerhalb DERSELBEN Reise eindeutig genug.
-        if (not vorhanden and reise_code and ki_result.get("buchungscode")
+        if (not any(_ist_derselbe_beleg(t, ki_result) for t in treffer)
+                and reise_code and ki_result.get("buchungscode")
                 and ki_result.get("transportart") in ("Flug", "Bahn")):
             try:
-                cur_dup.execute(f"""SELECT id, ki_json FROM belege
+                cur_dup.execute(f"""SELECT id, ki_json, belegart, rechnungsnummer, betrag_brutto FROM belege
                     WHERE buchungscode={P_dup} AND reise_code={P_dup} AND transportart={P_dup}
-                    AND aenderung_status IS NULL ORDER BY id LIMIT 1""",
+                    AND aenderung_status IS NULL ORDER BY id LIMIT 30""",
                     (ki_result["buchungscode"], reise_code, ki_result["transportart"]))
-                vorhanden = cur_dup.fetchone()
+                treffer = _dup_zeilen(cur_dup.fetchall())
             except Exception:
-                db_dup.rollback(); vorhanden = None
+                db_dup.rollback(); treffer = []
         cur_dup.close(); db_dup.close()
+        vorhanden = next((t for t in treffer if _ist_derselbe_beleg(t, ki_result)), None)
         if vorhanden:
-            bestehende_id = vorhanden[0] if isinstance(vorhanden, tuple) else vorhanden["id"]
-            alt_ki_str = vorhanden[1] if isinstance(vorhanden, tuple) else vorhanden["ki_json"]
+            bestehende_id = vorhanden["id"]
+            alt_ki_str = vorhanden["ki_json"]
             try: alt_ki = json.loads(alt_ki_str or "{}")
             except Exception: alt_ki = {}
             # Anderer Reisender (z.B. zwei Kollegen, jeder mit eigenem Ticket auf
@@ -1208,7 +1262,7 @@ async def beleg_verarbeiten(
         db0 = get_db(); cur0 = db0.cursor()
         try:
             if rechnr_chk:
-                cur0.execute(f"SELECT id FROM belege WHERE rechnungsnummer={P0} AND anbieter={P0} AND betrag_brutto={P0}",
+                cur0.execute(f"SELECT id, belegart FROM belege WHERE rechnungsnummer={P0} AND anbieter={P0} AND betrag_brutto={P0}",
                              (rechnr_chk, anbieter_chk, float(betrag_chk)))
             else:
                 bd_parsed = None
@@ -1216,9 +1270,13 @@ async def beleg_verarbeiten(
                     from datetime import datetime as _dtt2
                     bd_parsed = _dtt2.strptime(str(beleg_dat_chk).strip(), "%d.%m.%Y").date()
                 except: pass
-                cur0.execute(f"SELECT id FROM belege WHERE anbieter={P0} AND betrag_brutto={P0} AND belegdatum={P0}",
+                cur0.execute(f"SELECT id, belegart FROM belege WHERE anbieter={P0} AND betrag_brutto={P0} AND belegdatum={P0}",
                              (anbieter_chk, float(betrag_chk), bd_parsed))
-            dupe_row = cur0.fetchone()
+            # Buchungsbestätigung und Rechnung über denselben Betrag sind KEIN Duplikat, sondern zwei Belege
+            # derselben Buchung (werden verknüpft) – nur gleichartige Belege kommen als Duplikat in Frage.
+            dupe_row = next((x0 for x0 in cur0.fetchall()
+                             if _gleiche_beleg_klasse(x0[1] if isinstance(x0, tuple) else x0["belegart"],
+                                                      ki_result.get("belegart"))), None)
         except Exception:
             dupe_row = None
         cur0.close(); db0.close()
@@ -1391,8 +1449,19 @@ async def beleg_verarbeiten(
              json.dumps(ki_mod, ensure_ascii=False), beleg_id))
 
     db.commit(); cur.close(); db.close()
+
+    # Gleicher Buchungscode in derselben Reise: Buchungsbestätigung und Rechnung/Quittung
+    # automatisch zu einer Gruppe verknüpfen (Änderungs-Belege bleiben außen vor).
+    verknuepft = 0
+    if not aenderung_info:
+        try:
+            verknuepft = auto_verknuepfen(beleg_id)
+        except Exception:
+            verknuepft = 0
+        if verknuepft:
+            zusammenfassung += f" · automatisch mit {verknuepft} Beleg(en) derselben Buchung verknüpft"
     return {"beleg_id": beleg_id, "zusammenfassung": zusammenfassung,
-            "ki": ki_result, "pflichtfelder_ok": pflicht_ok,
+            "ki": ki_result, "pflichtfelder_ok": pflicht_ok, "verknuepft": verknuepft,
             "aenderung_zu": aenderung_info["zu"] if aenderung_info else None}
 
 
