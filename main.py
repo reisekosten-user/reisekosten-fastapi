@@ -64,6 +64,9 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.27", "zeit": "2026-10-16 18:54", "aenderungen": [
+        "Buchung mit Teilrechnungen, von denen eine keinen erkannten Betrag hat (Fall IndiGo: Buchung 19725 INR, Rechnung 9606 INR, Rechnung ohne Betrag): Der Beleg ohne Betrag wird jetzt namentlich genannt (Beleg-Seite, Abschluss, PDF, Hinweise). Auf der Beleg-Seite steht direkt ein Feld „Betrag speichern“ mit dem Rest der Buchung als Vorschlag (10119.00 INR) und ein Knopf „Beleg neu auslesen“. Bei Fremdwährung wird der Kurs vom Schwester-Beleg übernommen.",
+        "Abrechnung: Der echte Euro-Betrag und das Auslandsentgelt aus der Kreditkartenabrechnung liegen meist an der Buchung, nicht an den Teilrechnungen. Bisher gingen sie verloren, sobald die Rechnungen die Buchung belegten. Jetzt bekommt jede Rechnung ohne eigenen bestätigten Euro-Betrag ihren Anteil (Rechnungsbetrag / Buchungsbetrag), auch der noch fehlende Rest. Abschluss, PDF und Kosten-Kachel summieren damit genau den abgerechneten Betrag; in der Tabelle steht „Anteil der Buchung“."]},
     {"version": "3.26.1", "zeit": "2026-10-16 08:50", "aenderungen": [
         "Fehler behoben: Die Seite konnte komplett einfrieren („Antwort hat zu lange gedauert“), bis der Dienst neu gestartet wurde. Ursache: Der Mail-Abruf (Knopf und Cron alle 5 Minuten) wartete ohne Zeitlimit auf den Mailserver und hielt dabei die ganze App an.",
         "Der Abruf läuft jetzt im Hintergrund (eigener Thread), die Seite bleibt währenddessen bedienbar. Am Mailserver gilt ein Zeitlimit von 30 Sekunden je Schritt; danach meldet der Abruf einen Fehler (HTTP 500 beim Cron), statt zu hängen."]},
@@ -621,6 +624,22 @@ def gesamtbetrag_berechnen(betrag_brutto, waehrung, betrag_eur_geschaetzt,
     return basis + float(nebenkosten_eur or 0) + float(auslandsentgelt_eur or 0)
 
 
+def beleg_eur_mit_anteil(betrag_brutto, waehrung, betrag_eur_geschaetzt, betrag_eur_final,
+                         nebenkosten_eur, auslandsentgelt_eur, anteil=None) -> float:
+    """
+    Wie gesamtbetrag_berechnen. Hat die Rechnung einen Anteil an einer Buchung (Euro-Betrag und
+    Auslandsentgelt aus der Kreditkartenabrechnung, siehe mod_belegdeckung.anteile_aus_buchung),
+    ersetzen die Anteilswerte den Euro-Betrag und das Entgelt; Nebenkosten der Buchung kommen dazu.
+    """
+    if anteil:
+        betrag_eur_final = anteil["eur_final"]
+        nebenkosten_eur = float(nebenkosten_eur or 0) + anteil["nebenkosten"]
+        if anteil["entgelt"] is not None:
+            auslandsentgelt_eur = anteil["entgelt"]
+    return gesamtbetrag_berechnen(betrag_brutto, waehrung, betrag_eur_geschaetzt, betrag_eur_final,
+                                  nebenkosten_eur, auslandsentgelt_eur)
+
+
 def auslandsentgelt_neu_berechnen(bid: int, db) -> None:
     """
     Berechnet automatisch die Auslandseinsatzentgelt-Gebühr der Kreditkarte
@@ -853,6 +872,35 @@ def _verknuepfung_karte(bid: int, rcode) -> str:
         html += ('<div style="background:#fff7ed;color:#9a3412;border-radius:6px;padding:8px 10px;margin-bottom:10px;'
                  'font-size:12px;font-weight:600">⚠ Jede Buchung braucht eine Rechnung oder Quittung. '
                  'Zu dieser Buchung ist noch keine verknüpft.</div>')
+
+    # 1b) Rechnungen/Quittungen ohne erkannten Betrag: direkt hier eintragen (Vorschlag = Rest der Buchung)
+    ohne_betrag = [b for b in belege if D.ist_deckender_beleg(b.get("belegart")) and not D.hat_betrag(b)
+                   and "aenderung" not in (b.get("belegart") or "").lower()
+                   and "änderung" not in (b.get("belegart") or "").lower()
+                   and (b["id"] == bid or (gid and b.get("beleg_gruppe_id") == gid))]
+    vorschlag_betrag = None
+    if info and len(ohne_betrag) == 1 and info["status"] in ("teilweise", "offen") and info["fehlt"] > 0:
+        vorschlag_betrag = (info["fehlt"], info["waehrung"])
+    for ob in ohne_betrag:
+        wert, w_ob = "", (ob.get("waehrung") or "EUR").upper()
+        erklaerung = 'Bitte den Gesamtbetrag der Rechnung/Quittung eintragen.'
+        if vorschlag_betrag and len(ohne_betrag) == 1:
+            wert, w_ob = f"{vorschlag_betrag[0]:.2f}", vorschlag_betrag[1]
+            erklaerung = (f'Vorschlag: Rest der Buchung ({wert} {e(w_ob)}). '
+                          'Bitte mit dem Betrag auf der Rechnung vergleichen.')
+        html += ('<div style="background:#fff7ed;border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:12px">'
+                 f'<div style="font-weight:600;color:#9a3412"><a href="/beleg/{ob["id"]}" style="color:#9a3412">#{ob["id"]}</a> · '
+                 f'{e(D.art_name(ob.get("belegart")))} · {e(ob.get("anbieter") or "–")} hat keinen Betrag.</div>'
+                 f'<div style="{leise};margin:2px 0 6px">{erklaerung}</div>'
+                 f'<form method="post" action="/beleg/{ob["id"]}/betrag/bearbeiten" '
+                 'style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0">'
+                 f'<input type="hidden" name="zurueck" value="/beleg/{bid}">'
+                 f'<input type="number" step="0.01" name="betrag_brutto" value="{wert}" placeholder="Betrag" '
+                 'style="width:120px" required>'
+                 f'<input type="text" name="waehrung" value="{e(w_ob)}" maxlength="3" style="width:56px">'
+                 '<button type="submit" class="btn btn-primary btn-sm">Betrag speichern</button></form>'
+                 f'<form method="post" action="/beleg/{ob["id"]}/neu-analysieren" style="margin:6px 0 0">'
+                 '<button type="submit" class="btn btn-secondary btn-sm">Beleg neu auslesen</button></form></div>')
 
     # 2) Gruppenmitglieder
     mitglieder = [b for b in belege if gid and b.get("beleg_gruppe_id") == gid and b["id"] != bid]
@@ -1705,6 +1753,8 @@ async def beleg_betrag_bearbeiten(bid: int, request: Request):
     form = await request.form()
     betrag_raw = (form.get("betrag_brutto") or "").strip().replace(",", ".")
     waehrung = (form.get("waehrung") or "EUR").strip().upper()[:3] or "EUR"
+    zurueck = (form.get("zurueck") or "").strip()
+    ziel = zurueck if re.fullmatch(r"/beleg/\d+", zurueck) else f"/beleg/{bid}"   # nur interne Beleg-Seiten
     betrag = None
     if betrag_raw:
         try: betrag = float(betrag_raw)
@@ -1720,11 +1770,27 @@ async def beleg_betrag_bearbeiten(bid: int, request: Request):
             cur.execute(f"UPDATE belege SET betrag_brutto={P}, waehrung={P}, "
                         f"pflichtfelder_ok=TRUE, fehlende_felder='[]', status='ok' WHERE id={P}",
                         (betrag, waehrung, bid))
+            # Fremdwährung ohne Euro-Schätzung: Kurs vom Beleg derselben Buchungsgruppe übernehmen
+            # (z. B. Teilrechnung 2 von 2), damit der Beleg nicht mit 0 € in der Summe steht
+            if waehrung != "EUR" and betrag > 0:
+                cur.execute(f"SELECT betrag_eur FROM belege WHERE id={P}", (bid,))
+                r_eur = cur.fetchone()
+                if r_eur and (r_eur[0] if not hasattr(r_eur, "keys") else r_eur["betrag_eur"]) is None:
+                    cur.execute(f"""SELECT betrag_eur, betrag_brutto, kurs_eur FROM belege
+                        WHERE beleg_gruppe_id=(SELECT beleg_gruppe_id FROM belege WHERE id={P})
+                        AND id!={P} AND waehrung={P} AND betrag_brutto>0 AND betrag_eur IS NOT NULL
+                        ORDER BY (kurs_eur IS NULL), id LIMIT 1""", (bid, bid, waehrung))
+                    sib = cur.fetchone()
+                    if sib:
+                        sg = (lambda k, i: sib[k] if hasattr(sib, "keys") else sib[i])
+                        cur.execute(f"UPDATE belege SET betrag_eur={P}, kurs_eur={P} WHERE id={P}",
+                                    (round(betrag * float(sg("betrag_eur", 0)) / float(sg("betrag_brutto", 1)), 2),
+                                     sg("kurs_eur", 2), bid))
         else:
             cur.execute(f"UPDATE belege SET betrag_brutto={P}, waehrung={P} WHERE id={P}",
                         (betrag, waehrung, bid))
         db.commit(); cur.close(); db.close()
-        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+        return RedirectResponse(ziel, status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
 
@@ -3993,6 +4059,8 @@ def reise_abschluss(code: str):
         deck_belege = [{"id": g(b,"id",0), "belegart": g(b,"belegart",1), "beleg_gruppe_id": g(b,"beleg_gruppe_id",18),
                         "betrag_brutto": g(b,"betrag_brutto",7), "waehrung": g(b,"waehrung",10),
                         "betrag_eur": g(b,"betrag_eur",12), "betrag_eur_final": g(b,"betrag_eur_final",19),
+                        "nebenkosten_eur": g(b,"nebenkosten_eur",20),
+                        "kreditkarte_auslandsentgelt_eur": g(b,"kreditkarte_auslandsentgelt_eur",23),
                         "anbieter": g(b,"anbieter",4), "transportart": g(b,"transportart",2)} for b in belege]
         deck_by_id = {d["id"]: d for d in deck_belege}
         kat = deckung_mod.kategorisieren(deck_belege)
@@ -4014,11 +4082,12 @@ def reise_abschluss(code: str):
         rest_zeilen = kat["rest"]
         luecken_liste = deckung_mod.luecken(deck_belege, kat)
 
+        # Rechnungen einer Buchung bekommen ihren Anteil am echten Euro-Betrag/Auslandsentgelt der Buchung
         kosten_eur = sum(
-            gesamtbetrag_berechnen(g(b,"betrag_brutto",7), g(b,"waehrung",10), g(b,"betrag_eur",12),
-                                    g(b,"betrag_eur_final",19), g(b,"nebenkosten_eur",20),
-                                    g(b,"kreditkarte_auslandsentgelt_eur",23))
-            for b in (rechnungen + vorlaeufig)) + sum((r["fehlt_eur"] or 0.0) for r in rest_zeilen)
+            beleg_eur_mit_anteil(g(b,"betrag_brutto",7), g(b,"waehrung",10), g(b,"betrag_eur",12),
+                                 g(b,"betrag_eur_final",19), g(b,"nebenkosten_eur",20),
+                                 g(b,"kreditkarte_auslandsentgelt_eur",23), kat["anteile"].get(g(b,"id",0)))
+            for b in (rechnungen + vorlaeufig)) + sum(((r["fehlt_eur"] or 0.0) + r["gebuehr_eur"]) for r in rest_zeilen)
 
         # Wochentage
         wt = ["Mo","Di","Mi","Do","Fr","Sa","So"]
@@ -4085,6 +4154,12 @@ def reise_abschluss(code: str):
             betrag_eur_final_b=g(b,"betrag_eur_final",19); nebenkosten_b=g(b,"nebenkosten_eur",20)
             nebenkosten_besch_b=g(b,"nebenkosten_beschreibung",21)
             auslandsentgelt_b=g(b,"kreditkarte_auslandsentgelt_eur",23)
+            an_b = kat["anteile"].get(bid2)    # Anteil an der Buchung (echter Euro-Betrag, Entgelt)
+            if an_b:
+                betrag_eur_final_b = an_b["eur_final"]
+                nebenkosten_b = float(nebenkosten_b or 0) + an_b["nebenkosten"]
+                if an_b["entgelt"] is not None:
+                    auslandsentgelt_b = an_b["entgelt"]
 
             typ_label = typ + (f" – {freitext}" if freitext else "")
             if ist_vorlaeufig:
@@ -4107,7 +4182,7 @@ def reise_abschluss(code: str):
             else:
                 bet_s = f"{float(brutto):.2f} {waehrung}" if brutto else "–"
                 if betrag_eur_final_b:
-                    bet_s += f" = {float(betrag_eur_final_b):.2f} EUR"
+                    bet_s += f" = {float(betrag_eur_final_b):.2f} EUR" + (" (Anteil der Buchung)" if an_b else "")
                 elif betrag_eur_b:
                     bet_s += f" ≈ {float(betrag_eur_b):.2f} EUR (Kurs: {kurs})"
                 else:
@@ -4167,6 +4242,8 @@ def reise_abschluss(code: str):
             bu_row = next(x for x in belege if g(x,"id",0) == bu_id)
             typ_r = bu.get("transportart") or "Sonstiges"
             fe = r_rest["fehlt_eur"]
+            if fe is not None:
+                fe += r_rest["gebuehr_eur"]      # inkl. Anteil am Auslandsentgelt der Buchung
             summen[typ_r] = summen.get(typ_r, 0) + (fe or 0.0)
             w_r = r_rest["waehrung"]
             bet_r = f"{r_rest['fehlt']:.2f} {w_r}"
@@ -4528,6 +4605,8 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
         deck_belege = [{"id": g(b,"id",0), "belegart": g(b,"belegart",1), "beleg_gruppe_id": g(b,"beleg_gruppe_id",7),
                         "betrag_brutto": g(b,"betrag_brutto",4), "waehrung": g(b,"waehrung",5),
                         "betrag_eur": g(b,"betrag_eur",6), "betrag_eur_final": g(b,"betrag_eur_final",10),
+                        "nebenkosten_eur": g(b,"nebenkosten_eur",11),
+                        "kreditkarte_auslandsentgelt_eur": g(b,"kreditkarte_auslandsentgelt_eur",15),
                         "anbieter": g(b,"anbieter",2)} for b in belege]
         deck_by_id = {d["id"]: d for d in deck_belege}
         kat = deckung_mod.kategorisieren(deck_belege)
@@ -4537,10 +4616,10 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
         luecken_liste = deckung_mod.luecken(deck_belege, kat)
 
         kosten_eur = sum(
-            gesamtbetrag_berechnen(g(b,"betrag_brutto",4), g(b,"waehrung",5), g(b,"betrag_eur",6),
-                                    g(b,"betrag_eur_final",10), g(b,"nebenkosten_eur",11),
-                                    g(b,"kreditkarte_auslandsentgelt_eur",15))
-            for b in rechnungen) + sum((r["fehlt_eur"] or 0.0) for r in rest_zeilen)
+            beleg_eur_mit_anteil(g(b,"betrag_brutto",4), g(b,"waehrung",5), g(b,"betrag_eur",6),
+                                 g(b,"betrag_eur_final",10), g(b,"nebenkosten_eur",11),
+                                 g(b,"kreditkarte_auslandsentgelt_eur",15), kat["anteile"].get(g(b,"id",0)))
+            for b in rechnungen) + sum(((r["fehlt_eur"] or 0.0) + r["gebuehr_eur"]) for r in rest_zeilen)
 
         from reportlab.lib.pagesizes import A4
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
@@ -4690,6 +4769,9 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
                     except Exception: bd = None
                 betrag = g(b,"betrag_brutto",4); waehrung = g(b,"waehrung",5) or "EUR"
                 betrag_eur = g(b,"betrag_eur",6); betrag_eur_final = g(b,"betrag_eur_final",10)
+                an_b = kat["anteile"].get(g(b,"id",0))
+                if an_b:
+                    betrag_eur_final = an_b["eur_final"]      # Anteil am echten Euro-Betrag der Buchung
                 mwst_b = g(b,"betrag_mwst",12); land_b = g(b,"land_beleg",13) or ""
                 geprueft_b = bool(g(b,"geprueft",14))
                 bet_txt = f"{float(betrag):.2f} {waehrung}" if betrag else "–"
@@ -4716,7 +4798,7 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
                     except Exception: bd_r = None
                 bet_r = f"{r_rest['fehlt']:.2f} {r_rest['waehrung']}"
                 if r_rest["waehrung"] != "EUR" and r_rest["fehlt_eur"] is not None:
-                    bet_r += f" ({r_rest['fehlt_eur']:.2f} €)"
+                    bet_r += f" ({r_rest['fehlt_eur'] + r_rest['gebuehr_eur']:.2f} €)"
                 kosten_daten.append([bd_r.strftime("%d.%m.%Y") if bd_r else "–",
                                       zelle(f"Rest Buchung #{bu['id']}: {bu.get('anbieter') or '–'}"),
                                       bet_r, "–", "vorl.", "–"])
@@ -7640,15 +7722,17 @@ def reise_detail(code: str, request: Request):
         _kat_tag = deckung_mod.kategorisieren([
             {"id": get(b,"id",0), "belegart": get(b,"belegart",15), "beleg_gruppe_id": get(b,"beleg_gruppe_id",16),
              "betrag_brutto": get(b,"betrag_brutto",4), "waehrung": get(b,"waehrung",5),
-             "betrag_eur": get(b,"betrag_eur",17), "betrag_eur_final": get(b,"betrag_eur_final",18)}
+             "betrag_eur": get(b,"betrag_eur",17), "betrag_eur_final": get(b,"betrag_eur_final",18),
+             "nebenkosten_eur": get(b,"nebenkosten_eur",19),
+             "kreditkarte_auslandsentgelt_eur": get(b,"kreditkarte_auslandsentgelt_eur",20)}
             for b in beleg_rows_tag])
         _zaehlen_tag = set(_kat_tag["final"]) | set(_kat_tag["vorlaeufig"])
         beleg_kosten_gesamt = sum(
-            gesamtbetrag_berechnen(get(b,"betrag_brutto",4), get(b,"waehrung",5), get(b,"betrag_eur",17),
-                                   get(b,"betrag_eur_final",18), get(b,"nebenkosten_eur",19),
-                                   get(b,"kreditkarte_auslandsentgelt_eur",20))
+            beleg_eur_mit_anteil(get(b,"betrag_brutto",4), get(b,"waehrung",5), get(b,"betrag_eur",17),
+                                 get(b,"betrag_eur_final",18), get(b,"nebenkosten_eur",19),
+                                 get(b,"kreditkarte_auslandsentgelt_eur",20), _kat_tag["anteile"].get(get(b,"id",0)))
             for b in beleg_rows_tag if get(b,"id",0) in _zaehlen_tag
-        ) + sum((r["fehlt_eur"] or 0.0) for r in _kat_tag["rest"])
+        ) + sum(((r["fehlt_eur"] or 0.0) + r["gebuehr_eur"]) for r in _kat_tag["rest"])
 
         for b in beleg_rows_tag:
             bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"

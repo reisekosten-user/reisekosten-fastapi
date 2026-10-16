@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.26.1"
+DOKU_GEPRUEFT_FUER = "3.27"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -503,6 +503,9 @@ KAPITEL = [
             "**Von Hand:** Unten in der Karte die gewünschten Belege **ankreuzen** und **+ Ausgewählte verknüpfen** wählen (mehrere auf einmal). "
             "Belege mit gleichem Buchungscode oder Anbieter stehen oben; Buchungen zeigen ihren offenen Rest. Nur Belege derselben Reise sind möglich.",
             "**Lösen:** **Entfernen** neben einem Beleg nimmt ihn aus der Gruppe.",
+            "**Rechnung ohne Betrag:** Wurde bei einer Rechnung kein Betrag erkannt, nennt die Karte den Beleg („Beleg #232 hat keinen Betrag“) und zeigt direkt ein Feld **Betrag speichern**. "
+            "Fehlt genau ein Betrag, ist der **Rest der Buchung** vorausgefüllt (z. B. 19725 − 9606 = 10119 INR). Bitte mit der Rechnung vergleichen. Bei Fremdwährung wird der Kurs vom Schwester-Beleg übernommen. "
+            "**Beleg neu auslesen** startet die KI-Analyse noch einmal.",
         ]),
         ("tab", ["Stand", "Bedeutung", "Kostensumme"], [
             ["✓ vollständig belegt", "Rechnungen decken die Buchung (auf den Cent; bei Fremdwährung 5 % Kursspielraum). Übersteigen sie die Buchung, steht der Mehrbetrag dabei.", "Nur die Rechnungen zählen. Die Buchung zählt nicht doppelt."],
@@ -659,6 +662,10 @@ KAPITEL = [
               "Fehlt ein Teil, steht der **offene Rest** als orange Zeile „Rest der Buchung“ in der Tabelle und ist als „vorläufig“ in der Summe; ohne jede Rechnung zählt die ganze Buchung vorläufig. "
               "Ein Warnkasten nennt jede betroffene Buchung mit dem fehlenden Betrag. Dasselbe steht im PDF (Zeile „Rest Buchung #…“ und Hinweistext). "
               "Die Kachel „Kosten aus Belegen“ auf der Reise-Seite rechnet genauso."),
+        ("p", "**Euro-Betrag bei Buchung mit Teilrechnungen:** Der echte Euro-Betrag und das Auslandsentgelt aus der Kreditkartenabrechnung hängen meist an der Buchung (gleicher Betrag in Fremdwährung). "
+              "Damit nichts verloren geht, bekommt jede Rechnung ohne eigenen bestätigten Euro-Betrag ihren **Anteil** (Rechnungsbetrag geteilt durch Buchungsbetrag), ebenso der noch fehlende Rest. "
+              "In der Tabelle steht dann „= … EUR (Anteil der Buchung)“. Die Summe entspricht damit dem abgerechneten Betrag plus Entgelt. "
+              "Hat eine Rechnung schon einen eigenen bestätigten Euro-Betrag, gilt dieser. Ohne bestätigten Euro-Betrag an der Buchung bleibt es bei der KI-Schätzung."),
         ("p", "**Was als Flugsegment zählt:** Jede Teilstrecke eines Flugbelegs. **Nicht gezählt** werden Zugfahrten – auch Rail&Fly und Lufthansa Express Rail, die eine LH-Nummer tragen. "
               "Ein Segment gilt als Zug, wenn die Gesellschaft Bahn/Rail/ICE o. ä. nennt, der Ort ein Bahnhof ist (z. B. „Köln Hbf“) oder der Code ein Bahnhofs-Code ist (z. B. QKL, ZWS, QDU). "
               "Stornierte Flüge (Status aus der Flugüberwachung) zählen ebenfalls nicht. Unter der Liste steht, wie viele Zugfahrten und stornierte Flüge nicht gezählt wurden."),

@@ -112,6 +112,10 @@ def deckung_berechnen(belege) -> dict:
             "finale_ids": [b["id"] for b in finale],
             "deckende_ids": [b["id"] for b in deckende],
             "deckende_mit_betrag_ids": [b["id"] for b in deckende_mit],
+            # Änderungs-Dokumente (z. B. Flugänderung) haben absichtlich keinen Betrag: nicht anmahnen
+            "ohne_betrag_ids": [b["id"] for b in deckende if not hat_betrag(b)
+                                and "aenderung" not in (b.get("belegart") or "").lower()
+                                and "änderung" not in (b.get("belegart") or "").lower()],
             "soll": 0.0, "ist": 0.0, "waehrung": "EUR",
             "fehlt": 0.0, "fehlt_eur": 0.0, "mehr": 0.0, "status": "keine_buchung",
         }
@@ -157,6 +161,48 @@ def deckung_berechnen(belege) -> dict:
     return ergebnis
 
 
+def anteile_aus_buchung(belege, deckung=None):
+    """
+    Die Buchung (z. B. 19725 INR) trägt oft die echten Euro-Werte aus der Kreditkartenabrechnung
+    (Euro-Betrag, Auslandsentgelt), die Teilrechnungen (9606 + 10119 INR) nicht. Damit beim Wechsel von
+    der Buchung auf die Rechnungen nichts verloren geht, bekommt jede Rechnung ohne eigenen Euro-Betrag
+    ihren Anteil: Rechnungsbetrag / Buchungsbetrag. Gilt nur für Gruppen mit Status vollständig/teilweise,
+    einer einzigen Fremdwährung und einer Buchung mit bestätigtem Euro-Betrag.
+    Ergebnis: (anteile, rest_gebuehr)
+      anteile      {beleg_id: {"eur_final", "entgelt", "nebenkosten"}}; entgelt None = eigenen Wert behalten
+      rest_gebuehr {gruppen_id: Euro}  Gebühren-Anteil des noch nicht belegten Rests (nur bei „teilweise“)
+    """
+    deckung = deckung if deckung is not None else deckung_berechnen(belege)
+    by_id = {b["id"]: b for b in belege}
+    anteile, rest_gebuehr = {}, {}
+    for gid, info in deckung.items():
+        if info["status"] not in ("vollstaendig", "teilweise"):
+            continue
+        buchungen = [by_id[i] for i in info["buchung_mit_betrag_ids"]]
+        rechnungen = [by_id[i] for i in info["deckende_mit_betrag_ids"]]
+        waehrungen = {waehrung_von(b) for b in buchungen + rechnungen}
+        if len(waehrungen) != 1 or "EUR" in waehrungen:
+            continue
+        finale = [_zahl(b.get("betrag_eur_final")) for b in buchungen]
+        soll = sum(float(b["betrag_brutto"]) for b in buchungen)
+        if soll <= 0 or any(f is None for f in finale):
+            continue
+        faktor = sum(finale) / soll
+        entgelte = [_zahl(b.get("kreditkarte_auslandsentgelt_eur")) for b in buchungen]
+        entgelt_f = (sum(x or 0.0 for x in entgelte) / soll) if any(x is not None for x in entgelte) else None
+        neben_f = sum(_zahl(b.get("nebenkosten_eur")) or 0.0 for b in buchungen) / soll
+        for b in rechnungen:
+            if _zahl(b.get("betrag_eur_final")) is not None:
+                continue                      # hat schon einen eigenen, bestätigten Euro-Betrag
+            brutto = float(b["betrag_brutto"])
+            anteile[b["id"]] = {"eur_final": round(brutto * faktor, 2),
+                                "entgelt": None if entgelt_f is None else round(brutto * entgelt_f, 2),
+                                "nebenkosten": round(brutto * neben_f, 2)}
+        if info["status"] == "teilweise":
+            rest_gebuehr[gid] = round(info["fehlt"] * ((entgelt_f or 0.0) + neben_f), 2)
+    return anteile, rest_gebuehr
+
+
 def kategorisieren(belege) -> dict:
     """
     Teilt die Belege einer Reise für die Kostensumme auf:
@@ -165,9 +211,12 @@ def kategorisieren(belege) -> dict:
       ohne_betrag  Buchung ohne Betrag und ohne Rechnung in der Gruppe: fehlt in der Summe
       rest         je Gruppe mit nur teilweiser Deckung der offene Rest (zählt vorläufig mit)
     Buchungen, die vollständig durch Rechnungen belegt sind, tauchen NICHT auf (kein Doppelzählen).
+    anteile      Euro-Anteile der Rechnungen an der Buchung (siehe anteile_aus_buchung)
     """
     deckung = deckung_berechnen(belege)
-    erg = {"deckung": deckung, "final": [], "vorlaeufig": [], "ohne_betrag": [], "rest": []}
+    anteile, rest_gebuehr = anteile_aus_buchung(belege, deckung)
+    erg = {"deckung": deckung, "final": [], "vorlaeufig": [], "ohne_betrag": [], "rest": [],
+           "anteile": anteile}
     rest_gesehen = set()
     for b in belege:
         bid = b["id"]
@@ -183,6 +232,7 @@ def kategorisieren(belege) -> dict:
                 rest_gesehen.add(gid)
                 erg["rest"].append({"gruppe": gid, "buchung_ids": list(d["buchung_mit_betrag_ids"]),
                                     "fehlt": d["fehlt"], "fehlt_eur": d["fehlt_eur"],
+                                    "gebuehr_eur": rest_gebuehr.get(gid, 0.0),
                                     "waehrung": d["waehrung"]})
         else:
             if d is not None and d["finale_ids"]:
@@ -195,19 +245,26 @@ def luecken(belege, kat=None) -> list:
     """Alle Buchungen, denen Rechnungen/Quittungen fehlen (für Warnungen in Abschluss, PDF und Aufgaben)."""
     kat = kat or kategorisieren(belege)
     by_id = {b["id"]: b for b in belege}
+
+    def ohne_betrag_ids(b):
+        """Rechnungen/Quittungen derselben Gruppe, bei denen kein Betrag erkannt wurde."""
+        d = kat["deckung"].get(b.get("beleg_gruppe_id")) if b.get("beleg_gruppe_id") else None
+        return list(d["ohne_betrag_ids"]) if d else []
+
     out = []
     for bid in kat["vorlaeufig"]:
         b = by_id[bid]
         out.append({"art": "ohne_rechnung", "buchung_id": bid, "anbieter": b.get("anbieter") or "–",
-                    "fehlt": float(b["betrag_brutto"]), "waehrung": waehrung_von(b)})
+                    "fehlt": float(b["betrag_brutto"]), "waehrung": waehrung_von(b),
+                    "ohne_betrag_ids": ohne_betrag_ids(b)})
     for bid in kat["ohne_betrag"]:
         b = by_id[bid]
         out.append({"art": "ohne_betrag", "buchung_id": bid, "anbieter": b.get("anbieter") or "–",
-                    "fehlt": None, "waehrung": waehrung_von(b)})
+                    "fehlt": None, "waehrung": waehrung_von(b), "ohne_betrag_ids": []})
     for r in kat["rest"]:
         b = by_id[r["buchung_ids"][0]]
         out.append({"art": "teilweise", "buchung_id": r["buchung_ids"][0], "anbieter": b.get("anbieter") or "–",
-                    "fehlt": r["fehlt"], "waehrung": r["waehrung"]})
+                    "fehlt": r["fehlt"], "waehrung": r["waehrung"], "ohne_betrag_ids": ohne_betrag_ids(b)})
     return out
 
 
@@ -241,7 +298,7 @@ def _v(row, key, idx):
 
 _SPALTEN = ("id", "belegart", "beleg_gruppe_id", "betrag_brutto", "waehrung", "betrag_eur",
             "betrag_eur_final", "anbieter", "buchungscode", "transportart", "geprueft",
-            "rechnungsnummer", "belegdatum")
+            "rechnungsnummer", "belegdatum", "nebenkosten_eur", "kreditkarte_auslandsentgelt_eur")
 
 
 def belege_der_reise(rcode: str) -> list:
@@ -342,17 +399,29 @@ def art_name(art) -> str:
     return _ART_NAMEN.get(art or "", art or "Beleg")
 
 
+def ohne_betrag_text(ids) -> str:
+    """„ – Beleg #232 hat keinen Betrag“ (leer, wenn alle Belege einen Betrag haben)."""
+    ids = list(ids or [])
+    if not ids:
+        return ""
+    nr = ", ".join(f"#{i}" for i in ids)
+    return f" – Beleg {nr} hat keinen Betrag" if len(ids) == 1 else f" – Belege {nr} haben keinen Betrag"
+
+
 def status_anzeige(info):
     """(Text, Textfarbe, Hintergrund) für den Deckungsstatus einer Gruppe; None, wenn nichts zu prüfen ist."""
     st, w = info["status"], info["waehrung"]
+    ohne = ohne_betrag_text(info.get("ohne_betrag_ids"))
     if st == "vollstaendig":
         text = "✓ vollständig belegt"
         if info["mehr"]:
             text += f" (Rechnungen liegen {_betrag(info['mehr'], w)} über der Buchung)"
         return text, "#065f46", "#ecfdf5"
     if st == "teilweise":
-        return (f"⚠ teilweise belegt – es fehlen noch {_betrag(info['fehlt'], w)}", "#9a3412", "#fff7ed")
+        return (f"⚠ teilweise belegt – es fehlen noch {_betrag(info['fehlt'], w)}{ohne}", "#9a3412", "#fff7ed")
     if st == "offen":
+        if info.get("ohne_betrag_ids"):
+            return f"⚠ noch keine Rechnung/Quittung mit Betrag{ohne}", "#9a3412", "#fff7ed"
         return "⚠ noch keine Rechnung/Quittung zur Buchung", "#9a3412", "#fff7ed"
     if st == "nicht_vergleichbar":
         return "Beträge in verschiedenen Währungen ohne Kurs – bitte selbst prüfen", "#475569", "#f1f5f9"
@@ -400,11 +469,11 @@ def luecken_html(liste, by_id) -> str:
         if l["art"] == "teilweise":
             items += (f'<li style="margin:4px 0">{kopf}<span style="color:#c2410c">'
                       f'⚠ Rechnungen decken nur einen Teil – es fehlen {_betrag(l["fehlt"], l["waehrung"])} '
-                      f'(als vorläufig mitgezählt)</span></li>')
+                      f'(als vorläufig mitgezählt){_e(ohne_betrag_text(l.get("ohne_betrag_ids")))}</span></li>')
         elif l["art"] == "ohne_rechnung":
             items += (f'<li style="margin:4px 0">{kopf}<span style="color:#c2410c">'
                       f'⚠ noch keine Rechnung/Quittung – {_betrag(l["fehlt"], l["waehrung"])} '
-                      f'als vorläufig mitgezählt</span></li>')
+                      f'als vorläufig mitgezählt{_e(ohne_betrag_text(l.get("ohne_betrag_ids")))}</span></li>')
         else:
             items += (f'<li style="margin:4px 0">{kopf}<span style="color:#ef4444">'
                       f'⚠ keine Rechnung/Quittung und kein Betrag erkannt</span></li>')
@@ -418,10 +487,10 @@ def luecken_texte(liste) -> list:
     for l in liste:
         if l["art"] == "teilweise":
             out.append(f"Buchung #{l['buchung_id']} ({l['anbieter']}): Rechnungen decken nur einen Teil, "
-                       f"es fehlen {_betrag(l['fehlt'], l['waehrung'])} (vorläufig mitgezählt)")
+                       f"es fehlen {_betrag(l['fehlt'], l['waehrung'])} (vorläufig mitgezählt){ohne_betrag_text(l.get('ohne_betrag_ids'))}")
         elif l["art"] == "ohne_rechnung":
             out.append(f"Buchung #{l['buchung_id']} ({l['anbieter']}): noch keine Rechnung/Quittung, "
-                       f"{_betrag(l['fehlt'], l['waehrung'])} vorläufig mitgezählt")
+                       f"{_betrag(l['fehlt'], l['waehrung'])} vorläufig mitgezählt{ohne_betrag_text(l.get('ohne_betrag_ids'))}")
         else:
             out.append(f"Buchung #{l['buchung_id']} ({l['anbieter']}): keine Rechnung/Quittung, kein Betrag erkannt")
     return out
