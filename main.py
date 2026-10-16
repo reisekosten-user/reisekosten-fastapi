@@ -64,6 +64,9 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.28", "zeit": "2026-10-16 19:40", "aenderungen": [
+        "Zahlungsnachweis: Ein Beleg, der nur die Zahlung belegt (Fall PayU über 194.50 EUR zur IndiGo-Buchung über 19725 INR und ihren Teilrechnungen), wurde bisher zusätzlich zu den Rechnungen gezählt (424.50 statt 194.50 EUR, „Rechnungen liegen über der Buchung“). Jetzt erkennt die App ihn selbst: Eine Quittung oder ein Kartenbeleg neben echten Rechnungen derselben Gruppe zählt nicht extra, wenn er in anderer Währung lautet und die Rechnungen die Buchung schon voll decken, oder wenn sein Betrag genau der Buchung bzw. der Rechnungssumme entspricht. Andere Beträge (z. B. eine zusätzliche Restaurant-Quittung) zählen wie bisher.",
+        "Der Zahlungsnachweis liefert den echten Euro-Betrag: Hat die Buchung keinen bestätigten Euro-Betrag, verteilt die App die 194.50 EUR anteilig auf die Rechnungen (94.72 + 99.78). Beleg-Seite, Abschluss und PDF benennen den Zahlungsnachweis („zählt nicht extra“); er geht weiterhin als eigenes PDF an Habel."]},
     {"version": "3.27", "zeit": "2026-10-16 18:54", "aenderungen": [
         "Buchung mit Teilrechnungen, von denen eine keinen erkannten Betrag hat (Fall IndiGo: Buchung 19725 INR, Rechnung 9606 INR, Rechnung ohne Betrag): Der Beleg ohne Betrag wird jetzt namentlich genannt (Beleg-Seite, Abschluss, PDF, Hinweise). Auf der Beleg-Seite steht direkt ein Feld „Betrag speichern“ mit dem Rest der Buchung als Vorschlag (10119.00 INR) und ein Knopf „Beleg neu auslesen“. Bei Fremdwährung wird der Kurs vom Schwester-Beleg übernommen.",
         "Abrechnung: Der echte Euro-Betrag und das Auslandsentgelt aus der Kreditkartenabrechnung liegen meist an der Buchung, nicht an den Teilrechnungen. Bisher gingen sie verloren, sobald die Rechnungen die Buchung belegten. Jetzt bekommt jede Rechnung ohne eigenen bestätigten Euro-Betrag ihren Anteil (Rechnungsbetrag / Buchungsbetrag), auch der noch fehlende Rest. Abschluss, PDF und Kosten-Kachel summieren damit genau den abgerechneten Betrag; in der Tabelle steht „Anteil der Buchung“."]},
@@ -865,6 +868,12 @@ def _verknuepfung_karte(bid: int, rcode) -> str:
         art = "Buchung" if D.ist_buchung(b.get("belegart")) else D.art_name(b.get("belegart"))
         return f'<a href="/beleg/{b["id"]}" style="color:#2563eb">#{b["id"]}</a> · {e(art)} · {e(b.get("anbieter") or "–")} · {betrag_s(b)}'
 
+    # 0) dieser Beleg ist ein Zahlungsnachweis (z. B. PayU-Beleg über 194.50 EUR zur Buchung in Rupien)
+    if info and bid in info["nachweis_ids"]:
+        html += ('<div style="background:#f1f5f9;color:#334155;border-radius:6px;padding:8px 10px;margin-bottom:10px;'
+                 'font-size:12px">ℹ <b>Zahlungsnachweis:</b> Dieser Beleg weist die Zahlung der Buchung nach und zählt '
+                 'nicht zusätzlich zu den Rechnungen. Er liefert den Euro-Betrag. Er geht trotzdem als eigenes PDF an Habel.</div>')
+
     # 1) Rechnung: Buchung x gegen Rechnungen x1 + x2
     if info and D.status_anzeige(info):
         html += D.zusammenfassung_html(info, by_id)
@@ -909,6 +918,8 @@ def _verknuepfung_karte(bid: int, rcode) -> str:
                  'Beim Senden an Habel geht jeder Beleg einzeln als eigenes PDF in der Mail der Reise mit.</div>')
         for m in mitglieder:
             gp = "✓ geprüft" if m.get("geprueft") else "○ noch nicht geprüft"
+            if info and m["id"] in info["nachweis_ids"]:
+                gp += " · <b>Zahlungsnachweis</b> (zählt nicht extra)"
             html += ('<div style="display:flex;justify-content:space-between;align-items:center;'
                      'background:var(--bg);border-radius:6px;padding:8px 10px;margin-bottom:6px">'
                      f'<span style="font-size:12px">{zeile_kurz(m)} · {gp}</span>'
@@ -4806,6 +4817,12 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
             kosten_tbl = Table(kosten_daten, colWidths=[22*mm,58*mm,38*mm,18*mm,16*mm,18*mm])
             kosten_tbl.setStyle(tbl_style())
             story.append(kosten_tbl)
+            for nid in kat["nachweis"]:
+                nb = deck_by_id[nid]
+                story.append(Spacer(1, 2*mm))
+                story.append(Paragraph(esc(f"Zahlungsnachweis #{nid} ({nb.get('anbieter') or '–'}, "
+                                           f"{float(nb['betrag_brutto']):.2f} {nb.get('waehrung') or 'EUR'}) "
+                                           "belegt die Zahlung und zählt nicht zusätzlich."), styles["Normal"]))
             if luecken_liste:
                 story.append(Spacer(1, 2*mm))
                 story.append(Paragraph("Hinweis: Jede Buchung braucht Rechnungen oder Quittungen. Es fehlen:", styles["Normal"]))

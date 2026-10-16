@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.27"
+DOKU_GEPRUEFT_FUER = "3.28"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -513,7 +513,14 @@ KAPITEL = [
             ["⚠ noch keine Rechnung/Quittung", "Zur Buchung ist noch nichts verknüpft (oder nur Belege ohne Betrag).", "Die ganze Buchung zählt „vorläufig“ mit."],
             ["Währungen ohne Kurs", "Beträge in verschiedenen Währungen lassen sich ohne Kurs nicht vergleichen.", "Nur die Rechnungen. Bitte selbst prüfen."],
         ], [24, 48, 28]),
-        ("hinweis", "Eigenbelege der App (z. B. Bewirtungsbeleg) decken keine Buchung ab. Gruppen ohne Buchungsbestätigung (z. B. Bewirtungsbeleg mit Rechnung) werden nicht auf Beträge geprüft."),
+        ("p", "**Zahlungsnachweis:** Ein Kartenbeleg oder eine Zahlungsquittung (z. B. PayU über 194.50 EUR zur Buchung über 19725 INR) belegt nur die Zahlung. "
+              "Neben echten Rechnungen derselben Gruppe zählt er **nicht zusätzlich**. Die App erkennt ihn selbst, wenn die Gruppe mindestens eine Rechnung mit Betrag enthält und der Beleg "
+              "keine Rechnung ist (Quittung, Sonstiges …) und (a) in anderer Währung als die Buchung lautet, während die Rechnungen die Buchung schon voll decken, "
+              "oder (b) sein Betrag genau der ganzen Buchung oder der Rechnungssumme entspricht. Andere Beträge, etwa eine zusätzliche Restaurant-Quittung, zählen wie normale Belege. "
+              "Der Zahlungsnachweis liefert den echten Euro-Betrag (siehe „Beträge, Fremdwährung und Kurse“) und geht weiterhin als eigenes PDF an Habel. "
+              "Mit **Entfernen** nimmt man einen Beleg aus der Gruppe; er zählt dann wieder normal."),
+        ("hinweis", "Eigenbelege der App (z. B. Bewirtungsbeleg) decken keine Buchung ab. Gruppen ohne Buchungsbestätigung (z. B. Bewirtungsbeleg mit Rechnung) werden nicht auf Beträge geprüft. "
+                    "Eine Hotelrechnung, die höher ist als die Buchung (z. B. wegen Bewirtung oder Extras), gilt als vollständig belegt; der Mehrbetrag steht dabei."),
     ]},
     {"id": "b-betrag", "teil": "B", "titel": "Beträge, Fremdwährung und Kurse", "bloecke": [
         ("p", "Der Euro-Betrag eines Belegs wird immer nach derselben Regel gebildet:"),
@@ -665,7 +672,8 @@ KAPITEL = [
         ("p", "**Euro-Betrag bei Buchung mit Teilrechnungen:** Der echte Euro-Betrag und das Auslandsentgelt aus der Kreditkartenabrechnung hängen meist an der Buchung (gleicher Betrag in Fremdwährung). "
               "Damit nichts verloren geht, bekommt jede Rechnung ohne eigenen bestätigten Euro-Betrag ihren **Anteil** (Rechnungsbetrag geteilt durch Buchungsbetrag), ebenso der noch fehlende Rest. "
               "In der Tabelle steht dann „= … EUR (Anteil der Buchung)“. Die Summe entspricht damit dem abgerechneten Betrag plus Entgelt. "
-              "Hat eine Rechnung schon einen eigenen bestätigten Euro-Betrag, gilt dieser. Ohne bestätigten Euro-Betrag an der Buchung bleibt es bei der KI-Schätzung."),
+              "Hat eine Rechnung schon einen eigenen bestätigten Euro-Betrag, gilt dieser. Fehlt der bestätigte Euro-Betrag an der Buchung, nimmt die App ihn aus dem Zahlungsnachweis in Euro. "
+              "Gibt es keins von beidem, bleibt es bei der KI-Schätzung."),
         ("p", "**Was als Flugsegment zählt:** Jede Teilstrecke eines Flugbelegs. **Nicht gezählt** werden Zugfahrten – auch Rail&Fly und Lufthansa Express Rail, die eine LH-Nummer tragen. "
               "Ein Segment gilt als Zug, wenn die Gesellschaft Bahn/Rail/ICE o. ä. nennt, der Ort ein Bahnhof ist (z. B. „Köln Hbf“) oder der Code ein Bahnhofs-Code ist (z. B. QKL, ZWS, QDU). "
               "Stornierte Flüge (Status aus der Flugüberwachung) zählen ebenfalls nicht. Unter der Liste steht, wie viele Zugfahrten und stornierte Flüge nicht gezählt wurden."),

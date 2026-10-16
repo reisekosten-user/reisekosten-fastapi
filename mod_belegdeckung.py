@@ -80,6 +80,71 @@ def _summe_eur(liste):
     return None if any(w is None for w in werte) else sum(werte)
 
 
+def ist_rechnung(art) -> bool:
+    """Echte Rechnung (auch „Tankbeleg (Rechnung)“). Quittung, Kassenbon und Kartenbeleg sind keine Rechnung."""
+    return "rechnung" in (art or "").lower()
+
+
+def nachweise_erkennen(buchungen_mit, deckende_mit) -> list:
+    """
+    Zahlungsnachweis = Beleg, der die Zahlung belegt, aber nicht zusätzlich zu den Rechnungen zählt
+    (z. B. PayU-/PayPal-/Kartenbeleg über 194.50 EUR zur Buchung über 19725 INR und deren Rechnungen).
+    Er zählt nicht in Deckung und Kostensumme, liefert aber den echten Euro-Betrag.
+    Voraussetzung: Die Gruppe enthält mindestens eine Rechnung mit Betrag; nur Nicht-Rechnungen
+    (Quittung, Sonstiges …) können Nachweis sein. Ein solcher Beleg ist Nachweis, wenn
+      a) sein Betrag in derselben Währung genau der ganzen Buchung oder der Rechnungssumme entspricht,
+      b) sein Euro-Wert in anderer Währung zur Buchung/Rechnungssumme passt (5 %, mind. 1 EUR), oder
+      c) er in anderer Währung als die Buchung lautet und Rechnungen die Buchung schon voll decken.
+    Andere Beträge (z. B. eine zusätzliche Restaurant-Quittung) bleiben normale Belege und zählen mit.
+    """
+    rechnungen = [b for b in deckende_mit if ist_rechnung(b.get("belegart"))]
+    kandidaten = [b for b in deckende_mit if not ist_rechnung(b.get("belegart"))]
+    if not rechnungen or not kandidaten:
+        return []
+    refs = []                      # (Betrag, Währung, Euro-Wert oder None)
+    w_buchung, soll = None, 0.0
+    if buchungen_mit:
+        ws = {waehrung_von(b) for b in buchungen_mit}
+        if len(ws) == 1:
+            w_buchung = next(iter(ws))
+            soll = sum(float(b["betrag_brutto"]) for b in buchungen_mit)
+            refs.append((soll, w_buchung, _summe_eur(buchungen_mit)))
+    for w in {waehrung_von(b) for b in rechnungen}:
+        gleiche = [b for b in rechnungen if waehrung_von(b) == w]
+        refs.append((sum(float(b["betrag_brutto"]) for b in gleiche), w, _summe_eur(gleiche)))
+    buchung_gedeckt = bool(w_buchung) and sum(
+        float(b["betrag_brutto"]) for b in rechnungen if waehrung_von(b) == w_buchung
+    ) >= soll - TOLERANZ_GLEICHE_WAEHRUNG - 1e-9
+    nachweise = []
+    for q in kandidaten:
+        qw, qb, q_eur = waehrung_von(q), float(q["betrag_brutto"]), eur_wert(q)
+        treffer = False
+        for betrag, w, eur in refs:
+            if w == qw:
+                treffer = treffer or abs(qb - betrag) <= TOLERANZ_GLEICHE_WAEHRUNG + 1e-9
+            elif q_eur is not None and eur is not None:
+                treffer = treffer or abs(q_eur - eur) <= max(1.0, TOLERANZ_FREMDWAEHRUNG * eur)
+        if not treffer and w_buchung and qw != w_buchung and buchung_gedeckt:
+            treffer = True
+        if treffer:
+            nachweise.append(q)
+    return nachweise
+
+
+def _eur_quelle(buchungen_mit, nachweise):
+    """
+    Echter (bestätigter) Euro-Betrag der Buchung: der bestätigte Euro-Betrag der Buchung selbst
+    (Kreditkartenabrechnung), sonst ein Zahlungsnachweis in Euro. Ergebnis: (Summe oder None, Quellen).
+    """
+    finale = [_zahl(b.get("betrag_eur_final")) for b in buchungen_mit]
+    if buchungen_mit and all(f is not None for f in finale):
+        return sum(finale), list(buchungen_mit)
+    quellen = [n for n in nachweise if _zahl(n.get("betrag_eur_final")) is not None or waehrung_von(n) == "EUR"]
+    if quellen:
+        return sum(eur_wert(n) for n in quellen), quellen
+    return None, []
+
+
 def deckung_berechnen(belege) -> dict:
     """
     belege: Liste von dicts mit mindestens id, belegart, beleg_gruppe_id, betrag_brutto, waehrung,
@@ -91,6 +156,8 @@ def deckung_berechnen(belege) -> dict:
       teilweise          Rechnungen decken die Buchung nur zum Teil (fehlt > 0)
       vollstaendig       Rechnungen decken die Buchung (ggf. mehr: Feld „mehr“)
       nicht_vergleichbar Fremdwährungen ohne Kurs, Beträge lassen sich nicht vergleichen
+    Zahlungsnachweise (nachweise_erkennen) zählen nicht mit; Feld nachweis_ids. eur_summe/eur_quellen:
+    echter Euro-Betrag der Buchung (None = nur KI-Schätzung).
     """
     gruppen = {}
     for b in belege:
@@ -105,15 +172,20 @@ def deckung_berechnen(belege) -> dict:
         finale = [b for b in mitglieder if ist_belegart_final(b.get("belegart"))]
         deckende = [b for b in finale if ist_deckender_beleg(b.get("belegart"))]
         deckende_mit = [b for b in deckende if hat_betrag(b)]
+        nachweise = nachweise_erkennen(buchungen_mit, deckende_mit)
+        nachweis_ids = [b["id"] for b in nachweise]
+        deckende_mit = [b for b in deckende_mit if b["id"] not in nachweis_ids]
         info = {
             "gruppe": gid,
             "buchung_ids": [b["id"] for b in buchungen],
             "buchung_mit_betrag_ids": [b["id"] for b in buchungen_mit],
             "finale_ids": [b["id"] for b in finale],
-            "deckende_ids": [b["id"] for b in deckende],
+            "deckende_ids": [b["id"] for b in deckende if b["id"] not in nachweis_ids],
             "deckende_mit_betrag_ids": [b["id"] for b in deckende_mit],
+            "nachweis_ids": nachweis_ids,
+            "eur_summe": None, "eur_quellen": [],
             # Änderungs-Dokumente (z. B. Flugänderung) haben absichtlich keinen Betrag: nicht anmahnen
-            "ohne_betrag_ids": [b["id"] for b in deckende if not hat_betrag(b)
+            "ohne_betrag_ids": [b["id"] for b in deckende if not hat_betrag(b) and b["id"] not in nachweis_ids
                                 and "aenderung" not in (b.get("belegart") or "").lower()
                                 and "änderung" not in (b.get("belegart") or "").lower()],
             "soll": 0.0, "ist": 0.0, "waehrung": "EUR",
@@ -125,6 +197,8 @@ def deckung_berechnen(belege) -> dict:
 
         soll_eur = _summe_eur(buchungen_mit)
         waehrungen = {waehrung_von(b) for b in buchungen_mit + deckende_mit}
+        eur_summe, eur_quellen = _eur_quelle(buchungen_mit, nachweise)
+        info.update(eur_summe=eur_summe, eur_quellen=[b["id"] for b in eur_quellen])
 
         if not deckende_mit:
             w_buchung = {waehrung_von(b) for b in buchungen_mit}
@@ -141,7 +215,8 @@ def deckung_berechnen(belege) -> dict:
             soll = sum(float(b["betrag_brutto"]) for b in buchungen_mit)
             ist = sum(float(b["betrag_brutto"]) for b in deckende_mit)
             tol = TOLERANZ_GLEICHE_WAEHRUNG
-            faktor = (soll_eur / soll) if (soll_eur is not None and soll > 0) else None
+            euro = eur_summe if eur_summe is not None else soll_eur     # echter Betrag vor KI-Schätzung
+            faktor = (euro / soll) if (euro is not None and soll > 0) else None
         else:
             ist_eur = _summe_eur(deckende_mit)
             if soll_eur is None or ist_eur is None:
@@ -164,10 +239,11 @@ def deckung_berechnen(belege) -> dict:
 def anteile_aus_buchung(belege, deckung=None):
     """
     Die Buchung (z. B. 19725 INR) trägt oft die echten Euro-Werte aus der Kreditkartenabrechnung
-    (Euro-Betrag, Auslandsentgelt), die Teilrechnungen (9606 + 10119 INR) nicht. Damit beim Wechsel von
-    der Buchung auf die Rechnungen nichts verloren geht, bekommt jede Rechnung ohne eigenen Euro-Betrag
-    ihren Anteil: Rechnungsbetrag / Buchungsbetrag. Gilt nur für Gruppen mit Status vollständig/teilweise,
-    einer einzigen Fremdwährung und einer Buchung mit bestätigtem Euro-Betrag.
+    (Euro-Betrag, Auslandsentgelt), die Teilrechnungen (9606 + 10119 INR) nicht; sonst liefert sie ein
+    Zahlungsnachweis in Euro (z. B. PayU-Beleg über 194.50 EUR). Damit beim Wechsel von der Buchung auf die
+    Rechnungen nichts verloren geht, bekommt jede Rechnung ohne eigenen Euro-Betrag ihren Anteil:
+    Rechnungsbetrag / Buchungsbetrag. Gilt nur für Gruppen mit Status vollständig/teilweise, einer einzigen
+    Fremdwährung und bestätigtem Euro-Betrag (Buchung oder Zahlungsnachweis).
     Ergebnis: (anteile, rest_gebuehr)
       anteile      {beleg_id: {"eur_final", "entgelt", "nebenkosten"}}; entgelt None = eigenen Wert behalten
       rest_gebuehr {gruppen_id: Euro}  Gebühren-Anteil des noch nicht belegten Rests (nur bei „teilweise“)
@@ -176,21 +252,17 @@ def anteile_aus_buchung(belege, deckung=None):
     by_id = {b["id"]: b for b in belege}
     anteile, rest_gebuehr = {}, {}
     for gid, info in deckung.items():
-        if info["status"] not in ("vollstaendig", "teilweise"):
+        if info["status"] not in ("vollstaendig", "teilweise") or info["waehrung"] == "EUR":
             continue
-        buchungen = [by_id[i] for i in info["buchung_mit_betrag_ids"]]
+        if info["eur_summe"] is None or info["soll"] <= 0:
+            continue
+        quellen = [by_id[i] for i in info["eur_quellen"]]
         rechnungen = [by_id[i] for i in info["deckende_mit_betrag_ids"]]
-        waehrungen = {waehrung_von(b) for b in buchungen + rechnungen}
-        if len(waehrungen) != 1 or "EUR" in waehrungen:
-            continue
-        finale = [_zahl(b.get("betrag_eur_final")) for b in buchungen]
-        soll = sum(float(b["betrag_brutto"]) for b in buchungen)
-        if soll <= 0 or any(f is None for f in finale):
-            continue
-        faktor = sum(finale) / soll
-        entgelte = [_zahl(b.get("kreditkarte_auslandsentgelt_eur")) for b in buchungen]
+        soll = info["soll"]
+        faktor = info["eur_summe"] / soll
+        entgelte = [_zahl(b.get("kreditkarte_auslandsentgelt_eur")) for b in quellen]
         entgelt_f = (sum(x or 0.0 for x in entgelte) / soll) if any(x is not None for x in entgelte) else None
-        neben_f = sum(_zahl(b.get("nebenkosten_eur")) or 0.0 for b in buchungen) / soll
+        neben_f = sum(_zahl(b.get("nebenkosten_eur")) or 0.0 for b in quellen) / soll
         for b in rechnungen:
             if _zahl(b.get("betrag_eur_final")) is not None:
                 continue                      # hat schon einen eigenen, bestätigten Euro-Betrag
@@ -211,17 +283,19 @@ def kategorisieren(belege) -> dict:
       ohne_betrag  Buchung ohne Betrag und ohne Rechnung in der Gruppe: fehlt in der Summe
       rest         je Gruppe mit nur teilweiser Deckung der offene Rest (zählt vorläufig mit)
     Buchungen, die vollständig durch Rechnungen belegt sind, tauchen NICHT auf (kein Doppelzählen).
+    nachweis     Zahlungsnachweise (zählen nicht, siehe nachweise_erkennen)
     anteile      Euro-Anteile der Rechnungen an der Buchung (siehe anteile_aus_buchung)
     """
     deckung = deckung_berechnen(belege)
     anteile, rest_gebuehr = anteile_aus_buchung(belege, deckung)
-    erg = {"deckung": deckung, "final": [], "vorlaeufig": [], "ohne_betrag": [], "rest": [],
+    nachweis_alle = {i for d in deckung.values() for i in d["nachweis_ids"]}
+    erg = {"deckung": deckung, "final": [], "nachweis": [], "vorlaeufig": [], "ohne_betrag": [], "rest": [],
            "anteile": anteile}
     rest_gesehen = set()
     for b in belege:
         bid = b["id"]
         if ist_belegart_final(b.get("belegart")):
-            erg["final"].append(bid)
+            erg["nachweis" if bid in nachweis_alle else "final"].append(bid)
             continue
         gid = b.get("beleg_gruppe_id")
         d = deckung.get(gid) if gid else None
@@ -452,6 +526,12 @@ def zusammenfassung_html(info, by_id) -> str:
         zeilen.append(f"<div>Rechnungen/Quittungen: {rechnung}</div>")
     else:
         zeilen.append("<div>Rechnungen/Quittungen: –</div>")
+    for i in info.get("nachweis_ids") or []:
+        n = by_id[i]
+        zeilen.append(f"<div>Zahlungsnachweis: #{i} {_betrag(n['betrag_brutto'], waehrung_von(n))} "
+                      f"<span style=\"opacity:.8\">(zählt nicht extra)</span></div>")
+    if info.get("eur_summe") is not None and w != "EUR":
+        zeilen.append(f"<div>Euro-Betrag laut Abrechnung/Zahlungsnachweis: <b>{_betrag(info['eur_summe'])}</b></div>")
     return (f'<div style="background:{bg};color:{farbe};border-radius:6px;padding:8px 10px;margin-bottom:10px;'
             f'font-size:12px">{"".join(zeilen)}<div style="font-weight:700;margin-top:2px">{_e(text)}</div></div>')
 
@@ -510,7 +590,8 @@ def gruppen_uebersicht_html(deckung, by_id) -> str:
             if not b:
                 continue
             bet = _betrag(b["betrag_brutto"], waehrung_von(b)) if _zahl(b.get("betrag_brutto")) else "–"
-            rolle = "Buchung" if ist_buchung(b.get("belegart")) else art_name(b.get("belegart"))
+            rolle = ("Buchung" if ist_buchung(b.get("belegart")) else
+                     "Zahlungsnachweis" if bid in (info.get("nachweis_ids") or []) else art_name(b.get("belegart")))
             zeilen += (f'<tr><td><a href="/beleg/{bid}" style="color:var(--blue);font-weight:600;'
                        f'text-decoration:none">#{bid}</a></td><td>{_e(rolle)}</td>'
                        f'<td>{_e(b.get("anbieter") or "–")}</td>'
