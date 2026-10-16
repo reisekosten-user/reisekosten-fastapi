@@ -35,6 +35,7 @@ from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         OPENAI_KEY, OPENAI_MODEL, OPENAI_URL,
                         S3_ENDPOINT, S3_BUCKET,
                         _gleicher_reisender, _namens_tokens, _SEG_FELDER, _wert_gleich)
+import mod_belegdeckung as deckung_mod
 from mod_mail import fetch_mails, sende_dms_mail, dms_konfiguriert, DMS_EMAIL_TO, smtp_diagnose
 from mod_vma_tage import (vma_berechnen, land_fuer_tag, trennungspauschale_berechnen,
                            fruehstueck_aus_beleg, vma_tage_generieren, land_fuer_letzten_tag)
@@ -63,6 +64,13 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.26.1", "zeit": "2026-10-16 08:50", "aenderungen": [
+        "Fehler behoben: Die Seite konnte komplett einfrieren („Antwort hat zu lange gedauert“), bis der Dienst neu gestartet wurde. Ursache: Der Mail-Abruf (Knopf und Cron alle 5 Minuten) wartete ohne Zeitlimit auf den Mailserver und hielt dabei die ganze App an.",
+        "Der Abruf läuft jetzt im Hintergrund (eigener Thread), die Seite bleibt währenddessen bedienbar. Am Mailserver gilt ein Zeitlimit von 30 Sekunden je Schritt; danach meldet der Abruf einen Fehler (HTTP 500 beim Cron), statt zu hängen."]},
+    {"version": "3.26", "zeit": "2026-10-15 20:02", "aenderungen": [
+        "Buchung und Rechnungen: Eine Buchungsbestätigung (Betrag x) mit mehreren Rechnungen/Quittungen (x1 + x2 = x) wird jetzt sauber verknüpft, gerechnet und angezeigt. Die Beleg-Seite zeigt „Buchung 300.00 EUR · Rechnungen 120.00 + 180.00 = 300.00 EUR · vollständig belegt“, macht Vorschläge, wenn die Summe genau passt (ein Klick: „Alle verknüpfen“), und verknüpft mehrere Belege auf einmal per Ankreuzen. Beim Eingang werden Belege mit gleichem Buchungscode in derselben Reise automatisch verknüpft.",
+        "Abschluss, PDF und Kosten-Kachel: Eine vollständig belegte Buchung zählt nicht doppelt. Decken die Rechnungen nur einen Teil, steht der offene Rest als Zeile „Rest der Buchung“ in der Summe (vorläufig), ohne Rechnung zählt die ganze Buchung vorläufig. Warnkasten und neue Karte „Buchungen und zugehörige Rechnungen“ zeigen, was fehlt; auch in „Offene Aufgaben“ (nach Rückkehr) und als Hinweis bei der Habel-Übergabe.",
+        "Fehler behoben: Eine Rechnung mit demselben Buchungscode wie die Buchungsbestätigung (oder gleichem Betrag, Anbieter und Datum) wurde bisher als Duplikat verworfen oder als „Änderung“ behandelt. Buchung und Rechnung sind jetzt getrennte Belege, ebenso zwei Rechnungen mit verschiedener Rechnungsnummer."]},
     {"version": "3.25", "zeit": "2026-10-15 15:50", "aenderungen": [
         "Neu: Die Adresse /cron/mails holt neue Belege aus dem Postfach (gedacht für einen Cron-Aufruf alle 5 Minuten, z. B. per crontab auf dem Hetzner-Server). Gleiche Verarbeitung wie der Knopf „Mails abrufen“. Es läuft immer nur ein Abruf; bei einem Fehler antwortet die Adresse mit HTTP 500, damit der Cron-Dienst es meldet.",
         "Habel-Info neu gestaltet: Am Beleg steht jetzt der Stand der ganzen Reise (Fortschrittsbalken „n von m Belegen geprüft“, noch offene Belege als Links, Knopf zur Reise-Übergabe). Dashboard und „Offene Aufgaben“ melden Reisen, die zur Übergabe bereit sind, statt einzelner ungesendeter Belege. Die Liste der abgeschlossenen Reisen zeigt den Habel-Stand je Reise."]},
@@ -801,6 +809,145 @@ async def beleg_upload(request: Request,
             f'<pre style="font-size:11px">{traceback.format_exc()[:500]}</pre>'
             '<a href="/beleg/upload" class="btn btn-secondary">Zurück</a>'))
 
+def _verknuepfung_karte(bid: int, rcode) -> str:
+    """
+    Karte „Verknüpfte Belege“ an der Beleg-Seite. Jede Buchung braucht Rechnungen oder Quittungen:
+    zeigt Buchung x gegen Rechnungen x1 + x2, was noch fehlt, passende Vorschläge (Summe stimmt genau)
+    und die Auswahl weiterer Belege der Reise. Die Rechenregeln stehen in mod_belegdeckung.
+    """
+    from html import escape as e
+    D = deckung_mod
+
+    def karte(inhalt: str) -> str:
+        return ('<div class="card"><div class="card-header"><span class="card-title">🔗 Verknüpfte Belege</span></div>'
+                f'<div class="card-body">{inhalt}</div></div>')
+
+    leise = 'font-size:11px;color:var(--muted)'
+    if not rcode:
+        return karte(f'<div style="{leise};font-style:italic">Beleg muss zuerst einer Reise zugeordnet sein.</div>')
+    try:
+        belege = D.belege_der_reise(rcode)
+    except Exception as ex:
+        return karte(f'<div class="alert alert-err" style="font-size:12px">Verknüpfungen nicht ladbar: {e(str(ex))}</div>')
+    by_id = {b["id"]: b for b in belege}
+    me = by_id.get(bid)
+    if not me:
+        return karte(f'<div style="{leise};font-style:italic">Beleg gehört nicht zu dieser Reise.</div>')
+
+    deckung = D.kategorisieren(belege)["deckung"]
+    gid = me.get("beleg_gruppe_id")
+    info = deckung.get(gid) if gid else None
+    html = ""
+
+    def betrag_s(b):
+        return f'{float(b["betrag_brutto"]):.2f} {(b.get("waehrung") or "EUR")}' if D.hat_betrag(b) else "–"
+
+    def zeile_kurz(b):
+        art = "Buchung" if D.ist_buchung(b.get("belegart")) else D.art_name(b.get("belegart"))
+        return f'<a href="/beleg/{b["id"]}" style="color:#2563eb">#{b["id"]}</a> · {e(art)} · {e(b.get("anbieter") or "–")} · {betrag_s(b)}'
+
+    # 1) Rechnung: Buchung x gegen Rechnungen x1 + x2
+    if info and D.status_anzeige(info):
+        html += D.zusammenfassung_html(info, by_id)
+    elif D.ist_buchung(me.get("belegart")) and not (info and info["finale_ids"]):
+        html += ('<div style="background:#fff7ed;color:#9a3412;border-radius:6px;padding:8px 10px;margin-bottom:10px;'
+                 'font-size:12px;font-weight:600">⚠ Jede Buchung braucht eine Rechnung oder Quittung. '
+                 'Zu dieser Buchung ist noch keine verknüpft.</div>')
+
+    # 2) Gruppenmitglieder
+    mitglieder = [b for b in belege if gid and b.get("beleg_gruppe_id") == gid and b["id"] != bid]
+    if mitglieder:
+        html += (f'<div style="{leise};margin-bottom:8px">Dieser Beleg gehört zu einer Gruppe von {len(mitglieder) + 1} Belegen. '
+                 'Beim Senden an Habel geht jeder Beleg einzeln als eigenes PDF in der Mail der Reise mit.</div>')
+        for m in mitglieder:
+            gp = "✓ geprüft" if m.get("geprueft") else "○ noch nicht geprüft"
+            html += ('<div style="display:flex;justify-content:space-between;align-items:center;'
+                     'background:var(--bg);border-radius:6px;padding:8px 10px;margin-bottom:6px">'
+                     f'<span style="font-size:12px">{zeile_kurz(m)} · {gp}</span>'
+                     f'<form method="post" action="/beleg/{bid}/aus-gruppe-entfernen/{m["id"]}">'
+                     '<button type="submit" class="btn btn-secondary btn-sm">Entfernen</button></form></div>')
+
+    # 3) Vorschläge: Auswahl, deren Summe genau zur Buchung passt (z. B. 120 + 180 = 300)
+    def offener_betrag(buchung):
+        g = buchung.get("beleg_gruppe_id")
+        d = deckung.get(g) if g else None
+        if d is None:
+            return float(buchung["betrag_brutto"]), (buchung.get("waehrung") or "EUR").upper()
+        if d["status"] in ("offen", "teilweise"):
+            return d["fehlt"], d["waehrung"]
+        return None, None
+
+    frei = [b for b in belege if b["id"] != bid and D.ist_deckender_beleg(b.get("belegart"))
+            and D.hat_betrag(b) and not b.get("beleg_gruppe_id")]
+    vorschlaege = []   # (buchung, [beleg_ids], summe, waehrung)
+    if D.ist_buchung(me.get("belegart")) and D.hat_betrag(me):
+        ziel, w = offener_betrag(me)
+        if ziel:
+            ids = D.kombination_vorschlag(ziel, [(b["id"], b["betrag_brutto"]) for b in frei
+                                                   if D.waehrung_von(b) == w])
+            if ids:
+                vorschlaege.append((me, ids, ziel, w))
+    elif D.ist_deckender_beleg(me.get("belegart")) and D.hat_betrag(me) and not gid:
+        pool = frei + [me]
+        for buchung in belege:
+            if not (D.ist_buchung(buchung.get("belegart")) and D.hat_betrag(buchung)):
+                continue
+            ziel, w = offener_betrag(buchung)
+            if not ziel:
+                continue
+            ids = D.kombination_vorschlag(ziel, [(b["id"], b["betrag_brutto"]) for b in pool if D.waehrung_von(b) == w],
+                                          muss_id=bid)
+            if ids:
+                vorschlaege.append((buchung, ids, ziel, w))
+    for buchung, ids, ziel, w in vorschlaege[:3]:
+        teile = " + ".join(f'<a href="/beleg/{i}" style="color:#2563eb">#{i}</a> ({float(by_id[i]["betrag_brutto"]):.2f})' for i in ids)
+        html += ('<div style="background:#eff6ff;color:#1e3a8a;border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:12px">'
+                 f'💡 <b>Passender Vorschlag:</b> Buchung <a href="/beleg/{buchung["id"]}" style="color:#1e3a8a">#{buchung["id"]}</a> '
+                 f'({e(buchung.get("anbieter") or "–")}): {teile} = <b>{ziel:.2f} {e(w)}</b> – die Summe stimmt genau.'
+                 f'<form method="post" action="/beleg/{buchung["id"]}/verknuepfen-mehrere" style="margin-top:6px">'
+                 + "".join(f'<input type="hidden" name="ids" value="{i}">' for i in ids)
+                 + '<button type="submit" class="btn btn-primary btn-sm">Alle verknüpfen</button></form></div>')
+
+    # 4) Weitere Belege der Reise zum Verknüpfen (Auswahl, mehrere auf einmal)
+    cur_norm = None
+    for b in belege:
+        if b["id"] == bid:
+            cur_norm = D.code_normalisieren(b.get("buchungscode"))
+    kandidaten = [b for b in belege if b["id"] != bid and not (gid and b.get("beleg_gruppe_id") == gid)]
+
+    def rang(b):
+        gleicher_code = bool(cur_norm) and len(cur_norm) >= D.MIN_CODE_LAENGE and D.code_normalisieren(b.get("buchungscode")) == cur_norm
+        gleicher_anbieter = bool(me.get("anbieter")) and (b.get("anbieter") or "").strip().lower() == (me.get("anbieter") or "").strip().lower()
+        return (0 if gleicher_code else 1 if gleicher_anbieter else 2, -b["id"]), gleicher_code, gleicher_anbieter
+
+    kandidaten.sort(key=lambda b: rang(b)[0])
+    zeilen = ""
+    for b in kandidaten[:30]:
+        _, gleicher_code, gleicher_anbieter = rang(b)
+        tags = ""
+        if gleicher_code:
+            tags += ' <span style="color:#059669;font-weight:600">· gleicher Buchungscode</span>'
+        elif gleicher_anbieter:
+            tags += ' <span style="color:#2563eb">· gleicher Anbieter</span>'
+        if D.ist_buchung(b.get("belegart")) and D.hat_betrag(b):
+            rest, w = offener_betrag(b)
+            if rest:
+                tags += f' <span style="color:#c2410c">· offen: {rest:.2f} {e(w)}</span>'
+        zeilen += ('<label style="display:flex;gap:8px;align-items:center;padding:6px 0;'
+                   'border-bottom:1px solid var(--border);font-size:12px;cursor:pointer">'
+                   f'<input type="checkbox" name="ids" value="{b["id"]}">'
+                   f'<span>{zeile_kurz(b)}{tags}</span></label>')
+    if zeilen:
+        html += (f'<div style="{leise};margin:10px 0 4px">{"Weitere Belege" if mitglieder else "Belege dieser Reise"} '
+                 'verknüpfen (mehrere möglich):</div>'
+                 f'<form method="post" action="/beleg/{bid}/verknuepfen-mehrere">{zeilen}'
+                 '<button type="submit" class="btn btn-secondary btn-sm" style="margin-top:8px">'
+                 '+ Ausgewählte verknüpfen</button></form>')
+    if not html:
+        html = f'<div style="{leise};font-style:italic">Keine weiteren Belege in dieser Reise gefunden.</div>'
+    return karte(html)
+
+
 # ── Beleg Detailseite ──────────────────────────────────────────────────────────
 @app.get("/beleg/{bid}", response_class=HTMLResponse)
 def beleg_detail(bid: int, request: Request):
@@ -1014,79 +1161,8 @@ def beleg_detail(bid: int, request: Request):
                 {f'<div style="font-size:12px;color:var(--muted);margin-top:4px">💳 {kreditkarte_karte}</div>' if kreditkarte_karte else ''}
                 {_kk_abgerechnet_hinweis(bid2)}"""
 
-        # Verknüpfung: unabhängig von der Belegart – jeder Beleg jeder Art kann
-        # mit jedem anderen Beleg derselben Reise zu einer Gruppe zusammengefasst
-        # werden (z.B. Buchungsbestätigung + Rechnung + Tankbeleg + ...).
-        verk_db = get_db(); verk_cur = verk_db.cursor()
-        P2 = ph()
-        gruppen_mitglieder = []
-        if gruppe_id:
-            verk_cur.execute(f"""SELECT id, belegart, anbieter, betrag_brutto, waehrung, geprueft
-                                 FROM belege WHERE beleg_gruppe_id={P2} AND id!={P2}
-                                 ORDER BY id""", (gruppe_id, bid2))
-            for vr in verk_cur.fetchall():
-                gg = lambda k,i: vr[k] if hasattr(vr,'keys') else vr[i]
-                gruppen_mitglieder.append({
-                    "id": gg("id",0), "belegart": gg("belegart",1) or "–", "anbieter": gg("anbieter",2) or "–",
-                    "betrag": gg("betrag_brutto",3), "waehrung": gg("waehrung",4) or "EUR",
-                    "geprueft": bool(gg("geprueft",5))})
-
-        # Kandidaten: ALLE Belege derselben Reise, die noch nicht in dieser
-        # Gruppe sind (unabhängig von der Belegart)
-        kandidaten_html = ""
-        if rcode:
-            verk_cur.execute(f"""SELECT id, belegart, transportart, anbieter, betrag_brutto, waehrung FROM belege
-                                 WHERE reise_code={P2} AND id!={P2}
-                                 AND (beleg_gruppe_id IS NULL OR beleg_gruppe_id!={P2})
-                                 ORDER BY erstellt DESC LIMIT 15""",
-                             (rcode, bid2, gruppe_id or 0))
-            for kr in verk_cur.fetchall():
-                kg = lambda k,i: kr[k] if hasattr(kr,'keys') else kr[i]
-                kid = kg("id",0); kart = kg("belegart",1) or kg("transportart",2) or "–"
-                kanb = kg("anbieter",3) or "–"
-                kbet = kg("betrag_brutto",4); kwae = kg("waehrung",5) or "EUR"
-                kbet_s = f"{float(kbet):.2f} {kwae}" if kbet else "–"
-                kandidaten_html += (
-                    f'<form method="post" action="/beleg/{bid2}/verknuepfen/{kid}" '
-                    f'style="display:flex;justify-content:space-between;align-items:center;'
-                    f'padding:6px 0;border-bottom:1px solid var(--border)">'
-                    f'<span style="font-size:12px">#{kid} · {kart} · {kanb} · {kbet_s}</span>'
-                    f'<button type="submit" class="btn btn-secondary btn-sm">+ Hinzufügen</button></form>')
-        verk_cur.close(); verk_db.close()
-
-        mitglieder_html = ""
-        for m in gruppen_mitglieder:
-            geprueft_icon = "✓ geprüft" if m["geprueft"] else "○ noch nicht geprüft"
-            bet_s = f'{float(m["betrag"]):.2f} {m["waehrung"]}' if m["betrag"] else "–"
-            mitglieder_html += (
-                f'<div style="display:flex;justify-content:space-between;align-items:center;'
-                f'background:var(--bg);border-radius:6px;padding:8px 10px;margin-bottom:6px">'
-                f'<span style="font-size:12px"><a href="/beleg/{m["id"]}" style="color:#2563eb">'
-                f'#{m["id"]}</a> · {m["belegart"]} · {m["anbieter"]} · {bet_s} · {geprueft_icon}</span>'
-                f'<form method="post" action="/beleg/{bid2}/aus-gruppe-entfernen/{m["id"]}">'
-                f'<button type="submit" class="btn btn-secondary btn-sm">Entfernen</button></form></div>')
-
-        verknuepfung_html = ""
-        if mitglieder_html:
-            verknuepfung_html += (
-                f'<div style="font-size:11px;color:var(--muted);margin-bottom:8px">'
-                f'Dieser Beleg gehört zu einer Gruppe von {len(gruppen_mitglieder)+1} Belegen. '
-                f'Beim Senden an Habel geht jeder Beleg einzeln als eigenes PDF in der Mail der Reise mit.</div>{mitglieder_html}')
-        if kandidaten_html:
-            verknuepfung_html += (f'<div style="font-size:11px;color:var(--muted);margin:10px 0 6px">'
-                                  f'{"Weiteren" if mitglieder_html else "Beleg dieser Reise"} hinzufügen:</div>{kandidaten_html}')
-        if not verknuepfung_html:
-            verknuepfung_html = ('<div style="font-size:11px;color:var(--muted);font-style:italic">'
-                                  'Keine weiteren Belege in dieser Reise gefunden.</div>' if rcode else
-                                  '<div style="font-size:11px;color:var(--muted);font-style:italic">'
-                                  'Beleg muss zuerst einer Reise zugeordnet sein.</div>')
-
-        verknuepfung_karte_html = f"""<div class="card">
-            <div class="card-header"><span class="card-title">🔗 Verknüpfte Belege</span></div>
-            <div class="card-body">
-              {verknuepfung_html}
-            </div>
-          </div>"""
+        # Verknüpfung: Buchungsbestätigung (Betrag x) ↔ Rechnungen/Quittungen (x1 + x2 = x), siehe mod_belegdeckung
+        verknuepfung_karte_html = _verknuepfung_karte(bid2, rcode)
 
         bewirtung_karte_html = _bewirtung_karte(bid2) + _vorschuss_karte(bid2)
 
@@ -2080,35 +2156,38 @@ def beleg_verknuepfen(bid: int, andere_id: int):
     - Haben beide schon (unterschiedliche) Gruppen → Gruppen werden zusammengeführt.
     """
     try:
+        db = get_db(); cur = db.cursor()
+        deckung_mod.gruppe_zusammenfuehren(db, cur, bid, andere_id)
+        db.commit(); cur.close(); db.close()
+        return RedirectResponse(f"/beleg/{bid}", status_code=303)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
+
+@app.post("/beleg/{bid}/verknuepfen-mehrere")
+async def beleg_verknuepfen_mehrere(bid: int, request: Request):
+    """Verknüpft den Beleg mit mehreren ausgewählten Belegen DERSELBEN Reise auf einmal
+    (z.B. Buchungsbestätigung 300 € mit zwei Rechnungen über 120 € und 180 €)."""
+    form = await request.form()
+    ids = []
+    for x in form.getlist("ids"):
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            pass
+    try:
         P = ph()
         db = get_db(); cur = db.cursor()
-        cur.execute(f"SELECT beleg_gruppe_id FROM belege WHERE id={P}", (bid,))
-        r1 = cur.fetchone()
-        cur.execute(f"SELECT beleg_gruppe_id FROM belege WHERE id={P}", (andere_id,))
-        r2 = cur.fetchone()
-        g1 = (r1[0] if isinstance(r1, tuple) else r1["beleg_gruppe_id"]) if r1 else None
-        g2 = (r2[0] if isinstance(r2, tuple) else r2["beleg_gruppe_id"]) if r2 else None
-
-        if g1 and g2 and g1 != g2:
-            # Beide Gruppen zusammenführen: alle Mitglieder von g2 nach g1 verschieben
-            cur.execute(f"UPDATE belege SET beleg_gruppe_id={P} WHERE beleg_gruppe_id={P}", (g1, g2))
-            ziel_gruppe = g1
-        elif g1:
-            ziel_gruppe = g1
-            cur.execute(f"UPDATE belege SET beleg_gruppe_id={P} WHERE id={P}", (ziel_gruppe, andere_id))
-        elif g2:
-            ziel_gruppe = g2
-            cur.execute(f"UPDATE belege SET beleg_gruppe_id={P} WHERE id={P}", (ziel_gruppe, bid))
-        else:
-            if is_postgres():
-                cur.execute("INSERT INTO beleg_gruppen DEFAULT VALUES RETURNING id")
-                ziel_gruppe = cur.fetchone()[0]
-            else:
-                cur.execute("INSERT INTO beleg_gruppen DEFAULT VALUES")
-                ziel_gruppe = cur.lastrowid
-            cur.execute(f"UPDATE belege SET beleg_gruppe_id={P} WHERE id={P}", (ziel_gruppe, bid))
-            cur.execute(f"UPDATE belege SET beleg_gruppe_id={P} WHERE id={P}", (ziel_gruppe, andere_id))
-
+        cur.execute(f"SELECT reise_code FROM belege WHERE id={P}", (bid,))
+        r = cur.fetchone()
+        rcode = (r[0] if isinstance(r, tuple) else r["reise_code"]) if r else None
+        if not rcode:
+            cur.close(); db.close()
+            return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Beleg muss zuerst einer Reise zugeordnet sein.</div>'))
+        for andere in sorted(set(ids) - {bid}):
+            cur.execute(f"SELECT reise_code FROM belege WHERE id={P}", (andere,))
+            ra = cur.fetchone()
+            if ra and (ra[0] if isinstance(ra, tuple) else ra["reise_code"]) == rcode:
+                deckung_mod.gruppe_zusammenfuehren(db, cur, bid, andere)
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
@@ -2183,8 +2262,12 @@ def habel_paket_pruefen(rcode: str) -> dict:
             "name": f"{nr:02d}_{_datei_ascii(_ART_KURZ.get(art, art), 14)}_{_datei_ascii(anb, 22)}_{datum}_Nr{bid}.pdf".replace("__", "_")})
     offen = [b for b in belege if not b["geprueft"]]
     ohne_original = [b for b in belege if b["geprueft"] and not b["original"]]
+    try:   # Buchungen ohne (vollständige) Rechnung/Quittung: nur ein Hinweis, kein Sendehindernis
+        luecken_h = deckung_mod.luecken(deckung_mod.belege_der_reise(rcode))
+    except Exception:
+        luecken_h = []
     return {"reise": reise, "mitarbeiter": namen, "belege": belege, "offen": offen, "ohne_original": ohne_original,
-            "bereits": bool(belege) and all(b["gesendet_am"] for b in belege)}
+            "luecken": luecken_h, "bereits": bool(belege) and all(b["gesendet_am"] for b in belege)}
 
 
 def habel_hindernisse(info: dict) -> list:
@@ -2332,6 +2415,10 @@ def _habel_seite(info: dict, fehler: list | None = None, ok: bool = False, verse
     elif hind and not ok:
         banner += ('<div class="alert alert-warn" style="margin-bottom:16px"><b>Senden noch gesperrt:</b>%s</div>'
                    % "".join("<div>• %s</div>" % e(x) for x in hind))
+    if info.get("luecken") and not ok:
+        banner += ('<div class="alert alert-warn" style="margin-bottom:16px"><b>Hinweis (hindert das Senden nicht):</b> '
+                   'Jede Buchung braucht Rechnungen oder Quittungen. Es fehlt noch etwas zu:%s</div>'
+                   % "".join("<div>• %s</div>" % e(x) for x in deckung_mod.luecken_texte(info["luecken"])))
     erneut = ""
     if info["bereits"]:
         erneut = ('<label style="display:block;margin:10px 0;font-size:13px"><input type="checkbox" name="erneut" value="1" '
@@ -3051,7 +3138,11 @@ async def _mail_abruf_ausfuehren():
         return None
     _MAIL_ABRUF["aktiv"] = True
     try:
-        return await fetch_mails()
+        # WICHTIG: fetch_mails nutzt blockierendes IMAP. Direkt in dieser async-Funktion würde ein langsamer oder
+        # nicht antwortender Mailserver die GANZE Webseite einfrieren. Darum läuft der Abruf in einem eigenen Thread
+        # (mit eigener Ereignisschleife); die Seite bleibt währenddessen bedienbar.
+        import asyncio
+        return await asyncio.to_thread(lambda: asyncio.run(fetch_mails()))
     finally:
         _MAIL_ABRUF["aktiv"] = False
 
@@ -3885,22 +3976,13 @@ def reise_abschluss(code: str):
         vma_total_netto = sum(float(g(v,"vma_netto",10) or 0) for v in vma_rows)
         trennung_total = sum(float(g(v,"trennungspauschale",11) or 0) for v in vma_rows)
 
-        # Belege kategorisieren
-        rechnungen = []      # Rechnung/Quittung/Receipt
-        bestaetigung = []    # Nur Buchungsbestätigung OHNE verknüpfte Rechnung (= fehlt noch echt)
-        vorlaeufig = []      # Buchungsbestätigung OHNE verknüpfte Rechnung, aber MIT Betrag
-                              # -> zählt vorläufig mit, damit kein Geld in der Summe fehlt
-        kurs_fehlt = []      # Auslandsbelege ohne Kurs
-
-        # WICHTIG: Bewusst eine BLACKLIST (nur "Buchungsbestätigung" gilt als
-        # vorläufig), keine Whitelist – es gibt viele Belegarten (Tankbeleg,
-        # Hotel, Taxi, Bewirtung, Sonstige Kosten, Sonstiges ...), die alle
-        # genauso final/abschließend sind wie "Rechnung"/"Quittung". Eine
-        # Whitelist hätte all diese fälschlich als "nur Buchungsbestätigung"
-        # markiert, obwohl der Beleg vollständig war.
-        def ist_belegart_final(art: str) -> bool:
-            return "buchungsbest" not in (art or "").lower()
-
+        # Belege kategorisieren – die Regeln stehen in mod_belegdeckung (Buchung x gegen Rechnungen x1 + x2):
+        #   rechnungen    endgültige Belege (Rechnung, Quittung, Tankbeleg ...) – zählen immer
+        #   vorlaeufig    Buchungsbestätigung mit Betrag, aber ohne Rechnung/Quittung – zählt vorläufig voll mit
+        #   bestaetigung  Buchungsbestätigung ohne Betrag und ohne Rechnung – fehlt in der Summe
+        #   rest_zeilen   Rechnungen decken eine Buchung nur teilweise – der offene Rest zählt vorläufig mit
+        #   kurs_fehlt    Auslandsbelege ohne Kurs
+        # Eine vollständig durch Rechnungen belegte Buchung zählt NICHT mit (kein Doppelzählen).
         def kurs_fehlt_bei(b) -> bool:
             """Kurs nachzutragen? Nur bei Fremdwährung mit Betrag, ohne Kurs und ohne bestätigten Euro-Betrag.
             Selbst erzeugte Belege (Bewirtungsbeleg, Vorschuss) haben keinen eigenen Kurs."""
@@ -3908,40 +3990,35 @@ def reise_abschluss(code: str):
                         and g(b,"betrag_brutto",7) and g(b,"betrag_eur_final",19) is None
                         and (g(b,"belegart",1) or "") not in EIGENBELEG_ARTEN)
 
-        gruppen_hat_finale = {}
+        deck_belege = [{"id": g(b,"id",0), "belegart": g(b,"belegart",1), "beleg_gruppe_id": g(b,"beleg_gruppe_id",18),
+                        "betrag_brutto": g(b,"betrag_brutto",7), "waehrung": g(b,"waehrung",10),
+                        "betrag_eur": g(b,"betrag_eur",12), "betrag_eur_final": g(b,"betrag_eur_final",19),
+                        "anbieter": g(b,"anbieter",4), "transportart": g(b,"transportart",2)} for b in belege]
+        deck_by_id = {d["id"]: d for d in deck_belege}
+        kat = deckung_mod.kategorisieren(deck_belege)
+        ids_final, ids_vorl, ids_ohne = set(kat["final"]), set(kat["vorlaeufig"]), set(kat["ohne_betrag"])
+        rechnungen, bestaetigung, vorlaeufig, kurs_fehlt = [], [], [], []
         for b in belege:
-            gid = g(b,"beleg_gruppe_id",18)
-            if gid:
-                if ist_belegart_final(g(b,"belegart",1)):
-                    gruppen_hat_finale[gid] = True
-                else:
-                    gruppen_hat_finale.setdefault(gid, False)
-
-        for b in belege:
-            art = g(b,"belegart",1) or ""
-            waehrung = g(b,"waehrung",10) or "EUR"
-            if ist_belegart_final(art):
+            bid_k = g(b,"id",0)
+            if bid_k in ids_final:
                 rechnungen.append(b)
-                if kurs_fehlt_bei(b):
-                    kurs_fehlt.append(b)
-                continue
-
-            gid = g(b,"beleg_gruppe_id",18)
-            if gid and gruppen_hat_finale.get(gid):
-                continue  # wird durch den verknüpften finalen Beleg in der Gruppe bereits gezählt
-            betrag = g(b,"betrag_brutto",7)
-            if betrag:
+            elif bid_k in ids_vorl:
                 vorlaeufig.append(b)
-                if kurs_fehlt_bei(b):
-                    kurs_fehlt.append(b)
-            else:
+            elif bid_k in ids_ohne:
                 bestaetigung.append(b)
+                continue
+            else:
+                continue   # durch Rechnungen in derselben Gruppe belegt
+            if kurs_fehlt_bei(b):
+                kurs_fehlt.append(b)
+        rest_zeilen = kat["rest"]
+        luecken_liste = deckung_mod.luecken(deck_belege, kat)
 
         kosten_eur = sum(
             gesamtbetrag_berechnen(g(b,"betrag_brutto",7), g(b,"waehrung",10), g(b,"betrag_eur",12),
                                     g(b,"betrag_eur_final",19), g(b,"nebenkosten_eur",20),
                                     g(b,"kreditkarte_auslandsentgelt_eur",23))
-            for b in (rechnungen + vorlaeufig))
+            for b in (rechnungen + vorlaeufig)) + sum((r["fehlt_eur"] or 0.0) for r in rest_zeilen)
 
         # Wochentage
         wt = ["Mo","Di","Mi","Do","Fr","Sa","So"]
@@ -4012,6 +4089,11 @@ def reise_abschluss(code: str):
             typ_label = typ + (f" – {freitext}" if freitext else "")
             if ist_vorlaeufig:
                 typ_label += ' <span style="color:#c2410c;font-weight:600">· vorläufig</span>'
+            else:
+                d_b = kat["deckung"].get(g(b,"beleg_gruppe_id",18))
+                if d_b and d_b["buchung_ids"] and bid2 not in d_b["buchung_ids"]:
+                    typ_label += (f' <a href="/beleg/{d_b["buchung_ids"][0]}" style="color:#2563eb;font-size:10px;'
+                                  f'text-decoration:none" title="Gehört zu dieser Buchungsbestätigung">🔗 Buchung #{d_b["buchung_ids"][0]}</a>')
 
             eur_val = gesamtbetrag_berechnen(brutto, waehrung, betrag_eur_b, betrag_eur_final_b, nebenkosten_b, auslandsentgelt_b)
 
@@ -4075,6 +4157,34 @@ def reise_abschluss(code: str):
                   <a href="/beleg/{bid2}/pdf/original" target="_blank"
                      class="btn btn-secondary btn-sm">PDF</a>
                 </td>
+            </tr>"""
+
+        # Buchung nur teilweise durch Rechnungen belegt: der offene Rest steht als eigene (orange) Zeile
+        # in der Summe, bis die fehlende Rechnung/Quittung verknüpft ist
+        for r_rest in rest_zeilen:
+            bu_id = r_rest["buchung_ids"][0]
+            bu = deck_by_id[bu_id]
+            bu_row = next(x for x in belege if g(x,"id",0) == bu_id)
+            typ_r = bu.get("transportart") or "Sonstiges"
+            fe = r_rest["fehlt_eur"]
+            summen[typ_r] = summen.get(typ_r, 0) + (fe or 0.0)
+            w_r = r_rest["waehrung"]
+            bet_r = f"{r_rest['fehlt']:.2f} {w_r}"
+            if w_r != "EUR":
+                bet_r += (f" ≈ {fe:.2f} EUR" if fe is not None
+                          else ' <span style="color:#ef4444">⚠ Kurs fehlt</span>')
+            kosten_html += f"""<tr style="background:#fff7ed">
+                <td>{fdat(g(bu_row,"belegdatum",6))}</td>
+                <td><span style="font-size:11px;background:#f1f5f9;padding:1px 6px;border-radius:4px">{typ_r}
+                    <span style="color:#c2410c;font-weight:600">· vorläufig</span></span></td>
+                <td><b>{bu.get("anbieter") or "–"}</b></td>
+                <td style="font-size:11px;color:#c2410c">Rest der Buchung</td>
+                <td style="text-align:right;font-family:monospace">{bet_r}</td>
+                <td style="text-align:right;font-family:monospace;font-size:11px">–</td>
+                <td style="font-size:11px;color:#c2410c">Rechnung/Quittung fehlt noch</td>
+                <td style="text-align:center;font-size:11px">–</td>
+                <td style="text-align:center">–</td>
+                <td><a href="/beleg/{bu_id}" style="color:var(--blue);font-weight:600;text-decoration:none">#{bu_id}</a></td>
             </tr>"""
 
         # Prüfstatus-Zusammenfassung (für den grünen/roten Gesamthinweis)
@@ -4234,6 +4344,11 @@ def reise_abschluss(code: str):
               {f'<div style="padding:8px 16px;font-size:12px;color:var(--muted)">Nicht mitgezählt: {", ".join(nicht_f)}</div>' if nicht_f else ''}
             </div>"""
 
+        # Warnkasten: Buchungen ohne (vollständige) Rechnung/Quittung. „Kein Betrag erkannt“ steht schon in best_html.
+        luecken_box_html = deckung_mod.luecken_html([l for l in luecken_liste if l["art"] != "ohne_betrag"], deck_by_id)
+        gruppen_html = deckung_mod.gruppen_uebersicht_html(kat["deckung"], deck_by_id)
+        gruppen_block_html = f'<div style="margin-top:16px">{gruppen_html}</div>' if gruppen_html else ""
+
         content = f"""
         <div style="display:flex;align-items:flex-start;justify-content:space-between;
                     margin-bottom:20px;flex-wrap:wrap;gap:12px">
@@ -4280,6 +4395,7 @@ def reise_abschluss(code: str):
 
         {kurs_html}
         {best_html}
+        {luecken_box_html}
         {zeiten_html}
         {km_html}
         {flug_html}
@@ -4342,7 +4458,8 @@ def reise_abschluss(code: str):
               </tr></tfoot>
             </table>
           </div>
-        </div>"""
+        </div>
+        {gruppen_block_html}"""
 
         return HTMLResponse(shell(f"Abschluss {rcode}", content, "reisen"))
     except Exception as e:
@@ -4405,43 +4522,25 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
         vma_total_netto = sum(float(g(v,"vma_netto",9) or 0) for v in vma_rows)
         trennung_total = sum(float(g(v,"trennungspauschale",10) or 0) for v in vma_rows)
 
-        # Gleiche Logik wie /abschluss (HTML): Buchungsbestätigungen mit Betrag,
-        # die nicht mit einer echten Rechnung/Quittung verknüpft sind, zählen
-        # vorläufig mit – sonst würde z.B. eine erst als Buchungsbestätigung
-        # vorliegende Hotelrechnung stillschweigend in der Summe fehlen.
-        # WICHTIG: Bewusst eine BLACKLIST (nur "Buchungsbestätigung" gilt als
-        # vorläufig), keine Whitelist auf "Rechnung"/"Quittung" – es gibt viele
-        # weitere Belegarten (Tankbeleg, Hotel, Taxi, Bewirtung, Sonstige
-        # Kosten, Sonstiges ...), die alle genauso final/abschließend sind.
-        def ist_belegart_final(art: str) -> bool:
-            return "buchungsbest" not in (art or "").lower()
-
-        gruppen_hat_finale_pdf = {}
-        for b in belege:
-            gid = g(b,"beleg_gruppe_id",7)
-            if gid:
-                if ist_belegart_final(g(b,"belegart",1)):
-                    gruppen_hat_finale_pdf[gid] = True
-                else:
-                    gruppen_hat_finale_pdf.setdefault(gid, False)
-
-        rechnungen = []
-        for b in belege:
-            art = g(b,"belegart",1) or ""
-            if ist_belegart_final(art):
-                rechnungen.append(b)
-                continue
-            gid = g(b,"beleg_gruppe_id",7)
-            if gid and gruppen_hat_finale_pdf.get(gid):
-                continue
-            if g(b,"betrag_brutto",4):
-                rechnungen.append(b)  # vorläufig mitgezählt
+        # Gleiche Logik wie /abschluss (HTML), Regeln in mod_belegdeckung: Eine Buchungsbestätigung zählt
+        # nicht mit, wenn Rechnungen/Quittungen sie vollständig belegen (Buchung x = Rechnungen x1 + x2).
+        # Ohne Rechnung zählt sie vorläufig voll mit, bei nur teilweiser Deckung der offene Rest.
+        deck_belege = [{"id": g(b,"id",0), "belegart": g(b,"belegart",1), "beleg_gruppe_id": g(b,"beleg_gruppe_id",7),
+                        "betrag_brutto": g(b,"betrag_brutto",4), "waehrung": g(b,"waehrung",5),
+                        "betrag_eur": g(b,"betrag_eur",6), "betrag_eur_final": g(b,"betrag_eur_final",10),
+                        "anbieter": g(b,"anbieter",2)} for b in belege]
+        deck_by_id = {d["id"]: d for d in deck_belege}
+        kat = deckung_mod.kategorisieren(deck_belege)
+        ids_zaehlen = set(kat["final"]) | set(kat["vorlaeufig"])
+        rechnungen = [b for b in belege if g(b,"id",0) in ids_zaehlen]   # inkl. vorläufig mitgezählter Buchungen
+        rest_zeilen = kat["rest"]
+        luecken_liste = deckung_mod.luecken(deck_belege, kat)
 
         kosten_eur = sum(
             gesamtbetrag_berechnen(g(b,"betrag_brutto",4), g(b,"waehrung",5), g(b,"betrag_eur",6),
                                     g(b,"betrag_eur_final",10), g(b,"nebenkosten_eur",11),
                                     g(b,"kreditkarte_auslandsentgelt_eur",15))
-            for b in rechnungen)
+            for b in rechnungen) + sum((r["fehlt_eur"] or 0.0) for r in rest_zeilen)
 
         from reportlab.lib.pagesizes import A4
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
@@ -4582,7 +4681,7 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
         else:
             story.append(Paragraph("✓ Alle Belege geprüft", styles["Normal"]))
         story.append(Spacer(1, 2*mm))
-        if rechnungen:
+        if rechnungen or rest_zeilen:
             kosten_daten = [["Datum","Anbieter","Betrag","MwSt","Final","Geprüft"]]
             for b in rechnungen:
                 bd = g(b,"belegdatum",3)
@@ -4608,10 +4707,28 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
                 kosten_daten.append([bd.strftime("%d.%m.%Y") if bd else "–",
                                       zelle(g(b,"anbieter",2) or "–"), bet_txt, mwst_txt,
                                       final_txt, "✓" if geprueft_b else "✗"])
+            for r_rest in rest_zeilen:
+                bu = deck_by_id[r_rest["buchung_ids"][0]]
+                bu_row = next(x for x in belege if g(x,"id",0) == bu["id"])
+                bd_r = g(bu_row,"belegdatum",3)
+                if isinstance(bd_r,str):
+                    try: bd_r = date.fromisoformat(bd_r[:10])
+                    except Exception: bd_r = None
+                bet_r = f"{r_rest['fehlt']:.2f} {r_rest['waehrung']}"
+                if r_rest["waehrung"] != "EUR" and r_rest["fehlt_eur"] is not None:
+                    bet_r += f" ({r_rest['fehlt_eur']:.2f} €)"
+                kosten_daten.append([bd_r.strftime("%d.%m.%Y") if bd_r else "–",
+                                      zelle(f"Rest Buchung #{bu['id']}: {bu.get('anbieter') or '–'}"),
+                                      bet_r, "–", "vorl.", "–"])
             kosten_daten.append(["", "Gesamt:", f"{kosten_eur:.2f} €", "", "", ""])
             kosten_tbl = Table(kosten_daten, colWidths=[22*mm,58*mm,38*mm,18*mm,16*mm,18*mm])
             kosten_tbl.setStyle(tbl_style())
             story.append(kosten_tbl)
+            if luecken_liste:
+                story.append(Spacer(1, 2*mm))
+                story.append(Paragraph("Hinweis: Jede Buchung braucht Rechnungen oder Quittungen. Es fehlen:", styles["Normal"]))
+                for zeile_l in deckung_mod.luecken_texte(luecken_liste):
+                    story.append(Paragraph("– " + esc(zeile_l), styles["Normal"]))
         else:
             story.append(Paragraph("Keine Rechnungen/Quittungen erfasst.", styles["Normal"]))
 
@@ -5054,6 +5171,22 @@ def todo_belege_laden() -> list:
 
     def g(row, k, i): return row[k] if hasattr(row, 'keys') else row[i]
 
+    def rueckkehr_vorbei(rk) -> bool:
+        if isinstance(rk, str):
+            try: rk = date.fromisoformat(rk[:10])
+            except Exception: return False
+        return bool(rk) and rk < date.today()
+
+    # Buchungen ohne (vollständige) Rechnung/Quittung – erst nach der Rückkehr ein Problem
+    luecken_je_beleg = {}
+    for code in {g(r,"reise_code",1) for r in rows
+                 if g(r,"reise_code",1) and deckung_mod.ist_buchung(g(r,"belegart",10)) and rueckkehr_vorbei(g(r,"rueckkehr",11))}:
+        try:
+            for l in deckung_mod.luecken(deckung_mod.belege_der_reise(code)):
+                luecken_je_beleg[l["buchung_id"]] = l
+        except Exception:
+            pass
+
     ergebnis = []
     for r in rows:
         probleme = []
@@ -5077,6 +5210,10 @@ def todo_belege_laden() -> list:
                 probleme.append("✅ Nicht geprüft")
         if pflicht_ok is False or pflicht_ok == 0:
             probleme.append("⚠ Pflichtfelder fehlen")
+        l_b = luecken_je_beleg.get(g(r,"id",0))
+        if l_b:
+            probleme.append(f"🧾 Rechnung/Quittung fehlt noch ({l_b['fehlt']:.2f} {l_b['waehrung']})"
+                            if l_b["fehlt"] else "🧾 Rechnung/Quittung fehlt noch")
 
         if probleme:
             ergebnis.append({
@@ -7488,7 +7625,8 @@ def reise_detail(code: str, request: Request):
             return (belegart_x == "Buchungsbestaetigung"
                     and bool(gruppen_arten_tag.get(gruppe_x, set()) & {"Rechnung", "Quittung"}))
 
-        beleg_kosten_gesamt = 0.0
+        # Kosten: gleiche Regeln wie im Abschluss (mod_belegdeckung) – eine durch Rechnungen vollständig
+        # belegte Buchung zählt nicht mit, eine nur teilweise belegte nur mit ihrem offenen Rest.
         beleg_anzahl_gesamt = 0
         for b in beleg_rows_tag:
             belegart_k = get(b,"belegart",15) or ""
@@ -7499,10 +7637,18 @@ def reise_detail(code: str, request: Request):
             if beleg_unterdruecken(belegart_k, gruppe_k, hat_segmente_k):
                 continue
             beleg_anzahl_gesamt += 1
-            beleg_kosten_gesamt += gesamtbetrag_berechnen(
-                get(b,"betrag_brutto",4), get(b,"waehrung",5), get(b,"betrag_eur",17),
-                get(b,"betrag_eur_final",18), get(b,"nebenkosten_eur",19),
-                get(b,"kreditkarte_auslandsentgelt_eur",20))
+        _kat_tag = deckung_mod.kategorisieren([
+            {"id": get(b,"id",0), "belegart": get(b,"belegart",15), "beleg_gruppe_id": get(b,"beleg_gruppe_id",16),
+             "betrag_brutto": get(b,"betrag_brutto",4), "waehrung": get(b,"waehrung",5),
+             "betrag_eur": get(b,"betrag_eur",17), "betrag_eur_final": get(b,"betrag_eur_final",18)}
+            for b in beleg_rows_tag])
+        _zaehlen_tag = set(_kat_tag["final"]) | set(_kat_tag["vorlaeufig"])
+        beleg_kosten_gesamt = sum(
+            gesamtbetrag_berechnen(get(b,"betrag_brutto",4), get(b,"waehrung",5), get(b,"betrag_eur",17),
+                                   get(b,"betrag_eur_final",18), get(b,"nebenkosten_eur",19),
+                                   get(b,"kreditkarte_auslandsentgelt_eur",20))
+            for b in beleg_rows_tag if get(b,"id",0) in _zaehlen_tag
+        ) + sum((r["fehlt_eur"] or 0.0) for r in _kat_tag["rest"])
 
         for b in beleg_rows_tag:
             bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"

@@ -19,6 +19,7 @@ SMTP_PASS = os.getenv("SMTP_PASS", "") or IMAP_PASS
 DMS_EMAIL_TO = os.getenv("DMS_EMAIL_TO", "")
 SMTP_TIMEOUT = int(os.getenv("SMTP_TIMEOUT", "30") or "30")      # Wartezeit beim Senden (große Anhänge)
 SMTP_VERBINDUNG_TIMEOUT = 15                                      # Wartezeit für Verbindungsaufbau und Anmeldung
+IMAP_TIMEOUT = 30                                                 # Wartezeit je Schritt beim Mailserver (IMAP); danach Abbruch statt Hängen
 
 from mod_db import get_db, ph, is_postgres
 from mod_beleg import beleg_verarbeiten, get_s3, s3_download, lade_ma_daten
@@ -435,7 +436,7 @@ async def fetch_mails() -> dict:
     duplikate = 0
 
     try:
-        mail = imaplib.IMAP4_SSL(IMAP_HOST)
+        mail = imaplib.IMAP4_SSL(IMAP_HOST, timeout=IMAP_TIMEOUT)
         mail.login(IMAP_USER, IMAP_PASS)
         mail.select("INBOX")
         # Nur ungelesene Mails

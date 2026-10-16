@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.25"
+DOKU_GEPRUEFT_FUER = "3.26.1"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -437,7 +437,8 @@ KAPITEL = [
         ("ul", [
             "Der Reisecode (z. B. `26-007`) muss im Betreff oder Text stehen. Nur eine bestehende Reise gilt als Treffer.",
             "Abruf von Hand über **📬 Mails** (Menü, Dashboard oder Belegliste) **oder automatisch alle 5 Minuten** über den Cron (Teil C, „Automatische Aufgaben“). "
-            "Es läuft immer nur ein Abruf; ein zweiter Klick während eines Laufs zeigt einen Hinweis.",
+            "Es läuft immer nur ein Abruf; ein zweiter Klick während eines Laufs zeigt einen Hinweis. Der Abruf läuft im Hintergrund, die Seite bleibt bedienbar. "
+            "Antwortet der Mailserver nicht, bricht der Abruf nach 30 Sekunden mit einer Fehlermeldung ab.",
             "Geholt werden nur **ungelesene** Mails. Jeder Anhang (PDF, JPG, JPEG, PNG, HEIC, WEBP, XML) wird ein eigener Beleg. "
             "Ohne Anhang wird der Mailtext (mehr als 50 Zeichen) selbst zum Beleg.",
             "Ob ein Anhang ein Beleg ist, entscheidet sein **Inhalt** (PDF, JPG, PNG, WEBP, HEIC), nicht die Angabe der Mail. Auch kleine, vom Handy weitergeleitete PDFs werden erkannt. "
@@ -455,6 +456,9 @@ KAPITEL = [
               "Dort die Reise wählen und zuordnen, oder den Beleg öffnen."),
         ("p", "**Doppelte Belege** (gleiche Datei) werden erkannt und nicht erneut angelegt. Enthält ein PDF eine **eRechnung** (ZUGFeRD/XML), ist die XML-Datei "
               "auf der Beleg-Seite im Original und unverändert abrufbar."),
+        ("p", "**Buchung und Rechnung sind keine Duplikate.** Tragen eine Buchungsbestätigung und die dazugehörigen Rechnungen denselben Buchungscode, bleiben es getrennte Belege. "
+              "Zwei Rechnungen derselben Buchung gelten nur dann als doppelt, wenn auch die Rechnungsnummer (ohne Nummer: der Betrag) übereinstimmt. "
+              "Beim Eingang werden Buchungsbestätigung und Rechnungen mit **gleichem Buchungscode in derselben Reise automatisch verknüpft** (siehe „Beleg prüfen und ergänzen“)."),
     ]},
     {"id": "b-belegliste", "teil": "B", "titel": "Die Belegliste", "bloecke": [
         ("p", "Menü **Belege** zeigt alle Belege. Filter: Jahr, Monat, Reise, Geprüft, Problem (z. B. fehlende Pflichtfelder) und Suche "
@@ -467,7 +471,8 @@ KAPITEL = [
             "Mit **✏ Daten nachtragen** (Organisator) ergänzen oder korrigieren.",
             "**Belegart** und **Bezahlart** (siehe Tabellen unten). Bei Kreditkarte wählen Sie „Welche Karte?“.",
             "**📎 Dokumente:** Original-PDF, 🔒 Anonymisiert, 🔍 Analyse-PDF; Knöpfe zum erneuten Analysieren und erneuten Anonymisieren; Beleg löschen; Reise zuordnen.",
-            "**🔗 Verknüpfte Belege:** Zusammengehörige Belege (z. B. Rechnung und Buchungsbestätigung) lassen sich verknüpfen und wieder trennen.",
+            "**🔗 Verknüpfte Belege:** Zusammengehörige Belege (z. B. Buchungsbestätigung und Rechnungen) lassen sich verknüpfen und wieder trennen. "
+            "Die Karte zeigt, ob die Buchung durch Rechnungen belegt ist (siehe „Buchung und Rechnungen verknüpfen“ unten).",
             "**💰 Eurobetrag – Endabrechnung** und Kurs (siehe „Beträge, Fremdwährung und Kurse“).",
             "**✅ Prüfung & Übergabe an Habel:** Prüfvermerk eintragen und bestätigen. Danach steht dort „Geprüft von …“, und das Prüf-Deckblatt ist als PDF abrufbar. "
             "Darunter der **Habel-Stand der ganzen Reise**: Fortschrittsbalken („n von m Belegen geprüft“), noch offene Belege als Links und der Knopf zur Reise-Übergabe. "
@@ -481,12 +486,31 @@ KAPITEL = [
             ["Quittung", "ja", "Kassenbon, Quittung."],
             ["Bewirtungsbeleg (Eigenbeleg)", "ja", "Vom Reisenden im Portal erstellt, siehe Kapitel Bewirtung."],
             ["Vorschussquittung / Bargeldbeschaffung / Rückgabequittung", "ja", "Selbst erzeugt aus dem Bargeld-Konto, ohne eigenen Betrag."],
-            ["Buchungsbestätigung", "nein", "Betrag ist hier optional. Liefert Flug-/Zugdaten."],
+            ["Buchungsbestätigung", "nein", "Betrag ist hier optional. Liefert Flug-/Zugdaten. Braucht Rechnungen oder Quittungen (siehe unten)."],
             ["✈ Flugänderung/Umbuchung", "nein", "Löst die Änderungsklärung aus (siehe „Flug, Bahn und Termine“)."],
             ["Tankbeleg (Rechnung), Hotel, Taxi, Bewirtung, Sonstige Kosten, Sonstiges", "nein", "Zur Einordnung der Ausgabe. Nicht prüfpflichtig für die Habel-Übergabe."],
         ], [42, 16, 42]),
         ("h3", "Bezahlarten"),
         ("p", "💳 Kreditkarte · 💵 Bar · 🏦 Überweisung · 🅿 PayPal · 🤝 Durch Kunde · ❓ Unbekannt."),
+        ("h3", "Buchung und Rechnungen verknüpfen"),
+        ("p", "**Jede Buchung braucht Rechnungen oder Quittungen.** Die Buchungsbestätigung (Betrag x) ist nur der Vorab-Beleg; abgerechnet wird mit den echten Rechnungen "
+              "(x1 + x2 = x). Dazu werden die Belege zu einer **Gruppe** verknüpft. Die Karte „🔗 Verknüpfte Belege“ zeigt dann Buchung, Rechnungen und Summe, zum Beispiel "
+              "„Buchung 300.00 EUR · Rechnungen 120.00 + 180.00 = 300.00 EUR · ✓ vollständig belegt“."),
+        ("ul", [
+            "**Automatisch:** Beim Eingang werden Buchungsbestätigung und Rechnung/Quittung mit **gleichem Buchungscode** in derselben Reise verknüpft (Groß/Kleinschreibung, Leer- und Sonderzeichen egal, mindestens 4 Zeichen). Die Meldung beim Abruf nennt es.",
+            "**💡 Passender Vorschlag:** Ergeben ungebundene Rechnungen der Reise genau den Betrag der Buchung (oder den noch fehlenden Rest), schlägt die Karte die Belege vor. "
+            "Ein Klick auf **Alle verknüpfen** übernimmt sie. Der Vorschlag erscheint an der Buchung und auch an jeder der beteiligten Rechnungen.",
+            "**Von Hand:** Unten in der Karte die gewünschten Belege **ankreuzen** und **+ Ausgewählte verknüpfen** wählen (mehrere auf einmal). "
+            "Belege mit gleichem Buchungscode oder Anbieter stehen oben; Buchungen zeigen ihren offenen Rest. Nur Belege derselben Reise sind möglich.",
+            "**Lösen:** **Entfernen** neben einem Beleg nimmt ihn aus der Gruppe.",
+        ]),
+        ("tab", ["Stand", "Bedeutung", "Kostensumme"], [
+            ["✓ vollständig belegt", "Rechnungen decken die Buchung (auf den Cent; bei Fremdwährung 5 % Kursspielraum). Übersteigen sie die Buchung, steht der Mehrbetrag dabei.", "Nur die Rechnungen zählen. Die Buchung zählt nicht doppelt."],
+            ["⚠ teilweise belegt", "Die Rechnungen decken nur einen Teil, es fehlt ein Rest (z. B. 120 von 300).", "Rechnungen plus der **offene Rest** als „vorläufig“."],
+            ["⚠ noch keine Rechnung/Quittung", "Zur Buchung ist noch nichts verknüpft (oder nur Belege ohne Betrag).", "Die ganze Buchung zählt „vorläufig“ mit."],
+            ["Währungen ohne Kurs", "Beträge in verschiedenen Währungen lassen sich ohne Kurs nicht vergleichen.", "Nur die Rechnungen. Bitte selbst prüfen."],
+        ], [24, 48, 28]),
+        ("hinweis", "Eigenbelege der App (z. B. Bewirtungsbeleg) decken keine Buchung ab. Gruppen ohne Buchungsbestätigung (z. B. Bewirtungsbeleg mit Rechnung) werden nicht auf Beträge geprüft."),
     ]},
     {"id": "b-betrag", "teil": "B", "titel": "Beträge, Fremdwährung und Kurse", "bloecke": [
         ("p", "Der Euro-Betrag eines Belegs wird immer nach derselben Regel gebildet:"),
@@ -628,8 +652,13 @@ KAPITEL = [
             "**🧾 Belege (Rechnungen & Quittungen):** Datum, Art, Anbieter, Rechnungsnr., Betrag, MwSt, Hinweis, Final (Euro-Betrag bestätigt), Geprüft, Beleg.",
             "**⏱ Reise-/Arbeitszeiten** und **🚗 Gefahrene Kilometer** aus den Eingaben der Reisenden im Portal.",
             "**✈ Geflogene Flugsegmente:** Summe, Liste (Abflug, Reisender, Flug, Strecke) und Aufteilung je Reisendem – auch im PDF.",
-            "Gelbe/rote Hinweise zeigen, was noch offen ist (z. B. ungeprüfte Belege, fehlende Kurse).",
+            "**🔗 Buchungen und zugehörige Rechnungen:** Je Buchung die Rechnungen mit Summe und Stand („vollständig belegt“ oder „es fehlen noch …“). Rechnungen tragen in der Belegtabelle den Verweis „🔗 Buchung #…“.",
+            "Gelbe/rote Hinweise zeigen, was noch offen ist (z. B. ungeprüfte Belege, fehlende Kurse, **Buchungen ohne vollständige Rechnung/Quittung**).",
         ]),
+        ("p", "**Buchung und Rechnungen in der Summe:** Eine Buchungsbestätigung zählt nicht doppelt. Sind ihre Rechnungen/Quittungen verknüpft und decken den Betrag, zählen nur die Rechnungen. "
+              "Fehlt ein Teil, steht der **offene Rest** als orange Zeile „Rest der Buchung“ in der Tabelle und ist als „vorläufig“ in der Summe; ohne jede Rechnung zählt die ganze Buchung vorläufig. "
+              "Ein Warnkasten nennt jede betroffene Buchung mit dem fehlenden Betrag. Dasselbe steht im PDF (Zeile „Rest Buchung #…“ und Hinweistext). "
+              "Die Kachel „Kosten aus Belegen“ auf der Reise-Seite rechnet genauso."),
         ("p", "**Was als Flugsegment zählt:** Jede Teilstrecke eines Flugbelegs. **Nicht gezählt** werden Zugfahrten – auch Rail&Fly und Lufthansa Express Rail, die eine LH-Nummer tragen. "
               "Ein Segment gilt als Zug, wenn die Gesellschaft Bahn/Rail/ICE o. ä. nennt, der Ort ein Bahnhof ist (z. B. „Köln Hbf“) oder der Code ein Bahnhofs-Code ist (z. B. QKL, ZWS, QDU). "
               "Stornierte Flüge (Status aus der Flugüberwachung) zählen ebenfalls nicht. Unter der Liste steht, wie viele Zugfahrten und stornierte Flüge nicht gezählt wurden."),
@@ -648,6 +677,7 @@ KAPITEL = [
             "Größtes erlaubtes Mailvolumen: [[habel_max_mb]] MB (Summe aller PDF-Anhänge, Einstellung HABEL_MAX_MB).",
         ]),
         ("p", "Am Beleg steht der Stand der ganzen Reise: Fortschritt der Prüfung, noch offene Belege und der Link zur Übergabe. Nach dem Senden steht dort „Mit der Reise an Habel gesendet am …“."),
+        ("p", "Fehlen zu einer Buchung noch Rechnungen oder Quittungen, zeigt die Übergabe-Seite einen **Hinweis** mit der Buchung und dem fehlenden Betrag. Er sperrt das Senden **nicht**."),
         ("p", "Auf dem **Dashboard** und unter **📋 Offene Aufgaben** erscheinen Reisen, die zur Übergabe bereit sind (zurückgekehrt, alle Belege geprüft, noch nicht gesendet). "
               "Die Liste der abgeschlossenen Reisen zeigt je Reise den Habel-Stand und einen Knopf „📤 Habel“."),
     ]},
@@ -669,6 +699,7 @@ KAPITEL = [
               "Hinweise (z. B. Kurs nachtragen), Anzahl Belege im Posteingang und der Knopf **📬 Mails abrufen**."),
         ("h3", "📋 Offene Aufgaben (`/todo`)"),
         ("p", "Alles, was vor der finalen Abrechnung noch offen ist, über alle Reisen: Beträge in Fremdwährung ohne bestätigten Euro-Betrag, Belege ohne Prüfung, "
+              "Buchungen, zu denen nach der Rückkehr noch Rechnung oder Quittung fehlt („🧾 Rechnung/Quittung fehlt noch“, mit Betrag), "
               "nicht abgerechnete Reisen mit dem Habel-Stand je Reise (geprüft, bereit, gesendet)."),
         ("h3", "🗺 Karte (`/maps`)"),
         ("p", "Zeigt, wo sich zugeordnete Mitarbeiter bei laufenden Reisen aktuell befinden."),
