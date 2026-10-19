@@ -33,7 +33,7 @@ SPALTEN = ["id", "reise_code", "kuerzel", "nummer", "version", "ersetzt_id", "st
            "hauptbeleg_id", "eigenbeleg", "eigenbeleg_begruendung", "datum", "ort", "anlass",
            "teilnehmer_json", "betrag", "trinkgeld", "waehrung", "bestaetigt_am",
            "bestaetigt_name", "bestaetigt_ip", "bestaetigt_agent", "signatur_png",
-           "pruefsumme", "beleg_id", "s3_pdf"]
+           "pruefsumme", "beleg_id", "s3_pdf", "teilbetrag"]
 
 
 # ── Hilfsfunktionen ───────────────────────────────────────────────────────────
@@ -81,6 +81,7 @@ def _row(r) -> dict:
     d = {k: (r[k] if hasattr(r, "keys") else r[i]) for i, k in enumerate(SPALTEN)}
     d["betrag"] = _num(d["betrag"])
     d["trinkgeld"] = _num(d["trinkgeld"])
+    d["teilbetrag"] = _num(d["teilbetrag"])
     d["datum"] = _iso(d["datum"])
     d["eigenbeleg"] = bool(d["eigenbeleg"])
     try:
@@ -138,6 +139,15 @@ def validieren(d: dict) -> list[str]:
         f.append("Bitte mindestens zwei Teilnehmer mit Namen angeben (der Bewirtende gehört dazu).")
     if d.get("betrag") is None:
         f.append("Bitte den Betrag angeben.")
+    teil = d.get("teilbetrag")
+    if d.get("teilbetrag_ungueltig"):
+        f.append("Der Teilbetrag der Bewirtung ist keine gültige Zahl (z. B. 70,00) – oder das Feld leer lassen.")
+    if teil is not None:
+        if teil <= 0:
+            f.append("Der Teilbetrag der Bewirtung muss größer als 0 sein (oder das Feld leer lassen).")
+        elif d.get("betrag") is not None and teil >= float(d["betrag"]) - 0.004:
+            f.append("Der Teilbetrag der Bewirtung muss kleiner sein als der Betrag laut Originalbeleg "
+                     "(ist die ganze Rechnung Bewirtung, das Feld leer lassen).")
     if not d.get("hauptbeleg_id"):
         f.append("Bitte den Originalbeleg wählen oder hochladen. Jede Bewirtung braucht einen Originalbeleg "
                  "(gibt es keine Rechnung, bitte einen selbst erstellten Eigenbeleg hochladen).")
@@ -162,6 +172,8 @@ def pruefsumme_berechnen(d: dict) -> str:
         "bestaetigt_am": d.get("bestaetigt_am"), "bestaetigt_name": d.get("bestaetigt_name"),
         "signatur_sha256": hashlib.sha256(sig.encode()).hexdigest() if sig else None,
     }
+    if d.get("teilbetrag") is not None:       # nur wenn gesetzt: Prüfsummen älterer Belege bleiben gültig
+        kern["teilbetrag"] = round(float(d["teilbetrag"]), 2)
     text = json.dumps(kern, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -286,18 +298,18 @@ def entwurf_speichern(db, d: dict, bid: int | None = None) -> int:
              (d.get("eigenbeleg_begruendung") or "").strip() or None,
              d.get("datum"), (d.get("ort") or "").strip(), (d.get("anlass") or "").strip(),
              json.dumps(d.get("teilnehmer") or [], ensure_ascii=False),
-             d.get("betrag"), d.get("trinkgeld"), d.get("waehrung") or "EUR")
+             d.get("betrag"), d.get("trinkgeld"), d.get("waehrung") or "EUR", d.get("teilbetrag"))
     if bid:
         cur.execute(f"""UPDATE bewirtungen SET hauptbeleg_id={P}, eigenbeleg={P}, eigenbeleg_begruendung={P},
                         datum={P}, ort={P}, anlass={P}, teilnehmer_json={P}, betrag={P}, trinkgeld={P},
-                        waehrung={P} WHERE id={P} AND status='entwurf'""", werte + (bid,))
+                        waehrung={P}, teilbetrag={P} WHERE id={P} AND status='entwurf'""", werte + (bid,))
         neu_id = bid
     else:
         nummer = nummer_vergeben(db, d["reise_code"])
         sql = f"""INSERT INTO bewirtungen (reise_code, kuerzel, nummer, version, status,
                   hauptbeleg_id, eigenbeleg, eigenbeleg_begruendung, datum, ort, anlass,
-                  teilnehmer_json, betrag, trinkgeld, waehrung)
-                  VALUES ({P},{P},{P},1,'entwurf',{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})"""
+                  teilnehmer_json, betrag, trinkgeld, waehrung, teilbetrag)
+                  VALUES ({P},{P},{P},1,'entwurf',{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})"""
         args = (d["reise_code"], d["kuerzel"], nummer) + werte
         if is_postgres():
             cur.execute(sql + " RETURNING id", args)
@@ -323,13 +335,13 @@ def korrektur_starten(db, bid: int) -> int:
     P = ph()
     sql = f"""INSERT INTO bewirtungen (reise_code, kuerzel, nummer, version, ersetzt_id, status,
               hauptbeleg_id, eigenbeleg, eigenbeleg_begruendung, datum, ort, anlass, teilnehmer_json,
-              betrag, trinkgeld, waehrung, beleg_id)
-              VALUES ({P},{P},{P},{P},{P},'entwurf',{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})"""
+              betrag, trinkgeld, waehrung, beleg_id, teilbetrag)
+              VALUES ({P},{P},{P},{P},{P},'entwurf',{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})"""
     # Eigenbeleg-Ausnahme und eigenes Trinkgeld gibt es nicht mehr: eine Korrektur braucht immer einen Originalbeleg
     args = (alt["reise_code"], alt["kuerzel"], alt["nummer"], alt["version"] + 1, bid,
             alt["hauptbeleg_id"], False, None, alt["datum"],
             alt["ort"], alt["anlass"], json.dumps(alt["teilnehmer"], ensure_ascii=False),
-            alt["betrag"], None, alt["waehrung"], alt["beleg_id"])
+            alt["betrag"], None, alt["waehrung"], alt["beleg_id"], alt.get("teilbetrag"))
     if is_postgres():
         cur.execute(sql + " RETURNING id", args)
         neu_id = cur.fetchone()[0]
@@ -417,6 +429,9 @@ def pdf_bauen(d: dict, klarname: str, hauptbeleg: dict | None) -> bytes:
     story += [tt, Paragraph("Kosten", h2)]
 
     kosten = [["Betrag laut Originalbeleg", _betrag_txt(d.get("betrag"), w)]]
+    if d.get("teilbetrag") is not None:
+        kosten.append(["Davon Bewirtung (Rest: andere Leistungen auf dem Beleg, z. B. Übernachtung)",
+                       _betrag_txt(d.get("teilbetrag"), w)])
     ktab = Table(kosten, colWidths=[110 * mm, 64 * mm])
     ktab.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9.5), ("ALIGN", (1, 0), (1, -1), "RIGHT"),
                               ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0"))]))
@@ -643,6 +658,27 @@ def kosten_abgleichen(db, bid: int | None = None) -> int:
             geaendert += 1
     cur.close()
     return geaendert
+
+
+def teilbetraege_der_reise(db, reise_code: str) -> dict:
+    """Bestätigte Bewirtungen mit Teilbetrag (z. B. 70 von 520 EUR auf einer Hotelrechnung):
+    {hauptbeleg_id: {"teilbetrag", "betrag", "waehrung", "nummer", "beleg_id"}}.
+    Der Abschluss weist damit Hotel und Bewirtung getrennt aus; die Gesamtsumme bleibt gleich."""
+    cur = db.cursor()
+    cur.execute("SELECT hauptbeleg_id, teilbetrag, betrag, waehrung, nummer, beleg_id FROM bewirtungen "
+                f"WHERE reise_code={ph()} AND status='bestaetigt' AND teilbetrag IS NOT NULL "
+                "AND hauptbeleg_id IS NOT NULL ORDER BY id", (reise_code,))
+    out = {}
+    for r in cur.fetchall():
+        g = lambda k, i: r[k] if hasattr(r, "keys") else r[i]
+        t = _num(g("teilbetrag", 1))
+        if t is None or t <= 0:
+            continue
+        out[g("hauptbeleg_id", 0)] = {"teilbetrag": t, "betrag": _num(g("betrag", 2)),
+                                      "waehrung": g("waehrung", 3) or "EUR", "nummer": g("nummer", 4),
+                                      "beleg_id": g("beleg_id", 5)}
+    cur.close()
+    return out
 
 
 def _verknuepfen(db, cur, beleg_a: int, beleg_b: int) -> None:

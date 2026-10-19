@@ -377,14 +377,16 @@ def vma_tage_generieren(reise_code: str, db) -> int:
 
         # Manuell geänderte Einträge nicht überschreiben
         cur.execute(f"""SELECT id, quelle, trennungspauschale_quelle, trennungspauschale,
-                        tatsaechliche_uhrzeit
+                        tatsaechliche_uhrzeit, land_code, land_name, vma_satz_voll, vma_satz_halb, satz_hinweis
                         FROM vma_tage WHERE reise_code={P} AND datum={P}""",
                     (reise_code, tag.isoformat()))
         existing = cur.fetchone()
         trenn_quelle_alt = None
         trenn_alt = None
         tatsaechliche_zeit_alt = None
+        hinweis_alt = None
         if existing:
+            hinweis_alt = existing[9] if isinstance(existing, tuple) else existing["satz_hinweis"]
             q = (existing[1] if isinstance(existing, tuple) else existing["quelle"]) or ""
             trenn_quelle_alt = (existing[2] if isinstance(existing, tuple) else existing["trennungspauschale_quelle"]) or "auto"
             trenn_alt = existing[3] if isinstance(existing, tuple) else existing["trennungspauschale"]
@@ -416,12 +418,20 @@ def vma_tage_generieren(reise_code: str, db) -> int:
                                                       tatsaechliche_zeit_alt)
 
         if existing:
+            # Hat sich der Satz gegenüber der letzten Berechnung geändert, merkt sich der Tag einen Hinweis
+            # (bleibt stehen, bis er am Tag mit „OK“ bestätigt wird).
+            alt_land = existing[5] if isinstance(existing, tuple) else existing["land_code"]
+            alt_name = existing[6] if isinstance(existing, tuple) else existing["land_name"]
+            alt_voll = existing[7] if isinstance(existing, tuple) else existing["vma_satz_voll"]
+            alt_halb = existing[8] if isinstance(existing, tuple) else existing["vma_satz_halb"]
+            hinweis_neu = satz_aenderung_text(alt_land, alt_name, alt_voll, alt_halb, lcode, lname, voll, halb)
+            hinweis = hinweis_neu or hinweis_alt
             cur.execute(f"""UPDATE vma_tage SET
                 land_code={P}, land_name={P}, vma_satz_voll={P}, vma_satz_halb={P},
                 ist_halber_satz={P}, fruehstueck={P}, vma_brutto={P}, vma_netto={P},
-                quelle={P}, trennungspauschale={P} WHERE reise_code={P} AND datum={P}""",
+                quelle={P}, trennungspauschale={P}, satz_hinweis={P} WHERE reise_code={P} AND datum={P}""",
                 (lcode, lname, voll, halb, ist_halb, frueh, brutto, netto,
-                 quelle, trennung, reise_code, tag.isoformat()))
+                 quelle, trennung, hinweis, reise_code, tag.isoformat()))
         else:
             cur.execute(f"""INSERT INTO vma_tage
                 (reise_code, datum, land_code, land_name, vma_satz_voll, vma_satz_halb,
@@ -432,9 +442,57 @@ def vma_tage_generieren(reise_code: str, db) -> int:
                  ist_halb, frueh, False, False, brutto, netto, quelle, trennung))
         count += 1
 
+    # Wurden Abreise/Rückkehr geändert: automatisch erzeugte Tage außerhalb des neuen Zeitraums entfernen
+    # (manuell geänderte Tage bleiben erhalten).
+    cur.execute(f"""DELETE FROM vma_tage WHERE reise_code={P} AND (datum<{P} OR datum>{P})
+                    AND (quelle IS NULL OR quelle<>'manuell')""",
+                (reise_code, ab.isoformat(), zu.isoformat()))
+
     db.commit()
     cur.close()
     return count
+
+
+def satz_aenderung_text(alt_land, alt_name, alt_voll, alt_halb, neu_land, neu_name, neu_voll, neu_halb) -> str | None:
+    """Kurzer Hinweis, wenn sich Land oder Satz eines Tages gegenüber vorher geändert hat, sonst None."""
+    try:
+        av, ah, nv, nh = float(alt_voll), float(alt_halb), float(neu_voll), float(neu_halb)
+    except (TypeError, ValueError):
+        return None
+    if (alt_land or "") == (neu_land or "") and abs(av - nv) < 0.005 and abs(ah - nh) < 0.005:
+        return None
+    return (f"Satz geändert: vorher {alt_name or alt_land} {av:.2f} € (halb {ah:.2f} €) "
+            f"→ jetzt {neu_name or neu_land} {nv:.2f} € (halb {nh:.2f} €)")
+
+
+def vma_auto_fuer_beleg(beleg_id) -> int:
+    """Wie vma_auto_aktualisieren, für die Reise, der der Beleg zugeordnet ist (kein Beleg/keine Reise: nichts)."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT reise_code FROM belege WHERE id={ph()}", (beleg_id,))
+        r = cur.fetchone(); cur.close(); db.close()
+    except Exception as ex:
+        print(f"[VMA] Reise zu Beleg {beleg_id} nicht gelesen: {ex}")
+        return 0
+    code = (r[0] if isinstance(r, tuple) else r["reise_code"]) if r else None
+    return vma_auto_aktualisieren(code)
+
+
+def vma_auto_aktualisieren(reise_code) -> int:
+    """Berechnet die VMA-Tage einer Reise neu, mit eigener Datenbank-Verbindung.
+    Wird nach jeder Änderung aufgerufen, die den Satz beeinflusst (Reise anlegen/ändern, Länder, Hotel-/Flugbelege).
+    Ein Fehler hier bricht die aufrufende Aktion nie ab."""
+    if not reise_code:
+        return 0
+    try:
+        db = get_db()
+        try:
+            return vma_tage_generieren(str(reise_code).upper(), db)
+        finally:
+            db.close()
+    except Exception as ex:
+        print(f"[VMA] Automatische Berechnung für {reise_code} fehlgeschlagen: {ex}")
+        return 0
 
 
 def trennungspauschale_berechnen(tag: date, ist_halber_reisetag: bool,

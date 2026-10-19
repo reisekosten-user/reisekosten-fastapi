@@ -38,7 +38,8 @@ from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
 import mod_belegdeckung as deckung_mod
 from mod_mail import fetch_mails, sende_dms_mail, dms_konfiguriert, DMS_EMAIL_TO, smtp_diagnose
 from mod_vma_tage import (vma_berechnen, land_fuer_tag, trennungspauschale_berechnen,
-                           fruehstueck_aus_beleg, vma_tage_generieren, land_fuer_letzten_tag)
+                           fruehstueck_aus_beleg, vma_tage_generieren, land_fuer_letzten_tag,
+                           vma_auto_aktualisieren, vma_auto_fuer_beleg)
 from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
                        hat_bereits_passwoerter, pfad_ist_offen, ist_organisator)
 from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_token,
@@ -81,6 +82,15 @@ SESSION_SECRET, SESSION_SECRET_HERKUNFT = _session_secret_bestimmen()
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.35", "zeit": "2026-10-19 16:56", "aenderungen": [
+        "Neu: Die VMA-Tage werden jetzt automatisch angelegt, sobald eine Reise erstellt wird, und danach bei jeder Änderung aktualisiert (Reisedaten, Länder, neue, geänderte oder gelöschte Hotel-/Flugbelege, Beleg einer Reise zugeordnet). „VMA berechnen“ ist vor dem Eintragen von Terminen nicht mehr nötig. Wird der Reisezeitraum verkürzt, entfallen die überzähligen Tage (manuell geänderte Tage bleiben).",
+        "Neu: Ändert sich Land oder Satz eines Tages gegenüber vorher, zeigt der Tag den Hinweis „Satz geändert: vorher … → jetzt …“ mit Knopf OK. Kann für einen Tag kein Land erkannt werden, steht dort „Land nicht erkannt – es gilt Deutschland“. Die Spalte satz_hinweis wird beim Start automatisch angelegt."]},
+    {"version": "3.34", "zeit": "2026-10-19 16:46", "aenderungen": [
+        "Neu: Am Bewirtungsbeleg gibt es das Feld „Davon Bewirtung“ (Teilbetrag). Enthält eine Rechnung mehr als die Bewirtung (z. B. Hotelrechnung 520 EUR mit 70 EUR Abendessen für Gäste), trägt der Reisende nur den Bewirtungsanteil ein. Leer = ganze Rechnung ist Bewirtung (wie bisher).",
+        "Abschluss, Abschluss-PDF und Reise-Seite weisen Hotel und Bewirtung getrennt aus (z. B. Hotel 450 EUR, Bewirtung 70 EUR); die Gesamtsumme bleibt unverändert. Bei Fremdwährung wird der Anteil im gleichen Verhältnis umgerechnet. Die Spalte wird beim Start automatisch angelegt."]},
+    {"version": "3.33", "zeit": "2026-10-19 16:38", "aenderungen": [
+        "Neu: Liste „Kreditkarten-Belege Ausland“ (Einstellungen › 🌍) für den Abgleich mit der VISA-Abrechnung. Sie enthält jede mit Kreditkarte bezahlte Rechnung und Quittung aus dem Ausland, in Fremdwährung oder in EUR mit Land außerhalb Deutschlands. Bis zum Abgleich bleibt der Betrag in Originalwährung führend, der Euro-Wert daneben ist geschätzt (≈).",
+        "Nachtragen direkt in der Liste: Datum der Kartenabrechnung, Euro-Betrag und Gebühr eintragen oder bei EUR-Belegen „abgeglichen“ ankreuzen. Filter nach Status und Reise, CSV-Export für Excel. Unter „Offene Aufgaben“ steht die Zahl der noch abzugleichenden Belege."]},
     {"version": "3.32", "zeit": "2026-10-19 16:31", "aenderungen": [
         "Neu: Rechnungen und Quittungen lassen sich einzeln an Habel senden, und zwar nur von Hand. Auf der Reise-Seite listet die neue Karte „Belege einzeln an Habel senden“ alle Rechnungen und Quittungen der Reise; der Knopf „Einzeln senden“ schickt eine Mail mit genau diesem Beleg (mit Prüf-Deckblatt). Voraussetzung: Beleg geprüft und Original gespeichert. Ein schon gesendeter Beleg lässt sich nur nach ausdrücklicher Bestätigung erneut senden.",
         "Der Einzelversand wird in einer eigenen Spalte vermerkt (belege.habel_einzel_am, wird beim Start automatisch angelegt) und ändert den Stand „an Habel gesendet“ der Reise nicht. Die Übergabe der ganzen Reise bleibt unverändert und enthält alle Belege."]},
@@ -777,6 +787,8 @@ async def startup():
     eigenbelege_pflichtfelder_reparieren()
     bewirtung_kosten_reparieren()
     habel_einzel_spalte_sichern()
+    spalte_sichern("bewirtungen", "teilbetrag", "NUMERIC(10,2)")
+    spalte_sichern("vma_tage", "satz_hinweis", "TEXT")
     try:
         n_mwst = mod_beleg.mwst_flug_bahn_reparieren()
         if n_mwst:
@@ -1785,6 +1797,7 @@ async def beleg_daten_bearbeiten(bid: int, request: Request):
                         (pflicht_ok, json.dumps(fehlend, ensure_ascii=False), status, bid))
 
         db.commit(); cur.close(); db.close()
+        vma_auto_fuer_beleg(bid)          # Land/Hotel-Zeitraum können sich geändert haben
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
@@ -2248,8 +2261,12 @@ def beleg_loeschen(bid: int):
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT reise_code FROM belege WHERE id={P}", (bid,))
+        rc_row = cur.fetchone()
+        rc_alt = (rc_row[0] if isinstance(rc_row, tuple) else rc_row["reise_code"]) if rc_row else None
         cur.execute(f"DELETE FROM belege WHERE id={P}", (bid,))
         db.commit(); cur.close(); db.close()
+        vma_auto_aktualisieren(rc_alt)    # ein gelöschter Hotel-/Flugbeleg ändert Land und Satz
         return RedirectResponse("/belege", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
@@ -2453,19 +2470,25 @@ def _zeitstempel_text(v) -> str:
 EINZEL_ARTEN = ("Rechnung", "Quittung")
 
 
-def habel_einzel_spalte_sichern():
-    """Legt belege.habel_einzel_am an, falls /init noch nicht gelaufen ist (ein Neustart genügt). Ändert sonst nichts."""
+def spalte_sichern(tabelle: str, spalte: str, typ: str) -> None:
+    """Legt eine neue Spalte an, falls /init noch nicht gelaufen ist (ein Neustart genügt). Ändert sonst nichts.
+    Nur feste Namen aus dem Programm übergeben (kein Benutzereingabe-Text)."""
     try:
         db = get_db(); cur = db.cursor()
         if is_postgres():
-            cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS habel_einzel_am TIMESTAMP")
+            cur.execute(f"ALTER TABLE {tabelle} ADD COLUMN IF NOT EXISTS {spalte} {typ}")
         else:
-            cur.execute("PRAGMA table_info(belege)")
-            if "habel_einzel_am" not in {(r["name"] if hasattr(r, "keys") else r[1]) for r in cur.fetchall()}:
-                cur.execute("ALTER TABLE belege ADD COLUMN habel_einzel_am TIMESTAMP")
+            cur.execute(f"PRAGMA table_info({tabelle})")
+            if spalte not in {(r["name"] if hasattr(r, "keys") else r[1]) for r in cur.fetchall()}:
+                cur.execute(f"ALTER TABLE {tabelle} ADD COLUMN {spalte} {typ}")
         db.commit(); cur.close(); db.close()
     except Exception as ex:
-        print(f"[Startup] Spalte habel_einzel_am nicht angelegt (bitte /init aufrufen): {ex}")
+        print(f"[Startup] Spalte {tabelle}.{spalte} nicht angelegt (bitte /init aufrufen): {ex}")
+
+
+def habel_einzel_spalte_sichern():
+    """Spalte für den Einzelversand an Habel (belege.habel_einzel_am)."""
+    spalte_sichern("belege", "habel_einzel_am", "TIMESTAMP")
 
 
 def habel_einzel_hindernisse(b: dict) -> list:
@@ -2985,8 +3008,13 @@ async def beleg_zuordnen(bid: int, request: Request):
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT reise_code FROM belege WHERE id={P}", (bid,))
+        rc_row = cur.fetchone()
+        rc_alt = (rc_row[0] if isinstance(rc_row, tuple) else rc_row["reise_code"]) if rc_row else None
         cur.execute(f"UPDATE belege SET reise_code={P} WHERE id={P}", (rcode, bid))
         db.commit(); cur.close(); db.close()
+        for rc_x in {rc_alt, rcode}:      # alte und neue Reise aktualisieren
+            vma_auto_aktualisieren(rc_x)
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
@@ -3655,6 +3683,19 @@ def vma_tag_reset_und_neu(code: str, vid: int, request: Request):
         return JSONResponse({"fehler": str(e)}, status_code=500)
 
 
+@app.post("/reise/{code}/vma/{vid}/hinweis-ok")
+def vma_hinweis_ok(code: str, vid: int, request: Request):
+    """Bestätigt den Hinweis „Satz geändert“ an einem Tag (der Hinweis verschwindet)."""
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"UPDATE vma_tage SET satz_hinweis=NULL WHERE id={P} AND reise_code={P}", (vid, code.upper()))
+        db.commit(); cur.close(); db.close()
+    except Exception as e:
+        return JSONResponse({"fehler": str(e)}, status_code=500)
+    return RedirectResponse(request.headers.get("referer") or f"/reise/{code.upper()}", status_code=303)
+
+
 @app.post("/reise/{code}/vma/{vid}/zuruecksetzen")
 def vma_tag_zuruecksetzen(code: str, vid: int, request: Request):
     """
@@ -4289,6 +4330,14 @@ def reise_abschluss(code: str):
             ORDER BY belegdatum NULLS LAST, id""", (rcode,))
         belege = cur.fetchall()
         cur.close(); db.close()
+        try:   # Bewirtung mit Teilbetrag (z. B. 70 von 520 EUR auf einer Hotelrechnung): getrennt ausweisen
+            _db_t = get_db()
+            try:
+                teil_map = bw.teilbetraege_der_reise(_db_t, rcode)
+            finally:
+                _db_t.close()
+        except Exception:
+            teil_map = {}
 
         # VMA berechnen
         vma_total_netto = sum(float(g(v,"vma_netto",10) or 0) for v in vma_rows)
@@ -4464,7 +4513,17 @@ def reise_abschluss(code: str):
                           if geprueft_b else
                           '<span style="color:#ef4444;font-weight:700" title="Noch nicht geprüft">✗</span>')
 
-            summen[typ] = summen.get(typ, 0) + eur_val
+            tb = teil_map.get(bid2)
+            if (tb and brutto and waehrung == tb["waehrung"] and 0 < tb["teilbetrag"] < float(brutto) - 0.004
+                    and typ != "Bewirtung"):
+                eur_bw = eur_val * tb["teilbetrag"] / float(brutto)
+                summen[typ] = summen.get(typ, 0) + (eur_val - eur_bw)
+                summen["Bewirtung"] = summen.get("Bewirtung", 0) + eur_bw
+                bet_s += (f'<br><span style="font-size:10px;color:#7c3aed">davon Bewirtung {tb["teilbetrag"]:.2f} {waehrung}'
+                          + (f' = {eur_bw:.2f} EUR' if waehrung != "EUR" else "")
+                          + f' ({tb["nummer"]}) · übrige Leistungen {eur_val - eur_bw:.2f} EUR</span>')
+            else:
+                summen[typ] = summen.get(typ, 0) + eur_val
 
             kosten_html += f"""<tr{' style="background:#fff7ed"' if ist_vorlaeufig else ''}>
                 <td>{fdat(bd)}</td>
@@ -4866,6 +4925,14 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
             FROM belege WHERE reise_code={P} ORDER BY belegdatum""", (rcode,))
         belege = cur.fetchall()
         cur.close(); db.close()
+        try:   # Bewirtung mit Teilbetrag: getrennt ausweisen (Gesamtsumme unverändert)
+            _db_t = get_db()
+            try:
+                teil_map = bw.teilbetraege_der_reise(_db_t, rcode)
+            finally:
+                _db_t.close()
+        except Exception:
+            teil_map = {}
 
         vma_total_netto = sum(float(g(v,"vma_netto",9) or 0) for v in vma_rows)
         trennung_total = sum(float(g(v,"trennungspauschale",10) or 0) for v in vma_rows)
@@ -5077,6 +5144,24 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
             kosten_tbl = Table(kosten_daten, colWidths=[22*mm,58*mm,38*mm,18*mm,16*mm,18*mm])
             kosten_tbl.setStyle(tbl_style())
             story.append(kosten_tbl)
+            teil_zeilen = []
+            for b in rechnungen:
+                tb = teil_map.get(g(b,"id",0))
+                brutto_t = g(b,"betrag_brutto",4); w_t = g(b,"waehrung",5) or "EUR"
+                if tb and brutto_t and w_t == tb["waehrung"] and 0 < tb["teilbetrag"] < float(brutto_t) - 0.004:
+                    eur_ges = beleg_eur_mit_anteil(brutto_t, w_t, g(b,"betrag_eur",6), g(b,"betrag_eur_final",10),
+                                                   g(b,"nebenkosten_eur",11), g(b,"kreditkarte_auslandsentgelt_eur",15),
+                                                   kat["anteile"].get(g(b,"id",0)))
+                    eur_bw = eur_ges * tb["teilbetrag"] / float(brutto_t)
+                    teil_zeilen.append(
+                        f"Beleg #{g(b,'id',0)} ({g(b,'anbieter',2) or '–'}, {float(brutto_t):.2f} {w_t}): "
+                        f"davon Bewirtung {tb['teilbetrag']:.2f} {w_t} = {eur_bw:.2f} € ({tb['nummer']}), "
+                        f"übrige Leistungen {eur_ges - eur_bw:.2f} €")
+            if teil_zeilen:
+                story.append(Spacer(1, 2*mm))
+                story.append(Paragraph("Aufteilung Rechnung und Bewirtung (die Gesamtsumme bleibt unverändert):", styles["Normal"]))
+                for zeile_t in teil_zeilen:
+                    story.append(Paragraph("– " + esc(zeile_t), styles["Normal"]))
             for nid in kat["nachweis"]:
                 nb = deck_by_id[nid]
                 story.append(Spacer(1, 2*mm))
@@ -5447,6 +5532,17 @@ def todo_liste_laden() -> list:
     except Exception: pass
 
     try:
+        # 1b. Kreditkarten-Belege aus dem Ausland, noch nicht mit der VISA-Abrechnung abgeglichen
+        cur.execute(f"SELECT COUNT(*) FROM belege b WHERE {_KK_AUSLAND_WHERE} AND b.kk_abrechnung_datum IS NULL")
+        n = cur.fetchone()[0]
+        if n:
+            aufgaben.append({"icon": "🌍", "prio": "warn",
+                "text": f'Kreditkarte Ausland: {n} Beleg{"e" if n!=1 else ""} mit der VISA-Abrechnung abgleichen',
+                "sub": "Fremdwährung oder EUR im Ausland, Euro-Betrag und Gebühr nachtragen",
+                "url": "/einstellungen/kreditkarten/ausland"})
+    except Exception: pass
+
+    try:
         # 2. Belege noch nicht geprüft, obwohl die Reise bereits zurück ist
         cur.execute(f"""SELECT COUNT(*) FROM belege b
             JOIN reisen r ON r.code = b.reise_code
@@ -5665,11 +5761,20 @@ def todo_seite(request: Request):
                   <a href="/reise/{code}/habel" class="btn btn-secondary btn-sm">📤 Habel</a></td>
             </tr>"""
 
+        try:
+            n_kk = kk_ausland_offen_anzahl()
+        except Exception:
+            n_kk = 0
+        kk_banner = (f'<div class="alert alert-warn" style="margin-bottom:20px">🌍 <b>{n_kk} Kreditkarten-Beleg{"e" if n_kk != 1 else ""} '
+                     f'aus dem Ausland</b> {"warten" if n_kk != 1 else "wartet"} auf den Abgleich mit der VISA-Abrechnung. '
+                     '<a href="/einstellungen/kreditkarten/ausland" style="font-weight:600">Liste öffnen →</a></div>') if n_kk else ""
+
         content = f"""
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
           <h1 class="page-title" style="margin:0">📋 Offene Aufgaben</h1>
           <a href="/" class="btn btn-secondary">← Dashboard</a>
         </div>
+        {kk_banner}
 
         <div class="card" style="margin-bottom:20px">
           <div class="card-header"><span class="card-title">Belege mit offenen Punkten ({len(belege)})</span></div>
@@ -7496,6 +7601,7 @@ async def reise_neu(request: Request):
                 (code, lvon, lbis, lcode, lname, vvoll, vhalb))
 
         db.commit(); cur.close(); db.close()
+        vma_auto_aktualisieren(code)      # Tage sofort anlegen, damit Termine gleich eingetragen werden können
         return RedirectResponse(f"/reise/{code}", status_code=303)
     except Exception as e:
         import traceback
@@ -7831,9 +7937,16 @@ def reise_detail(code: str, request: Request):
         # VMA je Tag
         cur.execute(f"""SELECT id, datum, land_code, land_name, ist_halber_satz,
                         fruehstueck, mittagessen, abendessen, vma_netto, vma_satz_voll, vma_satz_halb,
-                        trennungspauschale, trennungspauschale_quelle, tatsaechliche_uhrzeit, quelle
+                        trennungspauschale, trennungspauschale_quelle, tatsaechliche_uhrzeit, quelle, satz_hinweis
                         FROM vma_tage WHERE reise_code = {P} ORDER BY datum""", (rcode,))
         vma_tage_rows = cur.fetchall()
+        if not vma_tage_rows and vma_auto_aktualisieren(rcode):
+            # Reise ohne VMA-Tage (z. B. vor dieser Funktion angelegt): einmal automatisch berechnen
+            cur.execute(f"""SELECT id, datum, land_code, land_name, ist_halber_satz,
+                        fruehstueck, mittagessen, abendessen, vma_netto, vma_satz_voll, vma_satz_halb,
+                        trennungspauschale, trennungspauschale_quelle, tatsaechliche_uhrzeit, quelle, satz_hinweis
+                        FROM vma_tage WHERE reise_code = {P} ORDER BY datum""", (rcode,))
+            vma_tage_rows = cur.fetchall()
 
         # Belege für den Tagesverlauf
         cur.execute(f"""SELECT id, transportart, transportart_freitext, anbieter,
@@ -8035,6 +8148,14 @@ def reise_detail(code: str, request: Request):
                     get(b,"betrag_brutto",4), get(b,"waehrung",5), get(b,"betrag_eur",17),
                     get(b,"betrag_eur_final",18), get(b,"nebenkosten_eur",19),
                     get(b,"kreditkarte_auslandsentgelt_eur",20), _kat_tag["anteile"].get(_bid))
+        try:
+            _db_t = get_db()
+            try:
+                _teil_tag = bw.teilbetraege_der_reise(_db_t, rcode)     # Hauptbeleg-ID -> Bewirtung mit Teilbetrag
+            finally:
+                _db_t.close()
+        except Exception:
+            _teil_tag = {}
         _hinweis_tag = {}       # Beleg-ID -> Hinweis, warum der Betrag nicht (voll) zählt
         _ohne_kurs_tag = set()  # Fremdwährung ohne Euro-Wert
         for _bid in _kat_tag["nachweis"]:
@@ -8186,6 +8307,10 @@ def reise_detail(code: str, request: Request):
                 sub_html = f'<div style="font-size:11px;color:var(--muted);margin-top:1px">{sub_txt}</div>' if sub_txt else ""
                 if art == "beleg" and eid in _hinweis_tag:
                     sub_html += f'<div style="font-size:11px;color:#b45309;margin-top:1px">ⓘ {_hinweis_tag[eid]}</div>'
+                if art == "beleg" and eid in _teil_tag:
+                    _tt = _teil_tag[eid]
+                    sub_html += (f'<div style="font-size:11px;color:#7c3aed;margin-top:1px">🍽 davon Bewirtung '
+                                 f'{_tt["teilbetrag"]:.2f} {_tt["waehrung"]} ({_tt["nummer"]})</div>')
                 rows += f"""<div style="display:flex;gap:12px;padding:8px 16px;border-bottom:1px solid var(--border);align-items:flex-start">
                     <div style="width:44px;flex-shrink:0;font-size:12px;color:var(--muted);font-weight:600;padding-top:1px">{zeit_disp}</div>
                     <div style="flex:1;font-size:13px">{titel_txt}{sub_html}</div>
@@ -8203,6 +8328,7 @@ def reise_detail(code: str, request: Request):
         vma_tage_summe = 0.0
         trennung_summe = 0.0
         tage_blocks = ""
+        standard_tage = []      # Tage, für die kein Land erkannt wurde (Deutschland als Rückfall)
 
         def cb(rcode, vid, name, checked, label, abzug_pct):
             ch = "checked" if checked else ""
@@ -8266,6 +8392,21 @@ def reise_detail(code: str, request: Request):
                     f'style="font-size:11px;padding:2px 6px;border:1px solid var(--border);border-radius:4px">'
                     f'</form>')
 
+            satz_hinweis_t = get(vt,"satz_hinweis",15) or ""
+            satz_hinweis_html = ""
+            if satz_hinweis_t:
+                satz_hinweis_html = (
+                    f'<div style="font-size:11px;color:#1d4ed8;margin-top:3px">🔔 {satz_hinweis_t} '
+                    f'<form method="post" action="/reise/{rcode}/vma/{vid}/hinweis-ok" style="display:inline">'
+                    f'<button type="submit" style="font-size:11px;color:#1d4ed8;background:none;border:1px solid #bfdbfe;'
+                    f'border-radius:6px;padding:1px 8px;cursor:pointer;margin-left:6px">OK</button></form></div>')
+
+            kein_land_html = ""
+            if quelle_t == "Standard":
+                standard_tage.append(vd)
+                kein_land_html = ('<div style="font-size:11px;color:#b45309;margin-top:2px">ⓘ Land nicht erkannt '
+                                  '(kein Flug, Hotel oder Land-Eintrag für diesen Tag) – es gilt Deutschland</div>')
+
             reset_html = ""
             if quelle_t == "manuell":
                 bestaetigung = ("Diesen Tag von \u2018manuell\u2019 zur\u00fcck auf \u2018automatisch\u2019 setzen? "
@@ -8284,6 +8425,8 @@ def reise_detail(code: str, request: Request):
                   <div>
                     <div style="font-weight:700;color:var(--text);font-size:14px">{datum_txt} {halb_badge}</div>
                     <div style="font-size:11px;color:var(--muted);margin-top:2px">🌍 {lname_t} ({lcode_t})</div>
+                    {kein_land_html}
+                    {satz_hinweis_html}
                   </div>
                   <div style="text-align:right">
                     <div style="font-size:16px;font-weight:700;color:var(--green)">{netto:.2f} EUR VMA netto</div>
@@ -8319,6 +8462,14 @@ def reise_detail(code: str, request: Request):
               </div>
               {tagesablauf_html(vd, rcode)}
             </div>"""
+
+        if standard_tage:
+            tage_blocks = (f'<div style="padding:10px 16px;font-size:12px;color:#92400e;background:#fffbeb;'
+                           f'border-bottom:1px solid var(--border)">ⓘ Für {len(standard_tage)} Tag(e) wurde kein Land erkannt, '
+                           f'es gilt der Deutschland-Satz. Die VMA-Berechnung braucht <b>keine Termine</b>: Sie nutzt Abreise und '
+                           f'Rückkehr, Flug- und Hotelbelege und die Länder-Einträge. Bei einer Auslandsreise bitte den '
+                           f'Hotel- oder Flugbeleg hochladen oder oben <b>🌍 + Land</b> eintragen; die Tage werden '
+                           f'dann automatisch neu berechnet.</div>') + tage_blocks
 
         # Belege mit Datum außerhalb des berechneten Reisezeitraums – sonst verschwinden sie
         tage_im_bereich = {get(vt,"datum",1) if not isinstance(get(vt,"datum",1), str)
@@ -8388,7 +8539,7 @@ def reise_detail(code: str, request: Request):
           <div class="card-header">
             <span class="card-title">📅 Tagesverlauf & VMA</span>
           </div>
-          {('<div style="padding:12px 16px;background:#fef3c7;color:#92400e;font-size:12px;border-bottom:1px solid var(--border)">⚠ Für diese Reise wurde die VMA noch nicht berechnet – solange fehlen die Tages-Köpfe und Belege werden fälschlich als "außerhalb des Reisezeitraums" angezeigt. <a href="/reise/' + rcode + '/vma-generieren" style="color:#92400e;font-weight:600">🔄 Jetzt VMA berechnen</a></div>' if not vma_tage_rows else '') + (tage_blocks if tage_blocks else '<div class="card-body"><div class="empty-state"><b>Noch keine VMA-Tage berechnet</b><p>Erst Länder hinterlegen, dann VMA generieren</p><a href="/reise/' + rcode + '/vma-generieren" class="btn btn-primary" style="margin-top:12px">🔄 VMA berechnen</a></div></div>')}
+          {('<div style="padding:12px 16px;background:#fef3c7;color:#92400e;font-size:12px;border-bottom:1px solid var(--border)">⚠ Für diese Reise wurde die VMA noch nicht berechnet – solange fehlen die Tages-Köpfe und Belege werden fälschlich als "außerhalb des Reisezeitraums" angezeigt. <a href="/reise/' + rcode + '/vma-generieren" style="color:#92400e;font-weight:600">🔄 Jetzt VMA berechnen</a></div>' if not vma_tage_rows else '') + (tage_blocks if tage_blocks else '<div class="card-body"><div class="empty-state"><b>Noch keine VMA-Tage berechnet</b><p>Die Tage werden normalerweise automatisch angelegt. Termine sind dafür nicht nötig – bitte einmal berechnen.</p><a href="/reise/' + rcode + '/vma-generieren" class="btn btn-primary" style="margin-top:12px">🔄 VMA berechnen</a></div></div>')}
           {'<div style="padding:12px 16px;display:flex;justify-content:flex-end;gap:24px;background:var(--bg)"><span style="font-size:13px;color:var(--muted)">VMA gesamt: <b style="color:var(--green)">' + f"{vma_tage_summe:.2f}" + ' EUR</b></span>' + (f'<span style="font-size:13px;color:var(--muted)">Trennungspauschale: <b style="color:#7c3aed">{trennung_summe:.2f} EUR</b></span>' if trennung_summe else '') + f'<span style="font-size:13px;font-weight:700">Gesamt: {vma_tage_summe + trennung_summe:.2f} EUR</span></div>' if vma_tage_rows else ''}
         </div>
 
@@ -8495,6 +8646,7 @@ async def reise_bearbeiten(code: str, request: Request):
             cur.execute(f"INSERT INTO reise_mitarbeiter (reise_code,kuerzel) VALUES ({P},{P})",
                         (rcode, ma))
         db.commit(); cur.close(); db.close()
+        vma_auto_aktualisieren(rcode)     # neue Reisedaten: Tage anpassen
         return RedirectResponse(f"/reise/{rcode}", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
@@ -8596,6 +8748,7 @@ async def land_neu(code: str, request: Request):
             f"VALUES ({P},{P},{P},{P},{P},{P},{P},{P})",
             (rcode, datum_von, datum_bis, land_code, land_name, vvoll, vhalb, ort))
         db.commit(); cur.close(); db.close()
+        vma_auto_aktualisieren(rcode)
         return RedirectResponse(f"/reise/{rcode}", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
@@ -8690,6 +8843,7 @@ async def land_bearbeiten(code: str, lid: int, request: Request):
             f"datum_bis={P},vma_voll={P},vma_halb={P} WHERE id={P}",
             (lcode, lname, dvon, dbis, vvoll, vhalb, lid))
         db.commit(); cur.close(); db.close()
+        vma_auto_aktualisieren(rcode)
         return RedirectResponse(f"/reise/{rcode}", status_code=303)
     except Exception as e:
         return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{e}</div>'))
@@ -8702,6 +8856,7 @@ def land_loeschen(code: str, lid: int):
         db = get_db(); cur = db.cursor()
         cur.execute(f"DELETE FROM reise_laender WHERE id={P}", (lid,))
         db.commit(); cur.close(); db.close()
+        vma_auto_aktualisieren(rcode)
         return RedirectResponse(f"/reise/{rcode}", status_code=303)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -9852,6 +10007,7 @@ def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | Non
         return " checked" if quelle == k else ""
 
     betrag_wert = "" if d.get("betrag") is None else f'{float(d["betrag"]):.2f}'.replace(".", ",")
+    teil_wert = "" if d.get("teilbetrag") is None else f'{float(d["teilbetrag"]):.2f}'.replace(".", ",")
     titel = "Bewirtungsbeleg bearbeiten" if bid else "Neuer Bewirtungsbeleg"
     version_hinweis = (f' <span style="font-size:12px;color:var(--muted)">(Korrektur, Version {d["version"]})</span>'
                        if d.get("version", 1) > 1 else "")
@@ -9904,6 +10060,12 @@ def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | Non
                 <select name="waehrung" id="bw_waehrung">{waehr_opts}</select></div>
             </div>
           </details>
+        </div>
+        <div class="form-group" style="margin-top:10px">
+          <label style="font-size:12px">Davon Bewirtung – nur ausfüllen, wenn die Rechnung mehr als die Bewirtung enthält
+            (z. B. Hotelrechnung mit Übernachtung)</label>
+          <input type="text" inputmode="decimal" name="teilbetrag" id="bw_teilbetrag" value="{teil_wert}"
+                 placeholder="z. B. 70,00 (leer = ganze Rechnung ist Bewirtung)" style="max-width:320px">
         </div>
         <p style="font-size:12px;color:var(--muted);margin:6px 0 0 0">Bei Rechnungen ab 250 € muss auf der Rechnung der Name
           des Bewirtenden (unsere Firma) stehen. Bitte vor dem Bezahlen prüfen lassen.</p>
@@ -9962,6 +10124,9 @@ def _bw_form_aus_request(form, info: dict) -> dict:
         "teilnehmer": bw.teilnehmer_aus_formular(form.getlist("tn_name"), form.getlist("tn_firma")),
         "betrag": bw.zahl_parsen(form.get("betrag")), "trinkgeld": None,
         "waehrung": waehrung,
+        "teilbetrag": bw.zahl_parsen(form.get("teilbetrag")),
+        # Text eingegeben, aber keine gültige Zahl (z. B. "abc" oder "-5") -> wird bei „Weiter“ als Fehler gemeldet
+        "teilbetrag_ungueltig": bool((form.get("teilbetrag") or "").strip()) and bw.zahl_parsen(form.get("teilbetrag")) is None,
     }
 
 
@@ -10152,6 +10317,9 @@ def _bw_detail_html(d: dict, klarname: str, haupt: dict | None, integritaet: boo
         <dt>Ort / Restaurant</dt><dd>{_bw_e(d["ort"])}</dd>
         <dt>Anlass</dt><dd>{_bw_e(d["anlass"])}</dd>
         <dt>Betrag</dt><dd><b>{_bw_betrag_txt(d["betrag"], d["waehrung"])}</b></dd>
+        {('<dt>Davon Bewirtung</dt><dd><b>' + _bw_betrag_txt(d["teilbetrag"], d["waehrung"]) + '</b> '
+          '<span style="color:var(--muted);font-size:12px">(der Rest der Rechnung ist keine Bewirtung)</span></dd>')
+         if d.get("teilbetrag") is not None else ""}
         <dt>Zugehöriger Beleg</dt><dd>{beleg_txt}</dd>
         <dt>Teilnehmer</dt><dd><ol style="margin:0;padding-left:18px">{tn}</ol></dd>
       </dl>{best}{pdf_btn}"""
@@ -10441,7 +10609,9 @@ def _bewirtung_vermerk_zusatz(bid: int) -> str:
             else:
                 teile.append(f"Eigenbeleg {d['nummer']} ({stand}), ohne Originalbeleg")
         else:
-            teile.append(f"Dazu gehört der Bewirtungsbeleg {d['nummer']} ({stand})")
+            teil_txt = (f", davon Bewirtung {d['teilbetrag']:.2f} {d['waehrung'] or 'EUR'}"
+                        if d.get("teilbetrag") is not None else "")
+            teile.append(f"Dazu gehört der Bewirtungsbeleg {d['nummer']} ({stand}){teil_txt}")
     return "; ".join(teile)
 
 
@@ -11994,6 +12164,278 @@ async def kk_zuordnung_loesen(request: Request):
     return RedirectResponse("/einstellungen/kreditkarten/zuordnungen", status_code=303)
 
 
+# ── Kreditkarten-Belege aus dem Ausland: Liste zum Abgleich mit der VISA-Abrechnung (FIWE / Herr Kolbert) ────
+# Jede Rechnung und Quittung, die mit Kreditkarte im Ausland bezahlt wurde (a. Fremdwährung, b. EUR im Ausland),
+# wird gegen die Kartenabrechnung abgeglichen. Bis dahin bleibt der Betrag in Originalwährung führend, der Euro-Wert
+# daneben ist nur geschätzt (≈). „Abgeglichen“ heißt: belege.kk_abrechnung_datum ist gesetzt (wie beim PDF-Abgleich).
+_KK_AUSLAND_WHERE = ("b.zahlungsart = 'Kreditkarte' AND b.belegart IN ('Rechnung','Quittung') "
+                     "AND b.betrag_brutto IS NOT NULL "
+                     "AND (COALESCE(b.waehrung,'EUR') <> 'EUR' "
+                     "OR (COALESCE(b.land_beleg,'') <> '' AND UPPER(b.land_beleg) <> 'DE'))")
+_KK_AUSLAND_SPALTEN = ["id", "reise_code", "belegart", "anbieter", "belegdatum", "betrag_brutto", "waehrung",
+                       "land_beleg", "betrag_eur", "betrag_eur_final", "kreditkarte_karte",
+                       "kreditkarte_auslandsentgelt_eur", "kk_abrechnung_datum", "reisender", "titel"]
+
+
+def kk_ausland_laden(status: str = "offen", reise: str = "") -> list:
+    """Belege für die Ausland-Liste als dicts. status: offen | erledigt | alle."""
+    P = ph()
+    bedingung = _KK_AUSLAND_WHERE
+    params = []
+    if status == "offen":
+        bedingung += " AND b.kk_abrechnung_datum IS NULL"
+    elif status == "erledigt":
+        bedingung += " AND b.kk_abrechnung_datum IS NOT NULL"
+    if reise:
+        bedingung += f" AND b.reise_code = {P}"
+        params.append(reise)
+    spalten = ", ".join(("r.titel" if k == "titel" else f"b.{k}") for k in _KK_AUSLAND_SPALTEN)
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(f"SELECT {spalten} FROM belege b LEFT JOIN reisen r ON r.code = b.reise_code "
+                    f"WHERE {bedingung} ORDER BY b.belegdatum NULLS LAST, b.id", tuple(params))
+        rows = cur.fetchall()
+    finally:
+        cur.close(); db.close()
+    return [{k: (r[k] if hasattr(r, "keys") else r[i]) for i, k in enumerate(_KK_AUSLAND_SPALTEN)} for r in rows]
+
+
+def kk_ausland_offen_anzahl() -> int:
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(f"SELECT COUNT(*) FROM belege b WHERE {_KK_AUSLAND_WHERE} AND b.kk_abrechnung_datum IS NULL")
+        return int(cur.fetchone()[0])
+    finally:
+        cur.close(); db.close()
+
+
+def _kk_ausland_euro(b: dict) -> tuple:
+    """(Text, Art) für den Euro-Wert: ('= 11,50 €', 'final') | ('≈ 6,00 €', 'schaetzung') | ('Kurs fehlt', 'fehlt')
+    | ('', 'eur') für Beträge, die schon in EUR lauten."""
+    if (b.get("waehrung") or "EUR") == "EUR":
+        if b.get("betrag_eur_final") is not None:
+            return "= " + _kk_betrag(b["betrag_eur_final"]) + " €", "final"
+        return "", "eur"
+    if b.get("betrag_eur_final") is not None:
+        return "= " + _kk_betrag(b["betrag_eur_final"]) + " €", "final"
+    if b.get("betrag_eur") is not None:
+        return "≈ " + _kk_betrag(b["betrag_eur"]) + " €", "schaetzung"
+    return "Kurs fehlt", "fehlt"
+
+
+def _kk_ausland_filter(request: Request) -> tuple:
+    status = (request.query_params.get("status") or "offen").strip()
+    if status not in ("offen", "erledigt", "alle"):
+        status = "offen"
+    reise = (request.query_params.get("reise") or "").strip().upper()
+    return status, reise
+
+
+@app.get("/einstellungen/kreditkarten/ausland", response_class=HTMLResponse)
+def kk_ausland_seite(request: Request):
+    from html import escape as e
+    if not ist_organisator(request):
+        return _kk_kein_zugriff()
+    status, reise = _kk_ausland_filter(request)
+    try:
+        liste = kk_ausland_laden(status, reise)
+        alle = kk_ausland_laden("alle", "")
+    except Exception as ex:
+        return HTMLResponse(shell("Kreditkarten-Belege Ausland", f'<div class="alert alert-err"><b>Fehler:</b> {e(str(ex))}. '
+                                  'Falls eine Spalte fehlt: einmal /init aufrufen.</div>', "einstellungen"))
+    n_offen = sum(1 for b in alle if not b["kk_abrechnung_datum"])
+    n_fertig = len(alle) - n_offen
+    reisen = sorted({b["reise_code"] for b in alle if b["reise_code"]})
+    reise_opts = '<option value="">alle Reisen</option>' + "".join(
+        f'<option value="{e(c)}"{" selected" if c == reise else ""}>{e(c)}</option>' for c in reisen)
+    status_opts = "".join(f'<option value="{k}"{" selected" if k == status else ""}>{t}</option>'
+                          for k, t in (("offen", "Offen (noch abzugleichen)"), ("erledigt", "Abgeglichen"), ("alle", "Alle")))
+    zeilen = ""
+    for b in liste:
+        bid = b["id"]
+        waehr = b.get("waehrung") or "EUR"
+        euro_txt, euro_art = _kk_ausland_euro(b)
+        farbe = {"final": "#15803d", "schaetzung": "#b45309", "fehlt": "#b91c1c", "eur": "var(--muted)"}[euro_art]
+        land = (b.get("land_beleg") or "").upper() or "–"
+        original = f'<b>{_kk_betrag(b["betrag_brutto"])} {e(waehr)}</b>'
+        gebuehr = b.get("kreditkarte_auslandsentgelt_eur")
+        gebuehr_txt = (_kk_betrag(gebuehr) + " €") if gebuehr is not None else "–"
+        if b["kk_abrechnung_datum"]:
+            aktion = f'<span style="color:#15803d;font-size:12px">✔ abgeglichen am {fmt_date(b["kk_abrechnung_datum"])}</span>'
+        else:
+            aktion = (f'<input type="text" inputmode="decimal" name="eur_{bid}" placeholder="Euro lt. VISA" '
+                      f'style="width:96px" title="Endgültiger Euro-Betrag laut Kartenabrechnung">'
+                      f' <input type="text" inputmode="decimal" name="fee_{bid}" placeholder="Gebühr" '
+                      f'style="width:72px" title="Auslandsgebühr laut Abrechnung. Leer = bleibt unverändert">'
+                      f' <label style="font-size:12px;white-space:nowrap"><input type="checkbox" name="ok_{bid}" value="1" '
+                      f'style="width:auto"> abgeglichen</label>')
+        zeilen += (f'<tr><td style="white-space:nowrap">{fmt_date(b["belegdatum"]) if b["belegdatum"] else "–"}</td>'
+                   f'<td><a href="/reise/{e(str(b["reise_code"] or ""))}">{e(str(b["reise_code"] or "–"))}</a></td>'
+                   f'<td><a href="/beleg/{bid}" target="_blank">#{bid}</a> {e(str(b["anbieter"] or "–"))}'
+                   f'<div style="font-size:11px;color:var(--muted)">{e(b["belegart"])} · {e(str(b.get("reisender") or "–"))}</div></td>'
+                   f'<td>{e(land)}</td><td style="font-size:12px">{e(str(b.get("kreditkarte_karte") or "–"))}</td>'
+                   f'<td style="text-align:right;white-space:nowrap">{original}</td>'
+                   f'<td style="text-align:right;white-space:nowrap;color:{farbe}">{e(euro_txt) or "–"}</td>'
+                   f'<td style="text-align:right;white-space:nowrap">{gebuehr_txt}</td>'
+                   f'<td style="white-space:nowrap">{aktion}</td></tr>')
+    if not zeilen:
+        zeilen = ('<tr><td colspan="9"><div class="empty-state">Keine Belege in dieser Auswahl.</div></td></tr>')
+    meldung = ""
+    if request.query_params.get("gespeichert"):
+        meldung = (f'<div class="alert alert-ok" style="margin-bottom:12px">✔ {e(request.query_params.get("gespeichert"))} '
+                   'Beleg(e) gespeichert.</div>')
+    csv_link = f'/einstellungen/kreditkarten/ausland/csv?status={e(status)}&reise={e(reise)}'
+    speichern = ""
+    if status != "erledigt" and any(not b["kk_abrechnung_datum"] for b in liste):
+        speichern = ('<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px">'
+                     '<label style="font-size:13px">Datum der Kartenabrechnung '
+                     f'<input type="date" name="datum" value="{date.today().isoformat()}" style="width:auto"></label>'
+                     '<button type="submit" class="btn btn-success">💾 Eingaben speichern</button>'
+                     '<span style="font-size:12px;color:var(--muted)">Gespeichert werden nur Zeilen mit Eingabe oder Haken.</span></div>')
+    content = f"""
+    <h1 class="page-title">💳 Kreditkarten-Belege Ausland</h1>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:12px">
+      Alle Rechnungen und Quittungen, die mit Kreditkarte im Ausland bezahlt wurden (Fremdwährung oder EUR im Ausland).
+      Zum Abgleich mit der VISA-Abrechnung: Euro-Betrag und Gebühr eintragen, oder bei EUR-Beträgen nur „abgeglichen“ ankreuzen.
+      Bis dahin bleibt der Betrag in Originalwährung führend, der Euro-Wert daneben ist nur geschätzt (≈).</p>
+    {meldung}
+    <div class="card" style="margin-bottom:12px"><div class="card-body">
+      <form method="get" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin:0">
+        <label style="font-size:13px">Status<br><select name="status">{status_opts}</select></label>
+        <label style="font-size:13px">Reise<br><select name="reise">{reise_opts}</select></label>
+        <button type="submit" class="btn btn-secondary">Filtern</button>
+        <a href="{csv_link}" class="btn btn-secondary">⬇ CSV (Excel)</a>
+        <span style="font-size:13px;color:var(--muted)">{n_offen} offen · {n_fertig} abgeglichen</span>
+      </form></div></div>
+    <form method="post" action="/einstellungen/kreditkarten/ausland/speichern">
+      <input type="hidden" name="status" value="{e(status)}"><input type="hidden" name="reise" value="{e(reise)}">
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Datum</th><th>Reise</th><th>Beleg</th><th>Land</th><th>Karte</th>
+          <th style="text-align:right">Betrag (Original)</th><th style="text-align:right">Euro</th>
+          <th style="text-align:right">Gebühr</th><th>Abgleich mit VISA</th></tr></thead>
+        <tbody>{zeilen}</tbody></table></div></div>
+      {speichern}
+    </form>
+    <p style="margin-top:12px"><a href="/einstellungen/kreditkarten" class="btn btn-secondary">PDF-Abrechnung hochladen</a>
+       <a href="/einstellungen/kreditkarten/zuordnungen" class="btn btn-secondary">Alle Zuordnungen</a></p>"""
+    return HTMLResponse(shell("Kreditkarten-Belege Ausland", content, "einstellungen"))
+
+
+def _csv_zelle(wert) -> str:
+    """Eine CSV-Zelle (Semikolon, UTF-8): Anführungszeichen verdoppeln, Formelzeichen am Anfang entschärfen."""
+    t = "" if wert is None else str(wert)
+    if t[:1] in ("=", "+", "-", "@"):
+        t = "'" + t
+    return '"' + t.replace('"', '""') + '"'
+
+
+def _csv_zahl(x) -> str:
+    return "" if x is None else f"{float(x):.2f}".replace(".", ",")
+
+
+@app.get("/einstellungen/kreditkarten/ausland/csv")
+def kk_ausland_csv(request: Request):
+    from fastapi.responses import Response
+    if not ist_organisator(request):
+        return _kk_kein_zugriff()
+    status, reise = _kk_ausland_filter(request)
+    liste = kk_ausland_laden(status, reise)
+    kopf = ["Beleg-Nr", "Reise", "Reisetitel", "Belegdatum", "Reisender", "Karte", "Belegart", "Anbieter", "Land",
+            "Betrag Original", "Währung", "Euro geschätzt", "Euro lt. Abrechnung", "Auslandsgebühr",
+            "Abrechnung vom", "Status"]
+    zeilen = [";".join(_csv_zelle(k) for k in kopf)]
+    for b in liste:
+        zeilen.append(";".join([
+            _csv_zelle(b["id"]), _csv_zelle(b["reise_code"]), _csv_zelle(b["titel"]),
+            _csv_zelle(fmt_date(b["belegdatum"]) if b["belegdatum"] else ""),
+            _csv_zelle(b.get("reisender")), _csv_zelle(b.get("kreditkarte_karte")), _csv_zelle(b["belegart"]),
+            _csv_zelle(b["anbieter"]), _csv_zelle((b.get("land_beleg") or "").upper()),
+            _csv_zahl(b["betrag_brutto"]), _csv_zelle(b.get("waehrung") or "EUR"),
+            _csv_zahl(b.get("betrag_eur")), _csv_zahl(b.get("betrag_eur_final")),
+            _csv_zahl(b.get("kreditkarte_auslandsentgelt_eur")),
+            _csv_zelle(fmt_date(b["kk_abrechnung_datum"]) if b["kk_abrechnung_datum"] else ""),
+            _csv_zelle("abgeglichen" if b["kk_abrechnung_datum"] else "offen")]))
+    daten = ("﻿" + "\r\n".join(zeilen) + "\r\n").encode("utf-8")
+    name = f"Kreditkarten-Ausland_{status}_{date.today().strftime('%Y%m%d')}.csv"
+    return Response(content=daten, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+def _kk_zahl_de(text: str):
+    """„12,40“ / „1.234,56“ / „12.40“ -> float. Leer -> None. Ungültig oder negativ -> ValueError."""
+    t = (text or "").strip().replace(" ", "")
+    if not t:
+        return None
+    if "," in t:
+        t = t.replace(".", "").replace(",", ".")
+    wert = float(t)
+    if wert != wert or wert < 0:
+        raise ValueError("Betrag ungültig")
+    return round(wert, 2)
+
+
+@app.post("/einstellungen/kreditkarten/ausland/speichern", response_class=HTMLResponse)
+async def kk_ausland_speichern(request: Request):
+    """Trägt Euro-Betrag/Gebühr aus der Kartenabrechnung nach und/oder markiert Belege als abgeglichen.
+    Verarbeitet werden nur Zeilen mit Eingabe oder Haken; geprüft wird alles, bevor etwas gespeichert wird."""
+    from html import escape as e
+    if not ist_organisator(request):
+        return _kk_kein_zugriff()
+    form = await request.form()
+    status = (form.get("status") or "offen"); reise = (form.get("reise") or "")
+    zurueck = f"/einstellungen/kreditkarten/ausland?status={status}&reise={reise}"
+    fehler, auftraege = [], []
+    try:
+        abr_datum = date.fromisoformat((form.get("datum") or "").strip())
+    except ValueError:
+        abr_datum = None
+        fehler.append("Bitte das Datum der Kartenabrechnung eintragen.")
+    ids = set()
+    for k in form.keys():
+        m = re.fullmatch(r"(eur|fee|ok)_(\d+)", k)
+        if m:
+            ids.add(int(m.group(2)))
+    offen = {b["id"]: b for b in kk_ausland_laden("offen", "")}
+    for bid in sorted(ids):
+        eur_s, fee_s, ok = form.get(f"eur_{bid}") or "", form.get(f"fee_{bid}") or "", form.get(f"ok_{bid}")
+        if not (eur_s.strip() or fee_s.strip() or ok):
+            continue
+        b = offen.get(bid)
+        if not b:
+            continue                      # nicht (mehr) offen oder kein Ausland-Kreditkartenbeleg: ignorieren
+        try:
+            eur, fee = _kk_zahl_de(eur_s), _kk_zahl_de(fee_s)
+        except ValueError:
+            fehler.append(f"Beleg #{bid}: Betrag oder Gebühr ist keine gültige Zahl.")
+            continue
+        if eur is not None and eur <= 0 and (b.get("waehrung") or "EUR") != "EUR":
+            fehler.append(f"Beleg #{bid}: Der Euro-Betrag muss größer als 0 sein.")
+            continue
+        auftraege.append((bid, eur, fee))
+    if not fehler and not auftraege:
+        fehler.append("Es wurde nichts eingetragen oder angekreuzt.")
+    if fehler:
+        return HTMLResponse(shell("Kreditkarten-Belege Ausland",
+            '<div class="alert alert-err"><b>Nicht gespeichert:</b>' + "".join(f"<div>• {e(x)}</div>" for x in fehler)
+            + f'</div><a href="{e(zurueck)}" class="btn btn-primary">← Zurück zur Liste</a>', "einstellungen"), status_code=400)
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    try:
+        for bid, eur, fee in auftraege:
+            sets, params = [f"kk_abrechnung_datum={P}"], [abr_datum.isoformat()]
+            if eur is not None:
+                sets.append(f"betrag_eur_final={P}"); params.append(eur)
+            if fee is not None:
+                sets.append(f"kreditkarte_auslandsentgelt_eur={P}"); params.append(fee)
+            cur.execute(f"UPDATE belege SET {', '.join(sets)} WHERE id={P}", tuple(params + [bid]))
+        db.commit()
+    except Exception:
+        db.rollback(); raise
+    finally:
+        cur.close(); db.close()
+    return RedirectResponse(f"{zurueck}&gespeichert={len(auftraege)}", status_code=303)
+
+
 def _version_zeit_text(zeit: str) -> str:
     """'2026-10-12 08:20' -> '12.10.2026, 08:20 Uhr'"""
     try:
@@ -12061,6 +12503,9 @@ def einstellungen_uebersicht(request: Request):
          "/maps"),
         ("💳", "Kreditkarten-Abrechnung", "Monatsabrechnung hochladen: endgültige Euro-Beträge und "
          "echte Auslandsgebühren werden den Belegen zugeordnet (ohne KI).", "/einstellungen/kreditkarten"),
+        ("🌍", "Kreditkarten-Belege Ausland", "Liste aller im Ausland mit Kreditkarte bezahlten Rechnungen und Quittungen "
+         "zum Abgleich mit der VISA-Abrechnung (Euro-Betrag und Gebühr nachtragen, CSV-Export).",
+         "/einstellungen/kreditkarten/ausland"),
         ("🔧", "Mail-Diagnose", "Prüft den Mail-Postausgang Schritt für Schritt (es wird keine Mail gesendet).",
          "/einstellungen/mail-diagnose"),
         ("📖", "Dokumentation", "Handbuch für Reisende und Organisatoren, alle Einstellungen und Funktionen – "

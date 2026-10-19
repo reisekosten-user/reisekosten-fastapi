@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.32"
+DOKU_GEPRUEFT_FUER = "3.35"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -184,6 +184,8 @@ SEITEN = [
     ("/einstellungen/backups", "Datensicherungen ansehen und sofort anstoßen", "c-backup"),
     ("/einstellungen/kreditkarten", "Kreditkarten-Abrechnung hochladen und prüfen", "b-kk"),
     ("/einstellungen/kreditkarten/zuordnungen", "Alle Zuordnungen von Abrechnungspositionen zu Belegen", "b-kk"),
+    ("/einstellungen/kreditkarten/ausland", "Kreditkarten-Belege Ausland: Liste zum Abgleich mit der VISA-Abrechnung", "b-kk"),
+    ("/einstellungen/kreditkarten/ausland/csv", "Dieselbe Liste als CSV (Excel)", "b-kk"),
     ("/einstellungen/mail-diagnose", "Mail-Diagnose: Postausgang Schritt für Schritt prüfen", "c-mail"),
     ("/einstellungen/dokumentation", "Dieses Handbuch", "c-pflege"),
     ("/einstellungen/dokumentation/pdf", "Dieses Handbuch als PDF", "c-pflege"),
@@ -303,8 +305,10 @@ KAPITEL = [
             "Im Portal bei „🍽 Bewirtungsbelege“ auf **+ Bewirtungsbeleg erstellen** tippen.",
             "Den Originalbeleg aus der Liste wählen. Tag, Ort, Betrag und Währung kommen automatisch aus dem Beleg.",
             "**Anlass** und **Teilnehmer** (Gäste, Firma) eintragen.",
+            "Nur wenn die Rechnung **mehr als die Bewirtung** enthält (z. B. Hotelrechnung mit Übernachtung und Abendessen): Im Feld **„Davon Bewirtung“** den Betrag der Bewirtung eintragen (z. B. 70,00). Ist die ganze Rechnung Bewirtung, das Feld **leer lassen**.",
             "Speichern, auf der Prüfseite alles kontrollieren und **elektronisch bestätigen** (Haken, Name, optional Unterschrift).",
         ]),
+        ("p", "Mit „Davon Bewirtung“ weist der Abschluss Hotel und Bewirtung **getrennt** aus (z. B. Hotel 450 €, Bewirtung 70 €). Die Gesamtsumme der Reise bleibt unverändert."),
         ("p", "Nach dem Bestätigen ist der Beleg **gesperrt**. Eine Änderung ist nur als **neue Version** („Korrektur“) möglich. "
               "Du kannst den Bewirtungsbeleg jederzeit als PDF öffnen."),
         ("hinweis", "Hinweise erscheinen, sperren aber nichts: Bei Rechnungen ab 250 € muss auf der Rechnung der Name unserer Firma (des Bewirtenden) stehen – "
@@ -407,7 +411,7 @@ KAPITEL = [
             ["💵 Vorschuss", "Reisevorschuss und Bargeld-Konto."],
             ["🗺 Reiseplan", "Zeitliche Übersicht aller Flüge, Züge und Termine."],
             ["📅 Outlook", "Outlook-Einladungen der Reise."],
-            ["🔄 VMA neu berechnen", "Erzeugt die Tage der Reise neu."],
+            ["🔄 VMA neu berechnen", "Rechnet die Tage der Reise neu. Normalerweise nicht nötig, die App rechnet automatisch (siehe Verpflegungsmehraufwand)."],
             ["🔍 VMA-Debug", "Zeigt, wie das Land des Rückreisetags ermittelt wurde."],
             ["✏ Bearbeiten", "Titel, Daten, Reisende und Notiz ändern."],
             ["🌍 + Land", "Weiteres Land mit Zeitraum hinzufügen. Vorhandene Länder lassen sich über ✏ ändern oder löschen."],
@@ -587,7 +591,10 @@ KAPITEL = [
         ("p", "Der **Tagesverlauf & VMA** auf der Reise-Seite zeigt je Tag: Datum, Land, Satz, Abzüge, **VMA netto** und alle Belege und Termine des Tages. Unter dem Tag steht die **Summe Belege in Euro**: Beträge in Fremdwährung bleiben führend und zeigen den Euro-Wert daneben (≈ geschätzt, = laut Abrechnung); fehlt der Kurs, steht „Kurs fehlt“ und der Beleg fehlt in der Summe. Durch Rechnungen belegte Buchungen und Zahlungsnachweise zählen nicht doppelt, ein Hinweis unter dem Eintrag sagt warum."),
         ("h3", "Land und Satz"),
         ("ul", [
-            "Das **Land je Tag** wird automatisch aus Flügen, Hotelbelegen und der Länder-Zeitleiste der Reise ermittelt.",
+            "Das **Land je Tag** wird automatisch aus Flügen, Hotelbelegen und der Länder-Zeitleiste der Reise ermittelt. Grundlage sind Abreise und Rückkehr der Reise; **Termine werden nicht benötigt**.",
+            "**Automatisch aktuell:** Die Tage werden schon beim **Anlegen der Reise** erzeugt (Termine lassen sich sofort eintragen) und danach bei jeder Änderung neu berechnet: geänderte Reisedaten, Länder, neue, geänderte oder gelöschte Hotel- und Flugbelege, einer Reise zugeordnete Belege. Wird der Zeitraum verkürzt, entfallen überzählige Tage; manuell geänderte Tage bleiben.",
+            "**🔔 Satz geändert:** Ändert sich Land oder Satz eines Tages gegenüber vorher (z. B. nach einem Hotelbeleg im Ausland), steht am Tag „vorher … → jetzt …“. Mit **OK** ist der Hinweis erledigt.",
+            "**Land nicht erkannt:** Gibt es für einen Tag weder Flug noch Hotel noch Land-Eintrag, gilt der Deutschland-Satz. Der Tag zeigt dann den Hinweis „Land nicht erkannt“. Bei einer Auslandsreise den Hotel- oder Flugbeleg hochladen oder **🌍 + Land** eintragen; die Tage werden dann automatisch neu berechnet.",
             "**Rückreisetag:** Hier zählt der letzte Tätigkeitsort vor der Heimreise (Abflugort der ersten Etappe des Tages), nicht der Ankunftsort. "
             "Bei eintägigen Reisen das zuletzt besuchte ausländische Land. Wie die App entschieden hat, zeigt **🔍 VMA-Debug**.",
             "Städte mit eigenem Sondersatz (z. B. Los Angeles, New York) werden berücksichtigt.",
@@ -600,7 +607,7 @@ KAPITEL = [
         ("ul", [
             "**Satz manuell überschreiben** (aufklappbar am Tag): voller und halber Satz in EUR, wenn die Automatik daneben liegt. Der Tag ist dann als „manuell“ markiert.",
             "**↺ Auto** am Tag: nimmt die manuelle Markierung zurück; Land und Sätze werden wieder automatisch ermittelt.",
-            "**🔄 VMA neu berechnen** (Reise-Seite): erzeugt die Tage der Reise neu, z. B. nach geänderten Ländern oder Belegen.",
+            "**🔄 VMA neu berechnen** (Reise-Seite): rechnet die Tage der Reise neu. Normalerweise nicht nötig, weil die App automatisch rechnet. Tage mit „manuell“ bleiben unverändert (dort zuerst ↺ Auto).",
         ]),
         ("h3", "Trennungspauschale (betriebliche Sonderregelung)"),
         ("tab", ["Fall", "Betrag"], [
@@ -620,6 +627,7 @@ KAPITEL = [
         ("ul", [
             "Er braucht **immer einen Originalbeleg** (Rechnung oder Kassenbon, auch ein selbst erstellter Eigenbeleg ist als Original möglich).",
             "**Betrag, Trinkgeld und Wechselkurs** stehen nur am Originalbeleg. Der Bewirtungsbeleg hat keinen eigenen Betrag und keinen eigenen Kurs.",
+            "**Davon Bewirtung (Teilbetrag):** Enthält die Rechnung mehr als die Bewirtung (z. B. Hotel), trägt der Reisende den Bewirtungsanteil ein. Abschluss, Abschluss-PDF und Reise-Seite zeigen dann Rechnung und Bewirtung getrennt (Hotel 450 € / Bewirtung 70 €); die Gesamtsumme bleibt gleich. Bei Fremdwährung wird der Anteil im gleichen Verhältnis in Euro umgerechnet. Leer = ganze Rechnung ist Bewirtung.",
             "**Elektronische Bestätigung:** Haken, Name, Zeitpunkt, optional Unterschrift, SHA-256-Prüfsumme. Danach ist der Beleg gesperrt; Änderungen nur als neue Version.",
             "Weiche Hinweise (sperren nichts): Rechnung ab 250 € (Name der Firma muss auf der Rechnung stehen); Bewirtung mehr als 14 Tage her.",
             "Der Bewirtungsbeleg ist prüfpflichtig und geht mit an Habel. Das Prüf-Deckblatt enthält einen Querverweis auf den zugehörigen Beleg.",
@@ -723,6 +731,18 @@ KAPITEL = [
         ]),
         ("hinweis", "Datenschutz: Es wird **keine KI** und kein externer Dienst genutzt. Das PDF wird nur im Arbeitsspeicher gelesen und nie gespeichert. "
                     "Gespeichert wird nur das Ergebnis am Beleg: endgültiger Euro-Betrag, echte Auslandsgebühr, Abrechnungsdatum."),
+        ("h3", "Liste „Kreditkarten-Belege Ausland“ (FIWE)"),
+        ("p", "**Einstellungen › 🌍 Kreditkarten-Belege Ausland.** Die Liste enthält **jede Rechnung und Quittung, die mit Kreditkarte im Ausland bezahlt wurde**: "
+              "a) in Fremdwährung und b) in EUR, wenn das Land des Belegs nicht Deutschland ist. Jeder dieser Belege muss mit der VISA-Abrechnung abgeglichen werden, "
+              "damit die Kosten stimmen."),
+        ("ul", [
+            "**Bis zum Abgleich** bleibt der Betrag in Originalwährung führend; daneben steht der geschätzte Euro-Wert mit „≈“. Nach dem Abgleich steht dort „=“ mit dem Betrag laut Abrechnung.",
+            "**Nachtragen:** Datum der Kartenabrechnung wählen, je Beleg den **Euro-Betrag lt. VISA** und die **Gebühr** eintragen (Gebühr leer = bleibt unverändert) und **Eingaben speichern**. "
+            "Bei EUR-Belegen genügt der Haken **abgeglichen**. Gespeichert werden nur Zeilen mit Eingabe oder Haken; Kommazahlen („12,40“) sind erlaubt.",
+            "Der Abgleich wirkt wie der PDF-Abgleich: Der Beleg gilt als abgeglichen und verschwindet aus der Ansicht „Offen“. Lösen lässt er sich unter „Alle Zuordnungen“.",
+            "**Filter** nach Status (offen, abgeglichen, alle) und nach Reise; **⬇ CSV (Excel)** exportiert die gefilterte Liste.",
+            "Unter **📋 Offene Aufgaben** steht, wie viele Belege noch abzugleichen sind. Die Seite ist Organisatoren vorbehalten; wer sie nutzen soll, braucht diese Rolle.",
+        ]),
     ]},
     {"id": "b-dashboard", "teil": "B", "titel": "Dashboard, Offene Aufgaben und Karte", "bloecke": [
         ("h3", "Dashboard"),
@@ -748,6 +768,7 @@ KAPITEL = [
             ["💰 VMA-Sätze", "Amtliche Sätze einsehen und importieren."],
             ["🗺 Karte", "Standorte der Mitarbeiter bei laufenden Reisen."],
             ["💳 Kreditkarten-Abrechnung", "Monatsabrechnung einspielen."],
+            ["🌍 Kreditkarten-Belege Ausland", "Liste der im Ausland mit Karte bezahlten Belege zum Abgleich mit der VISA-Abrechnung."],
             ["🔧 Mail-Diagnose", "Prüft den Postausgang Schritt für Schritt."],
             ["📖 Dokumentation", "Dieses Handbuch (Seite und PDF)."],
         ], [30, 70]),

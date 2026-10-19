@@ -70,6 +70,7 @@ from mod_belegdeckung import auto_verknuepfen
 from mod_anon import anonymisieren
 from mod_geo import adresse_geokodieren
 from mod_vma import IATA_KOORDINATEN
+from mod_vma_tage import vma_auto_aktualisieren, vma_auto_fuer_beleg
 
 
 def _segment_koordinaten_praezisieren(ki_result: dict) -> None:
@@ -1056,6 +1057,7 @@ async def beleg_neu_analysieren(bid: int) -> dict:
         ki_result.get("tanken_tankstelle"), ki_result.get("tanken_kennzeichen"),
         status) + kurs_update_vals + (bid,))
     db.commit(); cur.close(); db.close()
+    vma_auto_fuer_beleg(bid)          # Hotel-/Flugdaten können sich geändert haben -> VMA der Reise aktualisieren
     return {"ok": True}
 
 
@@ -1638,6 +1640,9 @@ async def beleg_verarbeiten(
              json.dumps(ki_mod, ensure_ascii=False), beleg_id))
 
     db.commit(); cur.close(); db.close()
+
+    if reise_code and not aenderung_info:
+        vma_auto_aktualisieren(reise_code)     # neuer Hotel-/Flugbeleg: Land und Satz der Tage aktualisieren
 
     # Gleicher Buchungscode in derselben Reise: Buchungsbestätigung und Rechnung/Quittung
     # automatisch zu einer Gruppe verknüpfen (Änderungs-Belege bleiben außen vor).
