@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.29.3"
+DOKU_GEPRUEFT_FUER = "3.30"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -468,6 +468,8 @@ KAPITEL = [
         ("p", "Die Beleg-Seite (`/beleg/…`) zeigt von oben nach unten:"),
         ("ul", [
             "**📊 KI-Analyse:** erkannte Daten (Anbieter, Datum, Betrag, MwSt, Währung, Transportart, Segmente). Fehlt etwas, steht dort „Fehlende Pflichtfelder“. "
+            "Die **MwSt.** wird nur übernommen, wenn sie auf dem Beleg steht. Bei Flug, Bahn-Fernverkehr, Fernbus, Schiff und Reisebüro-Rechnungen rechnet die App sie nie selbst aus (bei einem Reisebüro gilt sie oft nur für die Servicepauschale). "
+            "Nur bei einfachen deutschen Belegen (z. B. Parkschein, Tankquittung, ÖPNV) ergänzt die KI eine fehlende MwSt. selbst. "
             "Mit **✏ Daten nachtragen** (Organisator) ergänzen oder korrigieren.",
             "**Belegart** und **Bezahlart** (siehe Tabellen unten). Bei Kreditkarte wählen Sie „Welche Karte?“.",
             "**📎 Dokumente:** Original-PDF, 🔒 Anonymisiert, 🔍 Analyse-PDF; Knöpfe zum erneuten Analysieren und erneuten Anonymisieren; Beleg löschen; Reise zuordnen.",

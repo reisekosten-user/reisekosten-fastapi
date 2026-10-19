@@ -255,6 +255,103 @@ def pdf_text_lesen(pdf_bytes: bytes) -> str:
     except: return ""
 
 
+MWST_NIE_BERECHNEN = ("Flug", "Bahn")   # Fahrpreise: MwSt. nur übernehmen, wenn aufgedruckt
+
+
+def _zahlen_im_text(text: str) -> list:
+    """Alle Beträge mit zwei Nachkommastellen im Text (deutsche und englische Schreibweise)."""
+    erg = []
+    for m in re.finditer(r"\d{1,3}(?:\.\d{3})*,\d{2}(?!\d)|\d{1,3}(?:,\d{3})*\.\d{2}(?!\d)|\d+[.,]\d{2}(?!\d)", text or ""):
+        z = m.group(0).replace(" ", "")
+        if "," in z and "." in z:
+            dez = "," if z.rfind(",") > z.rfind(".") else "."
+            tausend = "." if dez == "," else ","
+            z = z.replace(tausend, "").replace(dez, ".")
+        else:
+            z = z.replace(",", ".")
+        try:
+            erg.append(float(z))
+        except ValueError:
+            pass
+    return erg
+
+
+def mwst_aufgedruckt(rohtext: str, betrag) -> bool:
+    """Steht dieser MwSt.-Betrag so im Belegtext? Wenn nicht, wurde er hochgerechnet."""
+    try:
+        b = float(betrag)
+    except (TypeError, ValueError):
+        return False
+    return any(abs(z - b) <= 0.005 + 1e-9 for z in _zahlen_im_text(rohtext))
+
+
+def mwst_pruefen(result: dict, rohtext: str | None = None) -> dict:
+    """Bei Flug und Bahn zählt nur eine aufgedruckte MwSt. (Fall Reisebüro: 19 % gelten nur für die
+    Servicepauschale, nicht für den Flugpreis). Hat die KI sie selbst berechnet oder steht der Betrag nicht
+    im Belegtext, werden Netto und MwSt. geleert."""
+    if (result.get("transportart") or "") not in MWST_NIE_BERECHNEN:
+        return result
+    try:
+        mwst = float(result.get("betrag_mwst")) if result.get("betrag_mwst") is not None else None
+    except (TypeError, ValueError):
+        mwst = None
+    if mwst is None:
+        return result
+    flag = result.get("mwst_berechnet")
+    berechnet = flag is True or str(flag).strip().lower() == "true"
+    if rohtext and rohtext.strip() and not mwst_aufgedruckt(rohtext, mwst):
+        berechnet = True
+    if berechnet:
+        result["betrag_netto"] = None
+        result["betrag_mwst"] = None
+    return result
+
+
+def mwst_flug_bahn_reparieren() -> int:
+    """Bereinigt ältere Belege: Bei Flug/Bahn hat die KI die MwSt. früher aus dem Bruttobetrag hochgerechnet
+    (19 % oder 7 %). Geleert wird, wenn der MwSt.-Betrag nirgends im Belegtext steht (also nicht aufgedruckt
+    war). Foto-Belege ohne echten Text bleiben unberührt. Läuft bei jedem Start und ändert nur solche Belege
+    (idempotent). Gibt die Anzahl zurück."""
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    n = 0
+    try:
+        cur.execute("SELECT id, betrag_mwst, rohtext FROM belege "
+                    "WHERE transportart IN ('Flug','Bahn') AND betrag_mwst IS NOT NULL AND rohtext IS NOT NULL")
+        for r in cur.fetchall():
+            g = (lambda k, i: r[k]) if hasattr(r, "keys") else (lambda k, i: r[i])
+            text = g("rohtext", 2) or ""
+            if not text.strip() or text.strip().startswith("{"):      # Bild-Belege: kein echter Belegtext
+                continue
+            if not mwst_aufgedruckt(text, float(g("betrag_mwst", 1))):
+                cur.execute(f"UPDATE belege SET betrag_netto=NULL, betrag_mwst=NULL WHERE id={P}", (g("id", 0),))
+                n += 1
+        db.commit()
+    finally:
+        cur.close(); db.close()
+    return n
+
+
+def belegart_normalisieren(result: dict) -> dict:
+    """Auffangregel nach der KI-Analyse: Ein Beleg mit Betrag, der weder Buchung noch Änderung ist,
+    ist ein Zahlungsbeleg. Fehlt die Belegart oder steht dort nur „Sonstiges“, wird „Quittung“ gesetzt,
+    sonst wäre der Beleg nicht prüfbar. Eine manuelle Wahl im Beleg bleibt davon unberührt."""
+    art = (result.get("belegart") or "").strip()
+    kurz = art.lower()
+    if kurz in ("receipt", "kassenbon", "beleg", "zahlungsbeleg", "kartenbeleg"):
+        art = "Quittung"
+    elif kurz in ("invoice", "tax invoice"):
+        art = "Rechnung"
+    try:
+        hat_betrag = float(result.get("betrag_brutto") or 0) > 0
+    except (TypeError, ValueError):
+        hat_betrag = False
+    if art in ("", "Sonstiges") and hat_betrag:
+        art = "Quittung"
+    result["belegart"] = art or None
+    return result
+
+
 async def gpt_analyse_bild(bild_bytes: bytes, content_type: str,
                             dateiname: str = "") -> dict:
     """
@@ -313,22 +410,37 @@ schätze den Euro-Gegenwert von "betrag_brutto" anhand des dir bekannten
 ungefähren Wechselkurses zum Datum von "belegdatum" (historischer Tageskurs,
 aus deinem eigenen Wissen). Bei "waehrung"="EUR" beide Felder null lassen.
 
-WICHTIG bei "betrag_netto"/"betrag_mwst" – NUR bei deutschen Belegen
-("land_beleg"="DE"): Steht auf dem Beleg nur ein Bruttobetrag mit einem
-Hinweis wie "inkl. MwSt." OHNE separaten Netto-/MwSt.-Ausweis (typisch bei
-ÖPNV-Fahrscheinen, Parkscheinen, Kleinbeträgen), dann BERECHNE "betrag_netto"
-und "betrag_mwst" selbst aus "betrag_brutto" nach deutschem Steuerrecht:
-- Ermäßigter Satz 7%: Nahverkehr/ÖPNV (Bus, Bahn, Tram im Personennahverkehr,
-  Fahrstrecke bis 50km bzw. Gemeindegebiet), Bücher, Zeitungen, die meisten
-  Lebensmittel, reine Hotelübernachtung (ohne Frühstück/Extras)
-- Regulärer Satz 19%: alles andere (Kraftstoff, Restaurant/Bewirtung vor Ort,
-  die meisten sonstigen Waren/Dienstleistungen, Fernverkehr/Fernbus)
-Rechnung: betrag_netto = betrag_brutto / (1 + Satz), betrag_mwst = betrag_brutto - betrag_netto,
-beide auf 2 Nachkommastellen gerundet. Ist auf dem Beleg dagegen bereits ein
-expliziter Netto-/MwSt.-Betrag angegeben, immer DEN übernehmen, nicht selbst
-rechnen. Bei Belegen aus anderen Ländern ("land_beleg" != "DE") beide Felder
-null lassen, wenn nicht explizit ausgewiesen – ausländische MwSt.-Sätze/-Regeln
-nicht selbst schätzen.
+WICHTIG bei "betrag_netto"/"betrag_mwst":
+1. Grundregel: Übernimm Netto- und MwSt.-Betrag NUR so, wie sie auf dem Beleg ausgewiesen
+   sind, und setze dann "mwst_berechnet" = false. Rechne NIE einen Steuersatz auf den
+   Gesamtbetrag hoch, wenn auf dem Beleg nur ein Teil davon mit MwSt. ausgewiesen ist
+   (Beispiel Reisebüro: Die 19 % MwSt. gelten nur für die Servicepauschale, nicht für den
+   Flugpreis. Richtig ist dann genau der aufgedruckte MwSt.-Betrag).
+2. Selbst berechnen ("mwst_berechnet" = true) darfst du NUR bei deutschen Belegen
+   ("land_beleg"="DE") ohne MwSt.-Ausweis (typisch bei ÖPNV-Fahrscheinen, Parkscheinen,
+   Kleinbeträgen, die "inkl. MwSt." tragen) und nur nach deutschem Steuerrecht:
+   - Ermäßigter Satz 7%: Nahverkehr/ÖPNV (Bus, Bahn, Tram im Personennahverkehr,
+     Fahrstrecke bis 50km bzw. Gemeindegebiet), Bücher, Zeitungen, die meisten
+     Lebensmittel, reine Hotelübernachtung (ohne Frühstück/Extras)
+   - Regulärer Satz 19%: Kraftstoff, Parkschein, Restaurant/Bewirtung vor Ort,
+     die meisten sonstigen Waren/Dienstleistungen
+   Rechnung: betrag_netto = betrag_brutto / (1 + Satz), betrag_mwst = betrag_brutto - betrag_netto,
+   beide auf 2 Nachkommastellen gerundet.
+3. NIEMALS selbst berechnen (beide Felder null, wenn nicht ausgewiesen) bei: Flugtickets
+   (Auslandsflüge tragen keine deutsche MwSt.; auch bei Inlandsflügen nichts schätzen),
+   Bahn-Fernverkehr, Fernbus, Schiff/Fähre, Rechnungen von Reisebüros/Vermittlern (der
+   Fahrpreis ist ein durchlaufender Posten), Visa- und Behördengebühren.
+4. Bei Belegen aus anderen Ländern ("land_beleg" != "DE") beide Felder null lassen, wenn
+   nicht explizit ausgewiesen – ausländische MwSt.-Sätze/-Regeln nicht selbst schätzen.
+
+WICHTIG bei "belegart" (niemals leer lassen):
+- "Quittung" = jeder Zahlungsbeleg über einen bezahlten Betrag: Kassenbon, Kartenbeleg,
+  Taxi-/Uber-/Bolt-Beleg, Parkschein, Mautbeleg, Tankquittung, auch Stornogebühren und
+  sonstige Gebühren.
+- "Rechnung" = Dokument, das ausdrücklich Rechnung/Invoice/Tax Invoice heißt oder eine
+  Rechnungsnummer samt Rechnungsanschrift trägt.
+- "Sonstiges" NUR, wenn das Dokument keinen bezahlten Betrag enthält und weder Buchung
+  noch Änderung ist.
 
 Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
 Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
@@ -346,6 +458,7 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
   "betrag_brutto": 45.30,
   "betrag_netto": null,
   "betrag_mwst": null,
+  "mwst_berechnet": "true nur wenn du Netto/MwSt. selbst berechnet hast, false wenn sie auf dem Beleg stehen, sonst null",
   "waehrung": "EUR",
   "betrag_eur_geschaetzt": "nur bei waehrung != EUR: geschätzter Euro-Gegenwert zum Kurs des Belegdatums, sonst null",
   "kurs_geschaetzt": "nur bei waehrung != EUR: verwendeter Wechselkurs (1 EUR = X Fremdwährung), sonst null",
@@ -382,7 +495,7 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
             raw = resp.json()["choices"][0]["message"]["content"].strip()
             m = re.search(r'\{.*\}', raw, re.DOTALL)
             if m:
-                result = json.loads(m.group(0))
+                result = mwst_pruefen(belegart_normalisieren(json.loads(m.group(0))))
                 pflicht = ["belegdatum","transportart","anbieter",
                            "betrag_brutto","waehrung","event_datum_von","zahlungsart"]
                 if result.get("belegart") == "Buchungsbestaetigung":
@@ -506,22 +619,28 @@ Arbeitsgrundlage, keine exakte Buchung; der Organisator kann sie später anhand
 der echten Kreditkartenabrechnung überschreiben. Bei "waehrung"="EUR" beide
 Felder null lassen.
 
-WICHTIG bei "betrag_netto"/"betrag_mwst" – NUR bei deutschen Belegen
-("land_beleg"="DE"): Steht auf dem Beleg nur ein Bruttobetrag mit einem
-Hinweis wie "inkl. MwSt." OHNE separaten Netto-/MwSt.-Ausweis (typisch bei
-ÖPNV-Fahrscheinen, Parkscheinen, Kleinbeträgen), dann BERECHNE "betrag_netto"
-und "betrag_mwst" selbst aus "betrag_brutto" nach deutschem Steuerrecht:
-- Ermäßigter Satz 7%: Nahverkehr/ÖPNV (Bus, Bahn, Tram im Personennahverkehr,
-  Fahrstrecke bis 50km bzw. Gemeindegebiet), Bücher, Zeitungen, die meisten
-  Lebensmittel, reine Hotelübernachtung (ohne Frühstück/Extras)
-- Regulärer Satz 19%: alles andere (Kraftstoff, Restaurant/Bewirtung vor Ort,
-  die meisten sonstigen Waren/Dienstleistungen, Fernverkehr/Fernbus)
-Rechnung: betrag_netto = betrag_brutto / (1 + Satz), betrag_mwst = betrag_brutto - betrag_netto,
-beide auf 2 Nachkommastellen gerundet. Ist auf dem Beleg dagegen bereits ein
-expliziter Netto-/MwSt.-Betrag angegeben, immer DEN übernehmen, nicht selbst
-rechnen. Bei Belegen aus anderen Ländern ("land_beleg" != "DE") beide Felder
-null lassen, wenn nicht explizit ausgewiesen – ausländische MwSt.-Sätze/-Regeln
-nicht selbst schätzen.
+WICHTIG bei "betrag_netto"/"betrag_mwst":
+1. Grundregel: Übernimm Netto- und MwSt.-Betrag NUR so, wie sie auf dem Beleg ausgewiesen
+   sind, und setze dann "mwst_berechnet" = false. Rechne NIE einen Steuersatz auf den
+   Gesamtbetrag hoch, wenn auf dem Beleg nur ein Teil davon mit MwSt. ausgewiesen ist
+   (Beispiel Reisebüro: Die 19 % MwSt. gelten nur für die Servicepauschale, nicht für den
+   Flugpreis. Richtig ist dann genau der aufgedruckte MwSt.-Betrag).
+2. Selbst berechnen ("mwst_berechnet" = true) darfst du NUR bei deutschen Belegen
+   ("land_beleg"="DE") ohne MwSt.-Ausweis (typisch bei ÖPNV-Fahrscheinen, Parkscheinen,
+   Kleinbeträgen, die "inkl. MwSt." tragen) und nur nach deutschem Steuerrecht:
+   - Ermäßigter Satz 7%: Nahverkehr/ÖPNV (Bus, Bahn, Tram im Personennahverkehr,
+     Fahrstrecke bis 50km bzw. Gemeindegebiet), Bücher, Zeitungen, die meisten
+     Lebensmittel, reine Hotelübernachtung (ohne Frühstück/Extras)
+   - Regulärer Satz 19%: Kraftstoff, Parkschein, Restaurant/Bewirtung vor Ort,
+     die meisten sonstigen Waren/Dienstleistungen
+   Rechnung: betrag_netto = betrag_brutto / (1 + Satz), betrag_mwst = betrag_brutto - betrag_netto,
+   beide auf 2 Nachkommastellen gerundet.
+3. NIEMALS selbst berechnen (beide Felder null, wenn nicht ausgewiesen) bei: Flugtickets
+   (Auslandsflüge tragen keine deutsche MwSt.; auch bei Inlandsflügen nichts schätzen),
+   Bahn-Fernverkehr, Fernbus, Schiff/Fähre, Rechnungen von Reisebüros/Vermittlern (der
+   Fahrpreis ist ein durchlaufender Posten), Visa- und Behördengebühren.
+4. Bei Belegen aus anderen Ländern ("land_beleg" != "DE") beide Felder null lassen, wenn
+   nicht explizit ausgewiesen – ausländische MwSt.-Sätze/-Regeln nicht selbst schätzen.
 
 WICHTIG bei "abreise_utc_offset"/"ankunft_utc_offset": Zeiten auf Reisebelegen
 stehen IMMER in der ORTSZEIT des jeweiligen Ortes – die Abreisezeit in der
@@ -531,6 +650,16 @@ können unterschiedlich sein, z.B. Frankfurt MESZ +02:00, Bukarest EEST
 Ort gilt (inkl. Sommer-/Winterzeit, aus deinem eigenen Wissen abgeleitet),
 im Format "+02:00"/"-05:00". Das ist wichtig für die korrekte Berechnung,
 wann ein Flug/Zug tatsächlich ankommt.
+
+WICHTIG bei "belegart" (niemals leer lassen):
+- "Quittung" = jeder Zahlungsbeleg über einen bezahlten Betrag: Kassenbon, Kartenbeleg,
+  Taxi-/Uber-/Bolt-Beleg, Parkschein, Mautbeleg, Tankquittung, auch Stornogebühren und
+  sonstige Gebühren.
+- "Rechnung" = Dokument, das ausdrücklich Rechnung/Invoice/Tax Invoice heißt oder eine
+  Rechnungsnummer samt Rechnungsanschrift trägt.
+- "Buchungsbestaetigung" = Vorab-Bestätigung einer Buchung (siehe oben), "Flugaenderung" = Änderungsdokument.
+- "Sonstiges" NUR, wenn das Dokument keinen bezahlten Betrag enthält und weder Buchung
+  noch Änderung ist.
 
 Pflichtfelder: belegdatum, transportart, anbieter, betrag_brutto, waehrung, event_datum_von
 Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfeld null ist.
@@ -549,6 +678,7 @@ JSON-Format:
   "betrag_brutto": 107.20,
   "betrag_netto": 89.33,
   "betrag_mwst": 17.87,
+  "mwst_berechnet": false,
   "waehrung": "EUR",
   "betrag_eur_geschaetzt": "nur bei waehrung != EUR: geschätzter Euro-Gegenwert zum Kurs des Belegdatums, sonst null",
   "kurs_geschaetzt": "nur bei waehrung != EUR: verwendeter Wechselkurs (1 EUR = X Fremdwährung), sonst null",
@@ -620,7 +750,7 @@ JSON-Format:
             raw = resp.json()["choices"][0]["message"]["content"].strip()
             m = re.search(r'\{.*\}', raw, re.DOTALL)
             if m:
-                result = json.loads(m.group(0))
+                result = mwst_pruefen(belegart_normalisieren(json.loads(m.group(0))), rohtext)
                 pflicht = ["belegdatum","transportart","anbieter",
                            "betrag_brutto","waehrung","event_datum_von","zahlungsart"]
                 if result.get("belegart") == "Buchungsbestaetigung":

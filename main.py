@@ -81,6 +81,9 @@ SESSION_SECRET, SESSION_SECRET_HERKUNFT = _session_secret_bestimmen()
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.30", "zeit": "2026-10-19 16:15", "aenderungen": [
+        "Fehler behoben: Die MwSt. bei Flug- und Bahn-Belegen war falsch (Fall Fly Away, Beleg #56: Die KI rechnete 19 % auf den ganzen Rechnungsbetrag hoch, obwohl die MwSt. bei einem Reisebüro nur für die Servicepauschale gilt, nicht für den Flugpreis). Neue Regel für die KI: MwSt. und Netto nur übernehmen, wenn sie auf dem Beleg stehen. Bei Flug, Bahn-Fernverkehr, Fernbus, Schiff, Reisebüro-Rechnungen und Visa-Gebühren wird nie selbst gerechnet.",
+        "Zusätzlich prüft die App selbst: Bei Flug und Bahn werden Netto und MwSt. geleert, wenn die KI sie berechnet hat oder der MwSt.-Betrag nicht im Belegtext steht. Ältere Flug-/Bahn-Belege mit hochgerechneter MwSt. werden beim Start einmalig bereinigt (Foto-Belege bleiben unberührt). „Beleg neu auslesen“ holt eine aufgedruckte MwSt. wieder."]},
     {"version": "3.29.3", "zeit": "2026-10-19 16:09", "aenderungen": [
         "Fehler behoben: Die „Summe Belege“ je Tag im Tagesverlauf addierte Beträge in Fremdwährung als Euro (Fall Reise 26-007: 81012.00 INR + 746.30 EUR + 115.90 EUR ergab 81874.20 EUR). Jetzt rechnet die Summe in Euro nach denselben Regeln wie Abschluss und Kosten-Kachel: Euro-Betrag laut Abrechnung, sonst geschätzter Euro-Wert, Anteil an der Buchung, Gebühren. Buchungen, die durch Rechnungen belegt sind, und Zahlungsnachweise zählen nicht doppelt.",
         "Anzeige: Der Fremdwährungsbetrag bleibt der führende Betrag, der Euro-Wert steht daneben („81012.00 INR (≈ 972.14 EUR)“; ≈ = geschätzt, = laut Abrechnung). Fehlt der Kurs, steht „Kurs fehlt“ und die Summenzeile nennt, wie viele Belege fehlen. Ein Hinweis erklärt, warum ein Betrag nicht oder nur als Rest zählt."]},
@@ -764,6 +767,12 @@ async def startup():
         print(f"[Startup] SESSION_SECRET fehlt – Ersatzschlüssel ({SESSION_SECRET_HERKUNFT}) aktiv. Bitte in den Einstellungen eintragen.")
     eigenbelege_pflichtfelder_reparieren()
     bewirtung_kosten_reparieren()
+    try:
+        n_mwst = mod_beleg.mwst_flug_bahn_reparieren()
+        if n_mwst:
+            print(f"[Startup] MwSt. bei {n_mwst} Flug-/Bahn-Beleg(en) entfernt (war hochgerechnet, nicht aufgedruckt)")
+    except Exception as e:
+        print(f"[Startup] MwSt.-Bereinigung übersprungen: {e}")
 
 if not os.path.exists("static"):
     os.makedirs("static", exist_ok=True)
