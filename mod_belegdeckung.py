@@ -57,6 +57,12 @@ def ist_deckender_beleg(art) -> bool:
     return ist_belegart_final(art) and (art or "") not in EIGENBELEG_ARTEN
 
 
+def ist_durch_kunde(b) -> bool:
+    """Bezahlart „Durch Kunde“: Der Kunde hat direkt bezahlt. Der Beleg zählt nie in der Summe und braucht
+    keine Rechnung/Quittung (er wird nur vermerkt)."""
+    return (b.get("zahlungsart") or "") == "DurchKunde"
+
+
 def hat_betrag(b) -> bool:
     z = _zahl(b.get("betrag_brutto"))
     return z is not None and z > 0
@@ -159,6 +165,7 @@ def deckung_berechnen(belege) -> dict:
     Zahlungsnachweise (nachweise_erkennen) zählen nicht mit; Feld nachweis_ids. eur_summe/eur_quellen:
     echter Euro-Betrag der Buchung (None = nur KI-Schätzung).
     """
+    belege = [b for b in belege if not ist_durch_kunde(b)]      # „Durch Kunde“ bezahlte Belege bleiben außen vor
     gruppen = {}
     for b in belege:
         gid = b.get("beleg_gruppe_id")
@@ -284,13 +291,16 @@ def kategorisieren(belege) -> dict:
       rest         je Gruppe mit nur teilweiser Deckung der offene Rest (zählt vorläufig mit)
     Buchungen, die vollständig durch Rechnungen belegt sind, tauchen NICHT auf (kein Doppelzählen).
     nachweis     Zahlungsnachweise (zählen nicht, siehe nachweise_erkennen)
+    durch_kunde  Belege mit Bezahlart „Durch Kunde“ (zählen nie, brauchen keine Rechnung)
     anteile      Euro-Anteile der Rechnungen an der Buchung (siehe anteile_aus_buchung)
     """
+    durch_kunde = [b["id"] for b in belege if ist_durch_kunde(b)]
+    belege = [b for b in belege if not ist_durch_kunde(b)]
     deckung = deckung_berechnen(belege)
     anteile, rest_gebuehr = anteile_aus_buchung(belege, deckung)
     nachweis_alle = {i for d in deckung.values() for i in d["nachweis_ids"]}
     erg = {"deckung": deckung, "final": [], "nachweis": [], "vorlaeufig": [], "ohne_betrag": [], "rest": [],
-           "anteile": anteile}
+           "anteile": anteile, "durch_kunde": durch_kunde}
     rest_gesehen = set()
     for b in belege:
         bid = b["id"]
@@ -372,7 +382,7 @@ def _v(row, key, idx):
 
 _SPALTEN = ("id", "belegart", "beleg_gruppe_id", "betrag_brutto", "waehrung", "betrag_eur",
             "betrag_eur_final", "anbieter", "buchungscode", "transportart", "geprueft",
-            "rechnungsnummer", "belegdatum", "nebenkosten_eur", "kreditkarte_auslandsentgelt_eur")
+            "rechnungsnummer", "belegdatum", "nebenkosten_eur", "kreditkarte_auslandsentgelt_eur", "zahlungsart")
 
 
 def belege_der_reise(rcode: str) -> list:

@@ -352,18 +352,11 @@ def belegart_normalisieren(result: dict) -> dict:
     return result
 
 
-async def gpt_analyse_bild(bild_bytes: bytes, content_type: str,
-                            dateiname: str = "") -> dict:
-    """
-    Schickt ein Bild direkt an GPT-4o Vision für OCR + Analyse.
-    Für Fotos von Belegen (Tankquittungen, Kassenzettel etc.)
-    """
-    if not OPENAI_KEY:
-        return {"fehler": "OPENAI_API_KEY nicht gesetzt",
-                "pflichtfelder_ok": False,
-                "fehlende_pflichtfelder": ["OPENAI_API_KEY fehlt"]}
+MAX_KI_SEITEN = 4   # so viele Seiten eines Scans liest die KI (Steuertabellen stehen oft auf der letzten Seite)
 
-    # Bild optimieren: upscale wenn zu klein, HEIC konvertieren
+
+def _bild_optimieren(bild_bytes: bytes, content_type: str) -> tuple:
+    """Bild für die Bilderkennung vorbereiten: drehen, Transparenz weiß, Mindestgröße, JPEG. Gibt (Bytes, Typ) zurück."""
     try:
         from PIL import Image, ImageOps
         img = Image.open(io.BytesIO(bild_bytes))
@@ -384,14 +377,54 @@ async def gpt_analyse_bild(bild_bytes: bytes, content_type: str,
             img = img.resize((int(w*scale), int(h*scale)), Image.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=95)
-        bild_bytes = buf.getvalue()
-        content_type = "image/jpeg"
+        return buf.getvalue(), "image/jpeg"
     except Exception as img_e:
         print(f"[Bild-Optimierung] {img_e}")
         if content_type in ("image/heic", "image/heif"):
             content_type = "image/jpeg"
+        return bild_bytes, content_type
 
+
+def pdf_seitenbilder(pdf_bytes: bytes, max_seiten: int = MAX_KI_SEITEN) -> list:
+    """Das eingebettete Bild je PDF-Seite (Scans, aus Fotos erzeugte PDFs), höchstens max_seiten Stück.
+    Seiten ohne Bild werden übersprungen. Leere Liste = kein Scan."""
+    try:
+        from pypdf import PdfReader
+        erg = []
+        for seite in PdfReader(io.BytesIO(pdf_bytes)).pages:
+            try:
+                bilder = list(seite.images)
+            except Exception as e:
+                print(f"[Seitenbilder] Seite übersprungen: {e}")
+                continue
+            if bilder:
+                erg.append(bilder[0].data)
+            if len(erg) >= max_seiten:
+                break
+        return erg
+    except Exception as e:
+        print(f"[Seitenbilder] {e}")
+        return []
+
+
+async def gpt_analyse_bild(bild_bytes: bytes, content_type: str,
+                            dateiname: str = "", weitere_seiten: list | None = None) -> dict:
+    """
+    Schickt ein Bild direkt an GPT-4o Vision für OCR + Analyse.
+    Für Fotos von Belegen (Tankquittungen, Kassenzettel etc.) und Scans.
+    weitere_seiten: Bilder (Bytes) der Folgeseiten desselben Belegs, in Reihenfolge.
+    """
+    if not OPENAI_KEY:
+        return {"fehler": "OPENAI_API_KEY nicht gesetzt",
+                "pflichtfelder_ok": False,
+                "fehlende_pflichtfelder": ["OPENAI_API_KEY fehlt"]}
+
+    bild_bytes, content_type = _bild_optimieren(bild_bytes, content_type)
     b64 = base64.b64encode(bild_bytes).decode()
+    folge_b64 = []
+    for extra in (weitere_seiten or [])[:MAX_KI_SEITEN - 1]:
+        eb, _ = _bild_optimieren(extra, "image/jpeg")
+        folge_b64.append(base64.b64encode(eb).decode())
 
     heute_str = date.today().strftime("%d.%m.%Y")
     prompt = f"""Analysiere dieses Foto eines Reisebelegs und fülle ALLE erkennbaren Felder aus.
@@ -432,6 +465,10 @@ WICHTIG bei "betrag_netto"/"betrag_mwst":
    Fahrpreis ist ein durchlaufender Posten), Visa- und Behördengebühren.
 4. Bei Belegen aus anderen Ländern ("land_beleg" != "DE") beide Felder null lassen, wenn
    nicht explizit ausgewiesen – ausländische MwSt.-Sätze/-Regeln nicht selbst schätzen.
+5. Gibt es mehrere Steuersätze (z. B. 0 % "auf fremde Rechnung" und 19 % "auf eigene Rechnung"
+   wie bei Reisebüros), ist "betrag_mwst" die SUMME der ausgewiesenen Steuerbeträge (Spalte
+   "Steuer") und "betrag_netto" = "betrag_brutto" minus "betrag_mwst". Eine Tabelle
+   "Enthaltene Mehrwertsteuer" steht oft auf der letzten Seite.
 
 WICHTIG bei "belegart" (niemals leer lassen):
 - "Quittung" = jeder Zahlungsbeleg über einen bezahlten Betrag: Kassenbon, Kartenbeleg,
@@ -480,12 +517,16 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
 
     try:
         async with httpx.AsyncClient(timeout=120) as client:
-            resp = await _openai_chat(client, [{"role": "user", "content": [
-                          {"type": "text", "text": prompt},
-                          {"type": "image_url", "image_url": {
-                              "url": f"data:{content_type};base64,{b64}",
-                              "detail": "high"}}
-                      ]}], 3000)
+            seiten_text = ""
+            if folge_b64:
+                seiten_text = (f"\n\nDas sind {1 + len(folge_b64)} Seiten DESSELBEN Belegs in Reihenfolge. "
+                               "Lies alle Seiten: Summen, Steuertabellen (z. B. 'Enthaltene Mehrwertsteuer') und "
+                               "Zahlungsangaben stehen oft auf der letzten Seite.")
+            inhalt = [{"type": "text", "text": prompt + seiten_text},
+                      {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{b64}", "detail": "high"}}]
+            for fb in folge_b64:
+                inhalt.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{fb}", "detail": "high"}})
+            resp = await _openai_chat(client, [{"role": "user", "content": inhalt}], 3000)
 
             if resp.status_code != 200:
                 return {"fehler": f"HTTP {resp.status_code}: {resp.text[:200]}",
@@ -641,6 +682,10 @@ WICHTIG bei "betrag_netto"/"betrag_mwst":
    Fahrpreis ist ein durchlaufender Posten), Visa- und Behördengebühren.
 4. Bei Belegen aus anderen Ländern ("land_beleg" != "DE") beide Felder null lassen, wenn
    nicht explizit ausgewiesen – ausländische MwSt.-Sätze/-Regeln nicht selbst schätzen.
+5. Gibt es mehrere Steuersätze (z. B. 0 % "auf fremde Rechnung" und 19 % "auf eigene Rechnung"
+   wie bei Reisebüros), ist "betrag_mwst" die SUMME der ausgewiesenen Steuerbeträge (Spalte
+   "Steuer") und "betrag_netto" = "betrag_brutto" minus "betrag_mwst". Eine Tabelle
+   "Enthaltene Mehrwertsteuer" steht oft auf der letzten Seite.
 
 WICHTIG bei "abreise_utc_offset"/"ankunft_utc_offset": Zeiten auf Reisebelegen
 stehen IMMER in der ORTSZEIT des jeweiligen Ortes – die Abreisezeit in der
@@ -912,17 +957,10 @@ async def beleg_neu_analysieren(bid: int) -> dict:
             return {"fehler": "Kein gespeichertes Original vorhanden – Neuanalyse nicht möglich"}
         try:
             pdf_bytes = s3_download(s3_original)
-            from pypdf import PdfReader
-            reader = PdfReader(io.BytesIO(pdf_bytes))
-            bild_bytes = None
-            for seite in reader.pages:
-                bilder = list(seite.images)
-                if bilder:
-                    bild_bytes = bilder[0].data
-                    break
-            if not bild_bytes:
+            seiten_bilder = pdf_seitenbilder(pdf_bytes)
+            if not seiten_bilder:
                 return {"fehler": "Konnte das Originalfoto nicht aus dem gespeicherten PDF extrahieren"}
-            ki_result = await gpt_analyse_bild(bild_bytes, "image/jpeg", dateiname or "beleg")
+            ki_result = await gpt_analyse_bild(seiten_bilder[0], "image/jpeg", dateiname or "beleg", seiten_bilder[1:])
         except Exception as e:
             return {"fehler": f"Bild-Neuanalyse fehlgeschlagen: {e}"}
     else:
@@ -1318,8 +1356,15 @@ async def beleg_verarbeiten(
 
     # Bild ohne extrahierbaren Text → GPT-4o Vision direkt
     is_image = content_type in BILD_TYPEN
-    if is_image and len(rohtext.strip()) < 20:
-        ki_result = await gpt_analyse_bild(datei_bytes, content_type, dateiname)
+    ohne_text = len(rohtext.strip()) < 20
+    # Scan ohne Text (Bild oder PDF aus Bildern): die KI liest alle Seiten (höchstens MAX_KI_SEITEN)
+    seiten_bilder = pdf_seitenbilder(original_pdf) if (ohne_text and (is_image or content_type == "application/pdf")) else []
+    if ohne_text and (is_image or (content_type == "application/pdf" and seiten_bilder)):
+        if len(seiten_bilder) > 1:
+            ki_result = await gpt_analyse_bild(seiten_bilder[0], "image/jpeg", dateiname, seiten_bilder[1:])
+        else:
+            ki_result = await gpt_analyse_bild(datei_bytes if is_image else seiten_bilder[0],
+                                               content_type if is_image else "image/jpeg", dateiname)
         rohtext = json.dumps(ki_result, ensure_ascii=False, indent=2)
     else:
         ki_result = await gpt_analyse(rohtext, dateiname)

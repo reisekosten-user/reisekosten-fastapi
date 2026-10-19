@@ -81,6 +81,12 @@ SESSION_SECRET, SESSION_SECRET_HERKUNFT = _session_secret_bestimmen()
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.31", "zeit": "2026-10-19 16:26", "aenderungen": [
+        "Neu: Belege mit der Bezahlart „Durch Kunde“ zählen nie in der Summe (Abschluss, PDF, Kosten-Kachel, Tagessumme) und brauchen keine Rechnung oder Quittung. Eine solche Buchungsbestätigung löst keine Warnung „Jede Buchung braucht eine Rechnung“ mehr aus, und die Hinweise „Betrag final offen“ und „Kurs fehlt“ entfallen.",
+        "Vermerk: Im Abschluss und im PDF stehen diese Belege in einer eigenen Zeile „Durch Kunde direkt bezahlt – zählt nicht in der Summe“, im Tagesverlauf mit dem Hinweis „durch Kunde direkt bezahlt“ und ohne Euro-Umrechnung."]},
+    {"version": "3.30.1", "zeit": "2026-10-19 16:21", "aenderungen": [
+        "Ursache der falschen MwSt. bei Fly Away (Beleg #56) gefunden: Bei Scans und Fotos las die KI nur die erste Seite. Die Rechnung weist die MwSt. aber auf Seite 2 aus („Enthaltene Mehrwertsteuer“: 12,35 EUR, nur 19 % auf die Ticketvermittlung; der Flug hat 0 %). Jetzt liest die KI alle Seiten eines Scans (höchstens 4), beim Hochladen, bei mehrseitigen TIF-Scans und bei „Beleg neu auslesen“.",
+        "Ein gescanntes PDF ohne Text (Scanner-PDF) wird beim Hochladen jetzt per Bilderkennung gelesen. Bisher meldete die Analyse „Kein Text vorhanden“. Bei mehreren Steuersätzen auf einem Beleg gilt: MwSt. = Summe der ausgewiesenen Steuerbeträge, Netto = Brutto minus MwSt. Beleg #56: bitte einmal „Beleg neu auslesen“."]},
     {"version": "3.30", "zeit": "2026-10-19 16:15", "aenderungen": [
         "Fehler behoben: Die MwSt. bei Flug- und Bahn-Belegen war falsch (Fall Fly Away, Beleg #56: Die KI rechnete 19 % auf den ganzen Rechnungsbetrag hoch, obwohl die MwSt. bei einem Reisebüro nur für die Servicepauschale gilt, nicht für den Flugpreis). Neue Regel für die KI: MwSt. und Netto nur übernehmen, wenn sie auf dem Beleg stehen. Bei Flug, Bahn-Fernverkehr, Fernbus, Schiff, Reisebüro-Rechnungen und Visa-Gebühren wird nie selbst gerechnet.",
         "Zusätzlich prüft die App selbst: Bei Flug und Bahn werden Netto und MwSt. geleert, wenn die KI sie berechnet hat oder der MwSt.-Betrag nicht im Belegtext steht. Ältere Flug-/Bahn-Belege mit hochgerechneter MwSt. werden beim Start einmalig bereinigt (Foto-Belege bleiben unberührt). „Beleg neu auslesen“ holt eine aufgedruckte MwSt. wieder."]},
@@ -915,7 +921,12 @@ def _verknuepfung_karte(bid: int, rcode) -> str:
                  'nicht zusätzlich zu den Rechnungen. Er liefert den Euro-Betrag. Er geht trotzdem als eigenes PDF an Habel.</div>')
 
     # 1) Rechnung: Buchung x gegen Rechnungen x1 + x2
-    if info and D.status_anzeige(info):
+    me_dk = D.ist_durch_kunde(me)
+    if me_dk:
+        html += ('<div style="background:#eff6ff;color:#1e3a8a;border-radius:6px;padding:8px 10px;margin-bottom:10px;'
+                 'font-size:12px">🤝 <b>Durch Kunde direkt bezahlt:</b> Dieser Beleg zählt nicht in der Summe und '
+                 'braucht keine Rechnung oder Quittung. Er wird nur vermerkt.</div>')
+    elif info and D.status_anzeige(info):
         html += D.zusammenfassung_html(info, by_id)
     elif D.ist_buchung(me.get("belegart")) and not (info and info["finale_ids"]):
         html += ('<div style="background:#fff7ed;color:#9a3412;border-radius:6px;padding:8px 10px;margin-bottom:10px;'
@@ -924,6 +935,7 @@ def _verknuepfung_karte(bid: int, rcode) -> str:
 
     # 1b) Rechnungen/Quittungen ohne erkannten Betrag: direkt hier eintragen (Vorschlag = Rest der Buchung)
     ohne_betrag = [b for b in belege if D.ist_deckender_beleg(b.get("belegart")) and not D.hat_betrag(b)
+                   and not D.ist_durch_kunde(b)
                    and "aenderung" not in (b.get("belegart") or "").lower()
                    and "änderung" not in (b.get("belegart") or "").lower()
                    and (b["id"] == bid or (gid and b.get("beleg_gruppe_id") == gid))]
@@ -977,7 +989,7 @@ def _verknuepfung_karte(bid: int, rcode) -> str:
         return None, None
 
     frei = [b for b in belege if b["id"] != bid and D.ist_deckender_beleg(b.get("belegart"))
-            and D.hat_betrag(b) and not b.get("beleg_gruppe_id")]
+            and D.hat_betrag(b) and not b.get("beleg_gruppe_id") and not D.ist_durch_kunde(b)]
     vorschlaege = []   # (buchung, [beleg_ids], summe, waehrung)
     if D.ist_buchung(me.get("belegart")) and D.hat_betrag(me):
         ziel, w = offener_betrag(me)
@@ -1028,7 +1040,9 @@ def _verknuepfung_karte(bid: int, rcode) -> str:
             tags += ' <span style="color:#059669;font-weight:600">· gleicher Buchungscode</span>'
         elif gleicher_anbieter:
             tags += ' <span style="color:#2563eb">· gleicher Anbieter</span>'
-        if D.ist_buchung(b.get("belegart")) and D.hat_betrag(b):
+        if D.ist_durch_kunde(b):
+            tags += ' <span style="color:#1e40af">· 🤝 durch Kunde bezahlt</span>'
+        elif D.ist_buchung(b.get("belegart")) and D.hat_betrag(b):
             rest, w = offener_betrag(b)
             if rest:
                 tags += f' <span style="color:#c2410c">· offen: {rest:.2f} {e(w)}</span>'
@@ -1421,7 +1435,7 @@ def beleg_detail(bid: int, request: Request):
                 <dd style="font-family:monospace">{buchungscode or "–"}</dd>
                 <dt style="color:var(--muted);font-size:12px">Rechnungsnr.</dt>
                 <dd style="font-family:monospace">{rechnr or "–"}</dd>
-                {f'<dt style="color:var(--muted);font-size:12px">Betrag in Euro (geschätzt)</dt><dd style="font-weight:600;color:var(--green)">{float(betrag_eur):.2f} EUR</dd>' if betrag_eur else ('<dt style="color:var(--amber);font-size:12px">Betrag in Euro (geschätzt)</dt><dd style="color:var(--amber);font-size:12px">⚠ Kurs fehlt – bitte nachtragen</dd>' if waehrung and waehrung != "EUR" and betrag_brutto else "")}
+                {f'<dt style="color:var(--muted);font-size:12px">Betrag in Euro (geschätzt)</dt><dd style="font-weight:600;color:var(--green)">{float(betrag_eur):.2f} EUR</dd>' if betrag_eur else ('<dt style="color:var(--amber);font-size:12px">Betrag in Euro (geschätzt)</dt><dd style="color:var(--amber);font-size:12px">⚠ Kurs fehlt – bitte nachtragen</dd>' if waehrung and waehrung != "EUR" and betrag_brutto and zahlungsart != "DurchKunde" else "")}
                 {f'<dt style="color:var(--muted);font-size:12px">Kurs</dt><dd style="font-family:monospace">{kurs_eur} ({kurs_datum or ""} {kurs_quelle or ""})</dd>' if kurs_eur else ""}
                 {f'<dt style="color:var(--muted);font-size:12px">Hotel</dt><dd style="font-weight:600">{hotel_name}</dd>' if hotel_name else ""}
                 {f'<dt style="color:var(--muted);font-size:12px">Check-in</dt><dd>{fmt_date(hotel_ci_dat)} {hotel_ci_zeit or ""}</dd>' if hotel_ci_dat else ""}
@@ -4099,7 +4113,7 @@ def reise_abschluss(code: str):
             betrag_brutto,betrag_netto,betrag_mwst,waehrung,
             land_beleg,betrag_eur,kurs_eur,kurs_datum,kurs_quelle,
             s3_original,status,beleg_gruppe_id,betrag_eur_final,nebenkosten_eur,
-            nebenkosten_beschreibung,geprueft,kreditkarte_auslandsentgelt_eur
+            nebenkosten_beschreibung,geprueft,kreditkarte_auslandsentgelt_eur,zahlungsart
             FROM belege WHERE reise_code={P}
             ORDER BY belegdatum NULLS LAST, id""", (rcode,))
         belege = cur.fetchall()
@@ -4128,7 +4142,8 @@ def reise_abschluss(code: str):
                         "betrag_eur": g(b,"betrag_eur",12), "betrag_eur_final": g(b,"betrag_eur_final",19),
                         "nebenkosten_eur": g(b,"nebenkosten_eur",20),
                         "kreditkarte_auslandsentgelt_eur": g(b,"kreditkarte_auslandsentgelt_eur",23),
-                        "anbieter": g(b,"anbieter",4), "transportart": g(b,"transportart",2)} for b in belege]
+                        "anbieter": g(b,"anbieter",4), "transportart": g(b,"transportart",2),
+                        "zahlungsart": g(b,"zahlungsart",24)} for b in belege]
         deck_by_id = {d["id"]: d for d in deck_belege}
         kat = deckung_mod.kategorisieren(deck_belege)
         ids_final, ids_vorl, ids_ohne = set(kat["final"]), set(kat["vorlaeufig"]), set(kat["ohne_betrag"])
@@ -4365,6 +4380,23 @@ def reise_abschluss(code: str):
               <ul style="margin-top:8px;padding-left:16px">{items}</ul>
             </div>"""
 
+        # Belege mit Bezahlart „Durch Kunde“: zählen nie in der Summe, werden nur vermerkt
+        kunde_html = ""
+        if kat["durch_kunde"]:
+            from html import escape as _h_escape
+            items = ""
+            for kid in kat["durch_kunde"]:
+                kb = deck_by_id[kid]
+                betrag_k = (f' – {float(kb["betrag_brutto"]):.2f} {kb.get("waehrung") or "EUR"}'
+                            if kb.get("betrag_brutto") else "")
+                items += (f'<li style="margin:4px 0"><a href="/beleg/{kid}" style="color:var(--blue)">'
+                          f'Beleg #{kid}</a>: {_h_escape(str(kb.get("anbieter") or "–"))}{betrag_k}</li>')
+            kunde_html = f"""
+            <div class="alert alert-info" style="margin-top:8px">
+              <b>🤝 Durch Kunde direkt bezahlt – zählt nicht in der Summe:</b>
+              <ul style="margin-top:8px;padding-left:16px">{items}</ul>
+            </div>"""
+
         # Fehlende Kurse
         kurs_html = ""
         if kurs_fehlt:
@@ -4539,6 +4571,7 @@ def reise_abschluss(code: str):
 
         {kurs_html}
         {best_html}
+        {kunde_html}
         {luecken_box_html}
         {zeiten_html}
         {km_html}
@@ -4658,7 +4691,7 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
 
         cur.execute(f"""SELECT id,belegart,anbieter,belegdatum,betrag_brutto,waehrung,betrag_eur,
             beleg_gruppe_id,s3_original,dateiname,betrag_eur_final,nebenkosten_eur,
-            betrag_mwst,land_beleg,geprueft,kreditkarte_auslandsentgelt_eur
+            betrag_mwst,land_beleg,geprueft,kreditkarte_auslandsentgelt_eur,zahlungsart
             FROM belege WHERE reise_code={P} ORDER BY belegdatum""", (rcode,))
         belege = cur.fetchall()
         cur.close(); db.close()
@@ -4674,7 +4707,7 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
                         "betrag_eur": g(b,"betrag_eur",6), "betrag_eur_final": g(b,"betrag_eur_final",10),
                         "nebenkosten_eur": g(b,"nebenkosten_eur",11),
                         "kreditkarte_auslandsentgelt_eur": g(b,"kreditkarte_auslandsentgelt_eur",15),
-                        "anbieter": g(b,"anbieter",2)} for b in belege]
+                        "anbieter": g(b,"anbieter",2), "zahlungsart": g(b,"zahlungsart",16)} for b in belege]
         deck_by_id = {d["id"]: d for d in deck_belege}
         kat = deckung_mod.kategorisieren(deck_belege)
         ids_zaehlen = set(kat["final"]) | set(kat["vorlaeufig"])
@@ -4886,6 +4919,16 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
                     story.append(Paragraph("– " + esc(zeile_l), styles["Normal"]))
         else:
             story.append(Paragraph("Keine Rechnungen/Quittungen erfasst.", styles["Normal"]))
+
+        if kat["durch_kunde"]:
+            story.append(Spacer(1, 2*mm))
+            story.append(Paragraph("Durch Kunde direkt bezahlt (zählt nicht in der Summe):", styles["Normal"]))
+            for kid in kat["durch_kunde"]:
+                kb = deck_by_id[kid]
+                betrag_k = (f", {float(kb['betrag_brutto']):.2f} {kb.get('waehrung') or 'EUR'}"
+                            if kb.get("betrag_brutto") else "")
+                story.append(Paragraph("– " + esc(f"Beleg #{kid} ({kb.get('anbieter') or '–'}{betrag_k})"),
+                                       styles["Normal"]))
 
         vs_daten = _vorschuss_abschluss_pdf_daten(rcode)
         if vs_daten:
@@ -5222,7 +5265,8 @@ def todo_liste_laden() -> list:
     try:
         # 1. Betrag final noch nicht bestätigt (Fremdwährung, nur Schätzung vorhanden)
         cur.execute(f"""SELECT COUNT(*) FROM belege
-            WHERE waehrung != 'EUR' AND betrag_eur_final IS NULL AND betrag_brutto IS NOT NULL""")
+            WHERE waehrung != 'EUR' AND betrag_eur_final IS NULL AND betrag_brutto IS NOT NULL
+            AND COALESCE(zahlungsart,'') != 'DurchKunde'""")
         n = cur.fetchone()[0]
         if n:
             aufgaben.append({"icon": "💶", "prio": "warn",
@@ -5318,7 +5362,7 @@ def todo_belege_laden() -> list:
 
     cur.execute(f"""SELECT b.id, b.reise_code, b.anbieter, b.betrag_brutto, b.waehrung,
             b.belegdatum, b.betrag_eur_final, b.geprueft, b.dms_versendet_am,
-            b.pflichtfelder_ok, b.belegart, r.rueckkehr
+            b.pflichtfelder_ok, b.belegart, r.rueckkehr, b.zahlungsart
         FROM belege b LEFT JOIN reisen r ON r.code = b.reise_code
         ORDER BY b.erstellt DESC""")
     rows = cur.fetchall()
@@ -5354,7 +5398,8 @@ def todo_belege_laden() -> list:
         belegart = g(r,"belegart",10) or ""
         rueckkehr = g(r,"rueckkehr",11)
 
-        if waehrung != "EUR" and betrag_eur_final is None and betrag_brutto is not None:
+        if (g(r,"zahlungsart",12) or "") != "DurchKunde" and waehrung != "EUR" \
+                and betrag_eur_final is None and betrag_brutto is not None:
             probleme.append("💶 Betrag final offen")
         if belegart in PRUEF_BELEGARTEN:
             rueckkehr_d = rueckkehr
@@ -5658,6 +5703,7 @@ def dashboard(request: Request):
                 f"""SELECT id FROM belege
                    WHERE waehrung != 'EUR' AND (kurs_eur IS NULL OR kurs_eur = 0)
                    AND betrag_brutto IS NOT NULL AND betrag_eur_final IS NULL
+                   AND COALESCE(zahlungsart,'') != 'DurchKunde'
                    AND COALESCE(belegart,'') NOT IN {EIGENBELEG_SQL}
                    ORDER BY erstellt DESC""")
             kurs_ids = [row[0] for row in cur2.fetchall()]
@@ -7624,7 +7670,7 @@ def reise_detail(code: str, request: Request):
                         event_datum_von, event_datum_bis, hotel_checkin_datum,
                         hotel_checkout_datum, hotel_checkout_zeit, event_zeit,
                         belegart, beleg_gruppe_id, betrag_eur, betrag_eur_final, nebenkosten_eur,
-                        kreditkarte_auslandsentgelt_eur
+                        kreditkarte_auslandsentgelt_eur, zahlungsart
                         FROM belege WHERE reise_code = {P} ORDER BY belegdatum""", (rcode,))
         beleg_rows_tag = cur.fetchall()
 
@@ -7797,9 +7843,11 @@ def reise_detail(code: str, request: Request):
              "betrag_brutto": get(b,"betrag_brutto",4), "waehrung": get(b,"waehrung",5),
              "betrag_eur": get(b,"betrag_eur",17), "betrag_eur_final": get(b,"betrag_eur_final",18),
              "nebenkosten_eur": get(b,"nebenkosten_eur",19),
-             "kreditkarte_auslandsentgelt_eur": get(b,"kreditkarte_auslandsentgelt_eur",20)}
+             "kreditkarte_auslandsentgelt_eur": get(b,"kreditkarte_auslandsentgelt_eur",20),
+             "zahlungsart": get(b,"zahlungsart",21)}
             for b in beleg_rows_tag])
         _zaehlen_tag = set(_kat_tag["final"]) | set(_kat_tag["vorlaeufig"])
+        _kunde_tag = set(_kat_tag["durch_kunde"])       # Bezahlart „Durch Kunde“: zählt nie
         beleg_kosten_gesamt = sum(
             beleg_eur_mit_anteil(get(b,"betrag_brutto",4), get(b,"waehrung",5), get(b,"betrag_eur",17),
                                  get(b,"betrag_eur_final",18), get(b,"nebenkosten_eur",19),
@@ -7820,6 +7868,8 @@ def reise_detail(code: str, request: Request):
         _ohne_kurs_tag = set()  # Fremdwährung ohne Euro-Wert
         for _bid in _kat_tag["nachweis"]:
             _hinweis_tag[_bid] = "Zahlungsnachweis – zählt nicht extra"
+        for _bid in _kunde_tag:
+            _hinweis_tag[_bid] = "durch Kunde direkt bezahlt – zählt nicht in der Summe"
         for r in _kat_tag["rest"]:
             if r["buchung_ids"]:
                 _rest_eur = (r["fehlt_eur"] or 0.0) + r["gebuehr_eur"]
@@ -7838,7 +7888,7 @@ def reise_detail(code: str, request: Request):
                 return None
             wk = get(b,"waehrung",5) or "EUR"
             text = f"{float(betrag_x):.2f} {wk}"
-            if wk == "EUR":
+            if wk == "EUR" or get(b,"id",0) in _kunde_tag:
                 return text
             bid_x = get(b,"id",0)
             eigen_final = get(b,"betrag_eur_final",18); eigen_eur = get(b,"betrag_eur",17)

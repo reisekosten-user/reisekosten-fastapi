@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.30"
+DOKU_GEPRUEFT_FUER = "3.31"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -265,7 +265,7 @@ KAPITEL = [
     {"id": "a-belege", "teil": "A", "titel": "Belege hochladen", "bloecke": [
         ("ol", [
             "Im Portal auf **„📎 Beleg hochladen“** tippen.",
-            "Datei wählen: PDF oder Foto/Scan (JPG, PNG, TIF, HEIC, WEBP).",
+            "Datei wählen: PDF oder Foto/Scan (JPG, PNG, TIF, HEIC, WEBP). Mehrseitige Scans werden komplett gelesen (bis zu 4 Seiten).",
             "**Hochladen** tippen. Es erscheint „Danke!“.",
             "Mit „Weiteren Beleg hochladen“ geht es direkt mit dem nächsten Beleg weiter.",
         ]),
@@ -470,6 +470,7 @@ KAPITEL = [
             "**📊 KI-Analyse:** erkannte Daten (Anbieter, Datum, Betrag, MwSt, Währung, Transportart, Segmente). Fehlt etwas, steht dort „Fehlende Pflichtfelder“. "
             "Die **MwSt.** wird nur übernommen, wenn sie auf dem Beleg steht. Bei Flug, Bahn-Fernverkehr, Fernbus, Schiff und Reisebüro-Rechnungen rechnet die App sie nie selbst aus (bei einem Reisebüro gilt sie oft nur für die Servicepauschale). "
             "Nur bei einfachen deutschen Belegen (z. B. Parkschein, Tankquittung, ÖPNV) ergänzt die KI eine fehlende MwSt. selbst. "
+            "Bei **Scans und Fotos** liest die KI alle Seiten (höchstens 4); ein Scanner-PDF ohne Text wird per Bilderkennung gelesen. Bei mehreren Steuersätzen gilt: MwSt. = Summe der ausgewiesenen Steuerbeträge, Netto = Brutto minus MwSt. Mit **Beleg neu auslesen** lässt sich ein älterer Scan mit allen Seiten neu analysieren. "
             "Mit **✏ Daten nachtragen** (Organisator) ergänzen oder korrigieren.",
             "**Belegart** und **Bezahlart** (siehe Tabellen unten). Bei Kreditkarte wählen Sie „Welche Karte?“.",
             "**📎 Dokumente:** Original-PDF, 🔒 Anonymisiert, 🔍 Analyse-PDF; Knöpfe zum erneuten Analysieren und erneuten Anonymisieren; Beleg löschen; Reise zuordnen.",
@@ -494,6 +495,9 @@ KAPITEL = [
         ], [42, 16, 42]),
         ("h3", "Bezahlarten"),
         ("p", "💳 Kreditkarte · 💵 Bar · 🏦 Überweisung · 🅿 PayPal · 🤝 Durch Kunde · ❓ Unbekannt."),
+        ("p", "**🤝 Durch Kunde:** Hat der Kunde direkt bezahlt, wählen Sie diese Bezahlart. Der Beleg **zählt nie in der Summe** (Abschluss, PDF, Kosten-Kachel, Tagessumme) "
+              "und braucht **keine Rechnung oder Quittung**. Er wird nur vermerkt: im Abschluss und im PDF unter „Durch Kunde direkt bezahlt“, im Tagesverlauf mit dem Hinweis „durch Kunde direkt bezahlt“. "
+              "Auch die Hinweise „Betrag final offen“ und „Kurs fehlt“ entfallen. Gehört eine Buchungsbestätigung dazu, setzen Sie auch dort „Durch Kunde“."),
         ("h3", "Buchung und Rechnungen verknüpfen"),
         ("p", "**Jede Buchung braucht Rechnungen oder Quittungen.** Die Buchungsbestätigung (Betrag x) ist nur der Vorab-Beleg; abgerechnet wird mit den echten Rechnungen "
               "(x1 + x2 = x). Dazu werden die Belege zu einer **Gruppe** verknüpft. Die Karte „🔗 Verknüpfte Belege“ zeigt dann Buchung, Rechnungen und Summe, zum Beispiel "
