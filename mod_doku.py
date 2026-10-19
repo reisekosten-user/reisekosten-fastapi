@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.29"
+DOKU_GEPRUEFT_FUER = "3.29.3"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -39,7 +39,7 @@ UMGEBUNG = [
     ("DATABASE_URL", "Grundbetrieb", "ja", "",
      "Adresse der PostgreSQL-Datenbank. Ohne Angabe läuft die App nur mit einer lokalen Testdatenbank.", True),
     ("SESSION_SECRET", "Grundbetrieb", "ja", "",
-     "Geheimer Schlüssel für die Anmeldung (Login-Cookie). Lang und zufällig wählen. Ohne ihn gilt ein unsicherer Standardwert.", True),
+     "Geheimer Schlüssel für die Anmeldung (Login-Cookie). Lang und zufällig wählen (mindestens 32 Zeichen, z. B. 64 Zeichen aus Buchstaben und Ziffern). Fehlt er, nutzt die App einen aus anderen geheimen Einstellungen abgeleiteten Ersatzschlüssel: sicher, aber bitte trotzdem eintragen. Nach jeder Änderung müssen sich alle einmal neu anmelden.", True),
     ("CRON_SECRET", "Grundbetrieb", "ja", "",
      "Passwort für die automatischen Aufgaben (Adressen /cron/…?key=…). Ohne ihn lehnen alle Cron-Adressen ab.", True),
     ("PORTAL_BASE_URL", "Grundbetrieb", "nein", "",
@@ -488,7 +488,7 @@ KAPITEL = [
             ["Vorschussquittung / Bargeldbeschaffung / Rückgabequittung", "ja", "Selbst erzeugt aus dem Bargeld-Konto, ohne eigenen Betrag."],
             ["Buchungsbestätigung", "nein", "Betrag ist hier optional. Liefert Flug-/Zugdaten. Braucht Rechnungen oder Quittungen (siehe unten)."],
             ["✈ Flugänderung/Umbuchung", "nein", "Löst die Änderungsklärung aus (siehe „Flug, Bahn und Termine“)."],
-            ["Tankbeleg (Rechnung), Hotel, Taxi, Bewirtung, Sonstige Kosten, Sonstiges", "nein", "Zur Einordnung der Ausgabe. Nicht prüfpflichtig für die Habel-Übergabe."],
+            ["Tankbeleg (Rechnung), Hotel, Taxi, Bewirtung, Sonstige Kosten, Sonstiges", "nein", "Zur Einordnung der Ausgabe. Nicht prüfpflichtig für die Habel-Übergabe. Liefert die KI für einen Beleg mit Betrag „Sonstiges“, setzt die App automatisch „Quittung“. Bei vorhandenen Belegen zeigt die Beleg-Seite den Knopf „Als Quittung einstufen“."],
         ], [42, 16, 42]),
         ("h3", "Bezahlarten"),
         ("p", "💳 Kreditkarte · 💵 Bar · 🏦 Überweisung · 🅿 PayPal · 🤝 Durch Kunde · ❓ Unbekannt."),
@@ -578,7 +578,7 @@ KAPITEL = [
                     "DB_TIMETABLES_CLIENT_ID, DB_TIMETABLES_API_KEY) sind gesetzt. Siehe Teil C."),
     ]},
     {"id": "b-vma", "teil": "B", "titel": "Verpflegungsmehraufwand (VMA) und Trennungspauschale", "bloecke": [
-        ("p", "Der **Tagesverlauf & VMA** auf der Reise-Seite zeigt je Tag: Datum, Land, Satz, Abzüge, **VMA netto** und alle Belege und Termine des Tages."),
+        ("p", "Der **Tagesverlauf & VMA** auf der Reise-Seite zeigt je Tag: Datum, Land, Satz, Abzüge, **VMA netto** und alle Belege und Termine des Tages. Unter dem Tag steht die **Summe Belege in Euro**: Beträge in Fremdwährung bleiben führend und zeigen den Euro-Wert daneben (≈ geschätzt, = laut Abrechnung); fehlt der Kurs, steht „Kurs fehlt“ und der Beleg fehlt in der Summe. Durch Rechnungen belegte Buchungen und Zahlungsnachweise zählen nicht doppelt, ein Hinweis unter dem Eintrag sagt warum."),
         ("h3", "Land und Satz"),
         ("ul", [
             "Das **Land je Tag** wird automatisch aus Flügen, Hotelbelegen und der Länder-Zeitleiste der Reise ermittelt.",

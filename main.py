@@ -58,12 +58,38 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
-SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECRET-setzen"
+def _session_secret_bestimmen() -> tuple:
+    """Schlüssel zum Signieren des Login-Cookies. Gibt (Schlüssel, Herkunft) zurück.
+    1. Eingetragenes SESSION_SECRET (empfohlen).
+    2. Fehlt es: stabiler Ersatz, abgeleitet aus anderen geheimen Einstellungen (Datenbank-Zugang usw.).
+       Er ist nicht öffentlich bekannt und bleibt bei jedem Neustart gleich.
+    3. Auch das nicht vorhanden (nur lokaler Test): zufälliger Schlüssel je Start.
+    Einen festen, im Quelltext stehenden Standardwert gibt es bewusst nicht mehr."""
+    import hashlib, secrets
+    wert = (os.getenv("SESSION_SECRET", "") or "").strip()
+    if wert:
+        return wert, "eingetragen"
+    basis = "|".join((os.getenv(n, "") or "").strip()
+                     for n in ("DATABASE_URL", "CRON_SECRET", "S3_SECRET_KEY", "IMAP_PASS", "OPENAI_API_KEY"))
+    if basis.strip("|"):
+        return hashlib.sha256(("reisekosten-session|" + basis).encode("utf-8")).hexdigest(), "abgeleitet"
+    return secrets.token_hex(32), "zufällig"
+
+SESSION_SECRET, SESSION_SECRET_HERKUNFT = _session_secret_bestimmen()
 
 # Versionsverlauf (neueste zuerst). Bei jedem Release OBEN einen Eintrag ergänzen:
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.29.3", "zeit": "2026-10-19 16:09", "aenderungen": [
+        "Fehler behoben: Die „Summe Belege“ je Tag im Tagesverlauf addierte Beträge in Fremdwährung als Euro (Fall Reise 26-007: 81012.00 INR + 746.30 EUR + 115.90 EUR ergab 81874.20 EUR). Jetzt rechnet die Summe in Euro nach denselben Regeln wie Abschluss und Kosten-Kachel: Euro-Betrag laut Abrechnung, sonst geschätzter Euro-Wert, Anteil an der Buchung, Gebühren. Buchungen, die durch Rechnungen belegt sind, und Zahlungsnachweise zählen nicht doppelt.",
+        "Anzeige: Der Fremdwährungsbetrag bleibt der führende Betrag, der Euro-Wert steht daneben („81012.00 INR (≈ 972.14 EUR)“; ≈ = geschätzt, = laut Abrechnung). Fehlt der Kurs, steht „Kurs fehlt“ und die Summenzeile nennt, wie viele Belege fehlen. Ein Hinweis erklärt, warum ein Betrag nicht oder nur als Rest zählt."]},
+    {"version": "3.29.2", "zeit": "2026-10-19 15:36", "aenderungen": [
+        "Sicherheit: Die Anmeldung wurde bisher mit einem festen, im Programm stehenden Schlüssel gesichert, wenn SESSION_SECRET nicht eingetragen war (Meldung „Fehlende Pflicht-Einstellungen: SESSION_SECRET“ in der Dokumentation). Wer diesen Standardwert kennt, könnte ein gültiges Login-Cookie bauen. Jetzt leitet die App ohne SESSION_SECRET einen nicht öffentlichen Ersatzschlüssel aus anderen geheimen Einstellungen ab; einen festen Standardwert gibt es nicht mehr.",
+        "Einmalig müssen sich alle Benutzer neu anmelden (der Schlüssel ändert sich). Die Dokumentation erklärt, wie SESSION_SECRET in Render eingetragen wird; auch dann ist einmal neues Anmelden nötig."]},
+    {"version": "3.29.1", "zeit": "2026-10-19 13:53", "aenderungen": [
+        "Fehler behoben: Bei manchen Belegen (Fall Uber-Stornoquittung #216) erschien keine Prüfung. Die KI hatte die Belegart „Sonstiges“ gesetzt, und diese Art ist nicht prüfpflichtig. Jetzt wird ein Beleg mit Betrag, bei dem die KI „Sonstiges“ oder nichts liefert, als Quittung eingestuft; die KI-Anweisung dazu ist präzisiert (Zahlungsbelege, auch Stornogebühren, sind Quittungen).",
+        "Bei bereits vorhandenen Belegen mit nicht prüfpflichtiger Belegart zeigt die Beleg-Seite jetzt einen Hinweis mit dem Knopf „Als Quittung einstufen“, statt die Prüfung stillschweigend auszublenden."]},
     {"version": "3.29", "zeit": "2026-10-19 13:41", "aenderungen": [
         "Bildformat TIF/TIFF wird erkannt: beim Hochladen (Beleg-Seite, Portal, Bewirtung) und als Mail-Anhang, auch wenn Browser oder Mail nur „octet-stream“ melden oder die Endung fehlt (Erkennung am Inhalt). Der Scan wird wie ein Foto zu PDF gewandelt und per Bilderkennung gelesen; mehrseitige TIF-Scans ergeben ein PDF mit allen Seiten (höchstens 20), die KI liest die erste Seite.",
         "Bei Bildern mit Transparenz (PNG) ist der Hintergrund im PDF jetzt weiß statt schwarz."]},
@@ -734,6 +760,8 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
 @app.on_event("startup")
 async def startup():
     print(f"[Startup] Herrhammer Reisekosten {APP_VERSION} gestartet")
+    if SESSION_SECRET_HERKUNFT != "eingetragen":
+        print(f"[Startup] SESSION_SECRET fehlt – Ersatzschlüssel ({SESSION_SECRET_HERKUNFT}) aktiv. Bitte in den Einstellungen eintragen.")
     eigenbelege_pflichtfelder_reparieren()
     bewirtung_kosten_reparieren()
 
@@ -1269,6 +1297,22 @@ def beleg_detail(bid: int, request: Request):
               </form>
               <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
               {dms_block_html}
+            </div>
+          </div>"""
+        elif (benutzer_ist_organisator and betrag_brutto and belegart not in EIGENBELEG_ARTEN
+              and "buchungsbest" not in (belegart or "").lower()
+              and "aenderung" not in (belegart or "").lower()):
+            # Zahlungsbeleg mit Betrag, aber Belegart nicht prüfpflichtig (z. B. „Sonstiges“): erklären statt schweigen
+            pruef_karte_html = f"""<div class="card">
+            <div class="card-header"><span class="card-title">✅ Prüfung & Übergabe an Habel</span></div>
+            <div class="card-body">
+              <div class="alert alert-warn" style="font-size:12px">Dieser Beleg ist noch nicht prüfbar, weil die Belegart
+                „{belegart or 'leer'}“ nicht prüfpflichtig ist. Ist es ein Zahlungsbeleg (Kassenbon, Taxi, Gebühr),
+                bitte als Quittung einstufen. Danach erscheint hier die Prüfung.</div>
+              <form method="post" action="/beleg/{bid2}/belegart" style="margin-top:10px">
+                <input type="hidden" name="belegart" value="Quittung">
+                <button type="submit" class="btn btn-primary" style="width:100%">Als Quittung einstufen</button>
+              </form>
             </div>
           </div>"""
 
@@ -7754,6 +7798,50 @@ def reise_detail(code: str, request: Request):
             for b in beleg_rows_tag if get(b,"id",0) in _zaehlen_tag
         ) + sum(((r["fehlt_eur"] or 0.0) + r["gebuehr_eur"]) for r in _kat_tag["rest"])
 
+        # Euro-Wert je Beleg für die Tagessummen: nur, was auch in der Gesamtsumme zählt (gleiche Regeln wie Abschluss).
+        _eur_tag = {}
+        for b in beleg_rows_tag:
+            _bid = get(b,"id",0)
+            if _bid in _zaehlen_tag:
+                _eur_tag[_bid] = beleg_eur_mit_anteil(
+                    get(b,"betrag_brutto",4), get(b,"waehrung",5), get(b,"betrag_eur",17),
+                    get(b,"betrag_eur_final",18), get(b,"nebenkosten_eur",19),
+                    get(b,"kreditkarte_auslandsentgelt_eur",20), _kat_tag["anteile"].get(_bid))
+        _hinweis_tag = {}       # Beleg-ID -> Hinweis, warum der Betrag nicht (voll) zählt
+        _ohne_kurs_tag = set()  # Fremdwährung ohne Euro-Wert
+        for _bid in _kat_tag["nachweis"]:
+            _hinweis_tag[_bid] = "Zahlungsnachweis – zählt nicht extra"
+        for r in _kat_tag["rest"]:
+            if r["buchung_ids"]:
+                _rest_eur = (r["fehlt_eur"] or 0.0) + r["gebuehr_eur"]
+                _eur_tag[r["buchung_ids"][0]] = _rest_eur
+                _hinweis_tag[r["buchung_ids"][0]] = "Buchung – nur der offene Rest zählt (%.2f EUR)" % _rest_eur
+        for b in beleg_rows_tag:
+            _bid = get(b,"id",0)
+            if (_bid not in _eur_tag and _bid not in _hinweis_tag
+                    and deckung_mod.ist_buchung(get(b,"belegart",15)) and float(get(b,"betrag_brutto",4) or 0) > 0):
+                _hinweis_tag[_bid] = "Buchung – zählt nicht, die Rechnungen/Quittungen zählen"
+
+        def betrag_anzeige(b):
+            """Betrag im Tagesverlauf: Fremdwährung führend, Euro-Wert daneben (≈ geschätzt, = laut Abrechnung)."""
+            betrag_x = get(b,"betrag_brutto",4)
+            if not betrag_x:
+                return None
+            wk = get(b,"waehrung",5) or "EUR"
+            text = f"{float(betrag_x):.2f} {wk}"
+            if wk == "EUR":
+                return text
+            bid_x = get(b,"id",0)
+            eigen_final = get(b,"betrag_eur_final",18); eigen_eur = get(b,"betrag_eur",17)
+            anteil = _kat_tag["anteile"].get(bid_x)
+            if eigen_final is None and eigen_eur is None and not anteil:
+                _ohne_kurs_tag.add(bid_x)
+                return text + " (Kurs fehlt)"
+            eur_x = _eur_tag[bid_x] if (bid_x in _eur_tag and bid_x not in _hinweis_tag) \
+                else float(eigen_final if eigen_final is not None else eigen_eur)
+            zeichen = "=" if (eigen_final is not None or anteil) else "≈"
+            return f"{text} ({zeichen} {eur_x:.2f} EUR)"
+
         for b in beleg_rows_tag:
             bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
             belegart_b = get(b,"belegart",15) or ""
@@ -7766,7 +7854,7 @@ def reise_detail(code: str, request: Request):
             anbieter = get(b,"anbieter",3) or "–"
             betrag = get(b,"betrag_brutto",4); waehrung = get(b,"waehrung",5) or "EUR"
             icon, bg, fg = BADGE_DETAIL.get(typ, BADGE_DETAIL["Sonstiges"])
-            bet_s = f"{float(betrag):.2f} {waehrung}" if betrag else None
+            bet_s = betrag_anzeige(b)
             kosten_vergeben = False
 
             segs = []
@@ -7834,7 +7922,8 @@ def reise_detail(code: str, request: Request):
 
         def tagesablauf_html(tag_datum, rcode):
             eintraege = list(events_by_date.get(tag_datum, []))
-            tages_summe = sum(float(e[5].split()[0]) for e in eintraege if e[5])
+            tages_summe = sum(_eur_tag.get(e[2], 0.0) for e in eintraege if e[1] == "beleg" and e[5])
+            n_ohne_kurs = sum(1 for e in eintraege if e[1] == "beleg" and e[5] and e[2] in _ohne_kurs_tag and e[2] in _eur_tag)
             for t in termine_je_tag.get(tag_datum, []):
                 tid = get(t,"id",0); von = get(t,"uhrzeit_von",2) or ""; bis = get(t,"uhrzeit_bis",3) or ""
                 titel_t = get(t,"titel",4); typ_t = get(t,"typ",5) or "termin"
@@ -7865,15 +7954,19 @@ def reise_detail(code: str, request: Request):
                             f'<a href="/reise/{rcode}/termin/{eid}/loeschen" style="font-size:11px;color:var(--muted);text-decoration:none" '
                             f'onclick="return confirm(\'Termin löschen?\')">🗑</a>')
                 sub_html = f'<div style="font-size:11px;color:var(--muted);margin-top:1px">{sub_txt}</div>' if sub_txt else ""
+                if art == "beleg" and eid in _hinweis_tag:
+                    sub_html += f'<div style="font-size:11px;color:#b45309;margin-top:1px">ⓘ {_hinweis_tag[eid]}</div>'
                 rows += f"""<div style="display:flex;gap:12px;padding:8px 16px;border-bottom:1px solid var(--border);align-items:flex-start">
                     <div style="width:44px;flex-shrink:0;font-size:12px;color:var(--muted);font-weight:600;padding-top:1px">{zeit_disp}</div>
                     <div style="flex:1;font-size:13px">{titel_txt}{sub_html}</div>
                     <div style="text-align:right;white-space:nowrap;display:flex;gap:8px;align-items:center">{rechts_html}{link}</div>
                 </div>"""
-            if tages_summe > 0:
+            if tages_summe > 0 or n_ohne_kurs:
+                kurs_txt = (f' <span style="color:#b45309;font-weight:400">· ohne {n_ohne_kurs} Beleg(e) ohne Kurs</span>'
+                            if n_ohne_kurs else "")
                 rows += (f'<div style="display:flex;justify-content:flex-end;padding:8px 16px;'
                           f'background:var(--bg)"><span style="font-size:12px;font-weight:600;'
-                          f'color:var(--text)">Summe Belege: {tages_summe:.2f} EUR</span></div>')
+                          f'color:var(--text)">Summe Belege: {tages_summe:.2f} EUR{kurs_txt}</span></div>')
             return rows
 
         wochentage = ["Mo","Di","Mi","Do","Fr","Sa","So"]
@@ -9249,6 +9342,10 @@ def dokumentation_seite(request: Request):
         if fehlt:
             hinweis += ('<div class="alert alert-warn" style="margin-bottom:12px">Fehlende Pflicht-Einstellungen: <b>%s</b> '
                         '(siehe Kapitel C2).</div>' % ", ".join(fehlt))
+        if "SESSION_SECRET" in fehlt:
+            hinweis += ('<div class="alert alert-warn" style="margin-bottom:12px"><b>SESSION_SECRET:</b> Die Anmeldung ist durch einen '
+                        'abgeleiteten Ersatzschlüssel geschützt. Bitte trotzdem in Render unter Environment eintragen '
+                        '(lange Zufallsfolge, mindestens 32 Zeichen). Danach müssen sich alle einmal neu anmelden.</div>')
     knoepfe = ('<a href="/einstellungen/dokumentation/pdf" class="btn btn-primary">📄 PDF herunterladen</a>')
     if org:
         knoepfe += (' <a href="/einstellungen/dokumentation/pdf?teil=A" class="btn btn-secondary">'
