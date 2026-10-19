@@ -45,7 +45,7 @@ PRODID = "-//Herrhammer Reisekosten//Kalender 1.0//DE"
 _LOCK_ID = 7310021
 _WOCHENTAG = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 _TERMIN_ICON = {"termin": "🤝", "kundenbesuch": "🤝", "fahrt": "🚕",
-                "mietwagen": "🚗", "hotel": "🏨", "sonstiges": "📌"}
+                "mietwagen": "🚗", "hotel": "🏨", "montage": "🔧", "sonstiges": "📌"}
 _TITEL_WOERTER = {"mr", "mrs", "ms", "miss", "mstr", "dr", "prof", "herr", "frau", "hr", "fr", "chd", "inf"}
 
 

@@ -82,6 +82,9 @@ SESSION_SECRET, SESSION_SECRET_HERKUNFT = _session_secret_bestimmen()
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.36", "zeit": "2026-10-19 17:08", "aenderungen": [
+        "Neu: Termin-Typ „🔧 Montage“. Beim Hinzufügen eines Termins gibt man das erste Datum und „Montage bis“ an; die App legt für jeden Tag der Spanne einen Termin an, Standard 07:00–16:00 (die Uhrzeiten oben lassen sich ändern). Für den Anreise- und den Abreisetag können eigene Zeiten eingetragen werden.",
+        "Geprüft wird: letzter Tag nicht vor dem ersten, höchstens 60 Tage, „bis“ nach „von“, Montage innerhalb des Reisezeitraums. Ein einzelner Tag (Feld „Montage bis“ leer) legt nur einen Termin an."]},
     {"version": "3.35", "zeit": "2026-10-19 16:56", "aenderungen": [
         "Neu: Die VMA-Tage werden jetzt automatisch angelegt, sobald eine Reise erstellt wird, und danach bei jeder Änderung aktualisiert (Reisedaten, Länder, neue, geänderte oder gelöschte Hotel-/Flugbelege, Beleg einer Reise zugeordnet). „VMA berechnen“ ist vor dem Eintragen von Terminen nicht mehr nötig. Wird der Reisezeitraum verkürzt, entfallen die überzähligen Tage (manuell geänderte Tage bleiben).",
         "Neu: Ändert sich Land oder Satz eines Tages gegenüber vorher, zeigt der Tag den Hinweis „Satz geändert: vorher … → jetzt …“ mit Knopf OK. Kann für einen Tag kein Land erkannt werden, steht dort „Land nicht erkannt – es gilt Deutschland“. Die Spalte satz_hinweis wird beim Start automatisch angelegt."]},
@@ -4044,7 +4047,7 @@ def reiseplan_daten_laden(reise_code: str):
                     "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else "", "ist_buchungscode": True}))
 
     TERMIN_ICON = {"termin": "🤝", "kundenbesuch": "🤝", "fahrt": "🚕",
-                   "mietwagen": "🚗", "hotel": "🏨", "sonstiges": "📌"}
+                   "mietwagen": "🚗", "hotel": "🏨", "montage": "🔧", "sonstiges": "📌"}
     cur.execute(f"""SELECT datum, uhrzeit_von, uhrzeit_bis, titel, typ, ort, ansprechpartner, telefon, notiz
                     FROM termine WHERE reise_code={P} ORDER BY datum, uhrzeit_von""", (reise_code,))
     for t in cur.fetchall():
@@ -8032,7 +8035,7 @@ def reise_detail(code: str, request: Request):
         # Belege und Termine nach Datum gruppieren
         TERMIN_ICON = {
             "termin": "🤝", "fahrt": "🚕", "mietwagen": "🚗",
-            "hotel": "🏨", "kundenbesuch": "🏢", "sonstiges": "📌",
+            "hotel": "🏨", "kundenbesuch": "🏢", "montage": "🔧", "sonstiges": "📌",
         }
         BADGE_DETAIL = {
             "Flug": ("✈", "#dbeafe", "#1e40af"), "Hotel": ("🏨", "#dcfce7", "#166534"),
@@ -8864,12 +8867,84 @@ def land_loeschen(code: str, lid: int):
 # ── Manuelle Termine ────────────────────────────────────────────────────────────
 TERMIN_ICON_MAP = {
     "termin": "🤝", "fahrt": "🚕", "mietwagen": "🚗",
-    "hotel": "🏨", "kundenbesuch": "🏢", "sonstiges": "📌",
+    "hotel": "🏨", "kundenbesuch": "🏢", "montage": "🔧", "sonstiges": "📌",
 }
 TERMIN_TYPEN = [
-    ("termin", "🤝 Termin"), ("kundenbesuch", "🏢 Kundenbesuch"), ("fahrt", "🚕 Fahrt/Taxi"),
-    ("mietwagen", "🚗 Mietwagen"), ("hotel", "🏨 Hotel"), ("sonstiges", "📌 Sonstiges"),
+    ("termin", "🤝 Termin"), ("kundenbesuch", "🏢 Kundenbesuch"), ("montage", "🔧 Montage"),
+    ("fahrt", "🚕 Fahrt/Taxi"), ("mietwagen", "🚗 Mietwagen"), ("hotel", "🏨 Hotel"), ("sonstiges", "📌 Sonstiges"),
 ]
+MONTAGE_STANDARD_VON = "07:00"
+MONTAGE_STANDARD_BIS = "16:00"
+MONTAGE_MAX_TAGE = 60
+
+
+def montage_tage_berechnen(erster: date, letzter: date, std_von: str, std_bis: str,
+                           an_von: str | None = None, an_bis: str | None = None,
+                           ab_von: str | None = None, ab_bis: str | None = None) -> list:
+    """Ein Eintrag je Tag von erster bis letzter: [(Datum, von, bis), ...].
+    Standardzeiten gelten an allen Tagen; am ersten Tag (Anreise) und letzten Tag (Abreise) gelten die
+    eigenen Zeiten, falls eingetragen (je Feld einzeln, ein leeres Feld nimmt die Standardzeit).
+    Bei nur einem Tag gelten die Standardzeiten."""
+    n = (letzter - erster).days + 1
+    erg = []
+    for i in range(n):
+        tag = erster + timedelta(days=i)
+        von, bis = std_von, std_bis
+        if n > 1 and i == 0:
+            von, bis = (an_von or std_von), (an_bis or std_bis)
+        elif n > 1 and i == n - 1:
+            von, bis = (ab_von or std_von), (ab_bis or std_bis)
+        erg.append((tag, von, bis))
+    return erg
+
+
+MONTAGE_BLOCK_HTML = """
+            <div class="form-group full" id="montage_block" style="display:none">
+              <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:var(--bg)">
+                <b style="font-size:13px">🔧 Montage über mehrere Tage</b>
+                <p style="font-size:12px;color:var(--muted);margin:4px 0 8px">Für jeden Tag vom <b>Datum</b> bis zum Tag unten wird ein Termin
+                  angelegt, mit den Uhrzeiten oben (Standard 07:00–16:00). Am Anreise- und am Abreisetag gelten die eigenen Zeiten,
+                  falls eingetragen. Nur ein Tag: Feld leer lassen.</p>
+                <div class="form-grid form-grid-2">
+                  <div class="form-group full">
+                    <label>Montage bis (letzter Tag)</label>
+                    <input type="date" name="datum_bis">
+                  </div>
+                  <div class="form-group">
+                    <label>Anreisetag von</label>
+                    <input type="time" name="anreise_von">
+                  </div>
+                  <div class="form-group">
+                    <label>Anreisetag bis</label>
+                    <input type="time" name="anreise_bis">
+                  </div>
+                  <div class="form-group">
+                    <label>Abreisetag von</label>
+                    <input type="time" name="abreise_von">
+                  </div>
+                  <div class="form-group">
+                    <label>Abreisetag bis</label>
+                    <input type="time" name="abreise_bis">
+                  </div>
+                </div>
+              </div>
+            </div>
+            <script>
+              (function () {
+                var sel = document.querySelector('select[name=typ]');
+                var blk = document.getElementById('montage_block');
+                var von = document.querySelector('input[name=uhrzeit_von]');
+                var bis = document.querySelector('input[name=uhrzeit_bis]');
+                function umschalten() {
+                  var m = sel.value === 'montage';
+                  blk.style.display = m ? 'block' : 'none';
+                  if (m) { if (!von.value) von.value = '07:00'; if (!bis.value) bis.value = '16:00'; }
+                }
+                sel.addEventListener('change', umschalten);
+                umschalten();
+              })();
+            </script>
+"""
 
 @app.get("/reise/{code}/termin/neu", response_class=HTMLResponse)
 def termin_neu_form(code: str, datum: str = "", zurueck: str = ""):
@@ -8950,6 +9025,7 @@ def termin_neu_form(code: str, datum: str = "", zurueck: str = ""):
               <label>Uhrzeit bis</label>
               <input type="time" name="uhrzeit_bis">
             </div>
+            {MONTAGE_BLOCK_HTML}
             <div class="form-group full">
               <label>Ort / Adresse</label>
               {ort_feld}
@@ -8996,10 +9072,52 @@ async def termin_neu(code: str, request: Request, zurueck: str = ""):
     google_lon = (form.get("lon") or "").strip()
     google_land = (form.get("land_code") or "").strip()
     ziel = f"/reise/{rcode}/reiseplan" if zurueck == "reiseplan" else f"/reise/{rcode}"
+    zurueck_link = f'<a href="/reise/{rcode}/termin/neu?datum={datum}&zurueck={zurueck}" class="btn btn-secondary">Zurück</a>'
     if not titel or not datum:
         return HTMLResponse(shell("Fehler",
             '<div class="alert alert-err">Titel und Datum sind Pflicht.</div>'
             f'<a href="/reise/{rcode}/termin/neu?zurueck={zurueck}" class="btn btn-secondary">Zurück</a>'))
+
+    # Montage über mehrere Tage: ein Termin je Tag (Standard 07:00–16:00, eigene Zeiten für An-/Abreisetag)
+    tage_liste = [(None, von, bis)]
+    if typ == "montage":
+        std_von = von or MONTAGE_STANDARD_VON
+        std_bis = bis or MONTAGE_STANDARD_BIS
+        t_erster = _datum_parsen(datum)
+        t_letzter = _datum_parsen(form.get("datum_bis")) or t_erster
+        zeiten = {k: (form.get(k) or "").strip() or None for k in ("anreise_von", "anreise_bis", "abreise_von", "abreise_bis")}
+        fehler_m = []
+        if not t_erster:
+            fehler_m.append("Das Datum ist ungültig.")
+        elif t_letzter < t_erster:
+            fehler_m.append("„Montage bis“ liegt vor dem ersten Tag.")
+        elif (t_letzter - t_erster).days + 1 > MONTAGE_MAX_TAGE:
+            fehler_m.append(f"Eine Montage kann höchstens {MONTAGE_MAX_TAGE} Tage umfassen.")
+        if not fehler_m:
+            for name_z, (zv, zb) in {"Standard": (std_von, std_bis),
+                                     "Anreisetag": (zeiten["anreise_von"], zeiten["anreise_bis"]),
+                                     "Abreisetag": (zeiten["abreise_von"], zeiten["abreise_bis"])}.items():
+                if zv and zb and zb <= zv:
+                    fehler_m.append(f"{name_z}: „bis“ muss nach „von“ liegen.")
+        if not fehler_m and t_letzter > t_erster:
+            try:
+                dbm = get_db(); curm = dbm.cursor()
+                curm.execute(f"SELECT abreise, rueckkehr FROM reisen WHERE code={ph()}", (rcode,))
+                rm = curm.fetchone(); curm.close(); dbm.close()
+                if rm:
+                    r_ab = _datum_parsen(rm[0] if isinstance(rm, tuple) else rm["abreise"])
+                    r_zu = _datum_parsen(rm[1] if isinstance(rm, tuple) else rm["rueckkehr"])
+                    if r_ab and r_zu and (t_erster < r_ab or t_letzter > r_zu):
+                        fehler_m.append(f"Die Montage liegt nicht im Reisezeitraum ({fmt_date(r_ab)} – {fmt_date(r_zu)}). "
+                                        f"Bitte den Zeitraum ändern oder zuerst die Reisedaten anpassen.")
+            except Exception:
+                pass
+        if fehler_m:
+            return HTMLResponse(shell("Montage",
+                '<div class="alert alert-err">' + "<br>".join(fehler_m) + '</div>' + zurueck_link), status_code=400)
+        tage_liste = montage_tage_berechnen(t_erster, t_letzter, std_von, std_bis,
+                                            zeiten["anreise_von"], zeiten["anreise_bis"],
+                                            zeiten["abreise_von"], zeiten["abreise_bis"])
     try:
         if google_lat and google_lon:
             lat, lon, land_code = float(google_lat), float(google_lon), (google_land.upper() or None)
@@ -9013,12 +9131,13 @@ async def termin_neu(code: str, request: Request, zurueck: str = ""):
 
         P = ph()
         db = get_db(); cur = db.cursor()
-        cur.execute(
-            f"INSERT INTO termine (reise_code,datum,uhrzeit_von,uhrzeit_bis,titel,typ,ort,"
-            f"ansprechpartner,telefon,notiz,lat,lon,land_code) "
-            f"VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})",
-            (rcode, datum, von, bis, titel, typ, ort, ansprechpartner, telefon, notiz,
-             lat, lon, land_code))
+        for tag_t, von_t, bis_t in tage_liste:
+            cur.execute(
+                f"INSERT INTO termine (reise_code,datum,uhrzeit_von,uhrzeit_bis,titel,typ,ort,"
+                f"ansprechpartner,telefon,notiz,lat,lon,land_code) "
+                f"VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})",
+                (rcode, tag_t.isoformat() if tag_t else datum, von_t, bis_t, titel, typ, ort,
+                 ansprechpartner, telefon, notiz, lat, lon, land_code))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(ziel, status_code=303)
     except Exception as e:

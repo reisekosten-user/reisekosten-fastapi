@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.35"
+DOKU_GEPRUEFT_FUER = "3.36"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -556,9 +556,12 @@ KAPITEL = [
         ("p", "Flüge und Züge kommen aus den Buchungsbelegen (die KI liest die Segmente mit Zeiten, Nummer, Sitz, Terminal/Gleis). "
               "Alles andere tragen Sie als **Termin** ein."),
         ("h3", "Termine"),
-        ("p", "Reise-Seite: **+ Termin** am Tag oder im Reiseplan **+ Ereignis**. Typen: Termin, Kundenbesuch, Fahrt/Taxi, Mietwagen, Hotel, Sonstiges. "
+        ("p", "Reise-Seite: **+ Termin** am Tag oder im Reiseplan **+ Ereignis**. Typen: Termin, Kundenbesuch, Montage, Fahrt/Taxi, Mietwagen, Hotel, Sonstiges. "
               "Felder: Titel, Typ, Datum, Uhrzeit von/bis, Ort/Adresse (mit Google-Vorschlägen, wenn GOOGLE_PLACES_API_KEY gesetzt ist), Ansprechpartner, Telefon, Notiz. "
               "Termine lassen sich ändern und löschen."),
+        ("p", "**🔧 Montage über mehrere Tage:** Beim Typ „Montage“ erscheint das Feld **„Montage bis (letzter Tag)“**. Die App legt dann für **jeden Tag** von „Datum“ bis zu diesem Tag einen Termin an, "
+              "Standard **07:00–16:00** (die Uhrzeiten oben lassen sich ändern). Für den **Anreisetag** und den **Abreisetag** gibt es eigene Zeiten; ein leeres Feld nimmt die Standardzeit. "
+              "Die Montage muss im Reisezeitraum liegen (höchstens 60 Tage). Ist „Montage bis“ leer, entsteht nur ein Termin. Jeder Tag ist danach ein eigener Termin und lässt sich einzeln ändern oder löschen."),
         ("h3", "Reiseplan"),
         ("p", "**🗺 Reiseplan** zeigt alle Flüge, Züge und Termine in zeitlicher Reihenfolge. Zwei PDF-Varianten: „für Reisemappe Mitarbeiter“ und „zum Emailversand“ (ohne Buchungscodes)."),
         ("h3", "Änderungen und Umbuchungen"),
