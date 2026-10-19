@@ -304,14 +304,15 @@ def decode_mime_header(val: str) -> str:
     return "".join(result)
 
 _ENDUNG_ZU_TYP = {".pdf": "application/pdf", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-                  ".heic": "image/heic", ".heif": "image/heic", ".webp": "image/webp", ".xml": "application/xml"}
+                  ".heic": "image/heic", ".heif": "image/heic", ".webp": "image/webp", ".xml": "application/xml",
+                  ".tif": "image/tiff", ".tiff": "image/tiff"}
 _TYP_ZU_ENDUNG = {"application/pdf": ".pdf", "image/jpeg": ".jpg", "image/png": ".png",
-                  "image/heic": ".heic", "image/webp": ".webp", "application/xml": ".xml"}
+                  "image/heic": ".heic", "image/webp": ".webp", "application/xml": ".xml", "image/tiff": ".tif"}
 
 
 def _anhang_typ(payload: bytes, fn: str, ct: str):
     """Erkennt, ob ein MIME-Teil ein Beleg-Anhang ist, und gibt den MIME-Typ zurück (sonst None).
-    Maßgeblich ist der INHALT (PDF/JPG/PNG/WEBP/HEIC erkennt man an den ersten Bytes), erst danach die
+    Maßgeblich ist der INHALT (PDF/JPG/PNG/WEBP/HEIC/TIF erkennt man an den ersten Bytes), erst danach die
     Dateiendung. Der von der Mail angegebene Typ zählt nicht: Handy-Apps und Weiterleitungen schreiben
     dort oft nur "application/octet-stream"."""
     if payload[:1024].find(b"%PDF") >= 0:
@@ -322,6 +323,8 @@ def _anhang_typ(payload: bytes, fn: str, ct: str):
         return "image/png"
     if payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
         return "image/webp"
+    if payload[:4] in (b"II*\x00", b"MM\x00*"):
+        return "image/tiff"
     if payload[4:8] == b"ftyp" and payload[8:12] in (b"heic", b"heix", b"hevc", b"mif1", b"msf1", b"heif"):
         return "image/heic"
     endung = os.path.splitext((fn or "").lower().strip())[1]
@@ -487,7 +490,7 @@ async def fetch_mails() -> dict:
             # Regel: PDF/Bild-Anhänge vorhanden → nur Anhänge verarbeiten
             # Kein Anhang → Mail-Body als Beleg
             echte_anhaenge = [(fn, payload, ct) for fn, payload, ct in attachments
-                              if fn.lower().endswith((".pdf",".jpg",".jpeg",".png",".heic",".webp",".xml"))]
+                              if fn.lower().endswith((".pdf",".jpg",".jpeg",".png",".heic",".webp",".tif",".tiff",".xml"))]
 
             if echte_anhaenge:
                 # Nur Anhänge verarbeiten – Body ist nur Benachrichtigung

@@ -112,43 +112,57 @@ def s3_download(key: str) -> bytes:
     obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
     return obj["Body"].read()
 
+BILD_TYPEN = ("image/jpeg", "image/jpg", "image/png", "image/heic", "image/heif", "image/webp", "image/tiff")
+MAX_BILD_SEITEN = 20     # mehrseitige TIF-Scans: höchstens so viele Seiten ins PDF
+
+
+def inhaltstyp_bestimmen(datei_bytes: bytes, dateiname: str, content_type: str) -> str:
+    """TIFF erkennt man an den ersten Bytes (II*\\0 oder MM\\0*). Browser und Mail-Programme melden
+    dafür oft nur "application/octet-stream" – sonst würde das Bild als Text verarbeitet."""
+    if datei_bytes[:4] in (b"II*\x00", b"MM\x00*"):
+        return "image/tiff"
+    return content_type
+
+
 def bild_zu_pdf(bild_bytes: bytes, dateiname: str = "bild") -> bytes:
-    """Konvertiert JPG/PNG zu PDF mit Pillow + ReportLab."""
-    from PIL import Image
-    from reportlab.lib.pagesizes import A4
-    from reportlab.platypus import SimpleDocTemplate, Image as RLImage
-    img = Image.open(io.BytesIO(bild_bytes))
-    # EXIF-Rotation korrigieren
-    try:
-        from PIL import ImageOps
-        img = ImageOps.exif_transpose(img)
-    except: pass
-    # Zu RGB konvertieren falls nötig
-    if img.mode not in ("RGB", "L"):
-        img = img.convert("RGB")
-    # Bild als JPEG in Buffer speichern
-    img_buf = io.BytesIO()
-    img.save(img_buf, format="JPEG", quality=95)
-    img_buf.seek(0)
-    # PDF erstellen
-    pdf_buf = io.BytesIO()
+    """Konvertiert JPG/PNG/TIF zu PDF mit Pillow + ReportLab. Mehrseitige TIF-Scans: eine PDF-Seite je Bildseite."""
+    from PIL import Image, ImageOps
     from reportlab.lib.units import mm
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas
     from reportlab.lib.utils import ImageReader
+    quelle = Image.open(io.BytesIO(bild_bytes))
+    seiten = min(getattr(quelle, "n_frames", 1) or 1, MAX_BILD_SEITEN)
+    pdf_buf = io.BytesIO()
     w_pt, h_pt = A4
-    img_w, img_h = img.size
-    # Skalieren auf A4 mit Rand
     rand = 20 * mm
-    max_w = w_pt - 2 * rand
-    max_h = h_pt - 2 * rand
-    scale = min(max_w / img_w, max_h / img_h)
-    draw_w = img_w * scale
-    draw_h = img_h * scale
-    x = (w_pt - draw_w) / 2
-    y = (h_pt - draw_h) / 2
     c_pdf = canvas.Canvas(pdf_buf, pagesize=A4)
-    c_pdf.drawImage(ImageReader(img_buf), x, y, draw_w, draw_h)
+    for nr in range(seiten):
+        if seiten > 1:
+            quelle.seek(nr)
+        img = quelle.copy()
+        # EXIF-Rotation korrigieren
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
+        # Transparenz -> weißer Hintergrund, sonst zu RGB konvertieren
+        if img.mode in ("RGBA", "LA"):
+            hintergrund = Image.new("RGB", img.size, (255, 255, 255))
+            hintergrund.paste(img, mask=img.split()[-1])
+            img = hintergrund
+        elif img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        # Bild als JPEG in Buffer speichern
+        img_buf = io.BytesIO()
+        img.save(img_buf, format="JPEG", quality=95)
+        img_buf.seek(0)
+        # Skalieren auf A4 mit Rand
+        img_w, img_h = img.size
+        scale = min((w_pt - 2 * rand) / img_w, (h_pt - 2 * rand) / img_h)
+        draw_w, draw_h = img_w * scale, img_h * scale
+        c_pdf.drawImage(ImageReader(img_buf), (w_pt - draw_w) / 2, (h_pt - draw_h) / 2, draw_w, draw_h)
+        c_pdf.showPage()
     c_pdf.save()
     return pdf_buf.getvalue()
 
@@ -1139,6 +1153,7 @@ async def beleg_verarbeiten(
     """
     import uuid
     beleg_id_temp = str(uuid.uuid4())[:8]
+    content_type = inhaltstyp_bestimmen(datei_bytes, dateiname, content_type)
 
     # 1. Zu PDF konvertieren
     ist_eigenstaendige_xml = (
@@ -1154,7 +1169,7 @@ async def beleg_verarbeiten(
         original_pdf = text_zu_pdf(xml_text, f"XRechnung: {dateiname}")
         erechnung_info = {"ist_erechnung": True, "format": "XRechnung (eigenständig)",
                            "xml_bytes": datei_bytes, "xml_name": dateiname}
-    elif content_type in ("image/jpeg", "image/jpg", "image/png", "image/heic", "image/heif", "image/webp"):
+    elif content_type in BILD_TYPEN:
         original_pdf = bild_zu_pdf(datei_bytes, dateiname)
         erechnung_info = {"ist_erechnung": False, "format": None, "xml_bytes": None, "xml_name": None}
     elif content_type == "application/pdf":
@@ -1172,8 +1187,7 @@ async def beleg_verarbeiten(
     rohtext = pdf_text_lesen(original_pdf)
 
     # Bild ohne extrahierbaren Text → GPT-4o Vision direkt
-    is_image = content_type in ("image/jpeg","image/jpg","image/png",
-                                "image/heic","image/heif","image/webp")
+    is_image = content_type in BILD_TYPEN
     if is_image and len(rohtext.strip()) < 20:
         ki_result = await gpt_analyse_bild(datei_bytes, content_type, dateiname)
         rohtext = json.dumps(ki_result, ensure_ascii=False, indent=2)

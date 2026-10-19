@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.28"
+DOKU_GEPRUEFT_FUER = "3.29"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -265,7 +265,7 @@ KAPITEL = [
     {"id": "a-belege", "teil": "A", "titel": "Belege hochladen", "bloecke": [
         ("ol", [
             "Im Portal auf **„📎 Beleg hochladen“** tippen.",
-            "Datei wählen: PDF oder Foto (JPG, PNG, HEIC, WEBP).",
+            "Datei wählen: PDF oder Foto/Scan (JPG, PNG, TIF, HEIC, WEBP).",
             "**Hochladen** tippen. Es erscheint „Danke!“.",
             "Mit „Weiteren Beleg hochladen“ geht es direkt mit dem nächsten Beleg weiter.",
         ]),
@@ -439,9 +439,9 @@ KAPITEL = [
             "Abruf von Hand über **📬 Mails** (Menü, Dashboard oder Belegliste) **oder automatisch alle 5 Minuten** über den Cron (Teil C, „Automatische Aufgaben“). "
             "Es läuft immer nur ein Abruf; ein zweiter Klick während eines Laufs zeigt einen Hinweis. Der Abruf läuft im Hintergrund, die Seite bleibt bedienbar. "
             "Antwortet der Mailserver nicht, bricht der Abruf nach 30 Sekunden mit einer Fehlermeldung ab.",
-            "Geholt werden nur **ungelesene** Mails. Jeder Anhang (PDF, JPG, JPEG, PNG, HEIC, WEBP, XML) wird ein eigener Beleg. "
+            "Geholt werden nur **ungelesene** Mails. Jeder Anhang (PDF, JPG, JPEG, PNG, TIF, HEIC, WEBP, XML) wird ein eigener Beleg. "
             "Ohne Anhang wird der Mailtext (mehr als 50 Zeichen) selbst zum Beleg.",
-            "Ob ein Anhang ein Beleg ist, entscheidet sein **Inhalt** (PDF, JPG, PNG, WEBP, HEIC), nicht die Angabe der Mail. Auch kleine, vom Handy weitergeleitete PDFs werden erkannt. "
+            "Ob ein Anhang ein Beleg ist, entscheidet sein **Inhalt** (PDF, JPG, PNG, WEBP, HEIC, TIF), nicht die Angabe der Mail. Auch kleine, vom Handy weitergeleitete PDFs werden erkannt. "
             "Nur kleine eingebettete **Bilder** (Logos in der Signatur) und Kalender-/Kontaktdateien werden ignoriert. Ein PDF in einer als Anhang weitergeleiteten Mail wird ebenfalls gefunden.",
             "Verarbeitete Mails werden im Postfach **gelöscht**. Doppelte Weiterleitungen werden über die Message-ID erkannt.",
             "Das Ergebnis zeigt: Mails verarbeitet, Belege erstellt, Duplikate, Fehler (mit Details). Wurde der Mailtext zum Beleg, obwohl die Mail weitere Teile hat oder im Text einen Anhang nennt, "

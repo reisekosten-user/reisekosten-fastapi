@@ -64,6 +64,9 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "") or "unsicher-bitte-SESSION_SECR
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.29", "zeit": "2026-10-19 13:41", "aenderungen": [
+        "Bildformat TIF/TIFF wird erkannt: beim Hochladen (Beleg-Seite, Portal, Bewirtung) und als Mail-Anhang, auch wenn Browser oder Mail nur „octet-stream“ melden oder die Endung fehlt (Erkennung am Inhalt). Der Scan wird wie ein Foto zu PDF gewandelt und per Bilderkennung gelesen; mehrseitige TIF-Scans ergeben ein PDF mit allen Seiten (höchstens 20), die KI liest die erste Seite.",
+        "Bei Bildern mit Transparenz (PNG) ist der Hintergrund im PDF jetzt weiß statt schwarz."]},
     {"version": "3.28", "zeit": "2026-10-16 19:40", "aenderungen": [
         "Zahlungsnachweis: Ein Beleg, der nur die Zahlung belegt (Fall PayU über 194.50 EUR zur IndiGo-Buchung über 19725 INR und ihren Teilrechnungen), wurde bisher zusätzlich zu den Rechnungen gezählt (424.50 statt 194.50 EUR, „Rechnungen liegen über der Buchung“). Jetzt erkennt die App ihn selbst: Eine Quittung oder ein Kartenbeleg neben echten Rechnungen derselben Gruppe zählt nicht extra, wenn er in anderer Währung lautet und die Rechnungen die Buchung schon voll decken, oder wenn sein Betrag genau der Buchung bzw. der Rechnungssumme entspricht. Andere Beträge (z. B. eine zusätzliche Restaurant-Quittung) zählen wie bisher.",
         "Der Zahlungsnachweis liefert den echten Euro-Betrag: Hat die Buchung keinen bestätigten Euro-Betrag, verteilt die App die 194.50 EUR anteilig auf die Rechnungen (94.72 + 99.78). Beleg-Seite, Abschluss und PDF benennen den Zahlungsnachweis („zählt nicht extra“); er geht weiterhin als eigenes PDF an Habel."]},
@@ -796,10 +799,10 @@ def beleg_upload_form():
             <div class="form-group">
               <label>Datei <span class="required">*</span></label>
               <input type="file" name="datei" required
-                     accept=".pdf,.jpg,.jpeg,.png,.heic,.webp,.xml"
+                     accept=".pdf,.jpg,.jpeg,.png,.heic,.webp,.tif,.tiff,.xml"
                      style="width:100%;padding:8px;border:1px solid var(--border);
                             border-radius:var(--radius-s);background:white">
-              <div class="form-hint">PDF, JPG, PNG, HEIC, WebP</div>
+              <div class="form-hint">PDF, JPG, PNG, TIF, HEIC, WebP</div>
             </div>
           </div>
           <div class="form-actions">
@@ -9002,7 +9005,7 @@ def portal_beleg_form(token: str):
           Für Reise <b>{info['reise_code']}</b> – {info['titel']}. Der Beleg wird automatisch
           ausgewertet und erscheint danach beim Organisator zur Prüfung.</p>
         <form method="post" action="/portal/{token}/beleg-hochladen" enctype="multipart/form-data">
-          <input type="file" name="datei" accept=".pdf,.jpg,.jpeg,.png,.heic,.webp" required
+          <input type="file" name="datei" accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff,.heic,.webp" required
                  style="display:block;margin-bottom:12px">
           <button type="submit" class="btn btn-primary" style="width:100%">Hochladen</button>
         </form>
@@ -9551,7 +9554,7 @@ def _bw_form_seite(token: str, info: dict, d: dict, fehler: list, bid: int | Non
         <label class="bw-opt"><input type="radio" name="quelle" value="upload"{chk("upload")}>
           Beleg (Rechnung, Kassenbon oder Eigenbeleg) jetzt hochladen</label>
         <div id="bwq_upload" class="bw-box">
-          <input type="file" name="datei" accept=".pdf,.jpg,.jpeg,.png,.heic,.webp">
+          <input type="file" name="datei" accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff,.heic,.webp">
           <p style="font-size:12px;color:var(--muted);margin:6px 0 0 0">Das Hochladen kann einen Moment dauern.</p>
         </div>
 
