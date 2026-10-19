@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.36"
+DOKU_GEPRUEFT_FUER = "3.39"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -186,6 +186,7 @@ SEITEN = [
     ("/einstellungen/kreditkarten/zuordnungen", "Alle Zuordnungen von Abrechnungspositionen zu Belegen", "b-kk"),
     ("/einstellungen/kreditkarten/ausland", "Kreditkarten-Belege Ausland: Liste zum Abgleich mit der VISA-Abrechnung", "b-kk"),
     ("/einstellungen/kreditkarten/ausland/csv", "Dieselbe Liste als CSV (Excel)", "b-kk"),
+    ("/einstellungen/zuschlaege", "Zuschläge einstellen: Sätze, Nacht, Feiertage, Probe", "b-zuschlag"),
     ("/einstellungen/mail-diagnose", "Mail-Diagnose: Postausgang Schritt für Schritt prüfen", "c-mail"),
     ("/einstellungen/dokumentation", "Dieses Handbuch", "c-pflege"),
     ("/einstellungen/dokumentation/pdf", "Dieses Handbuch als PDF", "c-pflege"),
@@ -240,7 +241,7 @@ KAPITEL = [
         ("h3", "Was du tun musst"),
         ("ol", [
             "**Belege hochladen** (Rechnungen, Quittungen, Buchungen) – am besten gleich nach dem Bezahlen.",
-            "**Jeden Reisetag ausfüllen:** welche Mahlzeiten gestellt wurden und deine Zeiten.",
+            "**Jeden Reisetag ausfüllen:** welche Mahlzeiten gestellt wurden und deine Zeiten. Danach **einmal unten speichern**.",
             "**Kilometer eintragen**, falls du mit Firmen- oder Privat-Pkw gefahren bist.",
             "**Bewirtungsbeleg erstellen**, wenn du Gäste eingeladen hast.",
             "**Bargeld bestätigen** (Vorschuss, Rückgabe) und selbst abgehobenes Geld eintragen.",
@@ -255,11 +256,22 @@ KAPITEL = [
             ["🍳 Frühstück / 🍽 Mittagessen / 🌙 Abendessen",
              "Haken setzen, wenn die Mahlzeit **gestellt** wurde (im Hotelpreis enthalten, vom Kunden bezahlt, im Flug serviert o. Ä.). "
              "Mahlzeiten, die du selbst bezahlt hast, bleiben ohne Haken."],
-            ["Reisebeginn / Reiseende", "Uhrzeit, wann du tatsächlich losgefahren bzw. angekommen bist."],
+            ["Reisebeginn / Reiseende", "Uhrzeit, wann du tatsächlich losgefahren bzw. angekommen bist. Hinter der Uhrzeit steht die **Zeitzone** (Standard: Ortszeit)."],
             ["Arbeitsbeginn / Arbeitsende", "Uhrzeit, wann die Arbeit am Reiseziel begann und endete."],
             ["Notiz", "Freie Bemerkung, z. B. „Flug 2 Stunden verspätet“."],
         ], [34, 66]),
-        ("p", "Mit **Speichern** (je Tag) wird die Karte gesichert. Du kannst jederzeit zurückkommen und ändern."),
+        ("h3", "Zeitzone der Uhrzeiten"),
+        ("p", "Alle Uhrzeiten gelten als **Ortszeit** des Landes, das auf der Tageskarte steht. Du musst dafür nichts auswählen. "
+              "Nur wenn du eine Zeit in einer **anderen Zeitzone** angibst, wählst du hinter der Uhrzeit im Menü die passende aus, "
+              "z. B. „Deutsche Zeit“. Die Stunden werden dann richtig umgerechnet."),
+        ("hinweis", "Beispiel: Du fliegst um 06:00 Uhr in Deutschland ab und landest um 09:00 Uhr Ortszeit in Rumänien. "
+                    "Steht auf der Tageskarte **Deutschland**, bleibt der Reisebeginn auf Ortszeit, und beim Reiseende wählst du „Osteuropa … (Bukarest)“. "
+                    "Steht auf der Karte **Rumänien**, wählst du beim Reisebeginn „Deutsche Zeit“. Gerechnet werden in beiden Fällen 2 Stunden Reisezeit."),
+        ("p", "Du kannst **alle Tage nacheinander ausfüllen**, ohne dass die Seite neu lädt. Ganz am Ende tippst du **einmal** auf "
+              "**💾 Alle Änderungen speichern**. Der Knopf bleibt am unteren Bildschirmrand sichtbar. Damit werden alle Tage und die Kilometer zusammen gesichert. "
+              "Danach erscheint „✓ Alles gespeichert“. Du kannst jederzeit zurückkommen und ändern."),
+        ("hinweis", "Erst mit **Alle Änderungen speichern** ist etwas gesichert. Bis dahin steht unten „⚠ Ungespeicherte Änderungen“. "
+                    "Verlässt du die Seite vorher (z. B. über „Beleg hochladen“), fragt der Browser nach."),
         ("hinweis", "Warum die Mahlzeiten wichtig sind: Der Verpflegungsmehraufwand (Tagegeld) wird gekürzt, wenn Mahlzeiten gestellt wurden – "
                     "Frühstück um 20 %, Mittag- und Abendessen um je 40 % des vollen Tagessatzes des Landes."),
         ("p", "Die Markierung **½ Satz** an einem Tag bedeutet, dass an diesem Tag nur der halbe Satz gilt (z. B. An- oder Abreisetag)."),
@@ -293,9 +305,10 @@ KAPITEL = [
         ("ol", [
             "Kennzeichen eintragen (z. B. WÜ-AB 123).",
             "Kilometer eintragen (z. B. 85).",
-            "**+ Hinzufügen** tippen.",
+            "Mit mehreren Fahrzeugen: **+ Weitere Fahrt** tippen und eine neue Zeile ausfüllen.",
+            "Ganz unten **💾 Alle Änderungen speichern** tippen.",
         ]),
-        ("p", "Ein Eintrag lässt sich mit 🗑 wieder löschen. Ein Datum ist nicht nötig."),
+        ("p", "Eine gespeicherte Fahrt löschst du so: Haken bei **🗑 löschen** setzen und unten speichern. Ein Datum ist nicht nötig."),
     ]},
     {"id": "a-bewirtung", "teil": "A", "titel": "Bewirtungsbeleg (Gäste eingeladen)", "bloecke": [
         ("p", "Nur wenn du **Gäste** (z. B. Kunden) eingeladen hast. Eigene Mahlzeiten auf der Reise gehören **nicht** hierher. "
@@ -337,7 +350,9 @@ KAPITEL = [
     {"id": "a-faq", "teil": "A", "titel": "Häufige Fragen", "bloecke": [
         ("tab", ["Frage", "Antwort"], [
             ["„Link ungültig oder abgelaufen“", "Der Link stimmt nicht mehr (z. B. weil dein Kürzel geändert wurde). Der Organisator schickt dir einen neuen."],
-            ["Ich habe eine Mahlzeit vergessen.", "Link öffnen, Haken setzen, Speichern. Das geht jederzeit."],
+            ["Ich kenne eine Zeit nur in deutscher Zeit (z. B. aus Outlook), bin aber im Ausland.", "Uhrzeit so eintragen und hinter der Uhrzeit **Deutsche Zeit** wählen. Ohne Auswahl gilt Ortszeit."],
+            ["Ich habe eine Mahlzeit vergessen.", "Link öffnen, Haken setzen, unten **Alle Änderungen speichern**. Das geht jederzeit."],
+            ["Ich habe etwas geändert, aber nicht gespeichert.", "Unten auf **💾 Alle Änderungen speichern** tippen. Solange dort „⚠ Ungespeicherte Änderungen“ steht, ist noch nichts gesichert."],
             ["Ich habe einen falschen Beleg hochgeladen.", "Dem Organisator Bescheid geben. Er löscht oder korrigiert den Beleg."],
             ["Der Beleg erscheint nicht im Portal.", "Das ist normal. Hochgeladene Belege sehen nur die Organisatoren."],
             ["Ich war mit dem Mietwagen unterwegs.", "Nichts eintragen. Kilometer sind nur für Firmen- oder Privat-Pkw."],
@@ -433,6 +448,9 @@ KAPITEL = [
               "**Bestandsreisen** (früher angelegt) bekommen keine automatische Mail; dort bleibt **📧 Link senden** von Hand. "
               "Der Link beginnt immer mit `https://`: Er wird aus `PORTAL_BASE_URL` gebaut, sonst aus der von Render gesetzten Adresse."),
         ("p", "**Erneut senden** verschickt dieselbe Mail noch einmal, der Betreff beginnt dann mit „Erneut:“."),
+        ("p", "**Speichern im Portal:** Die Reisenden speichern alle Tage und Kilometer mit **einem** Knopf. Geschrieben werden nur Tage, die sich "
+              "wirklich geändert haben. Ein unberührter Tag bleibt dadurch automatisch berechnet und wird nicht als „manuell“ eingefroren. "
+              "Eine unlesbare Uhrzeit überspringt nur diesen Tag; der Rest wird gespeichert und die Reisenden sehen einen Hinweis."),
     ]},
     {"id": "b-eingang", "teil": "B", "titel": "Belege hereinbekommen", "bloecke": [
         ("p", "Belege kommen auf drei Wegen in die App. Jeder Beleg wird ausgelesen: Text lesen, Namen und Mailadressen der Mitarbeiter unkenntlich machen "
@@ -677,7 +695,7 @@ KAPITEL = [
         ("ul", [
             "**🌍 Verpflegungsmehraufwand:** Datum, Land, Satz, Abzüge, Netto je Tag (plus Trennungspauschale).",
             "**🧾 Belege (Rechnungen & Quittungen):** Datum, Art, Anbieter, Rechnungsnr., Betrag, MwSt, Hinweis, Final (Euro-Betrag bestätigt), Geprüft, Beleg.",
-            "**⏱ Reise-/Arbeitszeiten** und **🚗 Gefahrene Kilometer** aus den Eingaben der Reisenden im Portal.",
+            "**⏱ Reise-/Arbeitszeiten** mit Stunden, Nachtstunden und **Zuschlägen** (je Tag und Summe je Mitarbeiter, siehe „Arbeitsstunden und Zuschläge“) und **🚗 Gefahrene Kilometer** aus den Eingaben der Reisenden im Portal.",
             "**✈ Geflogene Flugsegmente:** Summe, Liste (Abflug, Reisender, Flug, Strecke) und Aufteilung je Reisendem – auch im PDF.",
             "**🔗 Buchungen und zugehörige Rechnungen:** Je Buchung die Rechnungen mit Summe und Stand („vollständig belegt“ oder „es fehlen noch …“). Rechnungen tragen in der Belegtabelle den Verweis „🔗 Buchung #…“.",
             "Gelbe/rote Hinweise zeigen, was noch offen ist (z. B. ungeprüfte Belege, fehlende Kurse, **Buchungen ohne vollständige Rechnung/Quittung**).",
@@ -697,6 +715,43 @@ KAPITEL = [
         ("p", "Fehlt bei einem Flug ein Flughafen-Code, wird er mitgezählt und mit „⚠ Flughafencode fehlt – bitte prüfen“ markiert. "
               "Stehen dieselben Flüge in zwei Belegen, entfernt die App sie **nicht** selbst: Ein roter Hinweis führt zu **Überschneidungen klären** (siehe Reiseplan), erst danach stimmt die Summe."),
         ("p", "**PDF** erzeugt die Reisekostenabrechnung. **📤 An Habel** führt zur Übergabe."),
+    ]},
+    {"id": "b-zuschlag", "teil": "B", "titel": "Arbeitsstunden und Zuschläge", "bloecke": [
+        ("p", "Die Reisenden tragen im Portal je Tag **Reisezeit** und **Arbeitszeit** (von–bis) ein. Daraus rechnet die App **Stunden und Zuschläge** aus. "
+              "Das Ergebnis steht im **Abschluss** und im **Abschluss-PDF**: je Tag Stunden, Nachtstunden und Zuschlagsstunden, darunter die Summe je Mitarbeiter mit den Stunden je Zuschlagssatz. "
+              "Gerechnet wird **minutengenau**."),
+        ("h3", "So wird gerechnet"),
+        ("ul", [
+            "**Tagesart:** Montag bis Freitag ist ein **Werktag**: Es gilt der Zuschlag für Reisezeit bzw. Arbeitszeit. An **Samstag, Sonntag und Feiertagen** gilt statt dessen der Satz für diesen Tag (für Reise- und Arbeitszeit).",
+            "**Nacht:** Stunden zwischen „Beginn der Nacht“ und „Beginn des Tages“ bekommen den Nachtzuschlag. Ob er zum Tageszuschlag **addiert** wird oder nur **der höchste** gilt, steht in den Einstellungen.",
+            "**Über Mitternacht:** Liegt das Ende vor dem Beginn (z. B. 20:00–02:00), läuft die Zeit in den nächsten Tag. Jede Minute zählt für den Kalendertag, an dem sie liegt (nach Mitternacht also z. B. für den Sonntag).",
+            "**Zuschlagsstunden = Stunden × Zuschlag.** Beispiel: 8:00 Stunden Arbeit am Werktag mit 25 % = 2,00 Zuschlagsstunden.",
+            "**Feiertage** sind die gesetzlichen Feiertage des eingestellten Bundeslandes (auch bei Arbeit im Ausland). Örtliche Sonderfälle wie das Augsburger Friedensfest sind nicht enthalten.",
+            "**Zeitzonen:** Uhrzeiten gelten als **Ortszeit** des Landes der Tageskarte im Portal. Gibt ein Reisender eine Zeit in einer anderen Zeitzone an (Menü hinter der Uhrzeit), "
+            "rechnet die App die **echte verstrichene Zeit** (z. B. Abflug 06:00 deutsche Zeit, Landung 09:00 Ortszeit Rumänien = 2:00). Nacht, Wochentag und Feiertag werden nach der Ortszeit bestimmt. "
+            "Im Abschluss steht hinter abweichenden Zeiten die Zeitzone, im PDF ein Absatz „Zeitzone …“ unter der Tabelle.",
+            "Fehlt Beginn oder Ende, ist die Zeit nicht lesbar oder dauert sie über 16 Stunden, steht in der Zeile ein **Hinweis**.",
+        ]),
+        ("tab", ["Beispiel (Standardwerte)", "Ergebnis"], [
+            ["Arbeit Montag 08:00–16:00", "8:00 Stunden zu 25 % = 2,00 Zuschlagsstunden"],
+            ["Reise Montag 20:00–23:30", "3:30 Stunden: bis 22:00 0 %, danach 25 % (Nacht) = 0,38 Zuschlagsstunden"],
+            ["Arbeit Samstag 20:00–02:00", "2:00 zu 50 %, 2:00 zu 75 % (Samstag + Nacht), 2:00 zu 125 % (Sonntag + Nacht) = 5,00 Zuschlagsstunden"],
+            ["Arbeit Sonntag 08:00–12:00", "4:00 Stunden zu 100 % = 4,00 Zuschlagsstunden"],
+        ], [38, 62]),
+        ("h3", "Einstellungen"),
+        ("p", "**Einstellungen › ⏱ Zuschläge** (nur Organisatoren). Alle Werte sind hier änderbar; unten zeigt eine **Probe**, was die gespeicherten Werte für vier Beispiele ergeben."),
+        ("tab", ["Einstellung", "Standard", "Bedeutung"], [
+            ["Reisezeit (Reisetage, Mo–Fr)", "0 %", "Zuschlag auf Reisezeit an Werktagen"],
+            ["Arbeitszeit (Arbeitstage, Mo–Fr)", "25 %", "Zuschlag auf Arbeitszeit an Werktagen"],
+            ["Samstag", "50 %", "für Reise- und Arbeitszeit"],
+            ["Sonntag", "100 %", "für Reise- und Arbeitszeit"],
+            ["Feiertag", "100 %", "wie Sonntag"],
+            ["Nacht", "25 %", "für Stunden in der Nacht"],
+            ["Beginn der Nacht / des Tages", "22:00 / 06:00", "Die Nacht läuft vom einen zum anderen Zeitpunkt"],
+            ["Treffen mehrere Zuschläge zu", "addieren", "Addieren (Samstag nachts = 50 % + 25 %) oder nur der höchste (50 %)"],
+            ["Bundesland", "Bayern", "bestimmt die Feiertage"],
+        ], [34, 16, 50]),
+        ("hinweis", "Neue Werte gelten sofort für Abschluss und PDF aller Reisen, auch für bereits erfasste Zeiten. Die Zeiten selbst werden nicht verändert."),
     ]},
     {"id": "b-habel", "teil": "B", "titel": "Übergabe an Habel (DMS)", "bloecke": [
         ("p", "Button **📤 An Habel** (Reise-Seite oder Abschluss). Es geht **eine E-Mail je Reise** an `DMS_EMAIL_TO`: die Reisekostenabrechnung und "
@@ -772,6 +827,7 @@ KAPITEL = [
             ["🗺 Karte", "Standorte der Mitarbeiter bei laufenden Reisen."],
             ["💳 Kreditkarten-Abrechnung", "Monatsabrechnung einspielen."],
             ["🌍 Kreditkarten-Belege Ausland", "Liste der im Ausland mit Karte bezahlten Belege zum Abgleich mit der VISA-Abrechnung."],
+            ["⏱ Zuschläge", "Zuschläge für Reisezeit, Arbeitszeit, Nacht, Samstag, Sonntag, Feiertag; Beginn von Nacht und Tag; Bundesland."],
             ["🔧 Mail-Diagnose", "Prüft den Postausgang Schritt für Schritt."],
             ["📖 Dokumentation", "Dieses Handbuch (Seite und PDF)."],
         ], [30, 70]),

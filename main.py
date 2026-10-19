@@ -25,6 +25,8 @@ from mod_kk import (abrechnung_parsen, abrechnung_zuordnen, mitarbeiter_finden, 
 import mod_bewirtung as bw
 import mod_vorschuss as vs
 import mod_kalender as kal
+import mod_zuschlag as zs
+import mod_zeitzone as zeitzone
 import mod_doku
 import mod_beleg
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
@@ -45,7 +47,7 @@ from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
 from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_token,
                          tage_sicherstellen, tage_laden, tag_speichern,
                          reisende_der_reise, zugaenge_der_reise, portal_mail_senden,
-                         cron_portal_mails, PORTAL_TAGE_VORHER)
+                         cron_portal_mails, PORTAL_TAGE_VORHER, portal_aenderungen_speichern)
 from mod_flugalert import (konfiguration_laden,
                             cron_flug_alerts, offene_alerts_fuer_dashboard)
 from mod_geo import koordinaten_fuer_land, adresse_geokodieren
@@ -82,6 +84,15 @@ SESSION_SECRET, SESSION_SECRET_HERKUNFT = _session_secret_bestimmen()
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.39", "zeit": "2026-10-19 19:57", "aenderungen": [
+        "Portal: Hinter jeder Uhrzeit steht jetzt ein Zeitzonen-Menü. Vorgeschlagen ist immer die Ortszeit des Landes der Tageskarte. Wer eine Zeit in einer anderen Zeitzone kennt (z. B. deutsche Zeit), wählt sie dort aus.",
+        "Die Stunden und Zuschläge rechnen die echte verstrichene Zeit (Abflug 06:00 deutsche Zeit, Landung 09:00 Ortszeit Rumänien = 2:00). Nacht, Wochentag und Feiertag richten sich nach der Ortszeit. Abschluss und PDF zeigen abweichende Zeitzonen an."]},
+    {"version": "3.38", "zeit": "2026-10-19 17:56", "aenderungen": [
+        "Portal: Alle Angaben der Reisenden (Mahlzeiten, Zeiten, Notizen, Kilometer) werden jetzt mit einem einzigen Knopf „💾 Alle Änderungen speichern“ gesichert, der unten am Bildschirm sichtbar bleibt. Die Seite lädt nicht mehr nach jedem Tag neu. Ein Hinweis zeigt ungespeicherte Änderungen, und der Browser fragt nach, bevor man die Seite verlässt.",
+        "Gespeichert werden nur Tage, die sich geändert haben (unberührte Tage bleiben automatisch berechnet). Kilometer: mehrere Fahrten in einem Schritt, Löschen per Haken. Eine unlesbare Uhrzeit überspringt nur diesen Tag und wird gemeldet. Die alte Einzel-Speichern-Adresse prüft jetzt, dass der Tag zum eigenen Link gehört."]},
+    {"version": "3.37", "zeit": "2026-10-19 17:30", "aenderungen": [
+        "Neu: Arbeitsstunden und Zuschläge. Aus den Reise- und Arbeitszeiten, die die Reisenden im Portal eintragen, rechnet die App minutengenau Stunden, Nachtstunden, Samstag, Sonntag, Feiertag und die Zuschlagsstunden aus. Zu sehen im Abschluss (je Tag und Summe je Mitarbeiter, mit Stunden je Zuschlagssatz) und im Abschluss-PDF.",
+        "Neu: Einstellungen › ⏱ Zuschläge. Dort stehen Zuschlag Reisezeit (0 %), Arbeitszeit (25 %), Nacht (25 %), Samstag (50 %), Sonntag (100 %), Feiertag (100 %), Beginn von Nacht (22:00) und Tag (06:00), die Wahl „addieren oder nur der höchste“ und das Bundesland für die Feiertage (Bayern). Die Tabelle dafür legt die App beim Start selbst an."]},
     {"version": "3.36", "zeit": "2026-10-19 17:08", "aenderungen": [
         "Neu: Termin-Typ „🔧 Montage“. Beim Hinzufügen eines Termins gibt man das erste Datum und „Montage bis“ an; die App legt für jeden Tag der Spanne einen Termin an, Standard 07:00–16:00 (die Uhrzeiten oben lassen sich ändern). Für den Anreise- und den Abreisetag können eigene Zeiten eingetragen werden.",
         "Geprüft wird: letzter Tag nicht vor dem ersten, höchstens 60 Tage, „bis“ nach „von“, Montage innerhalb des Reisezeitraums. Ein einzelner Tag (Feld „Montage bis“ leer) legt nur einen Termin an."]},
@@ -792,6 +803,9 @@ async def startup():
     habel_einzel_spalte_sichern()
     spalte_sichern("bewirtungen", "teilbetrag", "NUMERIC(10,2)")
     spalte_sichern("vma_tage", "satz_hinweis", "TEXT")
+    for _zf in ("reise_beginn_zone", "reise_ende_zone", "arbeit_beginn_zone", "arbeit_ende_zone"):
+        spalte_sichern("reisetage_person", _zf, "TEXT")
+    zs.tabelle_sichern()
     try:
         n_mwst = mod_beleg.mwst_flug_bahn_reparieren()
         if n_mwst:
@@ -4313,7 +4327,8 @@ def reise_abschluss(code: str):
         ende_zeit = g(vma_rows[-1],"tatsaechliche_uhrzeit",12) if vma_rows else None
 
         # Reise-/Arbeitszeiten je Person und Tag (vom Reisenden im Portal erfasst)
-        cur.execute(f"""SELECT kuerzel, datum, reise_beginn, reise_ende, arbeit_beginn, arbeit_ende
+        cur.execute(f"""SELECT kuerzel, datum, reise_beginn, reise_ende, arbeit_beginn, arbeit_ende,
+            reise_beginn_zone, reise_ende_zone, arbeit_beginn_zone, arbeit_ende_zone, land_code
             FROM reisetage_person WHERE reise_code={P} ORDER BY kuerzel, datum""", (rcode,))
         zeiten_rows = cur.fetchall()
 
@@ -4658,26 +4673,89 @@ def reise_abschluss(code: str):
         # Monteure relevant, die ihre Zeiten dort eintragen
         zeiten_html = ""
         if zeiten_rows:
+            zs_erg = None
+            zs_cfg = {}
+            try:   # Stunden und Zuschläge aus den Zeiten (Einstellungen: Zuschläge)
+                zs_cfg = zs.einstellungen_laden()
+                zs_erg = zs.zeiten_auswerten([_zeiten_zeile(z) for z in zeiten_rows], zs_cfg)
+            except Exception as ex_zs:
+                print(f"[Zuschlag] Auswertung nicht möglich: {ex_zs}")
             zeilen_z = ""
-            for z in zeiten_rows:
+            for i_z, z in enumerate(zeiten_rows):
                 kuerzel_z = g(z,"kuerzel",0); datum_z = g(z,"datum",1)
-                rb = g(z,"reise_beginn",2) or "–"; re_ = g(z,"reise_ende",3) or "–"
-                ab_z = g(z,"arbeit_beginn",4) or "–"; ae_z = g(z,"arbeit_ende",5) or "–"
+                zz_z = _zeiten_zeile(z)
+                def _zt(feld, _z=zz_z):
+                    return zeitzone.zeit_mit_zone(_z[feld], zeitzone.zone_normalisieren(_z[feld + "_zone"], _z["land_code"]))
+                rb = _zt("reise_beginn"); re_ = _zt("reise_ende")
+                ab_z = _zt("arbeit_beginn"); ae_z = _zt("arbeit_ende")
+                extra_z = ""
+                if zs_erg and i_z < len(zs_erg["tage"]):
+                    tz = zs_erg["tage"][i_z]
+                    nacht_z = tz["reise"]["nacht"] + tz["arbeit"]["nacht"]
+                    zus_z = tz["reise"]["zuschlag"] + tz["arbeit"]["zuschlag"]
+                    art_z = ({"Samstag": "Sa", "Sonntag": "So", "Feiertag": "Feiertag"}.get(tz["tagesart"], ""))
+                    art_html = (f' <span style="font-size:10px;background:#fef3c7;color:#92400e;padding:1px 6px;'
+                                f'border-radius:10px">{art_z}</span>') if art_z else ""
+                    hinweis_z = "; ".join(tz["hinweise"])
+                    extra_z = (f'<td style="text-align:right;font-family:monospace">{zs.stunden_text(tz["reise"]["min"]) if tz["reise"]["min"] else "–"}</td>'
+                               f'<td style="text-align:right;font-family:monospace">{zs.stunden_text(tz["arbeit"]["min"]) if tz["arbeit"]["min"] else "–"}</td>'
+                               f'<td style="text-align:right;font-family:monospace">{zs.stunden_text(nacht_z) if nacht_z else "–"}</td>'
+                               f'<td style="text-align:right;font-family:monospace;font-weight:600">{zs.zuschlag_stunden_text(zus_z) if zus_z else "–"}</td>'
+                               f'<td style="font-size:11px;color:#c2410c">{hinweis_z}</td>')
+                    datum_zelle = f"{fdat(datum_z)}{art_html}"
+                else:
+                    datum_zelle = f"{fdat(datum_z)}"
                 zeilen_z += f"""<tr>
-                    <td>{fdat(datum_z)}</td><td>{kuerzel_z}</td>
+                    <td>{datum_zelle}</td><td>{kuerzel_z}</td>
                     <td style="text-align:right;font-family:monospace">{rb} – {re_}</td>
-                    <td style="text-align:right;font-family:monospace">{ab_z} – {ae_z}</td>
+                    <td style="text-align:right;font-family:monospace">{ab_z} – {ae_z}</td>{extra_z}
                 </tr>"""
+            kopf_extra = ('<th style="text-align:right">Reise</th><th style="text-align:right">Arbeit</th>'
+                          '<th style="text-align:right">Nacht</th><th style="text-align:right" title="Zuschlagsstunden = Stunden × Zuschlag">Zuschlag (h)</th>'
+                          '<th>Hinweis</th>') if zs_erg else ""
+            summen_z = ""
+            if zs_erg:
+                zeilen_p = ""
+                def _zeile_p(name, p):
+                    ges = {k: p["reise"][k] + p["arbeit"][k] for k in ("min", "nacht", "samstag", "sonntag", "feiertag", "zuschlag")}
+                    je_satz = dict(p["reise"]["je_satz"])
+                    for satz_k, mi_k in p["arbeit"]["je_satz"].items():
+                        je_satz[satz_k] = je_satz.get(satz_k, 0) + mi_k
+                    return (f"<tr><td><b>{name}</b></td>"
+                            f'<td style="text-align:right;font-family:monospace">{zs.stunden_text(p["reise"]["min"])}</td>'
+                            f'<td style="text-align:right;font-family:monospace">{zs.stunden_text(p["arbeit"]["min"])}</td>'
+                            f'<td style="text-align:right;font-family:monospace">{zs.stunden_text(ges["nacht"])}</td>'
+                            f'<td style="text-align:right;font-family:monospace">{zs.stunden_text(ges["samstag"])}</td>'
+                            f'<td style="text-align:right;font-family:monospace">{zs.stunden_text(ges["sonntag"])}</td>'
+                            f'<td style="text-align:right;font-family:monospace">{zs.stunden_text(ges["feiertag"])}</td>'
+                            f'<td style="text-align:right;font-family:monospace;font-weight:700">{zs.zuschlag_stunden_text(ges["zuschlag"])}</td>'
+                            f'<td style="font-size:11px">{zs.je_satz_text(je_satz)}</td></tr>')
+                for kz_p, p in sorted(zs_erg["personen"].items(), key=lambda x: str(x[0])):
+                    zeilen_p += _zeile_p(kz_p, p)
+                if len(zs_erg["personen"]) > 1:
+                    zeilen_p += _zeile_p("Gesamt", zs_erg["gesamt"])
+                summen_z = f"""<div class="table-wrap" style="border-top:1px solid var(--border)">
+                  <table>
+                    <thead><tr><th>Summe</th><th style="text-align:right">Reise</th><th style="text-align:right">Arbeit</th>
+                      <th style="text-align:right">Nacht</th><th style="text-align:right">Samstag</th>
+                      <th style="text-align:right">Sonntag</th><th style="text-align:right">Feiertag</th>
+                      <th style="text-align:right">Zuschlag (h)</th><th>Stunden je Zuschlagssatz</th></tr></thead>
+                    <tbody>{zeilen_p}</tbody>
+                  </table>
+                </div>
+                <div style="padding:8px 16px;font-size:11px;color:var(--muted)">{zs.regeln_text(zs_cfg)}
+                  Zuschlagsstunden = Stunden × Zuschlag. Änderbar unter
+                  <a href="/einstellungen/zuschlaege">Einstellungen › Zuschläge</a>.</div>"""
             zeiten_html = f"""<div class="card" style="margin-bottom:16px">
               <div class="card-header"><span class="card-title">⏱ Reise-/Arbeitszeiten</span></div>
               <div class="table-wrap">
                 <table>
                   <thead><tr><th>Datum</th><th>Kürzel</th>
                     <th style="text-align:right">Reisezeit</th>
-                    <th style="text-align:right">Arbeitszeit</th></tr></thead>
+                    <th style="text-align:right">Arbeitszeit</th>{kopf_extra}</tr></thead>
                   <tbody>{zeilen_z}</tbody>
                 </table>
-              </div>
+              </div>{summen_z}
             </div>"""
 
         # Gefahrene Kilometer (Firmen-/Privat-Pkw) – vom Reisenden im Portal
@@ -4914,7 +4992,8 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
         antritt_zeit = g(vma_rows[0],"tatsaechliche_uhrzeit",11) if vma_rows else None
         ende_zeit = g(vma_rows[-1],"tatsaechliche_uhrzeit",11) if vma_rows else None
 
-        cur.execute(f"""SELECT kuerzel, datum, reise_beginn, reise_ende, arbeit_beginn, arbeit_ende
+        cur.execute(f"""SELECT kuerzel, datum, reise_beginn, reise_ende, arbeit_beginn, arbeit_ende,
+            reise_beginn_zone, reise_ende_zone, arbeit_beginn_zone, arbeit_ende_zone, land_code
             FROM reisetage_person WHERE reise_code={P} ORDER BY kuerzel, datum""", (rcode,))
         zeiten_rows = cur.fetchall()
 
@@ -5018,15 +5097,78 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
 
         if zeiten_rows:
             story.append(Paragraph("Reise-/Arbeitszeiten", styles["Heading2"]))
-            zeiten_daten = [["Datum","Kürzel","Reisezeit","Arbeitszeit"]]
-            for z in zeiten_rows:
-                zeiten_daten.append([
-                    fmt_date(g(z,"datum",1)), zelle(g(z,"kuerzel",0)),
-                    f"{g(z,'reise_beginn',2) or '–'} – {g(z,'reise_ende',3) or '–'}",
-                    f"{g(z,'arbeit_beginn',4) or '–'} – {g(z,'arbeit_ende',5) or '–'}"])
-            zeiten_tbl = Table(zeiten_daten, colWidths=[28*mm,20*mm,45*mm,45*mm])
-            zeiten_tbl.setStyle(tbl_style(fusszeile=False))
-            story.append(zeiten_tbl)
+            zs_erg = None
+            zs_cfg = {}
+            try:   # Stunden und Zuschläge aus den Zeiten (Einstellungen: Zuschläge)
+                zs_cfg = zs.einstellungen_laden()
+                zs_erg = zs.zeiten_auswerten([_zeiten_zeile(z) for z in zeiten_rows], zs_cfg)
+            except Exception as ex_zs:
+                print(f"[Zuschlag] Auswertung nicht möglich: {ex_zs}")
+            if zs_erg:
+                zeiten_daten = [["Datum","Kürzel","Reisezeit","Arbeitszeit","Reise","Arbeit","Nacht","Zuschl. (h)"]]
+                hinweise_pdf = []
+                for i_z, z in enumerate(zeiten_rows):
+                    tz = zs_erg["tage"][i_z]
+                    nacht_z = tz["reise"]["nacht"] + tz["arbeit"]["nacht"]
+                    zus_z = tz["reise"]["zuschlag"] + tz["arbeit"]["zuschlag"]
+                    art_z = {"Samstag": " (Sa)", "Sonntag": " (So)", "Feiertag": " (Feiertag)"}.get(tz["tagesart"], "")
+                    zeiten_daten.append([
+                        fmt_date(g(z,"datum",1)) + art_z, zelle(g(z,"kuerzel",0)),
+                        f"{g(z,'reise_beginn',2) or '–'} – {g(z,'reise_ende',3) or '–'}",
+                        f"{g(z,'arbeit_beginn',4) or '–'} – {g(z,'arbeit_ende',5) or '–'}",
+                        zs.stunden_text(tz["reise"]["min"]) if tz["reise"]["min"] else "–",
+                        zs.stunden_text(tz["arbeit"]["min"]) if tz["arbeit"]["min"] else "–",
+                        zs.stunden_text(nacht_z) if nacht_z else "–",
+                        zs.zuschlag_stunden_text(zus_z) if zus_z else "–"])
+                    for h_z in tz["hinweise"]:
+                        hinweise_pdf.append(f"{fmt_date(g(z,'datum',1))} {g(z,'kuerzel',0)}: {h_z}")
+                zeiten_tbl = Table(zeiten_daten, colWidths=[30*mm,13*mm,26*mm,26*mm,15*mm,15*mm,15*mm,22*mm])
+                zeiten_tbl.setStyle(tbl_style(fusszeile=False))
+                story.append(zeiten_tbl)
+                for h_pdf in hinweise_pdf:
+                    story.append(Paragraph(esc("Hinweis: " + h_pdf), styles["Normal"]))
+                for z_zone in zeiten_rows:
+                    zd = _zeiten_zeile(z_zone)
+                    zh = zeitzone.zonen_hinweis(zd, zd["land_code"])
+                    if zh:
+                        story.append(Paragraph(esc(f"Zeitzone {fmt_date(zd['datum'])} {zd['kuerzel']}: {zh}"), styles["Normal"]))
+                story.append(Spacer(1, 3*mm))
+                summe_daten = [["Summe","Reise","Arbeit","Nacht","Samstag","Sonntag","Feiertag","Zuschl. (h)"]]
+                je_satz_zeilen = []
+                def _summe_zeile(name, p):
+                    ges = {k: p["reise"][k] + p["arbeit"][k] for k in ("min", "nacht", "samstag", "sonntag", "feiertag", "zuschlag")}
+                    je_satz = dict(p["reise"]["je_satz"])
+                    for satz_k, mi_k in p["arbeit"]["je_satz"].items():
+                        je_satz[satz_k] = je_satz.get(satz_k, 0) + mi_k
+                    summe_daten.append([zelle(name), zs.stunden_text(p["reise"]["min"]), zs.stunden_text(p["arbeit"]["min"]),
+                                        zs.stunden_text(ges["nacht"]), zs.stunden_text(ges["samstag"]),
+                                        zs.stunden_text(ges["sonntag"]), zs.stunden_text(ges["feiertag"]),
+                                        zs.zuschlag_stunden_text(ges["zuschlag"])])
+                    je_satz_zeilen.append(f"{name}: {zs.je_satz_text(je_satz)}")
+                for kz_p, p in sorted(zs_erg["personen"].items(), key=lambda x: str(x[0])):
+                    _summe_zeile(str(kz_p), p)
+                if len(zs_erg["personen"]) > 1:
+                    _summe_zeile("Gesamt", zs_erg["gesamt"])
+                summe_tbl = Table(summe_daten, colWidths=[24*mm,20*mm,20*mm,20*mm,20*mm,20*mm,20*mm,22*mm])
+                summe_tbl.setStyle(tbl_style(fusszeile=False))
+                story.append(summe_tbl)
+                story.append(Paragraph(esc("Stunden je Zuschlagssatz – " + " | ".join(je_satz_zeilen)), styles["Normal"]))
+                story.append(Paragraph(esc(zs.regeln_text(zs_cfg) + " Zuschlagsstunden = Stunden × Zuschlag."), styles["Normal"]))
+            else:
+                zeiten_daten = [["Datum","Kürzel","Reisezeit","Arbeitszeit"]]
+                for z in zeiten_rows:
+                    zeiten_daten.append([
+                        fmt_date(g(z,"datum",1)), zelle(g(z,"kuerzel",0)),
+                        f"{g(z,'reise_beginn',2) or '–'} – {g(z,'reise_ende',3) or '–'}",
+                        f"{g(z,'arbeit_beginn',4) or '–'} – {g(z,'arbeit_ende',5) or '–'}"])
+                zeiten_tbl = Table(zeiten_daten, colWidths=[28*mm,20*mm,45*mm,45*mm])
+                zeiten_tbl.setStyle(tbl_style(fusszeile=False))
+                story.append(zeiten_tbl)
+                for z_zone in zeiten_rows:
+                    zd = _zeiten_zeile(z_zone)
+                    zh = zeitzone.zonen_hinweis(zd, zd["land_code"])
+                    if zh:
+                        story.append(Paragraph(esc(f"Zeitzone {fmt_date(zd['datum'])} {zd['kuerzel']}: {zh}"), styles["Normal"]))
             story.append(Spacer(1, 5*mm))
 
         if km_rows:
@@ -9378,6 +9520,13 @@ def vma_uebersicht(ok: str = "", fehler: str = "", laender: str = "", staedte: s
     return HTMLResponse(shell("VMA-Sätze", content, "vma"))
 
 
+def _zeiten_zeile(z) -> dict:
+    """Eine Zeile aus reisetage_person (Reihenfolge: kuerzel, datum, 4 Zeiten, 4 Zonen, land_code) als Dict."""
+    namen = ("kuerzel", "datum", "reise_beginn", "reise_ende", "arbeit_beginn", "arbeit_ende",
+             "reise_beginn_zone", "reise_ende_zone", "arbeit_beginn_zone", "arbeit_ende_zone", "land_code")
+    return {n: (z[n] if hasattr(z, "keys") else z[i]) for i, n in enumerate(namen)}
+
+
 # ── Reisenden-Portal (Selbstbedienung, ohne Login, per Token) ─────────────────
 def portal_shell(titel: str, content: str) -> str:
     return f"""<!DOCTYPE html>
@@ -9394,8 +9543,87 @@ def portal_shell(titel: str, content: str) -> str:
 </body></html>"""
 
 
+# Sammel-Speichern im Portal: Hinweis bei ungespeicherten Änderungen, Kilometer-Zeilen
+PORTAL_SAMMEL_JS = """<script>
+(function () {
+  var f = document.getElementById('portalform');
+  if (!f) { return; }
+  var dirty = false;
+  var st = document.getElementById('savestate');
+  function merken() {
+    if (dirty) { return; }
+    dirty = true;
+    st.textContent = '⚠ Ungespeicherte Änderungen – unten speichern';
+    st.style.color = '#b45309';
+    st.style.fontWeight = '600';
+  }
+  f.addEventListener('input', merken);
+  f.addEventListener('change', merken);
+  f.addEventListener('submit', function () {
+    dirty = false;
+    var b = document.getElementById('savebtn');
+    b.disabled = true;
+    b.textContent = 'Speichert …';
+  });
+  window.addEventListener('beforeunload', function (e) {
+    if (dirty) { e.preventDefault(); e.returnValue = ''; }
+  });
+  var box = document.getElementById('kmneu');
+  function pflicht() {
+    var rows = box.querySelectorAll('.kmneu-row');
+    for (var i = 0; i < rows.length; i++) {
+      var ins = rows[i].querySelectorAll('input');
+      var any = ins[0].value.trim() !== '' || ins[1].value.trim() !== '';
+      ins[0].required = any;
+      ins[1].required = any;
+    }
+  }
+  box.addEventListener('input', pflicht);
+  document.getElementById('kmplus').addEventListener('click', function () {
+    var rows = box.querySelectorAll('.kmneu-row');
+    var neu = rows[0].cloneNode(true);
+    var ins = neu.querySelectorAll('input');
+    ins[0].value = ''; ins[1].value = '';
+    ins[0].required = false; ins[1].required = false;
+    box.appendChild(neu);
+    ins[0].focus();
+  });
+})();
+</script>"""
+
+
+def _portal_banner(request: Request) -> str:
+    """Hinweis nach dem Speichern (?gespeichert=1&f=Fehlercodes). Nur geprüfte Codes werden angezeigt."""
+    qp = request.query_params
+    if not qp.get("gespeichert"):
+        return ""
+    meldungen = []
+    for c in qp.getlist("f")[:20]:
+        m = re.fullmatch(r"([tsk])(\d{1,8})", c or "")
+        if not m:
+            continue
+        art, zahl = m.group(1), m.group(2)
+        if art in ("t", "s") and len(zahl) == 8:
+            d = f"{zahl[6:8]}.{zahl[4:6]}.{zahl[0:4]}"
+            if art == "t":
+                meldungen.append(f"Reisetag {d}: Eine Uhrzeit war nicht lesbar – dieser Tag wurde nicht gespeichert.")
+            else:
+                meldungen.append(f"Reisetag {d}: Konnte nicht gespeichert werden. Bitte noch einmal versuchen.")
+        elif art == "k" and zahl == "0":
+            meldungen.append("Kilometer konnten nicht gespeichert werden. Bitte noch einmal versuchen.")
+        elif art == "k":
+            meldungen.append(f"Fahrt {zahl}: Kennzeichen oder Kilometer fehlte bzw. war ungültig – nicht gespeichert.")
+    if meldungen:
+        liste = "".join(f"<li>{_bw_e(x)}</li>" for x in meldungen)
+        return ('<div class="alert alert-warn" style="margin-bottom:16px;font-size:13px">'
+                '<b>Der Rest wurde gespeichert. Bitte prüfen:</b>'
+                f'<ul style="margin:6px 0 0 18px;padding:0">{liste}</ul></div>')
+    return ('<div class="alert alert-ok" style="margin-bottom:16px;font-size:13px">'
+            '✓ Alles gespeichert. Danke!</div>')
+
+
 @app.get("/portal/{token}", response_class=HTMLResponse)
-def portal_ansicht(token: str):
+def portal_ansicht(token: str, request: Request):
     info = zugang_aus_token(token)
     if not info:
         return HTMLResponse(portal_shell("Link ungültig",
@@ -9405,6 +9633,7 @@ def portal_ansicht(token: str):
 
     tage_sicherstellen(info["reise_code"], info["kuerzel"])
     tage = tage_laden(info["reise_code"], info["kuerzel"])
+    banner = _portal_banner(request)
 
     wochentage = ["Mo","Di","Mi","Do","Fr","Sa","So"]
     g = lambda r, k, i: r[k] if hasattr(r, "keys") else r[i]
@@ -9429,28 +9658,31 @@ def portal_ansicht(token: str):
                     f'margin-right:14px;cursor:pointer"><input type="checkbox" name="{name}" value="1" '
                     f'{ch} style="width:auto"> {label}</label>')
 
+        notiz_e = _bw_e(notiz)
+        zone_rb = g(t,"reise_beginn_zone",16); zone_re = g(t,"reise_ende_zone",17)
+        zone_ab = g(t,"arbeit_beginn_zone",18); zone_ae = g(t,"arbeit_ende_zone",19)
+
+        def zeit_zeile(feld, label, wert, zone, _tid=tid, _lc=lcode, _ln=lname):
+            # Uhrzeit + Zeitzone (Standard: Ortszeit des Tageslandes)
+            return (f'<div class="form-group" style="margin-bottom:10px"><label style="font-size:12px">{label}</label>'
+                    f'<div style="display:flex;gap:6px">'
+                    f'<input type="time" name="{feld}_{_tid}" value="{wert}" style="flex:0 0 118px;min-width:0">'
+                    f'<select name="zone_{feld}_{_tid}" title="Zeitzone dieser Uhrzeit" style="flex:1;min-width:0">'
+                    f'{zeitzone.optionen_html(zone, _lc, _ln)}</select></div></div>')
         zeilen += f"""<div class="card" style="margin-bottom:12px">
           <div class="card-body">
             <div style="margin-bottom:10px">
               <b>{wt} {vd.day:02d}.{vd.month:02d}.{vd.year}</b>{halb_txt}
               <div style="font-size:12px;color:var(--muted)">🌍 {lname} ({lcode})</div>
             </div>
-            <form method="post" action="/portal/{token}/tag/{tid}">
-              <div style="margin-bottom:10px">{cb("fruehstueck",frueh,"🍳 Frühstück")}{cb("mittagessen",mittag,"🍽 Mittagessen")}{cb("abendessen",abend,"🌙 Abendessen")}</div>
-              <div class="form-grid form-grid-2">
-                <div class="form-group"><label style="font-size:12px">Reisebeginn (Uhrzeit)</label>
-                  <input type="time" name="reise_beginn" value="{reise_beginn}"></div>
-                <div class="form-group"><label style="font-size:12px">Reiseende (Uhrzeit)</label>
-                  <input type="time" name="reise_ende" value="{reise_ende}"></div>
-                <div class="form-group"><label style="font-size:12px">Arbeitsbeginn</label>
-                  <input type="time" name="arbeit_beginn" value="{arbeit_beginn}"></div>
-                <div class="form-group"><label style="font-size:12px">Arbeitsende</label>
-                  <input type="time" name="arbeit_ende" value="{arbeit_ende}"></div>
-                <div class="form-group full"><label style="font-size:12px">Notiz (optional)</label>
-                  <input type="text" name="notiz" value="{notiz}" placeholder="z.B. Verspätung, Besonderheiten"></div>
-              </div>
-              <button type="submit" class="btn btn-primary" style="width:100%;margin-top:6px">Speichern</button>
-            </form>
+            <input type="hidden" name="tag_{tid}" value="1">
+            <div style="margin-bottom:10px">{cb("fruehstueck_" + str(tid),frueh,"🍳 Frühstück")}{cb("mittagessen_" + str(tid),mittag,"🍽 Mittagessen")}{cb("abendessen_" + str(tid),abend,"🌙 Abendessen")}</div>
+            {zeit_zeile("reise_beginn", "Reisebeginn (Uhrzeit)", reise_beginn, zone_rb)}
+            {zeit_zeile("reise_ende", "Reiseende (Uhrzeit)", reise_ende, zone_re)}
+            {zeit_zeile("arbeit_beginn", "Arbeitsbeginn", arbeit_beginn, zone_ab)}
+            {zeit_zeile("arbeit_ende", "Arbeitsende", arbeit_ende, zone_ae)}
+            <div class="form-group"><label style="font-size:12px">Notiz (optional)</label>
+              <input type="text" name="notiz_{tid}" value="{notiz_e}" placeholder="z.B. Verspätung, Besonderheiten"></div>
           </div>
         </div>"""
 
@@ -9459,28 +9691,33 @@ def portal_ansicht(token: str):
         WHERE reise_code={Pk} AND kuerzel={Pk} ORDER BY datum""",
         (info["reise_code"], info["kuerzel"]))
     km_rows = ccur.fetchall(); ccur.close(); cur_km.close()
-    km_zeilen = "".join(
-        f'<div style="display:flex;justify-content:space-between;align-items:center;'
-        f'padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">'
-        f'<span>{g(k,"kennzeichen",2)} · {g(k,"km",3):.0f} km</span>'
-        f'<a href="/portal/{token}/kilometer/{g(k,"id",0)}/loeschen" '
-        f'style="color:#ef4444;text-decoration:none;font-size:12px" '
-        f'onclick="return confirm(\'Eintrag löschen?\')">🗑</a></div>'
-        for k in km_rows)
+    km_zeilen = ""
+    for k in km_rows:
+        kid = g(k, "id", 0); kenn = _bw_e(g(k, "kennzeichen", 2)); kmw = float(g(k, "km", 3) or 0)
+        km_zeilen += (
+            '<label class="kmrow" style="display:flex;justify-content:space-between;align-items:center;'
+            'padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;cursor:pointer">'
+            f'<span>{kenn} · {kmw:.0f} km</span>'
+            '<span style="font-size:12px;color:#ef4444;white-space:nowrap">'
+            f'<input type="checkbox" name="km_loeschen" value="{kid}" style="width:auto" '
+            "onchange=\"this.closest('.kmrow').style.opacity=this.checked?0.4:1\"> 🗑 löschen</span></label>")
     km_html = f"""<div class="card" style="margin-bottom:16px">
       <div class="card-header"><span class="card-title">🚗 Gefahrene Kilometer (Firmen-/Privat-Pkw)</span></div>
       <div class="card-body">
         <p style="font-size:12px;color:var(--muted);margin:0 0 10px 0">
           Nur eintragen, wenn du mit einem Firmen- oder deinem privaten Pkw gefahren bist
-          (bei Mietwagen steht das schon auf der Mietwagenrechnung, hier nicht nötig).</p>
+          (bei Mietwagen steht das schon auf der Mietwagenrechnung, hier nicht nötig).
+          Gespeichert wird erst unten mit „Alle Änderungen speichern“.</p>
         {km_zeilen}
-        <form method="post" action="/portal/{token}/kilometer/neu" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:end">
-          <div class="form-group" style="margin:0"><label style="font-size:12px">Kennzeichen</label>
-            <input type="text" name="kennzeichen" placeholder="z.B. WÜ-AB 123" required style="width:120px"></div>
-          <div class="form-group" style="margin:0"><label style="font-size:12px">Kilometer</label>
-            <input type="number" step="1" name="km" placeholder="z.B. 85" required style="width:90px"></div>
-          <button type="submit" class="btn btn-secondary">+ Hinzufügen</button>
-        </form>
+        <div id="kmneu">
+          <div class="kmneu-row" style="display:flex;gap:6px;flex-wrap:wrap;align-items:end;margin-top:10px">
+            <div class="form-group" style="margin:0"><label style="font-size:12px">Kennzeichen</label>
+              <input type="text" name="km_kennzeichen_neu" maxlength="30" placeholder="z.B. WÜ-AB 123" style="width:130px"></div>
+            <div class="form-group" style="margin:0"><label style="font-size:12px">Kilometer</label>
+              <input type="number" step="1" min="1" max="99999" name="km_km_neu" placeholder="z.B. 85" style="width:90px"></div>
+          </div>
+        </div>
+        <button type="button" id="kmplus" class="btn btn-secondary" style="margin-top:8px">+ Weitere Fahrt</button>
       </div>
     </div>"""
 
@@ -9497,20 +9734,53 @@ def portal_ansicht(token: str):
         </p>
         <p style="font-size:13px;margin-top:10px">
           Bitte trage für jeden Reisetag ein, welche Mahlzeiten gestellt wurden und
-          deine tatsächlichen Reise-/Arbeitszeiten ein. Du kannst die Angaben jederzeit
-          über diesen Link wieder ändern.</p>
+          deine tatsächlichen Reise-/Arbeitszeiten ein. Die Uhrzeiten gelten als <b>Ortszeit</b> des
+          jeweiligen Landes – nur wenn du eine Zeit in einer anderen Zeitzone angibst (z. B. deutsche Zeit),
+          wähle sie im Menü neben der Uhrzeit. <b>Zum Schluss einmal unten auf
+          „Alle Änderungen speichern“ tippen</b> – das gilt für alle Tage und die Kilometer
+          zusammen. Du kannst die Angaben jederzeit über diesen Link wieder ändern.</p>
         <a href="/portal/{token}/beleg-hochladen" class="btn btn-primary"
            style="width:100%;display:block;text-align:center;margin-top:12px">📎 Beleg hochladen</a>
         <a href="/portal/{token}/anleitung" class="btn btn-secondary"
            style="width:100%;display:block;text-align:center;margin-top:8px">📖 Anleitung</a>
       </div>
     </div>
+    {banner}
+    <form method="post" action="/portal/{token}/speichern" id="portalform">
     {km_html}
     {bewirtung_html}
     {vorschuss_html}
     {zeilen}
+    <div id="savebar" style="position:sticky;bottom:0;z-index:20;background:var(--white);
+         border-top:1px solid var(--border-strong);padding:10px 0 12px;margin-top:8px">
+      <div id="savestate" style="font-size:12px;text-align:center;color:var(--muted);margin-bottom:6px">
+        Noch keine Änderungen</div>
+      <button type="submit" id="savebtn" class="btn btn-primary" style="width:100%">💾 Alle Änderungen speichern</button>
+    </div>
+    </form>
+    {PORTAL_SAMMEL_JS}
     """
     return HTMLResponse(portal_shell(f"Reise {info['reise_code']} – {info['klarname']}", content))
+
+
+@app.post("/portal/{token}/speichern")
+async def portal_alles_speichern(token: str, request: Request):
+    """Speichert alle Angaben der Portal-Startseite auf einmal (Tage + Kilometer)."""
+    info = zugang_aus_token(token)
+    if not info:
+        return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
+    form = await request.form()
+    try:
+        erg = portal_aenderungen_speichern(info, form)
+    except Exception as e:
+        print(f"[Portal] Sammel-Speichern fehlgeschlagen: {e}")
+        return HTMLResponse(portal_shell("Fehler beim Speichern",
+            '<div class="card"><div class="card-body"><p>Deine Eingaben konnten leider nicht gespeichert werden. '
+            'Bitte versuch es gleich nochmal – klappt es weiterhin nicht, '
+            'bitte kurz beim Organisator melden.</p>'
+            f'<a href="/portal/{token}" class="btn btn-secondary">Zurück</a></div></div>'), status_code=500)
+    ziel = f"/portal/{token}?gespeichert=1" + "".join(f"&f={c}" for c in erg["fehler"])
+    return RedirectResponse(ziel, status_code=303)
 
 
 @app.post("/portal/{token}/tag/{tag_id}")
@@ -9518,6 +9788,8 @@ async def portal_tag_speichern(token: str, tag_id: int, request: Request):
     info = zugang_aus_token(token)
     if not info:
         return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
+    if tag_id not in [(t["id"] if hasattr(t, "keys") else t[0]) for t in tage_laden(info["reise_code"], info["kuerzel"])]:
+        return HTMLResponse(portal_shell("Nicht gefunden", '<p>Dieser Tag gehört nicht zu deinem Link.</p>'), status_code=404)
     form = await request.form()
     try:
         tag_speichern(
@@ -12625,6 +12897,8 @@ def einstellungen_uebersicht(request: Request):
         ("🌍", "Kreditkarten-Belege Ausland", "Liste aller im Ausland mit Kreditkarte bezahlten Rechnungen und Quittungen "
          "zum Abgleich mit der VISA-Abrechnung (Euro-Betrag und Gebühr nachtragen, CSV-Export).",
          "/einstellungen/kreditkarten/ausland"),
+        ("⏱", "Zuschläge", "Zuschläge für Reisezeit, Arbeitszeit, Nacht, Samstag, Sonntag und Feiertage sowie Beginn von Nacht und Tag "
+         "einstellen.", "/einstellungen/zuschlaege"),
         ("🔧", "Mail-Diagnose", "Prüft den Mail-Postausgang Schritt für Schritt (es wird keine Mail gesendet).",
          "/einstellungen/mail-diagnose"),
         ("📖", "Dokumentation", "Handbuch für Reisende und Organisatoren, alle Einstellungen und Funktionen – "
@@ -12649,6 +12923,115 @@ def einstellungen_uebersicht(request: Request):
       {karten_html}
     </div>"""
     return HTMLResponse(shell("Einstellungen", content))
+
+
+@app.get("/einstellungen/zuschlaege", response_class=HTMLResponse)
+def zuschlaege_form(request: Request, ok: str = "", fehler: str = ""):
+    """Einstellungen für Arbeitsstunden und Zuschläge (Abschluss und PDF)."""
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren dürfen diese Einstellungen ändern.</div>'), status_code=403)
+    return HTMLResponse(shell("Zuschläge", _zuschlaege_seite(zs.einstellungen_laden(), ok=bool(ok), fehler=[fehler] if fehler else [])))
+
+
+def _zuschlaege_seite(cfg: dict, ok: bool = False, fehler: list | None = None) -> str:
+    def feld(name, label, hinweis=""):
+        return (f'<div class="form-group"><label>{label}</label>'
+                f'<input type="text" inputmode="decimal" name="{name}" value="{_bw_e(cfg.get(name, ""))}" style="max-width:110px"> %'
+                f'{"<div class=form-hint>" + hinweis + "</div>" if hinweis else ""}</div>')
+    def zeit(name, label):
+        return (f'<div class="form-group"><label>{label}</label>'
+                f'<input type="time" name="{name}" value="{_bw_e(cfg.get(name, ""))}" style="max-width:140px"></div>')
+    komb_opts = "".join(f'<option value="{k}"{" selected" if cfg.get("kombination") == k else ""}>{_bw_e(t)}</option>'
+                        for k, t in zs.KOMBINATIONEN.items())
+    land_opts = "".join(f'<option value="{k}"{" selected" if cfg.get("bundesland") == k else ""}>{_bw_e(n)} ({k})</option>'
+                        for k, n in zs.BUNDESLAENDER.items())
+    # Probe mit den aktuellen Einstellungen (feste Beispieltage: Montag, Samstag, Sonntag)
+    c = zs.konfiguration(cfg)
+    proben = [("Arbeit Montag 08:00–16:00", date(2026, 9, 7), "08:00", "16:00", "arbeit"),
+              ("Reise Montag 20:00–23:30", date(2026, 9, 7), "20:00", "23:30", "reise"),
+              ("Arbeit Samstag 20:00–02:00", date(2026, 9, 12), "20:00", "02:00", "arbeit"),
+              ("Arbeit Sonntag 08:00–12:00", date(2026, 9, 13), "08:00", "12:00", "arbeit")]
+    proben_html = ""
+    for titel_p, tag_p, von_p, bis_p, art_p in proben:
+        e = zs.intervall_berechnen(tag_p, von_p, bis_p, art_p, c)
+        proben_html += (f'<tr><td>{titel_p}</td><td style="text-align:right;font-family:monospace">{zs.stunden_text(e["min"])}</td>'
+                        f'<td style="text-align:right;font-family:monospace">{zs.zuschlag_stunden_text(e["zuschlag"])}</td>'
+                        f'<td>{zs.je_satz_text(e["je_satz"])}</td></tr>')
+    meldung = ""
+    if ok:
+        meldung = '<div class="alert alert-ok" style="margin-bottom:16px">✓ Gespeichert.</div>'
+    if fehler:
+        meldung = ('<div class="alert alert-err" style="margin-bottom:16px"><b>Bitte prüfen:</b><ul style="margin:6px 0 0 18px">'
+                   + "".join(f"<li>{_bw_e(f)}</li>" for f in fehler) + "</ul></div>")
+    return f"""
+    <h1 class="page-title">⏱ Zuschläge – Einstellungen</h1>
+    {meldung}
+    <p style="color:var(--muted);font-size:13px;margin-bottom:16px;max-width:760px">
+      Aus den Reise- und Arbeitszeiten, die die Reisenden im Portal eintragen, rechnet die App Stunden und Zuschläge aus.
+      Sie erscheinen im Abschluss und im Abschluss-PDF. Gerechnet wird minutengenau; zählt ein Tag als Samstag, Sonntag
+      oder Feiertag, gilt dieser Zuschlag statt des Werktags-Zuschlags. Läuft eine Zeit über Mitternacht (z. B. 22:00–06:00),
+      zählt jede Minute für den Kalendertag, an dem sie liegt.</p>
+    <form method="post" action="/einstellungen/zuschlaege/speichern">
+      <div class="card" style="max-width:760px;margin-bottom:16px">
+        <div class="card-header"><span class="card-title">Zuschläge in Prozent</span></div>
+        <div class="card-body"><div class="form-grid form-grid-2">
+          {feld("zuschlag_reise", "Reisezeit (Reisetage, Mo–Fr)")}
+          {feld("zuschlag_arbeit", "Arbeitszeit (Arbeitstage, Mo–Fr)")}
+          {feld("zuschlag_samstag", "Samstag")}
+          {feld("zuschlag_sonntag", "Sonntag")}
+          {feld("zuschlag_feiertag", "Feiertag", "wie Sonntag; gilt für Reise- und Arbeitszeit")}
+          {feld("zuschlag_nacht", "Nacht", "zusätzlich oder statt, siehe Kombination")}
+        </div></div>
+      </div>
+      <div class="card" style="max-width:760px;margin-bottom:16px">
+        <div class="card-header"><span class="card-title">Nacht und Tag</span></div>
+        <div class="card-body"><div class="form-grid form-grid-2">
+          {zeit("nacht_beginn", "Beginn der Nacht")}
+          {zeit("tag_beginn", "Beginn des Tages (Ende der Nacht)")}
+        </div></div>
+      </div>
+      <div class="card" style="max-width:760px;margin-bottom:16px">
+        <div class="card-header"><span class="card-title">Kombination und Feiertage</span></div>
+        <div class="card-body"><div class="form-grid form-grid-2">
+          <div class="form-group full"><label>Treffen mehrere Zuschläge zu</label><select name="kombination">{komb_opts}</select></div>
+          <div class="form-group full"><label>Bundesland für die Feiertage</label><select name="bundesland">{land_opts}</select>
+            <div class="form-hint">Es gelten immer die deutschen Feiertage dieses Bundeslandes, auch bei Arbeit im Ausland.
+              Örtliche Sonderfälle (z. B. Augsburger Friedensfest) sind nicht enthalten.</div></div>
+        </div></div>
+      </div>
+      <div class="form-actions" style="max-width:760px">
+        <button type="submit" class="btn btn-primary">Speichern</button>
+        <a href="/einstellungen" class="btn btn-secondary">Zurück</a>
+      </div>
+    </form>
+    <div class="card" style="max-width:760px;margin-top:20px">
+      <div class="card-header"><span class="card-title">Probe mit den gespeicherten Einstellungen</span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Beispiel</th><th style="text-align:right">Stunden</th><th style="text-align:right">Zuschlag (h)</th><th>Stunden je Zuschlagssatz</th></tr></thead>
+        <tbody>{proben_html}</tbody></table></div>
+      <div style="padding:8px 16px;font-size:11px;color:var(--muted)">{_bw_e(zs.regeln_text(cfg))}</div>
+    </div>"""
+
+
+@app.post("/einstellungen/zuschlaege/speichern", response_class=HTMLResponse)
+async def zuschlaege_speichern(request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren dürfen diese Einstellungen ändern.</div>'), status_code=403)
+    form = await request.form()
+    werte, fehler = zs.einstellungen_pruefen(form)
+    if fehler:
+        cfg = zs.einstellungen_laden()
+        cfg.update({k: (form.get(k) or "") for k in list(zs.PROZENT_FELDER) + list(zs.ZEIT_FELDER)})
+        cfg.update({k: v for k, v in werte.items() if k in ("kombination", "bundesland")})
+        return HTMLResponse(shell("Zuschläge", _zuschlaege_seite(cfg, fehler=fehler)), status_code=400)
+    try:
+        zs.einstellungen_speichern(werte)
+    except Exception as ex:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">Speichern nicht möglich: {_bw_e(str(ex))}</div>'
+                                            '<a href="/einstellungen/zuschlaege" class="btn btn-secondary">Zurück</a>'), status_code=500)
+    return RedirectResponse("/einstellungen/zuschlaege?ok=1", status_code=303)
 
 
 @app.get("/einstellungen/backups", response_class=HTMLResponse)
