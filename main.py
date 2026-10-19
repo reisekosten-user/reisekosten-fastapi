@@ -81,6 +81,9 @@ SESSION_SECRET, SESSION_SECRET_HERKUNFT = _session_secret_bestimmen()
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.32", "zeit": "2026-10-19 16:31", "aenderungen": [
+        "Neu: Rechnungen und Quittungen lassen sich einzeln an Habel senden, und zwar nur von Hand. Auf der Reise-Seite listet die neue Karte „Belege einzeln an Habel senden“ alle Rechnungen und Quittungen der Reise; der Knopf „Einzeln senden“ schickt eine Mail mit genau diesem Beleg (mit Prüf-Deckblatt). Voraussetzung: Beleg geprüft und Original gespeichert. Ein schon gesendeter Beleg lässt sich nur nach ausdrücklicher Bestätigung erneut senden.",
+        "Der Einzelversand wird in einer eigenen Spalte vermerkt (belege.habel_einzel_am, wird beim Start automatisch angelegt) und ändert den Stand „an Habel gesendet“ der Reise nicht. Die Übergabe der ganzen Reise bleibt unverändert und enthält alle Belege."]},
     {"version": "3.31", "zeit": "2026-10-19 16:26", "aenderungen": [
         "Neu: Belege mit der Bezahlart „Durch Kunde“ zählen nie in der Summe (Abschluss, PDF, Kosten-Kachel, Tagessumme) und brauchen keine Rechnung oder Quittung. Eine solche Buchungsbestätigung löst keine Warnung „Jede Buchung braucht eine Rechnung“ mehr aus, und die Hinweise „Betrag final offen“ und „Kurs fehlt“ entfallen.",
         "Vermerk: Im Abschluss und im PDF stehen diese Belege in einer eigenen Zeile „Durch Kunde direkt bezahlt – zählt nicht in der Summe“, im Tagesverlauf mit dem Hinweis „durch Kunde direkt bezahlt“ und ohne Euro-Umrechnung."]},
@@ -773,6 +776,7 @@ async def startup():
         print(f"[Startup] SESSION_SECRET fehlt – Ersatzschlüssel ({SESSION_SECRET_HERKUNFT}) aktiv. Bitte in den Einstellungen eintragen.")
     eigenbelege_pflichtfelder_reparieren()
     bewirtung_kosten_reparieren()
+    habel_einzel_spalte_sichern()
     try:
         n_mwst = mod_beleg.mwst_flug_bahn_reparieren()
         if n_mwst:
@@ -2393,7 +2397,7 @@ def habel_paket_pruefen(rcode: str) -> dict:
                         WHERE rm.reise_code={P} ORDER BY m.klarname""", (rcode,))
         namen = [g(x, "klarname", 0) for x in cur.fetchall()]
         cur.execute(f"""SELECT id, belegart, anbieter, belegdatum, betrag_brutto, waehrung, geprueft, s3_original,
-                        dms_versendet_am FROM belege WHERE reise_code={P} AND belegart IN {PRUEF_SQL}
+                        dms_versendet_am, habel_einzel_am FROM belege WHERE reise_code={P} AND belegart IN {PRUEF_SQL}
                         ORDER BY belegdatum NULLS LAST, id""", (rcode,))
         zeilen = cur.fetchall()
     finally:
@@ -2406,6 +2410,7 @@ def habel_paket_pruefen(rcode: str) -> dict:
             "id": bid, "art": art, "anbieter": anb, "datum": datum, "betrag": g(z, "betrag_brutto", 4),
             "waehrung": g(z, "waehrung", 5) or "EUR", "geprueft": bool(g(z, "geprueft", 6)),
             "original": bool(g(z, "s3_original", 7)), "gesendet_am": g(z, "dms_versendet_am", 8),
+            "einzel_am": g(z, "habel_einzel_am", 9),
             "name": f"{nr:02d}_{_datei_ascii(_ART_KURZ.get(art, art), 14)}_{_datei_ascii(anb, 22)}_{datum}_Nr{bid}.pdf".replace("__", "_")})
     offen = [b for b in belege if not b["geprueft"]]
     ohne_original = [b for b in belege if b["geprueft"] and not b["original"]]
@@ -2431,9 +2436,107 @@ def habel_hindernisse(info: dict) -> list:
     return h
 
 
+def _zeitstempel_text(v) -> str:
+    """Zeitstempel aus der Datenbank als „19.10.2026, 16:30 Uhr“."""
+    if not v:
+        return "–"
+    if isinstance(v, str):
+        try:
+            from datetime import datetime as _dt
+            v = _dt.fromisoformat(v[:19])
+        except Exception:
+            return v[:16]
+    return v.strftime("%d.%m.%Y, %H:%M Uhr")
+
+
+# ── Einzelversand an Habel: nur von Hand, nur Rechnungen und Quittungen ───────────────────────────────────
+EINZEL_ARTEN = ("Rechnung", "Quittung")
+
+
+def habel_einzel_spalte_sichern():
+    """Legt belege.habel_einzel_am an, falls /init noch nicht gelaufen ist (ein Neustart genügt). Ändert sonst nichts."""
+    try:
+        db = get_db(); cur = db.cursor()
+        if is_postgres():
+            cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS habel_einzel_am TIMESTAMP")
+        else:
+            cur.execute("PRAGMA table_info(belege)")
+            if "habel_einzel_am" not in {(r["name"] if hasattr(r, "keys") else r[1]) for r in cur.fetchall()}:
+                cur.execute("ALTER TABLE belege ADD COLUMN habel_einzel_am TIMESTAMP")
+        db.commit(); cur.close(); db.close()
+    except Exception as ex:
+        print(f"[Startup] Spalte habel_einzel_am nicht angelegt (bitte /init aufrufen): {ex}")
+
+
+def habel_einzel_hindernisse(b: dict) -> list:
+    """Gründe, warum dieser Beleg jetzt nicht einzeln gesendet werden darf (leer = bereit)."""
+    h = []
+    if b["art"] not in EINZEL_ARTEN:
+        h.append("Einzeln gesendet werden nur Rechnungen und Quittungen.")
+    if not dms_konfiguriert():
+        h.append("Der Mail-Versand an Habel ist nicht eingerichtet (SMTP_HOST, SMTP_USER, SMTP_PASS oder DMS_EMAIL_TO fehlen).")
+    if not b["geprueft"]:
+        h.append("Der Beleg ist noch nicht geprüft.")
+    elif not b["original"]:
+        h.append("Für den Beleg ist kein Original-Dokument gespeichert.")
+    return h
+
+
+def habel_einzel_karte_html(rcode: str) -> str:
+    """Karte auf der Reise-Seite: Rechnungen und Quittungen der Reise mit Knopf „Einzeln senden“ (nur von Hand)."""
+    from html import escape as e
+    try:
+        info = habel_paket_pruefen(rcode)
+    except Exception:
+        return ""
+    liste = [b for b in info.get("belege", []) if b["art"] in EINZEL_ARTEN]
+    if not liste:
+        return ""
+    konfiguriert = dms_konfiguriert()
+    zeilen = ""
+    for b in liste:
+        bet = f'{float(b["betrag"]):.2f} {e(b["waehrung"])}' if b["betrag"] else "–"
+        if not b["geprueft"]:
+            aktion = f'<a href="/beleg/{b["id"]}" style="color:#b91c1c;font-size:12px">✗ erst prüfen</a>'
+        elif not b["original"]:
+            aktion = '<span style="color:#b91c1c;font-size:12px">✗ kein Original</span>'
+        elif not konfiguriert:
+            aktion = ('<button type="button" class="btn btn-secondary btn-sm" disabled style="opacity:.4;cursor:not-allowed" '
+                      'title="Mail-Versand an Habel ist nicht eingerichtet">📤 Einzeln senden</button>')
+        else:
+            schon = bool(b["einzel_am"] or b["gesendet_am"])
+            frage = (f"Beleg #{b['id']} wurde schon an Habel gesendet. Trotzdem erneut einzeln senden?" if schon
+                     else f"Beleg #{b['id']} jetzt einzeln an Habel senden?")
+            aktion = (f'<form method="post" action="/reise/{e(rcode)}/habel/beleg/{b["id"]}/senden" style="margin:0" '
+                      f'onsubmit="return confirm(\'{frage}\')">'
+                      f'<input type="hidden" name="erneut" value="{"1" if schon else ""}">'
+                      f'<button type="submit" class="btn btn-secondary btn-sm">📤 {"Erneut einzeln senden" if schon else "Einzeln senden"}</button></form>')
+        stand = []
+        if b["einzel_am"]:
+            stand.append(f'einzeln gesendet {e(_zeitstempel_text(b["einzel_am"]))}')
+        if b["gesendet_am"]:
+            stand.append(f'mit der Reise gesendet {e(_zeitstempel_text(b["gesendet_am"]))}')
+        zeilen += (f'<tr><td><a href="/beleg/{b["id"]}">#{b["id"]}</a></td><td>{e(b["art"])}</td>'
+                   f'<td>{e(b["anbieter"] or "–")}</td><td>{fmt_date(b["datum"]) if b["datum"] else "–"}</td>'
+                   f'<td style="text-align:right">{bet}</td>'
+                   f'<td style="font-size:12px;color:var(--muted)">{" · ".join(stand) or "–"}</td>'
+                   f'<td style="text-align:right">{aktion}</td></tr>')
+    return ('<div class="card" style="margin-top:16px"><div class="card-header">'
+            '<span class="card-title">📤 Belege einzeln an Habel senden</span></div>'
+            '<div class="card-body" style="padding-bottom:0">'
+            '<p style="font-size:12px;color:var(--muted);margin:0 0 8px 0">Nur von Hand, nur Rechnungen und Quittungen, '
+            'nur geprüfte Belege. Jeder Knopf schickt <b>eine</b> Mail mit diesem Beleg (mit Prüf-Deckblatt) an '
+            f'<b>{e(DMS_EMAIL_TO or "– nicht eingerichtet –")}</b>. Die Übergabe der ganzen Reise (Knopf „An Habel“ oben) '
+            'enthält diese Belege trotzdem noch einmal.</p></div>'
+            '<div class="table-wrap"><table><thead><tr><th>Beleg</th><th>Art</th><th>Anbieter</th><th>Datum</th>'
+            '<th style="text-align:right">Betrag</th><th>Stand</th><th></th></tr></thead>'
+            f'<tbody>{zeilen}</tbody></table></div></div>')
+
+
 def habel_beleg_block_html(bid: int, rcode: str, gesendet_text: str = "") -> str:
     """Habel-Info am einzelnen Beleg. Einzelne Belege gehen nicht an Habel: Die Übergabe erfolgt einmal für die
-    ganze Reise, sobald alle prüfpflichtigen Belege geprüft sind. Der Block zeigt den Stand der Reise."""
+    ganze Reise, sobald alle prüfpflichtigen Belege geprüft sind. Der Block zeigt den Stand der Reise.
+    Rechnungen und Quittungen lassen sich zusätzlich von Hand einzeln senden (Karte auf der Reise-Seite)."""
     from html import escape as e
     try:
         info = habel_paket_pruefen(rcode)
@@ -2447,6 +2550,11 @@ def habel_beleg_block_html(bid: int, rcode: str, gesendet_text: str = "") -> str
     def link(b):
         mark = " (dieser Beleg)" if b["id"] == bid else ""
         return f'<a href="/beleg/{b["id"]}" style="color:#2563eb">#{b["id"]}</a>{mark}'
+    einzel = next((b.get("einzel_am") for b in info["belege"] if b["id"] == bid), None)
+    einzel_html = ""
+    if einzel:
+        einzel_html = ('<div class="alert alert-ok" style="font-size:12px;margin:8px 0">📤 Einzeln an Habel gesendet am '
+                       f'<b>{e(_zeitstempel_text(einzel))}</b></div>')
     if gesendet_text:
         status = ('<div class="alert alert-ok" style="font-size:12px;margin:8px 0">📤 Mit der Reise an Habel gesendet am '
                   f'<b>{e(gesendet_text)}</b></div>')
@@ -2466,13 +2574,13 @@ def habel_beleg_block_html(bid: int, rcode: str, gesendet_text: str = "") -> str
     knopf_klasse = "btn-primary" if (bereit and not gesendet_text) else "btn-secondary"
     return (
         f'<div style="font-weight:700;font-size:13px;margin-bottom:4px">📤 Übergabe an Habel – Reise {e(rcode)}</div>'
-        '<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Einzelne Belege gehen nicht an Habel. '
-        'Sind alle Belege der Reise geprüft, geht die ganze Reise in <b>einer</b> Mail raus: '
-        'Reisekostenabrechnung und jeder Beleg als eigenes PDF.</div>'
+        '<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Die Übergabe an Habel erfolgt für die ganze Reise: '
+        'Sind alle Belege geprüft, geht sie in <b>einer</b> Mail raus (Reisekostenabrechnung und jeder Beleg als eigenes PDF). '
+        'Einzelne Rechnungen und Quittungen können Sie auf der Reise-Seite von Hand senden.</div>'
         '<div style="background:var(--bg);border-radius:6px;height:8px;overflow:hidden">'
         f'<div style="width:{prozent}%;height:8px;background:#16a34a"></div></div>'
         f'<div style="font-size:12px;margin-top:4px">{n_ok} von {n} Belegen der Reise geprüft</div>'
-        f'{status}'
+        f'{status}{einzel_html}'
         f'<a href="/reise/{e(rcode)}/habel" class="btn {knopf_klasse}" '
         'style="width:100%;text-align:center;display:block;margin-top:8px">'
         f'📤 {"Zur Übergabe an Habel" if (bereit and not gesendet_text) else "Übergabe ansehen"}</a>')
@@ -2746,6 +2854,69 @@ def reise_habel_senden(code: str, request: Request, erneut: str = Form("")):
             cur.execute(f"UPDATE belege SET dms_versendet_am={jetzt} WHERE id={P}", (b["id"],))
         db.commit(); cur.close(); db.close()
     return RedirectResponse(f"/reise/{rcode}/habel?ok=1", status_code=303)
+
+
+def _habel_einzel_ergebnis_seite(rcode: str, bid: int, fehler: list | None = None, ok_text: str = "") -> str:
+    from html import escape as e
+    if fehler:
+        banner = ('<div class="alert alert-err" style="margin-bottom:16px"><b>Nicht gesendet:</b>%s</div>'
+                  % "".join("<div>• %s</div>" % e(x) for x in fehler))
+    else:
+        banner = '<div class="alert alert-ok" style="margin-bottom:16px">%s</div>' % ok_text
+    content = (f'<h1 class="page-title">📤 Beleg #{bid} einzeln an Habel</h1>{banner}'
+               f'<a href="/reise/{e(rcode)}" class="btn btn-primary">← Zurück zur Reise {e(rcode)}</a> '
+               f'<a href="/beleg/{bid}" class="btn btn-secondary">Zum Beleg</a>')
+    return shell("Einzelversand an Habel", content, "reisen")
+
+
+@app.post("/reise/{code}/habel/beleg/{bid}/senden")
+def reise_habel_beleg_senden(code: str, bid: int, request: Request, erneut: str = Form("")):
+    """Sendet EINEN Beleg (nur Rechnung oder Quittung, geprüft, mit Original) von Hand an Habel.
+    Die Reise-Übergabe (dms_versendet_am) bleibt unberührt; der Einzelversand steht in belege.habel_einzel_am."""
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    rcode = code.upper()
+    info = habel_paket_pruefen(rcode)
+    if not info["reise"]:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden.</div>'), status_code=404)
+    b = next((x for x in info["belege"] if x["id"] == bid), None)
+    if not b:
+        return HTMLResponse(_habel_einzel_ergebnis_seite(rcode, bid, fehler=[
+            "Dieser Beleg gehört nicht zu dieser Reise oder ist keine Rechnung/Quittung."]), status_code=404)
+    fehler = habel_einzel_hindernisse(b)
+    if not fehler and (b["einzel_am"] or b["gesendet_am"]) and not erneut:
+        fehler.append("Dieser Beleg wurde schon an Habel gesendet. Zum erneuten Senden bitte den Knopf erneut bestätigen.")
+    daten = None
+    if not fehler:
+        try:
+            daten = pruef_pdf_fuer_beleg(bid)
+        except Exception as ex:
+            fehler.append(f"Beleg #{bid} konnte nicht vorbereitet werden: {ex}")
+        if daten is not None and len(daten) > HABEL_MAX_MB * 1024 * 1024:
+            fehler.append(f"Die Mail wäre {len(daten) / 1048576:.1f} MB groß (Grenze {HABEL_MAX_MB:g} MB).")
+    if fehler:
+        return HTMLResponse(_habel_einzel_ergebnis_seite(rcode, bid, fehler=fehler), status_code=409)
+    reise = info["reise"]
+    bet = ("%.2f %s" % (float(b["betrag"]), b["waehrung"])) if b["betrag"] else "ohne Betrag"
+    betreff = "Beleg %s – %s %s (Nr. %s)" % (rcode, b["art"], b["anbieter"] or "–", bid)
+    text = ("Einzelbeleg zur Reise %s – %s\nZeitraum: %s – %s\nReisende: %s\n\n"
+            "Anhang:\n - %s  (%s, %s, %s, %s)\n\n"
+            "Der Beleg ist geprüft (Prüf-Deckblatt im PDF). Einzelversand: Die Reisekostenabrechnung ist nicht enthalten.\n"
+            % (rcode, reise["titel"], fmt_date(reise["abreise"]), fmt_date(reise["rueckkehr"]),
+               ", ".join(info["mitarbeiter"]) or "–", b["name"], b["art"], b["anbieter"] or "–",
+               fmt_date(b["datum"]) if b["datum"] else "ohne Datum", bet))
+    ergebnis = sende_dms_mail(betreff, text, daten, b["name"])
+    if ergebnis.get("fehler"):
+        return HTMLResponse(_habel_einzel_ergebnis_seite(rcode, bid, fehler=[
+            "Der Versand ist fehlgeschlagen: %s" % ergebnis["fehler"]]), status_code=502)
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    jetzt = "NOW()" if is_postgres() else "datetime('now')"
+    cur.execute(f"UPDATE belege SET habel_einzel_am={jetzt} WHERE id={P}", (bid,))
+    db.commit(); cur.close(); db.close()
+    from html import escape as e
+    return HTMLResponse(_habel_einzel_ergebnis_seite(rcode, bid, ok_text=(
+        "✓ Beleg #%s gesendet an <b>%s</b> (eine Mail, eine PDF-Datei: %s)." % (bid, e(DMS_EMAIL_TO or "Habel"), e(b["name"])))))
 
 
 @app.post("/beleg/{bid}/zahlungsart")
@@ -8220,6 +8391,8 @@ def reise_detail(code: str, request: Request):
           {('<div style="padding:12px 16px;background:#fef3c7;color:#92400e;font-size:12px;border-bottom:1px solid var(--border)">⚠ Für diese Reise wurde die VMA noch nicht berechnet – solange fehlen die Tages-Köpfe und Belege werden fälschlich als "außerhalb des Reisezeitraums" angezeigt. <a href="/reise/' + rcode + '/vma-generieren" style="color:#92400e;font-weight:600">🔄 Jetzt VMA berechnen</a></div>' if not vma_tage_rows else '') + (tage_blocks if tage_blocks else '<div class="card-body"><div class="empty-state"><b>Noch keine VMA-Tage berechnet</b><p>Erst Länder hinterlegen, dann VMA generieren</p><a href="/reise/' + rcode + '/vma-generieren" class="btn btn-primary" style="margin-top:12px">🔄 VMA berechnen</a></div></div>')}
           {'<div style="padding:12px 16px;display:flex;justify-content:flex-end;gap:24px;background:var(--bg)"><span style="font-size:13px;color:var(--muted)">VMA gesamt: <b style="color:var(--green)">' + f"{vma_tage_summe:.2f}" + ' EUR</b></span>' + (f'<span style="font-size:13px;color:var(--muted)">Trennungspauschale: <b style="color:#7c3aed">{trennung_summe:.2f} EUR</b></span>' if trennung_summe else '') + f'<span style="font-size:13px;font-weight:700">Gesamt: {vma_tage_summe + trennung_summe:.2f} EUR</span></div>' if vma_tage_rows else ''}
         </div>
+
+        {habel_einzel_karte_html(rcode)}
 
         {zugaenge_html}
 

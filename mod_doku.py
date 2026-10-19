@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.31"
+DOKU_GEPRUEFT_FUER = "3.32"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -479,7 +479,7 @@ KAPITEL = [
             "**💰 Eurobetrag – Endabrechnung** und Kurs (siehe „Beträge, Fremdwährung und Kurse“).",
             "**✅ Prüfung & Übergabe an Habel:** Prüfvermerk eintragen und bestätigen. Danach steht dort „Geprüft von …“, und das Prüf-Deckblatt ist als PDF abrufbar. "
             "Darunter der **Habel-Stand der ganzen Reise**: Fortschrittsbalken („n von m Belegen geprüft“), noch offene Belege als Links und der Knopf zur Reise-Übergabe. "
-            "Einzelne Belege werden nicht an Habel gesendet.",
+            "Die Übergabe erfolgt für die ganze Reise. Einzelne Rechnungen und Quittungen lassen sich zusätzlich von Hand senden (Karte auf der Reise-Seite).",
         ]),
         ("hinweis", "Von der App selbst erzeugte Belege (Bewirtungsbeleg, Vorschuss-, Rückgabequittung, Bargeldbeschaffung) lassen sich nicht neu analysieren oder anonymisieren "
                     "und brauchen keine Rechnungs-Pflichtfelder."),
@@ -698,6 +698,16 @@ KAPITEL = [
             "Größtes erlaubtes Mailvolumen: [[habel_max_mb]] MB (Summe aller PDF-Anhänge, Einstellung HABEL_MAX_MB).",
         ]),
         ("p", "Am Beleg steht der Stand der ganzen Reise: Fortschritt der Prüfung, noch offene Belege und der Link zur Übergabe. Nach dem Senden steht dort „Mit der Reise an Habel gesendet am …“."),
+        ("h3", "Einzelne Belege von Hand senden"),
+        ("p", "Auf der **Reise-Seite** (unter dem Tagesverlauf) listet die Karte **📤 Belege einzeln an Habel senden** alle Rechnungen und Quittungen der Reise. "
+              "Der Knopf **Einzeln senden** schickt **eine Mail mit genau diesem Beleg** (mit Prüf-Deckblatt) an `DMS_EMAIL_TO`. Es geschieht nie automatisch."),
+        ("ul", [
+            "Nur **Rechnungen und Quittungen**. Bewirtungsbelege, Vorschuss- und Bargeldbelege gehen nur mit der Reise-Übergabe.",
+            "Nur **geprüfte** Belege mit gespeichertem Original. Sonst steht dort „erst prüfen“ oder „kein Original“.",
+            "Vor dem Senden fragt der Browser nach. Ein schon gesendeter Beleg zeigt **Erneut einzeln senden** und fragt ausdrücklich nach.",
+            "Der Einzelversand steht in der Karte und am Beleg („Einzeln an Habel gesendet am …“). Er zählt **nicht** als Reise-Übergabe: Der Stand „an Habel gesendet“ der Reise ändert sich nicht.",
+            "Die Übergabe der ganzen Reise enthält diese Belege trotzdem noch einmal.",
+        ]),
         ("p", "Fehlen zu einer Buchung noch Rechnungen oder Quittungen, zeigt die Übergabe-Seite einen **Hinweis** mit der Buchung und dem fehlenden Betrag. Er sperrt das Senden **nicht**."),
         ("p", "Auf dem **Dashboard** und unter **📋 Offene Aufgaben** erscheinen Reisen, die zur Übergabe bereit sind (zurückgekehrt, alle Belege geprüft, noch nicht gesendet). "
               "Die Liste der abgeschlossenen Reisen zeigt je Reise den Habel-Stand und einen Knopf „📤 Habel“."),
