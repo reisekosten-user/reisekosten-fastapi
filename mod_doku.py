@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.39"
+DOKU_GEPRUEFT_FUER = "3.40"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -493,7 +493,8 @@ KAPITEL = [
             "Die **MwSt.** wird nur übernommen, wenn sie auf dem Beleg steht. Bei Flug, Bahn-Fernverkehr, Fernbus, Schiff und Reisebüro-Rechnungen rechnet die App sie nie selbst aus (bei einem Reisebüro gilt sie oft nur für die Servicepauschale). "
             "Nur bei einfachen deutschen Belegen (z. B. Parkschein, Tankquittung, ÖPNV) ergänzt die KI eine fehlende MwSt. selbst. "
             "Bei **Scans und Fotos** liest die KI alle Seiten (höchstens 4); ein Scanner-PDF ohne Text wird per Bilderkennung gelesen. Bei mehreren Steuersätzen gilt: MwSt. = Summe der ausgewiesenen Steuerbeträge, Netto = Brutto minus MwSt. Mit **Beleg neu auslesen** lässt sich ein älterer Scan mit allen Seiten neu analysieren. "
-            "Mit **✏ Daten nachtragen** (Organisator) ergänzen oder korrigieren.",
+            "Mit **✏ Daten nachtragen** (Organisator) ergänzen oder korrigieren. Das **Land** wählen Sie aus einer Liste mit Code und Klarnamen (z. B. „DE – Deutschland“, „IT – Italien“, „MX – Mexiko“). "
+            "Häufige Reiseländer stehen oben, darunter alle Länder von A bis Z.",
             "**Belegart** und **Bezahlart** (siehe Tabellen unten). Bei Kreditkarte wählen Sie „Welche Karte?“.",
             "**📎 Dokumente:** Original-PDF, 🔒 Anonymisiert, 🔍 Analyse-PDF; Knöpfe zum erneuten Analysieren und erneuten Anonymisieren; Beleg löschen; Reise zuordnen.",
             "**🔗 Verknüpfte Belege:** Zusammengehörige Belege (z. B. Buchungsbestätigung und Rechnungen) lassen sich verknüpfen und wieder trennen. "

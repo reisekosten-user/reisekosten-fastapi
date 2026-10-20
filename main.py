@@ -27,6 +27,7 @@ import mod_vorschuss as vs
 import mod_kalender as kal
 import mod_zuschlag as zs
 import mod_zeitzone as zeitzone
+import mod_laender
 import mod_doku
 import mod_beleg
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
@@ -84,6 +85,9 @@ SESSION_SECRET, SESSION_SECRET_HERKUNFT = _session_secret_bestimmen()
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.40", "zeit": "2026-10-20 19:17", "aenderungen": [
+        "Beleg-Daten nachtragen: Das Land ist jetzt eine Auswahlliste mit ISO-Code und Klarnamen (z. B. DE – Deutschland, IT – Italien, MX – Mexiko). Häufige Reiseländer stehen oben, darunter alle Länder von A bis Z.",
+        "Ein bereits gespeichertes Land, das nicht in der Liste steht, bleibt als eigene Option erhalten und wird nicht stillschweigend überschrieben."]},
     {"version": "3.39", "zeit": "2026-10-19 19:57", "aenderungen": [
         "Portal: Hinter jeder Uhrzeit steht jetzt ein Zeitzonen-Menü. Vorgeschlagen ist immer die Ortszeit des Landes der Tageskarte. Wer eine Zeit in einer anderen Zeitzone kennt (z. B. deutsche Zeit), wählt sie dort aus.",
         "Die Stunden und Zuschläge rechnen die echte verstrichene Zeit (Abflug 06:00 deutsche Zeit, Landung 09:00 Ortszeit Rumänien = 2:00). Nacht, Wochentag und Feiertag richten sich nach der Ortszeit. Abschluss und PDF zeigen abweichende Zeitzonen an."]},
@@ -1678,8 +1682,8 @@ def beleg_daten_bearbeiten_form(bid: int, request: Request):
                   <input type="text" name="reisender" value="{reisender_v}">
                 </div>
                 <div class="form-group">
-                  <label>Land (ISO-Code)</label>
-                  <input type="text" name="land_beleg" value="{land_v}" maxlength="2" placeholder="z.B. DE">
+                  <label>Land</label>
+                  <select name="land_beleg">{mod_laender.land_optionen_html(land_v)}</select>
                 </div>
                 <div class="form-group">
                   <label>Belegdatum</label>
