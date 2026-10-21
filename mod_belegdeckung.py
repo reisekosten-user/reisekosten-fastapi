@@ -25,7 +25,8 @@ TOLERANZ_GLEICHE_WAEHRUNG = 0.01       # Beträge in derselben Währung müssen 
 TOLERANZ_FREMDWAEHRUNG = 0.05          # Vergleich über Euro-Werte: 5 % (Kursabweichung), mindestens 1 EUR
 MIN_CODE_LAENGE = 4                    # kürzere Buchungscodes sind für eine Automatik zu unsicher
 
-_ART_NAMEN = {"Buchungsbestaetigung": "Buchungsbestätigung", "Flugaenderung": "Flugänderung"}
+_ART_NAMEN = {"Buchungsbestaetigung": "Buchungsbestätigung", "Flugaenderung": "Flugänderung",
+              "A1Bescheinigung": "A1-Bescheinigung"}
 
 
 # ── Rechenlogik (ohne Datenbank) ─────────────────────────────────────────────

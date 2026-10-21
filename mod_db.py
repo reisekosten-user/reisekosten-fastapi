@@ -668,6 +668,7 @@ def get_migrations() -> list[str]:
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS geprueft_am TIMESTAMP",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS dms_versendet_am TIMESTAMP",
         "ALTER TABLE belege ADD COLUMN IF NOT EXISTS habel_einzel_am TIMESTAMP",
+        "ALTER TABLE belege ADD COLUMN IF NOT EXISTS a1_kuerzel TEXT",
         "ALTER TABLE bewirtungen ADD COLUMN IF NOT EXISTS teilbetrag NUMERIC(10,2)",
         "ALTER TABLE mitarbeiter ADD COLUMN IF NOT EXISTS passwort_hash TEXT",
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS trennungspauschale NUMERIC(6,2) DEFAULT 0",

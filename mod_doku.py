@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.40"
+DOKU_GEPRUEFT_FUER = "3.41"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -144,7 +144,7 @@ SEITEN = [
     ("/reise/{code}/termin/{tid}/loeschen", "Termin löschen", "b-plan"),
     ("/reise/{code}/uebersicht", "Alte Adresse, leitet auf die Reise-Seite um", "b-reise"),
     ("/reise/{code}/reiseplan", "Reiseplan: alle Flüge, Züge und Termine in zeitlicher Reihenfolge", "b-plan"),
-    ("/reise/{code}/reiseplan/pdf", "Reiseplan als PDF (Reisemappe oder zum Mailversand)", "b-plan"),
+    ("/reise/{code}/reiseplan/pdf", "Reiseplan als PDF: Reisemappe (mit Anlagen: Reise-PDFs und A1) oder zum Mailversand (ohne Anlagen)", "b-reisemappe"),
     ("/reise/{code}/ueberschneidungen", "Überschneidende Flug-/Zug-Segmente aus verschiedenen Belegen klären", "b-plan"),
     ("/reise/{code}/vma-generieren", "VMA-Tage der Reise neu berechnen", "b-vma"),
     ("/reise/{code}/vma-debug", "Fehlersuche: Wie das Land des Rückreisetags ermittelt wurde", "b-vma"),
@@ -187,6 +187,8 @@ SEITEN = [
     ("/einstellungen/kreditkarten/ausland", "Kreditkarten-Belege Ausland: Liste zum Abgleich mit der VISA-Abrechnung", "b-kk"),
     ("/einstellungen/kreditkarten/ausland/csv", "Dieselbe Liste als CSV (Excel)", "b-kk"),
     ("/einstellungen/zuschlaege", "Zuschläge einstellen: Sätze, Nacht, Feiertage, Probe", "b-zuschlag"),
+    ("/einstellungen/reise-pdfs", "Reise-PDFs: Dokumente hochladen, die in jede Reisemappe kommen (z. B. Krankenversicherung)", "b-reisemappe"),
+    ("/einstellungen/reise-pdfs/{pid}/ansehen", "Ein hochgeladenes Reise-PDF ansehen", "b-reisemappe"),
     ("/einstellungen/mail-diagnose", "Mail-Diagnose: Postausgang Schritt für Schritt prüfen", "c-mail"),
     ("/einstellungen/dokumentation", "Dieses Handbuch", "c-pflege"),
     ("/einstellungen/dokumentation/pdf", "Dieses Handbuch als PDF", "c-pflege"),
@@ -357,6 +359,7 @@ KAPITEL = [
             ["Der Beleg erscheint nicht im Portal.", "Das ist normal. Hochgeladene Belege sehen nur die Organisatoren."],
             ["Ich war mit dem Mietwagen unterwegs.", "Nichts eintragen. Kilometer sind nur für Firmen- oder Privat-Pkw."],
             ["Ich habe Bargeld vom Organisator bekommen.", "In der Karte „Reisevorschuss / Bargeld“ antippen und bestätigen."],
+            ["Was gehört in meine Reisemappe?", "Der Reiseplan, hinten angehängt deine Krankenversicherungs-Kopie und bei Reisen in Europa deine **A1-Bescheinigung**. Die A1 musst du auf der Reise dabeihaben. Fehlt sie noch, sag dem Organisator Bescheid oder schicke sie ihm."],
             ["Wohin mit Fragen?", "An deinen Organisator."],
         ], [38, 62]),
     ]},
@@ -478,6 +481,9 @@ KAPITEL = [
               "Dort die Reise wählen und zuordnen, oder den Beleg öffnen."),
         ("p", "**Doppelte Belege** (gleiche Datei) werden erkannt und nicht erneut angelegt. Enthält ein PDF eine **eRechnung** (ZUGFeRD/XML), ist die XML-Datei "
               "auf der Beleg-Seite im Original und unverändert abrufbar."),
+        ("p", "**A1-Bescheinigungen** erkennt die App am Inhalt (Überschrift „Bescheinigung über die anzuwendenden Rechtsvorschriften“, „Portable Document A1“, Verordnung 883/2004) "
+              "und legt sie als Belegart **🛂 A1-Bescheinigung** ab, ohne Betrag und ohne Kosten. Bei Scans ohne Text entscheidet die KI, ein Dateiname mit „A1“ hilft. "
+              "Siehe Kapitel „Reisemappe, Reise-PDFs und A1-Bescheinigung“."),
         ("p", "**Buchung und Rechnung sind keine Duplikate.** Tragen eine Buchungsbestätigung und die dazugehörigen Rechnungen denselben Buchungscode, bleiben es getrennte Belege. "
               "Zwei Rechnungen derselben Buchung gelten nur dann als doppelt, wenn auch die Rechnungsnummer (ohne Nummer: der Betrag) übereinstimmt. "
               "Beim Eingang werden Buchungsbestätigung und Rechnungen mit **gleichem Buchungscode in derselben Reise automatisch verknüpft** (siehe „Beleg prüfen und ergänzen“)."),
@@ -514,6 +520,7 @@ KAPITEL = [
             ["Vorschussquittung / Bargeldbeschaffung / Rückgabequittung", "ja", "Selbst erzeugt aus dem Bargeld-Konto, ohne eigenen Betrag."],
             ["Buchungsbestätigung", "nein", "Betrag ist hier optional. Liefert Flug-/Zugdaten. Braucht Rechnungen oder Quittungen (siehe unten)."],
             ["✈ Flugänderung/Umbuchung", "nein", "Löst die Änderungsklärung aus (siehe „Flug, Bahn und Termine“)."],
+            ["🛂 A1-Bescheinigung", "nein", "Kein Kostenbeleg: ohne Betrag, nicht in Abschluss und Kosten, keine Pflichtfelder. Siehe „Reisemappe, Reise-PDFs und A1-Bescheinigung“."],
             ["Tankbeleg (Rechnung), Hotel, Taxi, Bewirtung, Sonstige Kosten, Sonstiges", "nein", "Zur Einordnung der Ausgabe. Nicht prüfpflichtig für die Habel-Übergabe. Liefert die KI für einen Beleg mit Betrag „Sonstiges“, setzt die App automatisch „Quittung“. Bei vorhandenen Belegen zeigt die Beleg-Seite den Knopf „Als Quittung einstufen“."],
         ], [42, 16, 42]),
         ("h3", "Bezahlarten"),
@@ -582,7 +589,7 @@ KAPITEL = [
               "Standard **07:00–16:00** (die Uhrzeiten oben lassen sich ändern). Für den **Anreisetag** und den **Abreisetag** gibt es eigene Zeiten; ein leeres Feld nimmt die Standardzeit. "
               "Die Montage muss im Reisezeitraum liegen (höchstens 60 Tage). Ist „Montage bis“ leer, entsteht nur ein Termin. Jeder Tag ist danach ein eigener Termin und lässt sich einzeln ändern oder löschen."),
         ("h3", "Reiseplan"),
-        ("p", "**🗺 Reiseplan** zeigt alle Flüge, Züge und Termine in zeitlicher Reihenfolge. Zwei PDF-Varianten: „für Reisemappe Mitarbeiter“ und „zum Emailversand“ (ohne Buchungscodes)."),
+        ("p", "**🗺 Reiseplan** zeigt alle Flüge, Züge und Termine in zeitlicher Reihenfolge. Zwei PDF-Varianten: „für Reisemappe Mitarbeiter“ (mit Anlagen) und „zum Emailversand“ (ohne Buchungscodes, nie mit Anlagen). Mehr dazu im Kapitel „Reisemappe, Reise-PDFs und A1-Bescheinigung“."),
         ("h3", "Änderungen und Umbuchungen"),
         ("ul", [
             "Wird ein Beleg als **Flugänderung/Umbuchung** eingestuft, erscheint oben auf der Reise-Seite „n Änderungen warten auf Klärung“. "
@@ -592,6 +599,47 @@ KAPITEL = [
             "A behalten, B behalten oder beide behalten (z. B. zwei Reisende).",
             "**Flugstatus zurücksetzen:** löscht den gespeicherten Flug-/Bahnstatus eines Belegs, wenn ein falscher Endstatus (z. B. falsche Verspätung) auf dem Dashboard hängen bleibt.",
         ]),
+    ]},
+    {"id": "b-reisemappe", "teil": "B", "titel": "Reisemappe, Reise-PDFs und A1-Bescheinigung", "bloecke": [
+        ("p", "Die **Reisemappe** ist das Reiseplan-PDF (Reiseplan › „PDF für Reisemappe“). Seit Version 3.41 hängt die App hinten automatisch die nötigen Dokumente an "
+              "und setzt eine Seite **Anlagen** mit Inhaltsverzeichnis und Seitenzahlen davor. Im PDF-Leser gibt es dazu Lesezeichen."),
+        ("h3", "Reise-PDFs (Einstellungen › 📎 Reise-PDFs)"),
+        ("ul", [
+            "Hier laden Sie PDFs hoch, die in jede Reisemappe gehören, zum Beispiel die **Kopie der Krankenversicherung**. Auch ein Foto (JPG/PNG) geht; es wird in ein PDF umgewandelt. "
+            "Höchstens 15 MB und 60 Seiten, kein Passwortschutz.",
+            "**Gilt für:** „Alle Mitarbeiter“ oder ein bestimmter Mitarbeiter (z. B. seine persönliche Versicherungskarte). Der **Titel** erscheint im Inhaltsverzeichnis.",
+            "**Pausieren** nimmt ein Dokument vorübergehend aus allen Mappen, **Entfernen** löscht den Eintrag. **Ansehen** öffnet das PDF.",
+        ]),
+        ("h3", "Welche Anlagen kommen in welche Mappe?"),
+        ("ul", [
+            "Hat die Reise **einen** Reisenden, bekommt die Mappe seine Dokumente automatisch: alle Dokumente „für alle Mitarbeiter“, seine persönlichen Dokumente und seine A1.",
+            "Bei **mehreren Reisenden** zeigt der Reiseplan je Mitarbeiter einen eigenen Knopf („📄 Reisemappe Name“). Ohne Auswahl enthält die Mappe nur die Dokumente für alle Mitarbeiter, "
+            "keine persönlichen Dokumente und keine A1.",
+            "Die Variante **„PDF zum Emailversand“** enthält **nie** Anlagen (Versicherungsdaten gehören nicht zu Kunden oder Dritten).",
+            "Ist ein Dokument nicht lesbar oder die A1 fehlt noch, kommt die Mappe trotzdem. Auf der Anlagen-Seite steht dann unter **„Nicht angehängt“** was fehlt, mit Grund.",
+            "Mit `?anlagen=0` an der Adresse (`/reise/…/reiseplan/pdf?anlagen=0`) erzeugt die App das reine Reiseplan-PDF ohne Anlagen.",
+        ]),
+        ("h3", "A1-Bescheinigung bei Reisen in Europa"),
+        ("p", "Wer in ein EU-/EWR-Land, die Schweiz oder das Vereinigte Königreich reist, muss eine **A1-Bescheinigung** mitführen. Die App legt dafür von selbst eine Aufgabe an:"),
+        ("ul", [
+            "**Wann nötig?** Wenn die Reise (Länder der Reise oder Reisetage) mindestens ein solches Land außer Deutschland enthält. Länder: Belgien, Bulgarien, Dänemark, Estland, Finnland, Frankreich, Griechenland, Irland, "
+            "Island, Italien, Kroatien, Lettland, Liechtenstein, Litauen, Luxemburg, Malta, Niederlande, Norwegen, Österreich, Polen, Portugal, Rumänien, Schweden, Schweiz, Slowakei, Slowenien, Spanien, "
+            "Tschechien, Ungarn, Zypern und das Vereinigte Königreich. Die A1 braucht **jeder Reisende einzeln**.",
+            "**Aufgabe:** Auf **📋 Offene Aufgaben** (Karte 🛂) und auf dem Dashboard steht jede noch nicht beendete Europa-Reise, für die eine A1 fehlt oder zu prüfen ist. "
+            "Bei Abreise in 14 Tagen oder früher ist die Aufgabe rot.",
+            "**Karte „🛂 A1-Bescheinigung“ auf der Reise-Seite:** Status je Reisendem (✅ vorhanden mit Gültigkeit, ⚠ prüfen, ❌ fehlt, ➖ nicht nötig) und der Knopf zum **Hochladen**. "
+            "Eine so hochgeladene Datei wird immer als A1 abgelegt.",
+            "**Per Mail:** Die A1 als PDF (oder Foto) an das Reisekosten-Postfach schicken, mit dem Reisecode (z. B. `26-012`) im Betreff. Die App erkennt sie am Inhalt, legt sie als Belegart "
+            "**🛂 A1-Bescheinigung** ab und ordnet sie über den **Namen** dem Reisenden zu. Auch der normale Upload (Belege › Hochladen) funktioniert.",
+            "**Auslesen:** Name, Gültigkeitszeitraum, Ausstellungsdatum, Länder und ausstellende Stelle werden aus dem Text gelesen (bei Scans von der KI) und können über „✏ Daten nachtragen“ korrigiert werden. "
+            "Die App prüft, ob der **Gültigkeitszeitraum die ganze Reise abdeckt**; sonst steht „⚠ prüfen“. Fehlt der Zeitraum, ergänzen Sie Von/Bis im Beleg.",
+            "**Name passt nicht?** Die A1 erscheint in der Karte unter „A1 ohne passenden Reisenden“. Dort wählen Sie den Mitarbeiter und tippen **Zuordnen**.",
+            "**Ist keine A1 nötig** (z. B. der Mitarbeiter lebt und arbeitet im Reiseland)? Bei „❌ fehlt“ tragen Sie einen Grund ein und tippen **nicht nötig** (nur Organisatoren). Die Aufgabe verschwindet; **A1 doch erforderlich** macht es rückgängig.",
+            "**Mehrere Reisen:** Eine A1 gehört zu einer Reise. Gilt sie für mehrere Reisen, laden Sie sie bei jeder Reise hoch (die gleiche Datei zweimal bei **derselben** Reise wird als Duplikat erkannt).",
+            "Eine A1 ist **kein Kostenbeleg**: ohne Betrag, nicht im Abschluss, in den Kosten oder bei Habel, keine Pflichtfeld-Meldung.",
+        ]),
+        ("p", "Die Erkennung beruht auf den Überschriften der amtlichen Bescheinigung (deutsch, englisch, französisch, italienisch, spanisch). Eine Rechnung des Anbieters „A1 Telekom“ wird nicht verwechselt. "
+              "Sieht ein Dokument anders aus, stellen Sie auf der Beleg-Seite die Belegart von Hand auf „A1-Bescheinigung“."),
     ]},
     {"id": "b-alerts", "teil": "B", "titel": "Verspätungs-Alarme (Flug und Bahn)", "bloecke": [
         ("p", "Die App überwacht Flüge (AeroDataBox) und Züge (Deutsche Bahn, Timetables) nach einem **festen Prüfplan** – nicht editierbar:"),
@@ -810,7 +858,8 @@ KAPITEL = [
         ("h3", "📋 Offene Aufgaben (`/todo`)"),
         ("p", "Alles, was vor der finalen Abrechnung noch offen ist, über alle Reisen: Beträge in Fremdwährung ohne bestätigten Euro-Betrag, Belege ohne Prüfung, "
               "Buchungen, zu denen nach der Rückkehr noch Rechnung oder Quittung fehlt („🧾 Rechnung/Quittung fehlt noch“, mit Betrag), "
-              "nicht abgerechnete Reisen mit dem Habel-Stand je Reise (geprüft, bereit, gesendet)."),
+              "nicht abgerechnete Reisen mit dem Habel-Stand je Reise (geprüft, bereit, gesendet). "
+              "Ganz oben steht die Karte **🛂 A1-Bescheinigung – Reisen in Europa** mit allen Reisen, bei denen eine A1 fehlt, zu prüfen oder nicht zugeordnet ist."),
         ("h3", "🗺 Karte (`/maps`)"),
         ("p", "Zeigt, wo sich zugeordnete Mitarbeiter bei laufenden Reisen aktuell befinden."),
     ]},
@@ -829,6 +878,7 @@ KAPITEL = [
             ["💳 Kreditkarten-Abrechnung", "Monatsabrechnung einspielen."],
             ["🌍 Kreditkarten-Belege Ausland", "Liste der im Ausland mit Karte bezahlten Belege zum Abgleich mit der VISA-Abrechnung."],
             ["⏱ Zuschläge", "Zuschläge für Reisezeit, Arbeitszeit, Nacht, Samstag, Sonntag, Feiertag; Beginn von Nacht und Tag; Bundesland."],
+            ["📎 Reise-PDFs", "PDF-Dokumente für die Reisemappe, z. B. Kopie der Krankenversicherung (für alle oder einen Mitarbeiter)."],
             ["🔧 Mail-Diagnose", "Prüft den Postausgang Schritt für Schritt."],
             ["📖 Dokumentation", "Dieses Handbuch (Seite und PDF)."],
         ], [30, 70]),

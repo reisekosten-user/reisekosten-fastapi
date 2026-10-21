@@ -5,6 +5,7 @@ Modulare Struktur – Einstiegspunkt
 # v2.2-a – Modularisierung komplett
 from __future__ import annotations
 import os, re, json, io, base64
+import urllib.parse
 import httpx
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -28,6 +29,8 @@ import mod_kalender as kal
 import mod_zuschlag as zs
 import mod_zeitzone as zeitzone
 import mod_laender
+import mod_a1
+import mod_reisepdf
 import mod_doku
 import mod_beleg
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
@@ -85,6 +88,9 @@ SESSION_SECRET, SESSION_SECRET_HERKUNFT = _session_secret_bestimmen()
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.41", "zeit": "2026-10-21 12:36", "aenderungen": [
+        "Neu: Einstellungen › 📎 Reise-PDFs. Dort lädt der Organisator PDFs hoch (z. B. Kopie der Krankenversicherung), für alle Mitarbeiter oder nur für einen. Die Reisemappe (Reiseplan-PDF) bekommt sie automatisch hinten angehängt, mit einer Seite „Anlagen“ (Inhaltsverzeichnis) und Lesezeichen. Bei mehreren Reisenden gibt es je Mitarbeiter eine eigene Mappe. Die E-Mail-Variante hat nie Anlagen.",
+        "Neu: A1-Bescheinigung für Reisen in Europa (EU, EWR, Schweiz, Vereinigtes Königreich). Die App legt dafür automatisch eine Aufgabe an (Offene Aufgaben und Dashboard), je Reisendem. Die A1 wird auf der Reise-Seite hochgeladen oder per Mail mit dem Reisecode geschickt, am Inhalt erkannt, als Belegart „A1-Bescheinigung“ abgelegt (ohne Betrag, keine Kosten), dem Reisenden zugeordnet und auf Gültigkeit für die ganze Reise geprüft. Sie kommt automatisch in die Reisemappe des Mitarbeiters."]},
     {"version": "3.40", "zeit": "2026-10-20 19:17", "aenderungen": [
         "Beleg-Daten nachtragen: Das Land ist jetzt eine Auswahlliste mit ISO-Code und Klarnamen (z. B. DE – Deutschland, IT – Italien, MX – Mexiko). Häufige Reiseländer stehen oben, darunter alle Länder von A bis Z.",
         "Ein bereits gespeichertes Land, das nicht in der Liste steht, bleibt als eigene Option erhalten und wird nicht stillschweigend überschrieben."]},
@@ -810,6 +816,9 @@ async def startup():
     for _zf in ("reise_beginn_zone", "reise_ende_zone", "arbeit_beginn_zone", "arbeit_ende_zone"):
         spalte_sichern("reisetage_person", _zf, "TEXT")
     zs.tabelle_sichern()
+    spalte_sichern("belege", "a1_kuerzel", "TEXT")
+    mod_a1.tabelle_sichern()
+    mod_reisepdf.tabelle_sichern()
     try:
         n_mwst = mod_beleg.mwst_flug_bahn_reparieren()
         if n_mwst:
@@ -1417,6 +1426,7 @@ def beleg_detail(bid: int, request: Request):
                       <option value="Quittung"{' selected' if belegart=='Quittung' else ''}>Quittung</option>
                       <option value="Buchungsbestaetigung"{' selected' if belegart=='Buchungsbestaetigung' else ''}>Buchungsbestätigung</option>
                       <option value="Flugaenderung"{' selected' if belegart=='Flugaenderung' else ''}>✈ Flugänderung/Umbuchung</option>
+                      <option value="A1Bescheinigung"{' selected' if belegart=='A1Bescheinigung' else ''}>🛂 A1-Bescheinigung</option>
                       <option value="Tankbeleg"{' selected' if belegart=='Tankbeleg' else ''}>Tankbeleg (Rechnung)</option>
                       <option value="Hotel"{' selected' if belegart=='Hotel' else ''}>Hotel</option>
                       <option value="Taxi"{' selected' if belegart=='Taxi' else ''}>Taxi</option>
@@ -1457,7 +1467,7 @@ def beleg_detail(bid: int, request: Request):
                       <option value="Unbekannt"{' selected' if zahlungsart=='Unbekannt' else ''}>❓ Unbekannt</option>
                     </select>
                   </form>
-                  {'' if zahlungsart or belegart == 'Buchungsbestaetigung' else '<span style="font-size:11px;color:#b45309;margin-left:6px">⚠ bitte nachtragen</span>'}
+                  {'' if zahlungsart or belegart in ('Buchungsbestaetigung', 'A1Bescheinigung') else '<span style="font-size:11px;color:#b45309;margin-left:6px">⚠ bitte nachtragen</span>'}
                   {kreditkarte_dropdown_html}
                 </dd>
                 {f'<dt style="color:var(--muted);font-size:12px">Netto</dt><dd>{float(betrag_netto):.2f} {waehrung}</dd>' if betrag_netto else ""}
@@ -1810,6 +1820,8 @@ async def beleg_daten_bearbeiten(bid: int, request: Request):
             elif g("belegart",6) in EIGENBELEG_ARTEN:
                 # Eigenbelege (Bewirtung, Vorschuss) sind von der App vollständig erzeugt: nur Datum und Titel nötig
                 pflicht = [f for f in pflicht if f in ("belegdatum","anbieter")]
+            elif g("belegart",6) == mod_a1.BELEGART:
+                pflicht = []              # A1-Bescheinigung: kein Kostenbeleg, keine Pflichtfelder
             fehlend = [f for f in pflicht if not pflicht_werte.get(f)]
             pflicht_ok = len(fehlend) == 0
             status = "ok" if pflicht_ok else "fehlerhaft"
@@ -3012,6 +3024,10 @@ async def beleg_belegart_speichern(bid: int, request: Request):
             if r and g("event_datum_von",1) and g("belegdatum",2) and g("transportart",3) and g("anbieter",4):
                 cur.execute(f"UPDATE belege SET pflichtfelder_ok=TRUE, fehlende_felder='[]', "
                             f"status='ok' WHERE id={P}", (bid,))
+        if belegart == mod_a1.BELEGART:
+            # A1-Bescheinigung: kein Betrag, keine Pflichtfelder der Kostenbelege
+            cur.execute(f"UPDATE belege SET pflichtfelder_ok=TRUE, fehlende_felder='[]', "
+                        f"status='ok' WHERE id={P}", (bid,))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
@@ -3336,7 +3352,7 @@ def belege_liste(request: Request):
                 return False
             if f_problem == "fehler" and it["status"] != "fehler":
                 return False
-            if f_problem == "zahlungsart" and (it["zahlungsart"] or it["belegart"] == "Buchungsbestaetigung"):
+            if f_problem == "zahlungsart" and (it["zahlungsart"] or it["belegart"] in ("Buchungsbestaetigung", "A1Bescheinigung")):
                 return False
             if f_problem == "kreditkarte" and not (it["zahlungsart"] == "Kreditkarte" and it["id"] not in kk_abgeglichen):
                 return False
@@ -4126,16 +4142,16 @@ def reiseplan_anzeigen(code: str):
         <h1 class="page-title" style="margin:0">🗺 Reiseplan {rcode}</h1>
         <div style="color:var(--muted);font-size:13px">{daten["titel"]} · {fmt_date(daten["abreise"])} – {fmt_date(daten["rueckkehr"])}</div>
       </div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
         <a href="/reise/{rcode}/termin/neu?zurueck=reiseplan" class="btn btn-primary">+ Ereignis</a>
-        <a href="/reise/{rcode}/reiseplan/pdf" class="btn btn-secondary">📄 PDF für Reisemappe Mitarbeiter</a>
+        {_reisemappe_buttons(rcode)}
         <a href="/reise/{rcode}/reiseplan/pdf?ohne_buchungscode=1" class="btn btn-secondary">📄 PDF zum Emailversand</a>
         <a href="/reise/{rcode}/kalender" class="btn btn-secondary">📅 Outlook-Einladungen</a>
         <a href="/reise/{rcode}" class="btn btn-secondary">← Reise</a>
       </div>
     </div>
     <p style="font-size:12px;color:var(--muted);margin-bottom:16px">
-      Reine Zeit-/Orts-/Buchungsübersicht ohne Preisangaben – zum Versand an den Reisenden vor Abreise.
+      Reine Zeit-/Orts-/Buchungsübersicht ohne Preisangaben – zum Versand an den Reisenden vor Abreise. Die Reisemappe enthält hinten automatisch die PDFs aus Einstellungen › Reise-PDFs (z. B. Krankenversicherung) und die A1-Bescheinigung des Mitarbeiters; die E-Mail-Variante enthält nie Anlagen.
       Über "+ Ereignis" lassen sich Kundenbesuche (mit Adresse/Ansprechpartner/Telefon), Taxifahrten,
       Messebesuche o.ä. manuell ergänzen.</p>
     {tage_html or '<div class="alert alert-warn">Noch keine Flug-/Bahn-/Hotel-/Termindaten vorhanden.</div>'}
@@ -4264,13 +4280,210 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> by
     return buf.getvalue()
 
 
+# ── A1-Bescheinigung und Reisemappe mit Anlagen (v3.41) ──────────────────────────────────
+
+def _reisende_kn(rcode: str) -> list:
+    """[(kuerzel, klarname)] der Reisenden einer Reise."""
+    erg = []
+    for r in reisende_der_reise(rcode):
+        erg.append((r[0] if isinstance(r, tuple) else r["kuerzel"], r[1] if isinstance(r, tuple) else r["klarname"]))
+    return erg
+
+
+def _reisemappe_mit_anlagen(rcode: str, daten: dict, pdf_bytes: bytes, kuerzel: str = "") -> tuple:
+    """
+    Hängt an die Reisemappe (Reiseplan-PDF) hinten die Reise-PDFs aus den Einstellungen (z. B. Krankenversicherung)
+    und die A1-Bescheinigung des Mitarbeiters an. Nur für die Reisemappe, nie für die E-Mail-Variante.
+    Hat die Reise genau einen Reisenden, gilt er automatisch. Bei mehreren Reisenden ohne Auswahl
+    kommen nur die Dokumente „für alle Mitarbeiter“ dazu.
+    Rückgabe: (pdf_bytes, gewähltes_kuerzel). Ein Fehler hier darf die Reisemappe nie verhindern.
+    """
+    try:
+        reisende = _reisende_kn(rcode)
+        gueltig = {k.upper(): k for k, _n in reisende}
+        k = gueltig.get((kuerzel or "").strip().upper(), "")
+        if not k and len(reisende) == 1:
+            k = reisende[0][0]
+        anlagen = mod_reisepdf.anhaenge_fuer(k or None)
+        if k:
+            st = mod_a1.a1_status(rcode, reisende_der_reise(rcode))
+            person = next((x for x in st["personen"] if x["kuerzel"] == k), None)
+            if st["noetig"] and person:
+                if person["beleg"]:
+                    anlagen.append(mod_reisepdf.a1_anlage(person["beleg"]["id"], f"A1-Bescheinigung ({person['klarname']})"))
+                elif person["status"] == "fehlt":
+                    anlagen.append({"titel": "A1-Bescheinigung", "bytes": None, "fehler": "liegt noch nicht vor"})
+        neu, _probleme = mod_reisepdf.mappe_zusammenbauen(
+            pdf_bytes, anlagen, kopf=f"Reise {rcode} – {daten.get('titel') or ''}")
+        return neu, k
+    except Exception as ex:
+        print(f"[Reisemappe] Anlagen nicht angehängt: {ex}")
+        return pdf_bytes, kuerzel
+
+
+def _reisemappe_buttons(rcode: str) -> str:
+    """Knöpfe für die Reisemappe: bei mehreren Reisenden je Mitarbeiter ein eigenes PDF (mit seinen Anlagen)."""
+    try:
+        reisende = _reisende_kn(rcode)
+    except Exception:
+        reisende = []
+    if len(reisende) <= 1:
+        return f'<a href="/reise/{rcode}/reiseplan/pdf" class="btn btn-secondary">📄 PDF für Reisemappe Mitarbeiter</a>'
+    return "".join(f'<a href="/reise/{rcode}/reiseplan/pdf?kuerzel={_bw_e(k)}" class="btn btn-secondary">'
+                   f'📄 Reisemappe {_bw_e(n)}</a>' for k, n in reisende)
+
+
+def a1_karte_html(rcode: str, request: Request) -> str:
+    """Karte „A1-Bescheinigung“ an der Reise: Status je Reisendem, Hochladen, Zuordnen, „nicht nötig“."""
+    try:
+        reisende = reisende_der_reise(rcode)
+        st = mod_a1.a1_status(rcode, reisende)
+    except Exception as ex:
+        print(f"[A1] Karte nicht aufgebaut: {ex}")
+        return ""
+    hat_a1 = any(p["beleg"] for p in st["personen"]) or st["nicht_zugeordnet"]
+    if not st["noetig"] and not hat_a1:
+        return ""
+    org = ist_organisator(request)
+    leise = "font-size:11px;color:var(--muted)"
+    kn = [(p["kuerzel"], p["klarname"]) for p in st["personen"]]
+
+    def upload_form(kuerzel: str, text: str) -> str:
+        return (f'<form method="post" action="/reise/{rcode}/a1/upload" enctype="multipart/form-data" '
+                f'style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 0">'
+                f'<input type="hidden" name="kuerzel" value="{_bw_e(kuerzel)}">'
+                f'<input type="file" name="datei" accept=".pdf,image/*" required style="font-size:12px;max-width:230px">'
+                f'<button type="submit" class="btn btn-primary btn-sm">{text}</button></form>')
+
+    zeilen = ""
+    for p in st["personen"]:
+        b = p["beleg"]
+        if p["status"] == "ok":
+            gueltig = f" · gültig {fmt_date(b['von'])} – {fmt_date(b['bis'])}" if b["von"] and b["bis"] else ""
+            status = (f'<span style="color:#15803d;font-weight:600">✅ A1 vorhanden</span>{gueltig} · '
+                      f'<a href="/beleg/{b["id"]}" style="color:var(--blue)">Beleg #{b["id"]}</a>')
+            aktion = f'<details><summary style="{leise};cursor:pointer">andere A1 hochladen</summary>{upload_form(p["kuerzel"], "🛂 Hochladen")}</details>'
+        elif p["status"] == "pruefen":
+            status = (f'<span style="color:#b45309;font-weight:600">⚠ A1 prüfen</span> · {_bw_e(p["hinweis"])} · '
+                      f'<a href="/beleg/{b["id"]}" style="color:var(--blue)">Beleg #{b["id"]}</a>')
+            aktion = f'<details><summary style="{leise};cursor:pointer">neue A1 hochladen</summary>{upload_form(p["kuerzel"], "🛂 Hochladen")}</details>'
+        elif p["status"] == "befreit":
+            grund = f" ({_bw_e(p['hinweis'])})" if p["hinweis"] else ""
+            status = f'<span style="color:var(--muted)">➖ A1 nicht nötig{grund}</span>'
+            aktion = ""
+            if org:
+                aktion = (f'<form method="post" action="/reise/{rcode}/a1/befreiung" style="margin:4px 0 0">'
+                          f'<input type="hidden" name="kuerzel" value="{_bw_e(p["kuerzel"])}">'
+                          f'<input type="hidden" name="aktion" value="aufheben">'
+                          f'<button type="submit" class="btn btn-secondary btn-sm">A1 doch erforderlich</button></form>')
+        else:
+            status = '<span style="color:#b91c1c;font-weight:600">❌ A1 fehlt noch</span>'
+            aktion = upload_form(p["kuerzel"], "🛂 A1 hochladen")
+            if org and st["noetig"]:
+                aktion += (f'<form method="post" action="/reise/{rcode}/a1/befreiung" '
+                           f'style="display:flex;gap:6px;align-items:center;margin:6px 0 0">'
+                           f'<input type="hidden" name="kuerzel" value="{_bw_e(p["kuerzel"])}">'
+                           f'<input type="hidden" name="aktion" value="setzen">'
+                           f'<input type="text" name="grund" placeholder="Grund, z. B. Mitarbeiter wohnt in der Schweiz" '
+                           f'style="font-size:12px;flex:1;min-width:160px;max-width:300px">'
+                           f'<button type="submit" class="btn btn-secondary btn-sm">nicht nötig</button></form>')
+        zeilen += (f'<div style="padding:8px 0;border-bottom:1px solid var(--border)">'
+                   f'<div><b>{_bw_e(p["kuerzel"])}</b> – {_bw_e(p["klarname"])}</div>'
+                   f'<div style="font-size:13px;margin-top:2px">{status}</div>{aktion}</div>')
+    if not st["personen"]:
+        zeilen = f'<div style="{leise}">Dieser Reise ist noch kein Reisender zugeordnet.</div>'
+
+    lose = ""
+    for b in st["nicht_zugeordnet"]:
+        opts = "".join(f'<option value="{_bw_e(k)}">{_bw_e(n)}</option>' for k, n in kn)
+        name_im_doc = _bw_e(b["reisender"]) if b["reisender"] else "Name nicht erkannt"
+        lose += (f'<form method="post" action="/reise/{rcode}/a1/zuordnen" '
+                 f'style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:6px 0">'
+                 f'<span style="font-size:13px">🛂 <a href="/beleg/{b["id"]}" style="color:var(--blue)">Beleg #{b["id"]}</a>'
+                 f' · {name_im_doc} – gehört zu:</span>'
+                 f'<input type="hidden" name="beleg_id" value="{b["id"]}">'
+                 f'<select name="kuerzel" style="font-size:12px;max-width:260px">{opts}</select>'
+                 f'<button type="submit" class="btn btn-secondary btn-sm">Zuordnen</button></form>') if kn else ""
+    if lose:
+        lose = (f'<div style="margin-top:10px;padding:8px 10px;background:#fef3c7;border-radius:6px">'
+                f'<div style="font-size:12px;color:#92400e;margin-bottom:4px">A1 ohne passenden Reisenden – bitte zuordnen:</div>{lose}</div>')
+
+    if st["noetig"]:
+        intro = (f'Reise nach <b>{mod_a1.laender_text(st["laender"])}</b>: Jeder Reisende muss eine A1-Bescheinigung '
+                 f'mitführen. Sie kommt automatisch in die Reisemappe des Mitarbeiters. Die Datei kann hier hochgeladen '
+                 f'oder per Mail mit <b>{_bw_e(rcode)}</b> im Betreff gesendet werden – sie wird als A1 erkannt.')
+    else:
+        intro = 'Für die Länder dieser Reise ist keine A1 nötig; vorhandene Bescheinigungen sind hier aufgeführt.'
+    return (f'<div class="card" id="a1" style="margin-top:16px">'
+            f'<div class="card-header"><span class="card-title">🛂 A1-Bescheinigung</span></div>'
+            f'<div class="card-body"><p style="{leise};margin-bottom:8px">{intro}</p>{zeilen}{lose}</div></div>')
+
+
+def _a1_zurueck(rcode: str) -> RedirectResponse:
+    return RedirectResponse(f"/reise/{rcode}#a1", status_code=303)
+
+
+@app.post("/reise/{code}/a1/upload")
+async def reise_a1_upload(code: str, request: Request, datei: UploadFile = File(...), kuerzel: str = Form("")):
+    """A1-Bescheinigung für einen Reisenden hochladen: wird als Beleg „A1-Bescheinigung“ abgelegt."""
+    rcode = code.upper()
+    try:
+        daten_b = await datei.read()
+        if not daten_b:
+            raise ValueError("Die Datei ist leer.")
+        k = (kuerzel or "").strip()
+        if k not in {x for x, _n in _reisende_kn(rcode)}:
+            k = ""
+        result = await beleg_verarbeiten(daten_b, datei.filename or "A1.pdf", rcode,
+                                         datei.content_type or "application/octet-stream",
+                                         dokumentart=mod_a1.BELEGART, a1_kuerzel=k or None)
+        if result.get("duplikat"):
+            mod_a1.bestehende_zuordnen(result["beleg_id"], rcode, k or None)
+        return _a1_zurueck(rcode)
+    except Exception as e:
+        return HTMLResponse(shell("Fehler",
+            f'<div class="alert alert-err"><b>A1 konnte nicht gespeichert werden:</b> {_bw_e(str(e))}</div>'
+            f'<a href="/reise/{rcode}#a1" class="btn btn-secondary">Zurück zur Reise</a>'), status_code=500)
+
+
+@app.post("/reise/{code}/a1/zuordnen")
+async def reise_a1_zuordnen(code: str, request: Request, beleg_id: int = Form(...), kuerzel: str = Form("")):
+    """Eine erkannte A1 einem Reisenden dieser Reise fest zuordnen."""
+    rcode = code.upper()
+    kn = dict(_reisende_kn(rcode))
+    if kuerzel not in kn or beleg_id not in {b["id"] for b in mod_a1.a1_belege(rcode)}:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Zuordnung nicht möglich: '
+            'Beleg oder Mitarbeiter gehört nicht zu dieser Reise.</div>'
+            f'<a href="/reise/{rcode}#a1" class="btn btn-secondary">Zurück zur Reise</a>'), status_code=400)
+    mod_a1.a1_zuordnen(beleg_id, kuerzel, kn[kuerzel])
+    return _a1_zurueck(rcode)
+
+
+@app.post("/reise/{code}/a1/befreiung")
+async def reise_a1_befreiung(code: str, request: Request, kuerzel: str = Form(""), aktion: str = Form("setzen"),
+                             grund: str = Form("")):
+    """Organisator: „A1 nicht nötig“ für einen Reisenden dieser Reise merken oder wieder aufheben."""
+    rcode = code.upper()
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren dürfen das ändern.</div>'), status_code=403)
+    if kuerzel in dict(_reisende_kn(rcode)):
+        if aktion == "aufheben":
+            mod_a1.befreiung_loeschen(rcode, kuerzel)
+        else:
+            mod_a1.befreiung_setzen(rcode, kuerzel, grund)
+    return _a1_zurueck(rcode)
+
+
 @app.get("/reise/{code}/reiseplan/pdf")
-def reiseplan_pdf(code: str, ohne_buchungscode: bool = False):
+def reiseplan_pdf(code: str, ohne_buchungscode: bool = False, kuerzel: str = "", anlagen: int = 1):
     """
     Reiseplan als PDF. Zwei Varianten über den Query-Parameter:
     - /reise/{code}/reiseplan/pdf  -> für den Reisenden, mit Buchungscodes
     - /reise/{code}/reiseplan/pdf?ohne_buchungscode=1 -> identisch, aber ohne
-      Buchungscodes (z.B. zum Weitergeben an Kunden/Dritte)
+      Buchungscodes (z.B. zum Weitergeben an Kunden/Dritte); nie mit Anlagen
+    Die Reisemappe (erste Variante) bekommt hinten die Reise-PDFs aus den Einstellungen und die A1-Bescheinigung
+    des Mitarbeiters (?kuerzel=XY bei mehreren Reisenden; ?anlagen=0 schaltet die Anlagen ab).
     """
     rcode = code.upper()
     daten = reiseplan_daten_laden(rcode)
@@ -4279,7 +4492,11 @@ def reiseplan_pdf(code: str, ohne_buchungscode: bool = False):
     try:
         pdf_bytes = _reiseplan_pdf_bauen(rcode, daten, ohne_buchungscode)
         from fastapi.responses import Response
-        dateiname = f"Reiseplan_{rcode}" + ("_Emailversand" if ohne_buchungscode else "_Reisemappe") + ".pdf"
+        zusatz = ""
+        if not ohne_buchungscode and anlagen:
+            pdf_bytes, k_gewaehlt = _reisemappe_mit_anlagen(rcode, daten, pdf_bytes, kuerzel)
+            zusatz = ("_" + re.sub(r"[^A-Za-z0-9]", "", k_gewaehlt)) if k_gewaehlt else ""
+        dateiname = f"Reiseplan_{rcode}" + ("_Emailversand" if ohne_buchungscode else "_Reisemappe" + zusatz) + ".pdf"
         return Response(content=pdf_bytes, media_type="application/pdf",
                         headers={"Content-Disposition": f"inline; filename={dateiname}"})
     except Exception as e:
@@ -4348,7 +4565,7 @@ def reise_abschluss(code: str):
             land_beleg,betrag_eur,kurs_eur,kurs_datum,kurs_quelle,
             s3_original,status,beleg_gruppe_id,betrag_eur_final,nebenkosten_eur,
             nebenkosten_beschreibung,geprueft,kreditkarte_auslandsentgelt_eur,zahlungsart
-            FROM belege WHERE reise_code={P}
+            FROM belege WHERE reise_code={P} AND (belegart IS NULL OR belegart <> 'A1Bescheinigung')
             ORDER BY belegdatum NULLS LAST, id""", (rcode,))
         belege = cur.fetchall()
         cur.close(); db.close()
@@ -5008,7 +5225,8 @@ def abschluss_pdf_antwort(code: str, mit_originalen: bool = True, anlagen_namen:
         cur.execute(f"""SELECT id,belegart,anbieter,belegdatum,betrag_brutto,waehrung,betrag_eur,
             beleg_gruppe_id,s3_original,dateiname,betrag_eur_final,nebenkosten_eur,
             betrag_mwst,land_beleg,geprueft,kreditkarte_auslandsentgelt_eur,zahlungsart
-            FROM belege WHERE reise_code={P} ORDER BY belegdatum""", (rcode,))
+            FROM belege WHERE reise_code={P} AND (belegart IS NULL OR belegart <> 'A1Bescheinigung')
+            ORDER BY belegdatum""", (rcode,))
         belege = cur.fetchall()
         cur.close(); db.close()
         try:   # Bewirtung mit Teilbetrag: getrennt ausweisen (Gesamtsumme unverändert)
@@ -5763,6 +5981,17 @@ def todo_liste_laden() -> list:
                 "url": "/todo"})
     except Exception: pass
 
+    try:
+        # 7. A1-Bescheinigung bei Reisen in Europa (vor der Abreise nötig)
+        a1_t = mod_a1.a1_todos()
+        if a1_t:
+            bald = [t for t in a1_t if t["abreise"] and (t["abreise"] - date.today()).days <= 14]
+            aufgaben.append({"icon": "🛂", "prio": "danger" if bald else "warn",
+                "text": f'A1-Bescheinigung offen bei {len(a1_t)} Reise{"n" if len(a1_t)!=1 else ""}',
+                "sub": ", ".join(t["reise_code"] for t in a1_t[:5]) + (" …" if len(a1_t) > 5 else ""),
+                "url": f"/reise/{a1_t[0]['reise_code']}#a1" if len(a1_t) == 1 else "/todo"})
+    except Exception: pass
+
     cur.close(); db.close()
     return aufgaben
 
@@ -5918,12 +6147,36 @@ def todo_seite(request: Request):
                      f'aus dem Ausland</b> {"warten" if n_kk != 1 else "wartet"} auf den Abgleich mit der VISA-Abrechnung. '
                      '<a href="/einstellungen/kreditkarten/ausland" style="font-weight:600">Liste öffnen →</a></div>') if n_kk else ""
 
+        try:
+            a1_liste = mod_a1.a1_todos()
+        except Exception:
+            a1_liste = []
+        a1_zeilen = ""
+        for t in a1_liste:
+            a1_zeilen += (f'<tr><td><a href="/reise/{t["reise_code"]}#a1" style="color:var(--blue);font-weight:600;'
+                          f'text-decoration:none">{t["reise_code"]}</a></td><td>{_bw_e(t["titel"])}</td>'
+                          f'<td>{fmt_date(t["abreise"])}</td><td>{mod_a1.laender_text(t["laender"])}</td>'
+                          f'<td>{_bw_e(mod_a1.todo_text(t))}</td>'
+                          f'<td><a href="/reise/{t["reise_code"]}#a1" class="btn btn-secondary btn-sm">A1 verwalten</a></td></tr>')
+
         content = f"""
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
           <h1 class="page-title" style="margin:0">📋 Offene Aufgaben</h1>
           <a href="/" class="btn btn-secondary">← Dashboard</a>
         </div>
         {kk_banner}
+
+        <div class="card" style="margin-bottom:20px">
+          <div class="card-header"><span class="card-title">🛂 A1-Bescheinigung – Reisen in Europa ({len(a1_liste)})</span></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Reise</th><th>Titel</th><th>Abreise</th><th>Länder</th><th>Offen</th><th></th></tr></thead>
+              <tbody>
+                {a1_zeilen or '<tr><td colspan="6" class="empty-state">Keine offenen A1-Bescheinigungen 🎉</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>
 
         <div class="card" style="margin-bottom:20px">
           <div class="card-header"><span class="card-title">Belege mit offenen Punkten ({len(belege)})</span></div>
@@ -8104,7 +8357,8 @@ def reise_detail(code: str, request: Request):
                         hotel_checkout_datum, hotel_checkout_zeit, event_zeit,
                         belegart, beleg_gruppe_id, betrag_eur, betrag_eur_final, nebenkosten_eur,
                         kreditkarte_auslandsentgelt_eur, zahlungsart
-                        FROM belege WHERE reise_code = {P} ORDER BY belegdatum""", (rcode,))
+                        FROM belege WHERE reise_code = {P} AND (belegart IS NULL OR belegart <> 'A1Bescheinigung')
+                        ORDER BY belegdatum""", (rcode,))
         beleg_rows_tag = cur.fetchall()
 
         # Manuelle Termine für den Tagesverlauf
@@ -8693,6 +8947,8 @@ def reise_detail(code: str, request: Request):
         </div>
 
         {habel_einzel_karte_html(rcode)}
+
+        {a1_karte_html(rcode, request)}
 
         {zugaenge_html}
 
@@ -12903,6 +13159,8 @@ def einstellungen_uebersicht(request: Request):
          "/einstellungen/kreditkarten/ausland"),
         ("⏱", "Zuschläge", "Zuschläge für Reisezeit, Arbeitszeit, Nacht, Samstag, Sonntag und Feiertage sowie Beginn von Nacht und Tag "
          "einstellen.", "/einstellungen/zuschlaege"),
+        ("📎", "Reise-PDFs", "PDF-Dokumente, die in jede Reisemappe gehören (z. B. Kopie der Krankenversicherung) – "
+         "für alle Mitarbeiter oder nur für einen.", "/einstellungen/reise-pdfs"),
         ("🔧", "Mail-Diagnose", "Prüft den Mail-Postausgang Schritt für Schritt (es wird keine Mail gesendet).",
          "/einstellungen/mail-diagnose"),
         ("📖", "Dokumentation", "Handbuch für Reisende und Organisatoren, alle Einstellungen und Funktionen – "
@@ -12927,6 +13185,140 @@ def einstellungen_uebersicht(request: Request):
       {karten_html}
     </div>"""
     return HTMLResponse(shell("Einstellungen", content))
+
+
+# ── Einstellungen › Reise-PDFs (v3.41) ─────────────────────────────────────────────────────
+
+def _reisepdf_mitarbeiter() -> list:
+    """[(kuerzel, klarname)] aller aktiven Mitarbeiter für die Auswahl „Gilt für“."""
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("SELECT kuerzel, klarname FROM mitarbeiter WHERE aktiv = " + ("TRUE" if is_postgres() else "1")
+                    + " ORDER BY klarname")
+        return [(r[0] if isinstance(r, tuple) else r["kuerzel"], (r[1] if isinstance(r, tuple) else r["klarname"]) or "")
+                for r in cur.fetchall()]
+    finally:
+        cur.close(); db.close()
+
+
+def _reisepdf_seite(ok: str = "", fehler: str = "") -> str:
+    leise = "font-size:12px;color:var(--muted)"
+    ma = _reisepdf_mitarbeiter()
+    namen = dict(ma)
+    zeilen = ""
+    for d in mod_reisepdf.liste():
+        gilt = "Alle Mitarbeiter" if not d["kuerzel"] else _bw_e(namen.get(d["kuerzel"]) or d["kuerzel"])
+        kb = int(round((d["groesse"] or 0) / 1024))
+        akt_txt = "✅ aktiv" if d["aktiv"] else "⏸ pausiert"
+        akt_btn = "Pausieren" if d["aktiv"] else "Aktivieren"
+        zeilen += (f'<tr><td><b>{_bw_e(d["titel"])}</b><div style="{leise}">{_bw_e(d["dateiname"] or "")}</div></td>'
+                   f'<td>{gilt}</td><td>{d["seiten"] or "?"} S. · {kb} KB</td><td>{akt_txt}</td>'
+                   f'<td style="white-space:nowrap">'
+                   f'<a href="/einstellungen/reise-pdfs/{d["id"]}/ansehen" target="_blank" class="btn btn-secondary btn-sm">Ansehen</a> '
+                   f'<form method="post" action="/einstellungen/reise-pdfs/{d["id"]}/aktiv" style="display:inline">'
+                   f'<button type="submit" class="btn btn-secondary btn-sm">{akt_btn}</button></form> '
+                   f'<form method="post" action="/einstellungen/reise-pdfs/{d["id"]}/loeschen" style="display:inline" '
+                   f'onsubmit="return confirm(\'Dokument wirklich entfernen?\')">'
+                   f'<button type="submit" class="btn btn-secondary btn-sm">Entfernen</button></form></td></tr>')
+    opts = '<option value="">Alle Mitarbeiter</option>' + "".join(
+        f'<option value="{_bw_e(k)}">{_bw_e(n)} ({_bw_e(k)})</option>' for k, n in ma)
+    meldung = ""
+    if ok:
+        meldung = f'<div class="alert alert-ok" style="margin-bottom:12px">✓ {_bw_e(ok)}</div>'
+    if fehler:
+        meldung = f'<div class="alert alert-err" style="margin-bottom:12px">{_bw_e(fehler)}</div>'
+    return f"""
+    <h1 class="page-title">📎 Reise-PDFs</h1>
+    <p style="{leise};margin-bottom:16px;max-width:720px">
+      Diese PDFs werden automatisch hinten an die <b>Reisemappe</b> (Reiseplan-PDF) gehängt, zum Beispiel die Kopie der
+      Krankenversicherung. Ein Dokument gilt entweder für <b>alle Mitarbeiter</b> oder nur für <b>einen bestimmten
+      Mitarbeiter</b> (z. B. seine persönliche Versicherungskarte). Die A1-Bescheinigung kommt automatisch dazu und wird
+      an der Reise verwaltet. In der E-Mail-Variante des Reiseplans sind <b>nie</b> Anlagen enthalten.</p>
+    {meldung}
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-header"><span class="card-title">Dokumente für die Reisemappe ({len(mod_reisepdf.liste())})</span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Dokument</th><th>Gilt für</th><th>Umfang</th><th>Status</th><th></th></tr></thead>
+        <tbody>{zeilen or '<tr><td colspan="5" class="empty-state">Noch keine Dokumente hochgeladen</td></tr>'}</tbody>
+      </table></div>
+    </div>
+    <div class="card" style="max-width:720px">
+      <div class="card-header"><span class="card-title">Neues Dokument hochladen</span></div>
+      <div class="card-body">
+        <form method="post" action="/einstellungen/reise-pdfs/hochladen" enctype="multipart/form-data">
+          <div class="form-group"><label>Titel (erscheint im Inhaltsverzeichnis)</label>
+            <input type="text" name="titel" required maxlength="120" placeholder="z. B. Krankenversicherung – Kopie der Karte"></div>
+          <div class="form-group"><label>Gilt für</label><select name="kuerzel">{opts}</select></div>
+          <div class="form-group"><label>Datei (PDF oder Foto, höchstens {mod_reisepdf.MAX_MB} MB)</label>
+            <input type="file" name="datei" accept=".pdf,image/*" required></div>
+          <div style="display:flex;gap:8px;margin-top:12px">
+            <button type="submit" class="btn btn-primary">📎 Hochladen</button>
+            <a href="/einstellungen" class="btn btn-secondary">Zurück</a></div>
+        </form>
+      </div>
+    </div>"""
+
+
+def _reisepdf_kein_zugriff():
+    return HTMLResponse(shell("Kein Zugriff",
+        '<div class="alert alert-err">Nur Organisatoren dürfen die Reise-PDFs ändern.</div>'), status_code=403)
+
+
+@app.get("/einstellungen/reise-pdfs", response_class=HTMLResponse)
+def reisepdfs_seite(request: Request, ok: str = "", fehler: str = ""):
+    if not ist_organisator(request):
+        return _reisepdf_kein_zugriff()
+    return HTMLResponse(shell("Reise-PDFs", _reisepdf_seite(ok, fehler), "einstellungen"))
+
+
+@app.post("/einstellungen/reise-pdfs/hochladen", response_class=HTMLResponse)
+async def reisepdfs_hochladen(request: Request, datei: UploadFile = File(...), titel: str = Form(""),
+                              kuerzel: str = Form("")):
+    if not ist_organisator(request):
+        return _reisepdf_kein_zugriff()
+    try:
+        daten_b = await datei.read()
+        mod_reisepdf.hinzufuegen(titel, kuerzel, daten_b, datei.filename or "dokument.pdf", datei.content_type or "")
+    except ValueError as ex:
+        return HTMLResponse(shell("Reise-PDFs", _reisepdf_seite(fehler=str(ex)), "einstellungen"), status_code=400)
+    except Exception as ex:
+        return HTMLResponse(shell("Reise-PDFs", _reisepdf_seite(fehler=f"Speichern fehlgeschlagen: {ex}"), "einstellungen"),
+                            status_code=500)
+    return RedirectResponse("/einstellungen/reise-pdfs?ok=" + urllib.parse.quote("Dokument gespeichert"), status_code=303)
+
+
+@app.post("/einstellungen/reise-pdfs/{pid}/aktiv")
+async def reisepdfs_aktiv(pid: int, request: Request):
+    if not ist_organisator(request):
+        return _reisepdf_kein_zugriff()
+    d = mod_reisepdf.holen(pid)
+    if d:
+        mod_reisepdf.aktiv_setzen(pid, not d["aktiv"])
+    return RedirectResponse("/einstellungen/reise-pdfs", status_code=303)
+
+
+@app.post("/einstellungen/reise-pdfs/{pid}/loeschen")
+async def reisepdfs_loeschen(pid: int, request: Request):
+    if not ist_organisator(request):
+        return _reisepdf_kein_zugriff()
+    mod_reisepdf.loeschen(pid)
+    return RedirectResponse("/einstellungen/reise-pdfs?ok=" + urllib.parse.quote("Dokument entfernt"), status_code=303)
+
+
+@app.get("/einstellungen/reise-pdfs/{pid}/ansehen")
+def reisepdfs_ansehen(pid: int, request: Request):
+    if not ist_organisator(request):
+        return _reisepdf_kein_zugriff()
+    from fastapi.responses import Response
+    try:
+        daten_b = mod_reisepdf.pdf_bytes(pid)
+    except Exception as ex:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">Datei nicht ladbar: {_bw_e(str(ex))}</div>'),
+                            status_code=500)
+    if not daten_b:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Dokument nicht gefunden.</div>'), status_code=404)
+    return Response(content=daten_b, media_type="application/pdf",
+                    headers={"Content-Disposition": f"inline; filename=Reise-PDF_{pid}.pdf"})
 
 
 @app.get("/einstellungen/zuschlaege", response_class=HTMLResponse)

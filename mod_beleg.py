@@ -71,6 +71,7 @@ from mod_anon import anonymisieren
 from mod_geo import adresse_geokodieren
 from mod_vma import IATA_KOORDINATEN
 from mod_vma_tage import vma_auto_aktualisieren, vma_auto_fuer_beleg
+import mod_a1
 
 
 def _segment_koordinaten_praezisieren(ki_result: dict) -> None:
@@ -477,6 +478,12 @@ WICHTIG bei "belegart" (niemals leer lassen):
   sonstige Gebühren.
 - "Rechnung" = Dokument, das ausdrücklich Rechnung/Invoice/Tax Invoice heißt oder eine
   Rechnungsnummer samt Rechnungsanschrift trägt.
+- "A1Bescheinigung" = A1-Bescheinigung ("Bescheinigung über die anzuwendenden Rechtsvorschriften",
+  Portable Document A1, Entsendung ins EU-/EWR-Ausland, Schweiz, Vereinigtes Königreich). Dann ist
+  "reisender" der Name der Person, "event_datum_von"/"event_datum_bis" der Gültigkeitszeitraum,
+  "belegdatum" das Ausstellungsdatum, "anbieter" die ausstellende Stelle (Krankenkasse oder
+  Rentenversicherung); es gibt keinen Betrag. "transportart" bleibt leer. Eine Rechnung des
+  Telekommunikationsanbieters "A1 Telekom" ist KEINE A1-Bescheinigung.
 - "Sonstiges" NUR, wenn das Dokument keinen bezahlten Betrag enthält und weder Buchung
   noch Änderung ist.
 
@@ -485,7 +492,7 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
 
 """ + """{
   "belegdatum": "DD.MM.YYYY",
-  "belegart": "Rechnung|Quittung|Flugaenderung|Sonstiges",
+  "belegart": "Rechnung|Quittung|Flugaenderung|A1Bescheinigung|Sonstiges",
   "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Sonstiges",
   "transportart_freitext": "nur wenn Sonstiges",
   "anbieter": "Name des Anbieters",
@@ -542,6 +549,8 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
                            "betrag_brutto","waehrung","event_datum_von","zahlungsart"]
                 if result.get("belegart") == "Buchungsbestaetigung":
                     pflicht = [f for f in pflicht if f not in ("betrag_brutto","waehrung","zahlungsart")]
+                if result.get("belegart") == "A1Bescheinigung":
+                    pflicht = []          # A1-Bescheinigung: kein Betrag, keine Pflichtfelder der Kostenbelege
                 fehlend = [f for f in pflicht if not result.get(f)]
                 result["pflichtfelder_ok"] = len(fehlend) == 0
                 result["fehlende_pflichtfelder"] = fehlend
@@ -704,6 +713,12 @@ WICHTIG bei "belegart" (niemals leer lassen):
 - "Rechnung" = Dokument, das ausdrücklich Rechnung/Invoice/Tax Invoice heißt oder eine
   Rechnungsnummer samt Rechnungsanschrift trägt.
 - "Buchungsbestaetigung" = Vorab-Bestätigung einer Buchung (siehe oben), "Flugaenderung" = Änderungsdokument.
+- "A1Bescheinigung" = A1-Bescheinigung ("Bescheinigung über die anzuwendenden Rechtsvorschriften",
+  Portable Document A1, Entsendung ins EU-/EWR-Ausland, Schweiz, Vereinigtes Königreich). Dann ist
+  "reisender" der Name der Person, "event_datum_von"/"event_datum_bis" der Gültigkeitszeitraum,
+  "belegdatum" das Ausstellungsdatum, "anbieter" die ausstellende Stelle (Krankenkasse oder
+  Rentenversicherung); es gibt keinen Betrag. "transportart" bleibt leer. Eine Rechnung des
+  Telekommunikationsanbieters "A1 Telekom" ist KEINE A1-Bescheinigung.
 - "Sonstiges" NUR, wenn das Dokument keinen bezahlten Betrag enthält und weder Buchung
   noch Änderung ist.
 
@@ -713,7 +728,7 @@ Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfe
 JSON-Format:
 """ + """{
   "belegdatum": "DD.MM.YYYY",
-  "belegart": "Rechnung|Buchungsbestaetigung|Quittung|Flugaenderung|Sonstiges",
+  "belegart": "Rechnung|Buchungsbestaetigung|Quittung|Flugaenderung|A1Bescheinigung|Sonstiges",
   "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Sonstiges",
   "transportart_freitext": "nur wenn Sonstiges",
   "anbieter": "Name des Anbieters",
@@ -801,6 +816,8 @@ JSON-Format:
                            "betrag_brutto","waehrung","event_datum_von","zahlungsart"]
                 if result.get("belegart") == "Buchungsbestaetigung":
                     pflicht = [f for f in pflicht if f not in ("betrag_brutto","waehrung","zahlungsart")]
+                if result.get("belegart") == "A1Bescheinigung":
+                    pflicht = []          # A1-Bescheinigung: kein Betrag, keine Pflichtfelder der Kostenbelege
                 fehlend = [f for f in pflicht if not result.get(f)]
                 result["pflichtfelder_ok"] = len(fehlend) == 0
                 result["fehlende_pflichtfelder"] = fehlend
@@ -964,8 +981,11 @@ async def beleg_neu_analysieren(bid: int) -> dict:
             ki_result = await gpt_analyse_bild(seiten_bilder[0], "image/jpeg", dateiname or "beleg", seiten_bilder[1:])
         except Exception as e:
             return {"fehler": f"Bild-Neuanalyse fehlgeschlagen: {e}"}
+    elif mod_a1.a1_erkennen(rohtext, dateiname or ""):
+        ki_result = mod_a1.ki_ergebnis(mod_a1.a1_auswerten(rohtext, dateiname or ""), dateiname or "")
     else:
         ki_result = await gpt_analyse(rohtext, "")
+    ki_result = mod_a1.a1_pruefen(ki_result) or ki_result
 
     if "fehler" in ki_result and not ki_result.get("anbieter"):
         return {"fehler": ki_result.get("fehler", "KI-Analyse fehlgeschlagen")}
@@ -1310,10 +1330,13 @@ async def beleg_verarbeiten(
     datei_bytes: bytes,
     dateiname: str,
     reise_code: str | None,
-    content_type: str = "application/pdf"
+    content_type: str = "application/pdf",
+    dokumentart: str | None = None,
+    a1_kuerzel: str | None = None,
 ) -> dict:
     """
-    Komplette Beleg-Pipeline:
+    Komplette Beleg-Pipeline (dokumentart="A1Bescheinigung": ausdrücklich als A1 hochgeladen, a1_kuerzel =
+    Mitarbeiter, dem sie gehört):
     1. Zu PDF konvertieren
     2. Anonymisieren
     3. GPT-4o Analyse
@@ -1356,12 +1379,22 @@ async def beleg_verarbeiten(
     # 2. Text aus PDF lesen
     rohtext = pdf_text_lesen(original_pdf)
 
-    # Bild ohne extrahierbaren Text → GPT-4o Vision direkt
+    # 2b. A1-Bescheinigung? Erkennung am Text (bei Scans am Dateinamen) oder ausdrücklich als A1 hochgeladen.
+    # Mit Text wird sie direkt ausgewertet (ohne KI, ohne Betrag) und als Beleg „A1Bescheinigung“ abgelegt.
+    # Bei Scans liest die KI die Angaben; sagt sie „keine A1“, obwohl nur der Dateiname so aussah, gilt die KI.
     is_image = content_type in BILD_TYPEN
     ohne_text = len(rohtext.strip()) < 20
+    a1_felder = None
+    if dokumentart == mod_a1.BELEGART or mod_a1.a1_erkennen(rohtext, dateiname):
+        a1_felder = mod_a1.a1_auswerten(rohtext, dateiname)
+    a1_scan = a1_felder is not None and ohne_text
+
+    # Bild ohne extrahierbaren Text → GPT-4o Vision direkt
     # Scan ohne Text (Bild oder PDF aus Bildern): die KI liest alle Seiten (höchstens MAX_KI_SEITEN)
     seiten_bilder = pdf_seitenbilder(original_pdf) if (ohne_text and (is_image or content_type == "application/pdf")) else []
-    if ohne_text and (is_image or (content_type == "application/pdf" and seiten_bilder)):
+    if a1_felder is not None and not a1_scan:
+        ki_result = mod_a1.ki_ergebnis(a1_felder, dateiname)
+    elif ohne_text and (is_image or (content_type == "application/pdf" and seiten_bilder)):
         if len(seiten_bilder) > 1:
             ki_result = await gpt_analyse_bild(seiten_bilder[0], "image/jpeg", dateiname, seiten_bilder[1:])
         else:
@@ -1370,6 +1403,21 @@ async def beleg_verarbeiten(
         rohtext = json.dumps(ki_result, ensure_ascii=False, indent=2)
     else:
         ki_result = await gpt_analyse(rohtext, dateiname)
+    if a1_felder is None or a1_scan:
+        a1_ki = mod_a1.a1_pruefen(ki_result)          # die KI hat das Dokument als A1 erkannt
+        if a1_ki:
+            ki_result, a1_felder = a1_ki, (a1_felder or {})
+        elif a1_scan and (dokumentart == mod_a1.BELEGART or "fehler" in ki_result):
+            ki_result = mod_a1.ki_ergebnis(a1_felder, dateiname)   # KI nicht erreichbar oder ohne Ergebnis: einfache A1
+            rohtext = json.dumps(ki_result, ensure_ascii=False, indent=2)
+        else:
+            a1_felder = None                              # nur der Dateiname sah nach A1 aus, die KI sagt: etwas anderes
+    ist_a1 = a1_felder is not None
+    if ist_a1:
+        dup_a1 = mod_a1.duplikat_id(reise_code, ki_result, dateiname)
+        if dup_a1:
+            return {"beleg_id": dup_a1, "duplikat": True, "status": "duplikat",
+                    "zusammenfassung": f"Duplikat – diese A1-Bescheinigung ist bereits als Beleg #{dup_a1} vorhanden."}
 
     # Inhaltsbasierter Duplikat-Check: Message-ID allein reicht nicht, da eine
     # WEITERLEITUNG einer E-Mail technisch eine neue, eigene Message-ID
@@ -1558,6 +1606,8 @@ async def beleg_verarbeiten(
                        f"{ki_result.get('anbieter','?')} – "
                        f"{ki_result.get('betrag_brutto','?')} "
                        f"{ki_result.get('waehrung','EUR')}")
+    if ist_a1:
+        zusammenfassung = mod_a1.zusammenfassung(ki_result)
 
     # Von der KI geschätzter Euro-Gegenwert bei Fremdwährungsbelegen – nur als
     # Arbeitsgrundlage, der Organisator kann ihn später anhand der echten
@@ -1641,13 +1691,19 @@ async def beleg_verarbeiten(
 
     db.commit(); cur.close(); db.close()
 
-    if reise_code and not aenderung_info:
+    if ist_a1 and a1_kuerzel:
+        try:
+            mod_a1.a1_zuordnen(beleg_id, a1_kuerzel)
+        except Exception as ex:
+            print(f"[A1] Zuordnung zu {a1_kuerzel} nicht gespeichert (Neustart/Init nötig?): {ex}")
+
+    if reise_code and not aenderung_info and not ist_a1:
         vma_auto_aktualisieren(reise_code)     # neuer Hotel-/Flugbeleg: Land und Satz der Tage aktualisieren
 
     # Gleicher Buchungscode in derselben Reise: Buchungsbestätigung und Rechnung/Quittung
     # automatisch zu einer Gruppe verknüpfen (Änderungs-Belege bleiben außen vor).
     verknuepft = 0
-    if not aenderung_info:
+    if not aenderung_info and not ist_a1:
         try:
             verknuepft = auto_verknuepfen(beleg_id)
         except Exception:
