@@ -2,7 +2,7 @@
 mod_auth.py – Login pro Mitarbeiter (Passwort-Hashing, Session-Check)
 """
 from __future__ import annotations
-import hashlib, os, secrets
+import hashlib, os, secrets, time
 
 from mod_db import get_db, ph, is_postgres
 
@@ -49,14 +49,36 @@ def login_pruefen(kuerzel: str, passwort: str) -> dict | None:
     return {"kuerzel": g("kuerzel", 0), "klarname": g("klarname", 1)}
 
 
+_PW_CACHE_SEKUNDEN = 300
+_pw_bekannt_bis = 0.0       # bis zu diesem Zeitpunkt (time.monotonic) gilt "es gibt Passwörter" als gemerkt
+
+
+def passwoerter_bekannt() -> bool:
+    """Nur aus dem Speicher, ohne Datenbank: True, wenn kürzlich schon festgestellt wurde, dass Passwörter existieren."""
+    return time.monotonic() < _pw_bekannt_bis
+
+
+def passwort_cache_leeren() -> None:
+    global _pw_bekannt_bis
+    _pw_bekannt_bis = 0.0
+
+
 def hat_bereits_passwoerter() -> bool:
-    """True, wenn schon mindestens ein Mitarbeiter ein Passwort gesetzt hat (Bootstrap-Sperre)."""
-    P = ph()
+    """
+    True, wenn schon mindestens ein Mitarbeiter ein Passwort gesetzt hat (Bootstrap-Sperre).
+    Ein "Ja" wird 5 Minuten gemerkt – diese Prüfung läuft bei jedem Seitenaufruf und kostete bisher jedes Mal
+    eine Datenbankverbindung. Ein "Nein" wird nie gemerkt (die Ersteinrichtung muss sofort wirken).
+    """
+    global _pw_bekannt_bis
+    if passwoerter_bekannt():
+        return True
     db = get_db(); cur = db.cursor()
     cur.execute("SELECT COUNT(*) FROM mitarbeiter WHERE passwort_hash IS NOT NULL")
     row = cur.fetchone()
     cur.close(); db.close()
-    count = row[0] if isinstance(row, tuple) else row["count"]
+    count = row[0]
+    if count > 0:
+        _pw_bekannt_bis = time.monotonic() + _PW_CACHE_SEKUNDEN
     return count > 0
 
 

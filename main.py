@@ -48,7 +48,7 @@ from mod_vma_tage import (vma_berechnen, land_fuer_tag, trennungspauschale_berec
                            fruehstueck_aus_beleg, vma_tage_generieren, land_fuer_letzten_tag,
                            vma_auto_aktualisieren, vma_auto_fuer_beleg)
 from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
-                       hat_bereits_passwoerter, pfad_ist_offen, ist_organisator)
+                       hat_bereits_passwoerter, passwoerter_bekannt, pfad_ist_offen, ist_organisator)
 from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_token,
                          tage_sicherstellen, tage_laden, tag_speichern,
                          reisende_der_reise, zugaenge_der_reise, portal_mail_senden,
@@ -122,6 +122,9 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.46", "zeit": "2026-10-21 15:49", "aenderungen": [
+        "Geschwindigkeit: Die App war langsam, weil sie bei jedem Seitenaufruf sehr viele neue Datenbank-Verbindungen aufgebaut hat (Dashboard und „Offene Aufgaben“ je über 100). Die Verbindungen werden jetzt wiederverwendet. Die A1-Aufgaben werden für alle Reisen gesammelt abgefragt (statt je Reise einzeln). Dashboard und Aufgaben-Liste laden dadurch um ein Vielfaches schneller.",
+        "Anmeldeprüfung und Datei-Speicher (S3) sparen sich bei jedem Aufruf die Neuverbindung bzw. den Neuaufbau des Clients; die Anmeldeprüfung blockiert andere Anfragen nicht mehr."]},
     {"version": "3.45", "zeit": "2026-10-21 15:15", "aenderungen": [
         "Reisen-Übersicht: Die Spalte „Status“ steht jetzt ganz links.",
         "Anmeldeschlüssel: Ist SESSION_SECRET in Render nicht eingetragen, erzeugt die App einmalig einen zufälligen Schlüssel und speichert ihn in der Datenbank (bleibt bei jedem Neustart gleich). Die Meldung „Fehlende Pflicht-Einstellungen: SESSION_SECRET“ in der Dokumentation entfällt. Ein in Render eingetragener Wert hat weiter Vorrang. Einmalig müssen sich alle neu anmelden."]},
@@ -836,7 +839,14 @@ async def _zugang_pruefen(request: Request, call_next):
     pfad = request.url.path
     if pfad_ist_offen(pfad):
         return await call_next(request)
-    if not hat_bereits_passwoerter():
+    # Die Datenbank-Prüfung läuft im Hintergrund-Thread, damit sie die übrigen Anfragen nicht blockiert;
+    # ein bekanntes "Ja" kommt ohne Datenbank aus dem Speicher.
+    if passwoerter_bekannt():
+        hat_pw = True
+    else:
+        from starlette.concurrency import run_in_threadpool
+        hat_pw = await run_in_threadpool(hat_bereits_passwoerter)
+    if not hat_pw:
         # Noch kein Passwort im System vergeben → Ersteinrichtung erlauben
         if pfad != "/setup":
             return RedirectResponse("/setup", status_code=303)

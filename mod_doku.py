@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.45"
+DOKU_GEPRUEFT_FUER = "3.46"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -1013,6 +1013,8 @@ KAPITEL = [
             ["Falsches Land oder falscher VMA-Satz", "Am Tag **↺ Auto** klicken oder oben im Tagesverlauf **↺ Alle Tage auf Auto**. Notfalls den Satz am Tag manuell überschreiben. Die Diagnose steht unter `/reise/<Code>/vma-debug`."],
             ["„Kurs nachtragen“ bleibt stehen", "Kurs am Beleg eintragen oder Euro-Betrag final setzen (am besten über die Kreditkarten-Abrechnung)."],
             ["Seite meldet „Spalte fehlt“", "Einmal `/init` aufrufen."],
+            ["Erster Aufruf nach einer Pause dauert 30–60 Sekunden", "Kostenlose Render-Instanzen schlafen nach 15 Minuten ohne Aufruf ein und müssen erst starten. Abhilfe: bezahlte Instanz oder ein Wach-Aufruf von `/health` alle 10 Minuten (z. B. mit einem Uptime-Dienst)."],
+            ["Seiten laden dauernd langsam", "Datenbank und App sollten in Render in derselben **Region** liegen (Dashboard der Datenbank → Region). Liegen sie in verschiedenen Regionen, kostet jede Abfrage Zeit. Die Datenbank-Verbindungen werden seit Version 3.46 wiederverwendet; der Datei-Speicher (Hetzner) wird nur beim Hochladen und Öffnen von Belegen angesprochen."],
         ], [34, 66]),
     ]},
     {"id": "c-verlauf", "teil": "C", "titel": "Änderungsverlauf", "bloecke": [

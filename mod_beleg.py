@@ -94,13 +94,23 @@ def _segment_koordinaten_praezisieren(ki_result: dict) -> None:
                 seg[f"{praefix}_lat"], seg[f"{praefix}_lon"] = koord
 from mod_vma import IATA_KOORDINATEN
 
+_s3_cache: dict = {}
+
+
 def get_s3():
-    """S3/Hetzner Object Storage Client."""
+    """S3/Hetzner Object Storage Client. Wird wiederverwendet (der Neuaufbau des Clients kostet jedes Mal
+    einige hundert Millisekunden; boto3-Clients sind für den gemeinsamen Gebrauch durch mehrere Threads gedacht)."""
     import boto3
-    return boto3.client("s3",
-        endpoint_url=S3_ENDPOINT,
-        aws_access_key_id=S3_ACCESS_KEY,
-        aws_secret_access_key=S3_SECRET_KEY)
+    schluessel = (S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY)
+    client = _s3_cache.get(schluessel)
+    if client is None:
+        client = boto3.client("s3",
+            endpoint_url=S3_ENDPOINT,
+            aws_access_key_id=S3_ACCESS_KEY,
+            aws_secret_access_key=S3_SECRET_KEY)
+        _s3_cache.clear()
+        _s3_cache[schluessel] = client
+    return client
 
 def s3_upload(key: str, data: bytes, content_type: str = "application/pdf") -> str:
     """Lädt Datei zu S3 hoch. Gibt Key zurück."""

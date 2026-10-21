@@ -370,63 +370,129 @@ def befreiung_loeschen(reise_code: str, kuerzel: str) -> None:
         cur.close(); db.close()
 
 
-def befreiungen(reise_code: str) -> dict:
-    """{kuerzel: grund} für die Reise."""
+def _teile(liste: list, n: int = 400):
+    """Zerlegt eine lange Liste in Stücke (für IN-Abfragen; SQLite erlaubt höchstens 999 Platzhalter)."""
+    for i in range(0, len(liste), n):
+        yield liste[i:i + n]
+
+
+def _befreiungen_fuer(codes: list) -> dict:
+    """{reise_code: {kuerzel: grund}} für mehrere Reisen mit einer einzigen Abfrage."""
+    erg = {c: {} for c in codes}
+    if not codes:
+        return erg
     P = ph()
     db = get_db(); cur = db.cursor()
     try:
-        cur.execute(f"SELECT kuerzel, grund FROM a1_befreiung WHERE reise_code={P}", (reise_code,))
-        return {_g(r, "kuerzel", 0): (_g(r, "grund", 1) or "") for r in cur.fetchall()}
+        for teil in _teile(list(codes)):
+            marken = ",".join([P] * len(teil))
+            cur.execute(f"SELECT reise_code, kuerzel, grund FROM a1_befreiung WHERE reise_code IN ({marken})",
+                        tuple(teil))
+            for r in cur.fetchall():
+                erg.setdefault(_g(r, "reise_code", 0), {})[_g(r, "kuerzel", 1)] = (_g(r, "grund", 2) or "")
     except Exception:
         try: db.rollback()
         except Exception: pass
-        return {}
+        return {c: {} for c in codes}
     finally:
         cur.close(); db.close()
+    return erg
+
+
+def befreiungen(reise_code: str) -> dict:
+    """{kuerzel: grund} für die Reise."""
+    return _befreiungen_fuer([reise_code]).get(reise_code, {})
 
 
 # ── Reise: Länder, Reisende, Status ───────────────────────────────
 
-def reise_a1_laender(reise_code: str) -> list:
-    """[(Code, Name)] der Reiseländer, für die eine A1 nötig ist (EU/EWR/CH/GB, ohne Deutschland)."""
+def _laender_fuer(codes: list) -> dict:
+    """{reise_code: [(Code, Name)]} der Reiseländer, für die eine A1 nötig ist – mehrere Reisen, wenige Abfragen."""
+    gefunden = {c: set() for c in codes}
+    if not codes:
+        return {}
     P = ph()
-    codes = set()
     db = get_db(); cur = db.cursor()
     try:
-        for sql in (f"SELECT DISTINCT land_code FROM vma_tage WHERE reise_code={P}",
-                    f"SELECT DISTINCT land_code FROM reise_laender WHERE reise_code={P}"):
-            try:
-                cur.execute(sql, (reise_code,))
-                for r in cur.fetchall():
-                    c = str(_g(r, "land_code", 0) or "").strip().upper()
-                    if c in A1_LAENDER:
-                        codes.add(c)
-            except Exception:
-                try: db.rollback()
-                except Exception: pass
+        for teil in _teile(list(codes)):
+            marken = ",".join([P] * len(teil))
+            for tabelle in ("vma_tage", "reise_laender"):
+                try:
+                    cur.execute(f"SELECT DISTINCT reise_code, land_code FROM {tabelle} WHERE reise_code IN ({marken})",
+                                tuple(teil))
+                    for r in cur.fetchall():
+                        rc = _g(r, "reise_code", 0)
+                        c = str(_g(r, "land_code", 1) or "").strip().upper()
+                        if c in A1_LAENDER and rc in gefunden:
+                            gefunden[rc].add(c)
+                except Exception:
+                    try: db.rollback()
+                    except Exception: pass
     finally:
         cur.close(); db.close()
-    return sorted(((c, mod_laender.land_name(c) or c) for c in codes), key=lambda x: x[1])
+    return {rc: sorted(((c, mod_laender.land_name(c) or c) for c in cs), key=lambda x: x[1])
+            for rc, cs in gefunden.items()}
+
+
+def reise_a1_laender(reise_code: str) -> list:
+    """[(Code, Name)] der Reiseländer, für die eine A1 nötig ist (EU/EWR/CH/GB, ohne Deutschland)."""
+    return _laender_fuer([reise_code]).get(reise_code, [])
+
+
+def _belege_fuer(codes: list) -> dict:
+    """{reise_code: [{id, reisender, kuerzel, von, bis, dateiname}]} – A1-Belege mehrerer Reisen, wenige Abfragen."""
+    erg = {c: [] for c in codes}
+    if not codes:
+        return erg
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    try:
+        for teil in _teile(list(codes)):
+            marken = ",".join([P] * len(teil))
+            try:
+                cur.execute(f"""SELECT reise_code, id, reisender, a1_kuerzel, event_datum_von, event_datum_bis, dateiname
+                                FROM belege WHERE reise_code IN ({marken}) AND belegart={P} ORDER BY id""",
+                            tuple(teil) + (BELEGART,))
+            except Exception:
+                db.rollback()
+                cur.execute(f"""SELECT reise_code, id, reisender, NULL, event_datum_von, event_datum_bis, dateiname
+                                FROM belege WHERE reise_code IN ({marken}) AND belegart={P} ORDER BY id""",
+                            tuple(teil) + (BELEGART,))
+            for r in cur.fetchall():
+                erg.setdefault(_g(r, "reise_code", 0), []).append(
+                    {"id": _g(r, "id", 1), "reisender": _g(r, "reisender", 2) or "",
+                     "kuerzel": _g(r, "a1_kuerzel", 3) or "",
+                     "von": _als_datum(_g(r, "event_datum_von", 4)), "bis": _als_datum(_g(r, "event_datum_bis", 5)),
+                     "dateiname": _g(r, "dateiname", 6) or ""})
+    finally:
+        cur.close(); db.close()
+    return erg
 
 
 def a1_belege(reise_code: str) -> list:
     """Alle A1-Belege der Reise: [{id, reisender, kuerzel, von, bis, dateiname}]"""
+    return _belege_fuer([reise_code]).get(reise_code, [])
+
+
+def _reisende_fuer(codes: list) -> dict:
+    """{reise_code: [(kuerzel, klarname, email)]} – dieselbe Reihenfolge wie mod_portal.reisende_der_reise."""
+    erg = {c: [] for c in codes}
+    if not codes:
+        return erg
     P = ph()
     db = get_db(); cur = db.cursor()
     try:
-        try:
-            cur.execute(f"""SELECT id, reisender, a1_kuerzel, event_datum_von, event_datum_bis, dateiname
-                            FROM belege WHERE reise_code={P} AND belegart={P} ORDER BY id""", (reise_code, BELEGART))
-        except Exception:
-            db.rollback()
-            cur.execute(f"""SELECT id, reisender, NULL, event_datum_von, event_datum_bis, dateiname
-                            FROM belege WHERE reise_code={P} AND belegart={P} ORDER BY id""", (reise_code, BELEGART))
-        rows = cur.fetchall()
+        for teil in _teile(list(codes)):
+            marken = ",".join([P] * len(teil))
+            cur.execute(f"""SELECT rm.reise_code, m.kuerzel, m.klarname, m.email
+                            FROM reise_mitarbeiter rm JOIN mitarbeiter m ON m.kuerzel = rm.kuerzel
+                            WHERE rm.reise_code IN ({marken}) ORDER BY m.klarname""", tuple(teil))
+            for r in cur.fetchall():
+                erg.setdefault(_g(r, "reise_code", 0), []).append(
+                    (_g(r, "kuerzel", 1), _g(r, "klarname", 2), _g(r, "email", 3)))
     finally:
         cur.close(); db.close()
-    return [{"id": _g(r, "id", 0), "reisender": _g(r, "reisender", 1) or "", "kuerzel": _g(r, "a1_kuerzel", 2) or "",
-             "von": _als_datum(_g(r, "event_datum_von", 3)), "bis": _als_datum(_g(r, "event_datum_bis", 4)),
-             "dateiname": _g(r, "dateiname", 5) or ""} for r in rows]
+    return erg
 
 
 def _reisezeitraum(reise_code: str):
@@ -453,6 +519,11 @@ def a1_status(reise_code: str, reisende: list) -> dict:
     belege = a1_belege(reise_code)
     frei = befreiungen(reise_code)
     ab, zu = _reisezeitraum(reise_code)
+    return _a1_status_berechnen(laender, belege, frei, ab, zu, reisende)
+
+
+def _a1_status_berechnen(laender: list, belege: list, frei: dict, ab, zu, reisende: list) -> dict:
+    """Reine Rechnung ohne Datenbankzugriff (wird auch von a1_todos mit gesammelten Daten genutzt)."""
     verwendet = set()
     personen = []
     for r in reisende:
@@ -532,6 +603,7 @@ def a1_todos(heute: date | None = None) -> list:
     """
     Offene A1-Aufgaben für Reisen, die noch nicht zu Ende sind:
     [{reise_code, titel, abreise, rueckkehr, laender:[(c,n)], fehlt:[Klarnamen], pruefen:[Klarnamen], nicht_zugeordnet:int}]
+    Die Daten aller Reisen werden gesammelt abgefragt (5 Abfragen insgesamt statt 5 je Reise).
     """
     heute = heute or date.today()
     db = get_db(); cur = db.cursor()
@@ -542,15 +614,23 @@ def a1_todos(heute: date | None = None) -> list:
         reisen = cur.fetchall()
     finally:
         cur.close(); db.close()
+    if not reisen:
+        return []
+    codes = [_g(r, "code", 0) for r in reisen]
     try:
-        from mod_portal import reisende_der_reise
+        laender_je = _laender_fuer(codes)
+        belege_je = _belege_fuer(codes)
+        frei_je = _befreiungen_fuer(codes)
+        reisende_je = _reisende_fuer(codes)
     except Exception:
         return []
     erg = []
     for r in reisen:
         code = _g(r, "code", 0)
+        ab, zu = _als_datum(_g(r, "abreise", 2)), _als_datum(_g(r, "rueckkehr", 3))
         try:
-            st = a1_status(code, reisende_der_reise(code))
+            st = _a1_status_berechnen(laender_je.get(code, []), belege_je.get(code, []), frei_je.get(code, {}),
+                                      ab, zu, reisende_je.get(code, []))
         except Exception:
             continue
         if not st["noetig"]:
@@ -561,7 +641,7 @@ def a1_todos(heute: date | None = None) -> list:
             fehlt = ["(noch kein Reisender zugeordnet)"]
         if fehlt or pruefen or st["nicht_zugeordnet"]:
             erg.append({"reise_code": code, "titel": _g(r, "titel", 1) or "",
-                        "abreise": _als_datum(_g(r, "abreise", 2)), "rueckkehr": _als_datum(_g(r, "rueckkehr", 3)),
+                        "abreise": ab, "rueckkehr": zu,
                         "laender": st["laender"], "fehlt": fehlt, "pruefen": pruefen,
                         "nicht_zugeordnet": len(st["nicht_zugeordnet"])})
     return erg

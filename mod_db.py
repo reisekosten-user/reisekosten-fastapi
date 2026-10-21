@@ -8,11 +8,127 @@ from datetime import date, datetime, timedelta
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
+# ── Verbindungs-Pool (nur PostgreSQL) ─────────────────────────────
+# Bisher wurde bei jedem get_db() eine NEUE Verbindung zur Datenbank aufgebaut (TCP + SSL + Anmeldung).
+# Das kostet auf Render je Verbindung 20–200 ms, ein Dashboard-Aufruf brauchte über 100 davon.
+# Jetzt werden fertige Verbindungen aufbewahrt und wiederverwendet. Der übrige Code ändert sich nicht:
+# db.close() gibt die Verbindung an den Pool zurück, statt sie zu schließen.
+import threading, time
+
+POOL_MAX_LEER = 8          # so viele ungenutzte Verbindungen werden höchstens aufbewahrt
+POOL_PRUEFEN_NACH = 20     # Sekunden: länger ungenutzte Verbindungen werden vor der Nutzung kurz angepingt
+POOL_MAX_ALTER = 300       # Sekunden: länger ungenutzte Verbindungen werden geschlossen
+_pool: list = []           # [(Verbindung, Zeitpunkt der Rückgabe)]
+_pool_lock = threading.Lock()
+_pool_zaehler = {"neu": 0, "wieder": 0}
+
+
+def _roh_schliessen(c) -> None:
+    try:
+        c.close()
+    except Exception:
+        pass
+
+
+def _zurueckgeben(c) -> None:
+    """Verbindung nach Gebrauch in den Pool legen (offene Transaktion wird wie bei close() verworfen)."""
+    try:
+        if c.closed:
+            return
+        c.rollback()
+    except Exception:
+        _roh_schliessen(c)
+        return
+    jetzt = time.monotonic()
+    zu_schliessen = []
+    with _pool_lock:
+        while _pool and jetzt - _pool[0][1] > POOL_MAX_ALTER:
+            zu_schliessen.append(_pool.pop(0)[0])
+        if len(_pool) < POOL_MAX_LEER:
+            _pool.append((c, jetzt))
+            c = None
+    for alt in zu_schliessen:
+        _roh_schliessen(alt)
+    if c is not None:
+        _roh_schliessen(c)
+
+
+class _PoolVerbindung:
+    """Dünne Hülle um eine psycopg2-Verbindung: alles wird durchgereicht, nur close() gibt in den Pool zurück."""
+
+    def __init__(self, c):
+        object.__setattr__(self, "_c", c)
+        object.__setattr__(self, "_zu", False)
+
+    def __getattr__(self, name):
+        if name in ("_c", "_zu"):
+            raise AttributeError(name)
+        return getattr(self._c, name)
+
+    def __setattr__(self, name, wert):
+        setattr(self._c, name, wert)
+
+    @property
+    def closed(self):
+        return self._zu or self._c.closed
+
+    def close(self):
+        if self._zu:
+            return
+        object.__setattr__(self, "_zu", True)
+        _zurueckgeben(self._c)
+
+    def __enter__(self):
+        self._c.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self._c.__exit__(*args)
+
+    def __del__(self):
+        # Wurde close() vergessen, wird die Verbindung wie früher einfach geschlossen (nicht in den Pool gelegt).
+        try:
+            if not self._zu:
+                _roh_schliessen(self._c)
+        except Exception:
+            pass
+
+
+def _pg_verbindung():
+    import psycopg2
+    jetzt = time.monotonic()
+    while True:
+        with _pool_lock:
+            eintrag = _pool.pop() if _pool else None
+        if eintrag is None:
+            break
+        c, seit = eintrag
+        try:
+            if c.closed:
+                continue
+            if jetzt - seit > POOL_PRUEFEN_NACH:
+                cur = c.cursor()
+                cur.execute("SELECT 1")
+                cur.close()
+                c.rollback()
+            _pool_zaehler["wieder"] += 1
+            return _PoolVerbindung(c)
+        except Exception:
+            _roh_schliessen(c)
+    _pool_zaehler["neu"] += 1
+    return _PoolVerbindung(psycopg2.connect(DATABASE_URL, connect_timeout=10, keepalives=1, keepalives_idle=30))
+
+
+def pool_info() -> dict:
+    """Für Tests/Diagnose: wie viele Verbindungen liegen bereit, wie oft neu aufgebaut / wiederverwendet."""
+    with _pool_lock:
+        return {"bereit": len(_pool), "neu": _pool_zaehler["neu"], "wieder": _pool_zaehler["wieder"]}
+
+
 def get_db():
     """PostgreSQL wenn DATABASE_URL gesetzt, sonst SQLite lokal."""
     if DATABASE_URL:
-        import psycopg2
-        return psycopg2.connect(DATABASE_URL)
+        return _pg_verbindung()
     else:
         import sqlite3
         conn = sqlite3.connect("reisekosten.db", check_same_thread=False)
