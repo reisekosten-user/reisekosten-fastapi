@@ -19,6 +19,12 @@ Entprellung: Änderungen werden erst gesendet, wenn sie RUHE_SEKUNDEN unverände
 geblieben sind (vermeidet Mail-Flut beim Korrigieren). "sofort=True" (Button)
 überspringt das Warten.
 
+Montage über mehrere Tage: alle Tage tragen dieselbe termine.serie_id und gehen als EINE
+Terminserie (RRULE, eine Mail je Person) raus. Tage mit abweichenden Zeiten (Anreise-/Abreisetag)
+stehen als Ausnahmen (RECURRENCE-ID) in derselben Einladung, fehlende Tage als EXDATE. Die Serie
+läuft in der Zeitzone Europe/Berlin, damit die Uhrzeit über die Sommer-/Winterzeit-Umstellung
+gleich bleibt. Termine ohne serie_id (auch ältere Montagen) bleiben Einzeltermine.
+
 Zeiten: Belege enthalten Ortszeiten. Die Einladung enthält absolute UTC-Zeiten
 (Outlook rechnet in die eigene Zeitzone um); die Ortszeiten stehen zusätzlich
 im Beschreibungstext. Fehlt der UTC-Offset im Beleg, wird MEZ/MESZ angenommen
@@ -117,6 +123,16 @@ def naiv_zu_utc(naiv: datetime, offset_str):
     if off is None:
         off = berlin_offset(naiv)
     return (naiv - off).replace(tzinfo=timezone.utc), geschaetzt
+
+
+def _utc_zu_berlin(utc_dt: datetime) -> datetime:
+    """UTC-datetime -> naive Berliner Ortszeit (MEZ/MESZ)."""
+    naiv = utc_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    for off in (timedelta(hours=1), timedelta(hours=2)):
+        lokal = naiv + off
+        if berlin_offset(lokal) == off:
+            return lokal
+    return naiv + timedelta(hours=1)
 
 
 def _lokal_text(naiv: datetime | None, mit_datum: bool = True) -> str:
@@ -221,6 +237,74 @@ def ics_erzeugen(*, uid, sequence, methode, summary, start, ende, ganztag, locat
     return "\r\n".join(_falten(x) for x in z) + "\r\n"
 
 
+_VTIMEZONE_BERLIN = [
+    "BEGIN:VTIMEZONE", "TZID:Europe/Berlin",
+    "BEGIN:DAYLIGHT", "TZOFFSETFROM:+0100", "TZOFFSETTO:+0200", "TZNAME:CEST",
+    "DTSTART:19700329T020000", "RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU", "END:DAYLIGHT",
+    "BEGIN:STANDARD", "TZOFFSETFROM:+0200", "TZOFFSETTO:+0100", "TZNAME:CET",
+    "DTSTART:19701025T030000", "RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU", "END:STANDARD",
+    "END:VTIMEZONE"]
+
+
+def _ics_zeit(name: str, iso, ganztag: bool) -> str:
+    """Zeile mit Datum bzw. Berliner Ortszeit. iso: 'YYYY-MM-DD' oder 'YYYY-MM-DDTHH:MM:SS' (naiv, Berlin)."""
+    if ganztag:
+        return "%s;VALUE=DATE:%s" % (name, str(iso)[:10].replace("-", ""))
+    return "%s;TZID=Europe/Berlin:%s" % (name, str(iso)[:19].replace("-", "").replace(":", ""))
+
+
+def ics_serie_erzeugen(*, uid, sequence, methode, inhalt, organisator_mail, organisator_name,
+                       teilnehmer_mail, teilnehmer_name, jetzt=None) -> str:
+    """iCalendar für eine Terminserie: Haupttermin mit RRULE (täglich), EXDATE für Lücken und je ein
+    VEVENT mit RECURRENCE-ID für Tage mit abweichenden Zeiten/Angaben. methode: REQUEST oder CANCEL
+    (CANCEL sagt die ganze Serie ab: nur der Haupttermin, STATUS:CANCELLED)."""
+    jetzt = jetzt or _jetzt_utc()
+    abgesagt = (methode == "CANCEL")
+    master_gt = bool(inhalt["ganztag"])
+    abweichungen = [] if abgesagt else list(inhalt.get("abweichungen") or [])
+    org = "ORGANIZER;CN=%s:mailto:%s" % (_cn(organisator_name), organisator_mail)
+    att = ("ATTENDEE;CN=%s;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=FALSE:mailto:%s"
+           % (_cn(teilnehmer_name), teilnehmer_mail))
+
+    def vevent(vor, nach, ganztag, start, ende, summary, location, description):
+        z = ["BEGIN:VEVENT", "UID:" + uid, "DTSTAMP:" + _dt_utc(jetzt), "SEQUENCE:%d" % int(sequence)]
+        z += vor
+        z += [_ics_zeit("DTSTART", start, ganztag), _ics_zeit("DTEND", ende, ganztag)]
+        z += nach
+        z.append("SUMMARY:" + _ics_text(summary))
+        if location:
+            z.append("LOCATION:" + _ics_text(location))
+        if description:
+            z.append("DESCRIPTION:" + _ics_text(description))
+        z += [org, att, "STATUS:CANCELLED" if abgesagt else "STATUS:CONFIRMED",
+              "TRANSP:TRANSPARENT" if ganztag else "TRANSP:OPAQUE",
+              "X-MICROSOFT-CDO-BUSYSTATUS:" + ("FREE" if ganztag else "BUSY")]
+        if ganztag:
+            z.append("X-MICROSOFT-CDO-ALLDAYEVENT:TRUE")
+        if not abgesagt and inhalt.get("erinnerung") and not ganztag:
+            z += ["BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:Erinnerung",
+                  "TRIGGER:-PT%dM" % int(inhalt["erinnerung"]), "END:VALARM"]
+        z.append("END:VEVENT")
+        return z
+
+    wiederholung = []
+    if int(inhalt.get("anzahl") or 1) > 1:
+        wiederholung.append("RRULE:FREQ=DAILY;COUNT=%d" % int(inhalt["anzahl"]))
+    if not abgesagt:
+        wiederholung += [_ics_zeit("EXDATE", x, master_gt) for x in (inhalt.get("ausnahmen") or [])]
+    ereignisse = vevent([], wiederholung, master_gt, inhalt["start"], inhalt["ende"],
+                        inhalt["summary"], inhalt["location"], inhalt["description"])
+    for ab in abweichungen:
+        ereignisse += vevent([_ics_zeit("RECURRENCE-ID", ab["id"], master_gt)], [], bool(ab["ganztag"]),
+                             ab["start"], ab["ende"], ab["summary"], ab["location"], ab["description"])
+    mit_zone = (not master_gt) or any(not ab["ganztag"] for ab in abweichungen)
+    z = ["BEGIN:VCALENDAR", "PRODID:" + PRODID, "VERSION:2.0", "CALSCALE:GREGORIAN", "METHOD:" + methode]
+    if mit_zone:
+        z += _VTIMEZONE_BERLIN
+    z += ereignisse + ["END:VCALENDAR"]
+    return "\r\n".join(_falten(x) for x in z) + "\r\n"
+
+
 def _absender() -> tuple:
     mail = os.getenv("KALENDER_ABSENDER", "").strip() or mod_mail.SMTP_USER
     if "@" not in (mail or ""):
@@ -309,6 +393,7 @@ def _termin_ereignisse(termine: list, ankuenfte: list) -> list:
               "typ": t.get("typ") or "termin", "ort": t.get("ort") or "",
               "ansprechpartner": t.get("ansprechpartner") or "", "telefon": t.get("telefon") or "",
               "notiz": t.get("notiz") or "", "reisender": None, "beleg_id": None,
+              "serie_id": str(t.get("serie_id") or "").strip(),
               "naiv_ab": naiv, "naiv_an": None, "zeit_geschaetzt": False}
         if naiv is None:
             ev.update({"ganztag": True, "datum": d, "utc_ab": None, "utc_an": None})
@@ -326,7 +411,47 @@ def _termin_ereignisse(termine: list, ankuenfte: list) -> list:
             ev.update({"ganztag": False, "utc_ab": utc_ab, "utc_an": utc_an, "naiv_an": naiv_bis,
                        "zeit_geschaetzt": bool(geschaetzt and land and land != "DE")})
         out.append(ev)
-    return out
+    einzel, serien = [], {}
+    for ev in out:
+        if ev["serie_id"]:
+            serien.setdefault(ev["serie_id"], []).append(ev)
+        else:
+            einzel.append(ev)
+    for sid, tage in serien.items():                         # mehrtägige Montage: eine Serie je serie_id
+        einzel += _serie_zusammenfassen(sid, tage)
+    return einzel
+
+
+def _tag_datum(ev: dict) -> date:
+    """Kalendertag eines Termins in Berliner Ortszeit (Grundlage der Serien-Wiederholung)."""
+    return ev["datum"] if ev["ganztag"] else _utc_zu_berlin(ev["utc_ab"]).date()
+
+
+def _utc_grenzen(ev: dict) -> tuple:
+    if ev["ganztag"]:
+        a = datetime(ev["datum"].year, ev["datum"].month, ev["datum"].day, tzinfo=timezone.utc)
+        return a, a + timedelta(days=1)
+    return ev["utc_ab"], ev["utc_an"]
+
+
+def _serie_zusammenfassen(sid: str, tage: list) -> list:
+    """Macht aus den Tagen einer Montage EIN Serien-Ereignis. Ein zweiter Termin am selben Kalendertag
+    lässt sich in einer Tagesserie nicht abbilden und bleibt ein Einzeltermin."""
+    tage = sorted(tage, key=lambda t: (_tag_datum(t), t["naiv_ab"] or datetime.min))
+    belegt, serie, extra = set(), [], []
+    for t in tage:
+        d = _tag_datum(t)
+        if d in belegt:
+            extra.append(t)
+        else:
+            belegt.add(d)
+            serie.append(t)
+    grenzen = [_utc_grenzen(t) for t in serie]
+    ev = {"schluessel": "serie|%s" % sid, "art": "Termin", "titel": serie[0]["titel"], "typ": serie[0]["typ"],
+          "serie_id": sid, "serie_tage": serie, "reisender": None, "beleg_id": None, "ganztag": False,
+          "datum": None, "naiv_ab": None, "naiv_an": None, "zeit_geschaetzt": False,
+          "utc_ab": min(g[0] for g in grenzen), "utc_an": max(g[1] for g in grenzen)}
+    return [ev] + extra
 
 
 def _ort_zeile(art, ort, iata, zusatz) -> str:
@@ -398,8 +523,121 @@ def _komponieren(ev: dict, reise: dict, klarname: str) -> dict:
             "erinnerung": ERINNERUNG_MIN["Termin"]}
 
 
+_ISO = "%Y-%m-%dT%H:%M:%S"
+
+
+def _datum_text(d: date) -> str:
+    return "%s %s" % (_WOCHENTAG[d.weekday()], d.strftime("%d.%m.%Y"))
+
+
+def _zeit_zeile(t: dict) -> str:
+    if t["ganztag"]:
+        return "Ganztägig: %s" % t["datum"].strftime("%d.%m.%Y")
+    return "Zeit: %s – %s (Ortszeit)" % (_lokal_text(t["naiv_ab"]), _lokal_text(t["naiv_an"], False))
+
+
+def _serie_tag(t: dict, reise_zeile: str) -> dict:
+    """Ein Tag der Serie: Berliner Zeiten für die Wiederholung, Texte ohne Zeitzeile."""
+    rest = []
+    for etikett, feld in (("Ort", "ort"), ("Ansprechpartner", "ansprechpartner"), ("Telefon", "telefon"),
+                          ("Notiz", "notiz")):
+        if t[feld]:
+            rest.append("%s: %s" % (etikett, t[feld]))
+    rest.append(reise_zeile)
+    if t["zeit_geschaetzt"]:
+        rest.append("Hinweis: Zeitzone des Termins nicht bekannt – MEZ/MESZ angenommen.")
+    a = {"t": t, "datum": _tag_datum(t), "ganztag": bool(t["ganztag"]), "rest": rest,
+         "summary": "%s %s" % (_TERMIN_ICON.get(t["typ"], "📌"), t["titel"]), "location": t["ort"]}
+    if a["ganztag"]:
+        a.update(von=None, bis=None, dauer=0)
+    else:
+        a.update(von=_utc_zu_berlin(t["utc_ab"]), bis=_utc_zu_berlin(t["utc_an"]),
+                 dauer=int((t["utc_an"] - t["utc_ab"]).total_seconds() // 60))
+    a["muster"] = (a["ganztag"], a["von"].strftime("%H:%M") if a["von"] else "", a["dauer"],
+                   a["summary"], a["location"], tuple(rest))
+    return a
+
+
+def _inhalt_serie(ev: dict, reise: dict, klarname: str) -> dict:
+    """Einladungsinhalt einer Terminserie. Häufigster Tag = Haupttermin; abweichende Tage = Ausnahmen,
+    Lücken = EXDATE. Alle Uhrzeiten in Berliner Ortszeit (bleibt über die Zeitumstellung gleich)."""
+    reise_zeile = "Reise: %s – %s" % (reise.get("code"), reise.get("titel") or "")
+    tage = sorted((_serie_tag(t, reise_zeile) for t in ev["serie_tage"]), key=lambda a: a["datum"])
+    zaehler = {}
+    for a in tage:
+        zaehler[a["muster"]] = zaehler.get(a["muster"], 0) + 1
+    spitze = max(zaehler.values())                           # häufigster Tag = Haupttermin; bei Gleichstand der
+    mitte = (len(tage) - 1) / 2                              # Tag, der am nächsten an der Mitte der Serie liegt
+    muster = min((m for m in zaehler if zaehler[m] == spitze),
+                 key=lambda m: min(abs(i - mitte) for i, a in enumerate(tage) if a["muster"] == m))
+    mt = next(a for a in tage if a["muster"] == muster)
+    erster, letzter = tage[0]["datum"], tage[-1]["datum"]
+    spanne = (letzter - erster).days + 1
+    vorhanden = {a["datum"] for a in tage}
+
+    def instanz(d: date) -> str:                             # Beginn der Wiederholung am Tag d
+        if mt["ganztag"]:
+            return d.isoformat()
+        return datetime.combine(d, mt["von"].time()).strftime(_ISO)
+
+    if mt["ganztag"]:
+        m_start, m_ende = erster.isoformat(), (erster + timedelta(days=1)).isoformat()
+    else:
+        s0 = datetime.combine(erster, mt["von"].time())
+        m_start, m_ende = s0.strftime(_ISO), (s0 + timedelta(minutes=mt["dauer"])).strftime(_ISO)
+    luecken = [erster + timedelta(days=i) for i in range(spanne) if (erster + timedelta(days=i)) not in vorhanden]
+
+    if len(tage) > 1:
+        zeitraum = "%s – %s (%d Tage)" % (_datum_text(erster), _datum_text(letzter), len(tage))
+        start_text = "%s – %s, %d Tage" % (_datum_text(erster), _datum_text(letzter), len(tage))
+    else:
+        zeitraum = _datum_text(erster)
+        start_text = _lokal_text(mt["t"]["naiv_ab"]) if mt["t"]["naiv_ab"] else erster.strftime("%d.%m.%Y")
+
+    abweichungen, abw_zeilen = [], []
+    for a in tage:
+        if a["muster"] == muster:
+            continue
+        if a["ganztag"]:
+            s1, e1 = a["datum"].isoformat(), (a["datum"] + timedelta(days=1)).isoformat()
+            kurz = "ganztägig"
+        else:
+            s1, e1 = a["von"].strftime(_ISO), a["bis"].strftime(_ISO)
+            kurz = "%s – %s" % (a["t"]["naiv_ab"].strftime("%H:%M"), a["t"]["naiv_an"].strftime("%H:%M"))
+        if (a["summary"], a["location"], tuple(a["rest"])) != (mt["summary"], mt["location"], tuple(mt["rest"])):
+            kurz += " (weitere Angaben abweichend)"
+        abw_zeilen.append("%s: %s" % (_datum_text(a["datum"]), kurz))
+        abweichungen.append({"id": instanz(a["datum"]), "ganztag": a["ganztag"], "start": s1, "ende": e1,
+                             "summary": a["summary"], "location": a["location"],
+                             "description": "\n".join([_zeit_zeile(a["t"])] + a["rest"] +
+                                                      ["Teil der Terminserie %s" % zeitraum])})
+
+    z = []
+    if len(tage) > 1:
+        z.append("Zeitraum: " + zeitraum)
+        if mt["ganztag"]:
+            z.append("Ganztägig")
+        else:
+            z.append("Zeit: täglich %s – %s (Ortszeit)" % (mt["t"]["naiv_ab"].strftime("%H:%M"),
+                                                           mt["t"]["naiv_an"].strftime("%H:%M")))
+    else:
+        z.append(_zeit_zeile(mt["t"]))
+    z += mt["rest"]
+    if abw_zeilen:
+        z.append("Abweichende Tage:")
+        z += ["  " + x for x in abw_zeilen]
+    if luecken:
+        z.append("Kein Termin an: " + ", ".join(_datum_text(d) for d in luecken))
+    return {"serie": True, "summary": mt["summary"], "location": mt["location"], "description": "\n".join(z),
+            "erinnerung": ERINNERUNG_MIN["Termin"], "ganztag": bool(mt["ganztag"]), "start": m_start,
+            "ende": m_ende, "anzahl": spanne, "ausnahmen": [instanz(d) for d in luecken],
+            "abweichungen": abweichungen, "start_text": start_text, "tage": len(tage)}
+
+
 def _inhalt(ev: dict, reise: dict, klarname: str) -> dict:
     """Vollständiger, speicherbarer Einladungsinhalt (auch für spätere Absage)."""
+    if ev.get("serie_tage"):
+        return _inhalt_serie(ev, reise, klarname)
     k = _komponieren(ev, reise, klarname)
     if ev["ganztag"]:
         start, ende = ev["datum"].isoformat(), (ev["datum"] + timedelta(days=1)).isoformat()
@@ -448,13 +686,13 @@ def _lade_soll(cur, code: str) -> dict | None:
         beleg = {"id": _g(b, "id", 0), "transportart": _g(b, "transportart", 1), "anbieter": _g(b, "anbieter", 2),
                  "reisender": _g(b, "reisender", 3), "ki_json": _g(b, "ki_json", 4)}
         ereignisse += _segment_ereignisse(beleg, ankuenfte, probleme)
-    cur.execute("SELECT id, datum, uhrzeit_von, uhrzeit_bis, titel, typ, ort, ansprechpartner, telefon, notiz, land_code "
-                "FROM termine WHERE reise_code=" + P + " ORDER BY datum, uhrzeit_von", (code,))
+    cur.execute("SELECT id, datum, uhrzeit_von, uhrzeit_bis, titel, typ, ort, ansprechpartner, telefon, notiz, land_code, "
+                "serie_id FROM termine WHERE reise_code=" + P + " ORDER BY datum, uhrzeit_von", (code,))
     termine = []
     for t in cur.fetchall():
         termine.append({k: _g(t, k, i) for i, k in enumerate(
             ("id", "datum", "uhrzeit_von", "uhrzeit_bis", "titel", "typ", "ort", "ansprechpartner",
-             "telefon", "notiz", "land_code"))})
+             "telefon", "notiz", "land_code", "serie_id"))})
     ereignisse += _termin_ereignisse(termine, ankuenfte)
 
     haken = [t for t in teilnehmer if t["haken"]]
@@ -529,27 +767,35 @@ def _sende_einladung(person: dict, reise: dict, z: dict, inhalt: dict, sequence:
                      aktualisierung: bool) -> dict:
     org_mail, org_name = _absender()
     ziel = person["email"]
-    if inhalt["ganztag"]:
-        start, ende = date.fromisoformat(inhalt["start"]), date.fromisoformat(inhalt["ende"])
+    serie = bool(inhalt.get("serie"))
+    if serie:
+        ics = ics_serie_erzeugen(uid=z["uid"], sequence=sequence, methode=methode, inhalt=inhalt,
+                                 organisator_mail=org_mail, organisator_name=org_name,
+                                 teilnehmer_mail=ziel, teilnehmer_name=person["klarname"])
     else:
-        start, ende = _iso_lesen(inhalt["start"]), _iso_lesen(inhalt["ende"])
-    ics = ics_erzeugen(uid=z["uid"], sequence=sequence, methode=methode, summary=inhalt["summary"],
-                       start=start, ende=ende, ganztag=inhalt["ganztag"], location=inhalt["location"],
-                       description=inhalt["description"], erinnerung_min=inhalt["erinnerung"],
-                       organisator_mail=org_mail, organisator_name=org_name,
-                       teilnehmer_mail=ziel, teilnehmer_name=person["klarname"])
+        if inhalt["ganztag"]:
+            start, ende = date.fromisoformat(inhalt["start"]), date.fromisoformat(inhalt["ende"])
+        else:
+            start, ende = _iso_lesen(inhalt["start"]), _iso_lesen(inhalt["ende"])
+        ics = ics_erzeugen(uid=z["uid"], sequence=sequence, methode=methode, summary=inhalt["summary"],
+                           start=start, ende=ende, ganztag=inhalt["ganztag"], location=inhalt["location"],
+                           description=inhalt["description"], erinnerung_min=inhalt["erinnerung"],
+                           organisator_mail=org_mail, organisator_name=org_name,
+                           teilnehmer_mail=ziel, teilnehmer_name=person["klarname"])
     vorname = (person["klarname"].split() or [""])[0]
     betreff = "%s (%s)" % (inhalt["summary"], inhalt["start_text"])
+    wort = "Terminserie" if (serie and inhalt.get("tage", 1) > 1) else "Termin"
     if methode == "CANCEL":
         betreff = "Abgesagt: " + betreff
-        kopf = "dieser Termin zur Reise %s entfällt (Buchung geändert oder storniert):" % reise["code"]
-        fuss = "Er wird in Outlook automatisch entfernt."
+        kopf = "diese %s zur Reise %s entfällt (Buchung geändert oder storniert):" % (wort, reise["code"])
+        fuss = "Sie wird in Outlook automatisch entfernt." if wort == "Terminserie" else "Er wird in Outlook automatisch entfernt."
     elif aktualisierung:
         betreff = "Aktualisiert: " + betreff
-        kopf = "dein Termin zur Reise %s wurde aktualisiert:" % reise["code"]
+        kopf = "deine %s zur Reise %s wurde aktualisiert:" % (wort, reise["code"])
         fuss = "Bitte in Outlook die Aktualisierung annehmen."
     else:
-        kopf = "hier dein Kalendereintrag zur Reise %s:" % reise["code"]
+        kopf = ("hier deine Terminserie zur Reise %s (ein Eintrag für alle Tage):" % reise["code"]) if wort == "Terminserie" \
+            else "hier dein Kalendereintrag zur Reise %s:" % reise["code"]
         fuss = "Bitte in Outlook annehmen. Bei Änderungen der Buchung wird der Termin automatisch aktualisiert."
     text = "Hallo %s,\n\n%s\n\n%s\n\n%s\n\n%s\n\nViele Grüße" % (
         vorname, kopf, inhalt["summary"], inhalt["description"], fuss)

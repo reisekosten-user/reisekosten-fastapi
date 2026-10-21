@@ -704,6 +704,8 @@ def get_migrations() -> list[str]:
         "ALTER TABLE termine ADD COLUMN IF NOT EXISTS lat NUMERIC(9,6)",
         "ALTER TABLE termine ADD COLUMN IF NOT EXISTS lon NUMERIC(9,6)",
         "ALTER TABLE termine ADD COLUMN IF NOT EXISTS land_code TEXT",
+        "ALTER TABLE termine ADD COLUMN IF NOT EXISTS serie_id TEXT",
+        "ALTER TABLE reisetage_person ADD COLUMN IF NOT EXISTS bearbeitet BOOLEAN",
         "ALTER TABLE mitarbeiter ADD COLUMN IF NOT EXISTS ist_organisator BOOLEAN DEFAULT FALSE",
         "ALTER TABLE mitarbeiter ADD COLUMN IF NOT EXISTS ist_reisender BOOLEAN DEFAULT TRUE",
         "UPDATE mitarbeiter SET ist_organisator=TRUE WHERE rolle='organisator'",

@@ -6,7 +6,7 @@ import os, re, secrets
 from datetime import date, datetime, timedelta
 
 from mod_db import get_db, ph, is_postgres, fmt_date
-from mod_vma_tage import land_fuer_tag, vma_berechnen
+from mod_vma_tage import land_fuer_tag, vma_berechnen, vma_tage_generieren
 from mod_vma import VMA_SAETZE
 import mod_zeitzone as zz
 from mod_mail import sende_mail, smtp_sitzung
@@ -86,11 +86,34 @@ def _to_date(v):
     return v
 
 
+def _tag_text(v):
+    """Datum als 'YYYY-MM-DD' (Datenbank liefert je nach System Text oder date)."""
+    d = _to_date(v)
+    return d.isoformat() if d else ""
+
+
+def _vma_tage_der_reise(cur, reise_code: str) -> dict:
+    """Maßgebliche Tageswerte der Reise-Seite (vma_tage): 'YYYY-MM-DD' -> Werte."""
+    P = ph()
+    cur.execute(f"""SELECT datum, land_code, land_name, vma_satz_voll, vma_satz_halb, ist_halber_satz,
+                    fruehstueck, mittagessen, abendessen FROM vma_tage WHERE reise_code={P}""", (reise_code,))
+    out = {}
+    for r in cur.fetchall():
+        out[_tag_text(_w(r, "datum", 0))] = {
+            "land_code": _w(r, "land_code", 1), "land_name": _w(r, "land_name", 2),
+            "voll": _w(r, "vma_satz_voll", 3), "halb": _w(r, "vma_satz_halb", 4),
+            "ist_halb": bool(_w(r, "ist_halber_satz", 5)),
+            "frueh": bool(_w(r, "fruehstueck", 6)), "mittag": bool(_w(r, "mittagessen", 7)),
+            "abend": bool(_w(r, "abendessen", 8))}
+    return out
+
+
 def tage_sicherstellen(reise_code: str, kuerzel: str) -> None:
     """
     Legt für jeden Tag der Reise (falls noch nicht vorhanden) einen Eintrag in
-    reisetage_person an – Land/VMA-Satz automatisch ermittelt wie beim internen
-    VMA-Lauf, Mahlzeiten/Zeiten zunächst leer, vom Reisenden selbst zu befüllen.
+    reisetage_person an. Land, Sätze und halber Satz kommen aus den VMA-Tagen der Reise-Seite
+    (vma_tage) – fehlen die dort noch, werden sie zuerst berechnet. Danach wird alles Bestehende
+    mit der Reise-Seite abgeglichen (siehe von_reise_uebernehmen).
     """
     P = ph()
     db = get_db(); cur = db.cursor()
@@ -104,6 +127,16 @@ def tage_sicherstellen(reise_code: str, kuerzel: str) -> None:
     tage = (zu - ab).days + 1
     eintaegig = (tage == 1)
 
+    vma = _vma_tage_der_reise(cur, reise_code)
+    if any((ab + timedelta(days=i)).isoformat() not in vma for i in range(tage)):
+        try:                                   # Reise-Seite hat noch nicht alle Tage berechnet
+            vma_tage_generieren(reise_code, db)
+            vma = _vma_tage_der_reise(cur, reise_code)
+        except Exception as e:
+            try: db.rollback()
+            except Exception: pass
+            print(f"[Portal] VMA-Tage für {reise_code} nicht berechnet: {e}")
+
     for i in range(tage):
         tag = ab + timedelta(days=i)
         cur.execute(f"SELECT id FROM reisetage_person WHERE reise_code={P} AND kuerzel={P} AND datum={P}",
@@ -111,20 +144,132 @@ def tage_sicherstellen(reise_code: str, kuerzel: str) -> None:
         if cur.fetchone():
             continue
         ist_letzter_tag = (i == tage - 1)
-        lcode, lname, quelle, override = land_fuer_tag(reise_code, tag, db, ist_letzter_tag, eintaegig)
-        if override:
-            voll, halb = override["voll"], override["halb"]
-        else:
-            satz = VMA_SAETZE.get(lcode, VMA_SAETZE["DE"])
-            voll, halb = satz["voll"], satz["halb"]
-        ist_halb = (i == 0 or i == tage - 1)
-        brutto, netto = vma_berechnen(voll, halb, ist_halb, False, False, False)
+        v = vma.get(tag.isoformat())
+        if v and v["voll"] is not None and v["halb"] is not None:
+            lcode, lname, voll, halb, ist_halb = v["land_code"], v["land_name"], v["voll"], v["halb"], v["ist_halb"]
+            frueh, mittag, abend = v["frueh"], v["mittag"], v["abend"]
+        else:                                  # Rückfall: wie der interne VMA-Lauf
+            lcode, lname, quelle, override = land_fuer_tag(reise_code, tag, db, ist_letzter_tag, eintaegig)
+            if override:
+                voll, halb = override["voll"], override["halb"]
+            else:
+                satz = VMA_SAETZE.get(lcode, VMA_SAETZE["DE"])
+                voll, halb = satz["voll"], satz["halb"]
+            ist_halb = (i == 0 or i == tage - 1)
+            frueh = mittag = abend = False
+        brutto, netto = vma_berechnen(voll, halb, ist_halb, frueh, mittag, abend)
         cur.execute(f"""INSERT INTO reisetage_person
             (reise_code, kuerzel, datum, land_code, land_name, vma_satz_voll, vma_satz_halb,
-             ist_halber_satz, vma_netto)
-            VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P})""",
-            (reise_code, kuerzel, tag.isoformat(), lcode, lname, voll, halb, ist_halb, netto))
+             ist_halber_satz, fruehstueck, mittagessen, abendessen, vma_netto, bearbeitet)
+            VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})""",
+            (reise_code, kuerzel, tag.isoformat(), lcode, lname, voll, halb, ist_halb,
+             frueh, mittag, abend, netto, False))
     db.commit(); cur.close(); db.close()
+    von_reise_uebernehmen(reise_code, mahlzeiten="neue")
+
+
+def von_reise_uebernehmen(reise_code: str, datum=None, mahlzeiten: str = "neue") -> int:
+    """Reise-Seite (vma_tage) -> Portal (reisetage_person), für alle Reisenden der Reise.
+    Immer: Land, Sätze, halber Satz und VMA netto (die Reise-Seite ist hier maßgeblich).
+    mahlzeiten: "alle"  = Mahlzeiten überall überschreiben (bewusste Änderung auf der Reise-Seite),
+                "neue"  = nur Tage, die der Reisende im Portal noch nie gespeichert hat (z. B. Frühstück aus Hotelbeleg),
+                "nein"  = Mahlzeiten nicht anfassen.
+    datum: nur dieser Tag, sonst alle Tage. Rückgabe: Anzahl geänderter Portal-Tage. Fehler brechen nie ab."""
+    n = 0
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        try:
+            vma = _vma_tage_der_reise(cur, reise_code)
+            nur = _tag_text(datum) if datum else None
+            cur.execute(f"""SELECT id, datum, land_code, land_name, vma_satz_voll, vma_satz_halb, ist_halber_satz,
+                            fruehstueck, mittagessen, abendessen, vma_netto, bearbeitet
+                            FROM reisetage_person WHERE reise_code={P}""", (reise_code,))
+            for r in cur.fetchall():
+                tag = _tag_text(_w(r, "datum", 1))
+                v = vma.get(tag)
+                if not v or (nur and tag != nur) or v["voll"] is None or v["halb"] is None:
+                    continue
+                bearbeitet = bool(_w(r, "bearbeitet", 11))
+                if mahlzeiten == "alle" or (mahlzeiten == "neue" and not bearbeitet):
+                    frueh, mittag, abend = v["frueh"], v["mittag"], v["abend"]
+                else:
+                    frueh, mittag, abend = (bool(_w(r, "fruehstueck", 7)), bool(_w(r, "mittagessen", 8)),
+                                            bool(_w(r, "abendessen", 9)))
+                _b, netto = vma_berechnen(v["voll"], v["halb"], v["ist_halb"], frueh, mittag, abend)
+                alt = (_w(r, "land_code", 2), _w(r, "land_name", 3), float(_w(r, "vma_satz_voll", 4) or 0),
+                       float(_w(r, "vma_satz_halb", 5) or 0), bool(_w(r, "ist_halber_satz", 6)),
+                       bool(_w(r, "fruehstueck", 7)), bool(_w(r, "mittagessen", 8)), bool(_w(r, "abendessen", 9)),
+                       round(float(_w(r, "vma_netto", 10) or 0), 2))
+                neu = (v["land_code"], v["land_name"], float(v["voll"]), float(v["halb"]), v["ist_halb"],
+                       frueh, mittag, abend, round(float(netto), 2))
+                if alt == neu:
+                    continue
+                cur.execute(f"""UPDATE reisetage_person SET land_code={P}, land_name={P}, vma_satz_voll={P},
+                                vma_satz_halb={P}, ist_halber_satz={P}, fruehstueck={P}, mittagessen={P},
+                                abendessen={P}, vma_netto={P} WHERE id={P}""", neu + (_w(r, "id", 0),))
+                n += 1
+            db.commit()
+        finally:
+            cur.close(); db.close()
+    except Exception as e:
+        print(f"[Portal] Abgleich Reise-Seite → Portal für {reise_code} fehlgeschlagen: {e}")
+    return n
+
+
+def tatsaechliche_zeit_uebernehmen(reise_code: str, datum, uhrzeit) -> int:
+    """Reise-Seite: „Reiseantritt/Reiseende (tatsächlich)“ -> Portal-Zeit aller Reisenden.
+    Erster Reisetag -> Reisebeginn, letzter Reisetag -> Reiseende (Zone leer = Ortszeit des Tageslandes).
+    Leere Uhrzeit ändert im Portal nichts. Fehler brechen nie ab."""
+    zeit, ok = zeit_normalisieren(uhrzeit)
+    if not zeit or not ok:
+        return 0
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        try:
+            cur.execute(f"SELECT abreise, rueckkehr FROM reisen WHERE code={P}", (reise_code,))
+            r = cur.fetchone()
+            if not r:
+                return 0
+            ab, zu = _tag_text(r[0] if isinstance(r, tuple) else r["abreise"]), _tag_text(r[1] if isinstance(r, tuple) else r["rueckkehr"])
+            tag = _tag_text(datum)
+            if tag == ab:
+                feld = "reise_beginn"
+            elif tag == zu:
+                feld = "reise_ende"
+            else:
+                return 0
+            cur.execute(f"UPDATE reisetage_person SET {feld}={P}, {feld}_zone=NULL WHERE reise_code={P} AND datum={P}",
+                        (zeit, reise_code, tag))
+            n = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            db.commit()
+            return n
+        finally:
+            cur.close(); db.close()
+    except Exception as e:
+        print(f"[Portal] Zeit Reise-Seite → Portal für {reise_code} fehlgeschlagen: {e}")
+        return 0
+
+
+def bearbeitet_nachtragen() -> None:
+    """Einmalig nach Einführung der Spalte reisetage_person.bearbeitet: Tage, in denen der Reisende schon
+    etwas eingetragen hat, gelten als bearbeitet (werden von der Reise-Seite nicht überschrieben)."""
+    try:
+        db = get_db(); cur = db.cursor()
+        try:
+            cur.execute("""SELECT id, fruehstueck, mittagessen, abendessen, reise_beginn, reise_ende,
+                           arbeit_beginn, arbeit_ende, notiz FROM reisetage_person WHERE bearbeitet IS NULL""")
+            for r in cur.fetchall():
+                hat = any(bool(_w(r, f, i)) for i, f in enumerate(
+                    ("id", "fruehstueck", "mittagessen", "abendessen", "reise_beginn", "reise_ende",
+                     "arbeit_beginn", "arbeit_ende", "notiz")) if i > 0)
+                cur.execute(f"UPDATE reisetage_person SET bearbeitet={ph()} WHERE id={ph()}", (hat, _w(r, "id", 0)))
+            db.commit()
+        finally:
+            cur.close(); db.close()
+    except Exception as e:
+        print(f"[Portal] Altbestand nicht nachgetragen: {e}")
 
 
 def tage_laden(reise_code: str, kuerzel: str) -> list:
@@ -134,8 +279,10 @@ def tage_laden(reise_code: str, kuerzel: str) -> list:
                     ist_halber_satz, fruehstueck, mittagessen, abendessen, vma_netto,
                     reise_beginn, reise_ende, arbeit_beginn, arbeit_ende, notiz,
                     reise_beginn_zone, reise_ende_zone, arbeit_beginn_zone, arbeit_ende_zone
-                    FROM reisetage_person WHERE reise_code={P} AND kuerzel={P} ORDER BY datum""",
-                (reise_code, kuerzel))
+                    FROM reisetage_person WHERE reise_code={P} AND kuerzel={P}
+                    AND datum >= (SELECT abreise FROM reisen WHERE code={P})
+                    AND datum <= (SELECT rueckkehr FROM reisen WHERE code={P}) ORDER BY datum""",
+                (reise_code, kuerzel, reise_code, reise_code))
     rows = cur.fetchall()
     cur.close(); db.close()
     return rows
@@ -161,6 +308,21 @@ def tag_speichern(tag_id: int, frueh: bool, mittag: bool, abend: bool,
     reise_code = r[3] if isinstance(r, tuple) else r["reise_code"]
     datum = r[4] if isinstance(r, tuple) else r["datum"]
     land_code = r[5] if isinstance(r, tuple) else r["land_code"]
+    # Maßgeblich für Land, Sätze und halben Satz ist die Reise-Seite (vma_tage). Fehlt der Tag dort noch,
+    # wird er zuerst berechnet – sonst gingen die Eingaben für die Reise-Seite verloren.
+    if reise_code and datum:
+        vt = _vma_tage_der_reise(cur, reise_code)
+        if _tag_text(datum) not in vt:
+            try:
+                vma_tage_generieren(reise_code, db)
+                vt = _vma_tage_der_reise(cur, reise_code)
+            except Exception as e:
+                try: db.rollback()
+                except Exception: pass
+                print(f"[Portal] VMA-Tage für {reise_code} nicht berechnet: {e}")
+        v = vt.get(_tag_text(datum))
+        if v and v["voll"] is not None and v["halb"] is not None:
+            voll, halb, ist_halb, land_code = v["voll"], v["halb"], v["ist_halb"], v["land_code"]
     # Rückfall auf 0, falls der VMA-Satz für diesen Tag aus irgendeinem Grund
     # nicht gesetzt ist (z.B. Randfall bei bereits abgeschlossener Reise) –
     # sonst würde float(None) mit einer ungefangenen Exception abstürzen und
@@ -177,10 +339,11 @@ def tag_speichern(tag_id: int, frueh: bool, mittag: bool, abend: bool,
                           ("reise_beginn", "reise_ende", "arbeit_beginn", "arbeit_ende"))
     cur.execute(f"""UPDATE reisetage_person SET
         fruehstueck={P}, mittagessen={P}, abendessen={P}, vma_netto={P},
-        reise_beginn={P}, reise_ende={P}, arbeit_beginn={P}, arbeit_ende={P}, notiz={P}{zonen_sql}
+        reise_beginn={P}, reise_ende={P}, arbeit_beginn={P}, arbeit_ende={P}, notiz={P},
+        bearbeitet={P}{zonen_sql}
         WHERE id={P}""",
         (frueh, mittag, abend, netto, reise_beginn or None, reise_ende or None,
-         arbeit_beginn or None, arbeit_ende or None, notiz or None) + zonen_val + (tag_id,))
+         arbeit_beginn or None, arbeit_ende or None, notiz or None, True) + zonen_val + (tag_id,))
 
     # WICHTIG: Portal-Eingaben (reisetage_person) sind bisher NIE in die
     # eigentliche, für Reise-Ansicht/Abschluss/PDF maßgebliche vma_tage-

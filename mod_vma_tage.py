@@ -377,7 +377,8 @@ def vma_tage_generieren(reise_code: str, db) -> int:
 
         # Manuell geänderte Einträge nicht überschreiben
         cur.execute(f"""SELECT id, quelle, trennungspauschale_quelle, trennungspauschale,
-                        tatsaechliche_uhrzeit, land_code, land_name, vma_satz_voll, vma_satz_halb, satz_hinweis
+                        tatsaechliche_uhrzeit, land_code, land_name, vma_satz_voll, vma_satz_halb, satz_hinweis,
+                        ist_halber_satz, fruehstueck, mittagessen, abendessen
                         FROM vma_tage WHERE reise_code={P} AND datum={P}""",
                     (reise_code, tag.isoformat()))
         existing = cur.fetchone()
@@ -392,7 +393,24 @@ def vma_tage_generieren(reise_code: str, db) -> int:
             trenn_alt = existing[3] if isinstance(existing, tuple) else existing["trennungspauschale"]
             tatsaechliche_zeit_alt = existing[4] if isinstance(existing, tuple) else existing["tatsaechliche_uhrzeit"]
             if q == "manuell":
-                continue  # Manuell → nicht anfassen
+                # Manuell → Land, Sätze und Mahlzeiten nicht anfassen. Nur die Lage in der Reise zieht nach
+                # (halber Satz am ersten/letzten Tag): Wurde die Reise verlängert oder verkürzt, wäre der Tag
+                # sonst mit dem falschen Satz eingefroren.
+                g_ex = (lambda k, i: existing[i] if isinstance(existing, tuple) else existing[k])
+                if bool(g_ex("ist_halber_satz", 10)) != ist_halb:
+                    try:
+                        brutto_m, netto_m = vma_berechnen(g_ex("vma_satz_voll", 7), g_ex("vma_satz_halb", 8), ist_halb,
+                                                          bool(g_ex("fruehstueck", 11)), bool(g_ex("mittagessen", 12)),
+                                                          bool(g_ex("abendessen", 13)))
+                        trenn_m = (trenn_alt or 0) if trenn_quelle_alt == "manuell" else trennungspauschale_berechnen(
+                            tag, ist_halb, ist_erster_tag, ist_letzter_tag, tatsaechliche_zeit_alt)
+                        cur.execute(f"""UPDATE vma_tage SET ist_halber_satz={P}, vma_brutto={P}, vma_netto={P},
+                                        trennungspauschale={P} WHERE reise_code={P} AND datum={P}""",
+                                    (ist_halb, brutto_m, netto_m, trenn_m, reise_code, tag.isoformat()))
+                        count += 1
+                    except (TypeError, ValueError):
+                        pass
+                continue
 
         lcode, lname, quelle, override = land_fuer_tag(reise_code, tag, db, ist_letzter_tag, eintaegig)
         if override:
@@ -450,6 +468,11 @@ def vma_tage_generieren(reise_code: str, db) -> int:
 
     db.commit()
     cur.close()
+    try:                       # Portal-Tage der Reisenden mit der Reise-Seite abgleichen (Land, Sätze, ½ Satz, Frühstück)
+        from mod_portal import von_reise_uebernehmen
+        von_reise_uebernehmen(reise_code, mahlzeiten="neue")
+    except Exception as ex:
+        print(f"[VMA] Portal-Abgleich für {reise_code} fehlgeschlagen: {ex}")
     return count
 
 

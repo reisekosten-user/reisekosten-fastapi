@@ -4,7 +4,7 @@ Modulare Struktur – Einstiegspunkt
 """
 # v2.2-a – Modularisierung komplett
 from __future__ import annotations
-import os, re, json, io, base64
+import os, re, json, io, base64, uuid
 import urllib.parse
 import httpx
 from datetime import date, datetime, timedelta, timezone
@@ -51,7 +51,8 @@ from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
 from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_token,
                          tage_sicherstellen, tage_laden, tag_speichern,
                          reisende_der_reise, zugaenge_der_reise, portal_mail_senden,
-                         cron_portal_mails, PORTAL_TAGE_VORHER, portal_aenderungen_speichern)
+                         cron_portal_mails, PORTAL_TAGE_VORHER, portal_aenderungen_speichern,
+                         von_reise_uebernehmen, tatsaechliche_zeit_uebernehmen, bearbeitet_nachtragen)
 from mod_flugalert import (konfiguration_laden,
                             cron_flug_alerts, offene_alerts_fuer_dashboard)
 from mod_geo import koordinaten_fuer_land, adresse_geokodieren
@@ -88,6 +89,10 @@ SESSION_SECRET, SESSION_SECRET_HERKUNFT = _session_secret_bestimmen()
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.42", "zeit": "2026-10-21 13:44", "aenderungen": [
+        "Montage über mehrere Tage: In Outlook kommt jetzt eine einzige Einladung als Terminserie an (eine Mail statt einer je Tag). Abweichende Zeiten am Anreise-/Abreisetag stehen darin als Ausnahmen; geänderte oder gelöschte Tage und die Absage laufen ebenfalls über diese eine Einladung. Bereits versendete ältere Montagen bleiben Einzeltermine.",
+        "Portal und Reise-Seite gleichen sich jetzt in beide Richtungen ab: Mahlzeiten, Land, Sätze, halber Satz und Reisezeiten von der Reise-Seite erscheinen im Portal (auch bei geänderten Reisedaten), Eingaben aus dem Portal landen verlässlich auf der Reise-Seite. Die Reise-Seite zeigt zusätzlich Portal-Zeiten, Notizen und Kilometer.",
+        "Portal: neue Karte „📄 Reiseunterlagen“ mit Link zur Krankenversicherung (Reise-PDFs aus den Einstellungen) und bei Europa-Reisen zur eigenen A1-Bescheinigung."]},
     {"version": "3.41", "zeit": "2026-10-21 12:36", "aenderungen": [
         "Neu: Einstellungen › 📎 Reise-PDFs. Dort lädt der Organisator PDFs hoch (z. B. Kopie der Krankenversicherung), für alle Mitarbeiter oder nur für einen. Die Reisemappe (Reiseplan-PDF) bekommt sie automatisch hinten angehängt, mit einer Seite „Anlagen“ (Inhaltsverzeichnis) und Lesezeichen. Bei mehreren Reisenden gibt es je Mitarbeiter eine eigene Mappe. Die E-Mail-Variante hat nie Anlagen.",
         "Neu: A1-Bescheinigung für Reisen in Europa (EU, EWR, Schweiz, Vereinigtes Königreich). Die App legt dafür automatisch eine Aufgabe an (Offene Aufgaben und Dashboard), je Reisendem. Die A1 wird auf der Reise-Seite hochgeladen oder per Mail mit dem Reisecode geschickt, am Inhalt erkannt, als Belegart „A1-Bescheinigung“ abgelegt (ohne Betrag, keine Kosten), dem Reisenden zugeordnet und auf Gültigkeit für die ganze Reise geprüft. Sie kommt automatisch in die Reisemappe des Mitarbeiters."]},
@@ -817,6 +822,9 @@ async def startup():
         spalte_sichern("reisetage_person", _zf, "TEXT")
     zs.tabelle_sichern()
     spalte_sichern("belege", "a1_kuerzel", "TEXT")
+    spalte_sichern("termine", "serie_id", "TEXT")
+    spalte_sichern("reisetage_person", "bearbeitet", "BOOLEAN")
+    bearbeitet_nachtragen()
     mod_a1.tabelle_sichern()
     mod_reisepdf.tabelle_sichern()
     try:
@@ -3668,7 +3676,12 @@ async def vma_tag_speichern(code: str, vid: int, request: Request):
             WHERE id={P}""",
             (lcode, lname, voll, halb, ist_halb, frueh, mittag, abend,
              brutto, netto, notiz or None, vid))
+        cur.execute(f"SELECT datum FROM vma_tage WHERE id={P}", (vid,))
+        rd = cur.fetchone()
+        tag_portal = (rd["datum"] if hasattr(rd, "keys") else rd[0]) if rd else None
         db.commit(); cur.close(); db.close()
+        if tag_portal:      # Änderung auf der Reise-Seite auch im Portal der Reisenden zeigen
+            von_reise_uebernehmen(rcode, tag_portal, mahlzeiten="alle")
         ziel = request.headers.get("referer") or f"/reise/{code.upper()}"
         return RedirectResponse(ziel, status_code=303)
     except Exception as e:
@@ -3933,6 +3946,8 @@ async def vma_tatsaechliche_zeit_speichern(code: str, vid: int, request: Request
             cur.execute(f"UPDATE vma_tage SET trennungspauschale={P} WHERE id={P}", (neue_trennung, vid))
 
         db.commit(); cur.close(); db.close()
+        if row:             # Zeit auch im Portal der Reisenden zeigen (erster Tag = Reisebeginn, letzter = Reiseende)
+            tatsaechliche_zeit_uebernehmen(g("reise_code",0), g("datum",1), uhrzeit)
         ziel = request.headers.get("referer") or f"/reise/{code.upper()}"
         return RedirectResponse(ziel, status_code=303)
     except Exception as e:
@@ -8365,7 +8380,30 @@ def reise_detail(code: str, request: Request):
         cur.execute(f"""SELECT id, datum, uhrzeit_von, uhrzeit_bis, titel, typ, ort, ansprechpartner, telefon
                         FROM termine WHERE reise_code = {P} ORDER BY datum, uhrzeit_von""", (rcode,))
         termin_rows = cur.fetchall()
+        # Angaben der Reisenden aus dem Portal (Zeiten, Notizen, Kilometer) – werden im Tagesverlauf mit angezeigt
+        try:
+            cur.execute(f"""SELECT kuerzel, datum, reise_beginn, reise_ende, arbeit_beginn, arbeit_ende, notiz
+                            FROM reisetage_person WHERE reise_code = {P} ORDER BY kuerzel, datum""", (rcode,))
+            portal_zeilen = cur.fetchall()
+            cur.execute(f"""SELECT kuerzel, kennzeichen, km FROM kilometer_fahrten
+                            WHERE reise_code = {P} ORDER BY kuerzel, id""", (rcode,))
+            km_zeilen = cur.fetchall()
+        except Exception:
+            portal_zeilen, km_zeilen = [], []
         cur.close(); db.close()
+
+        portal_je_tag: dict = {}
+        for pz in portal_zeilen:
+            pd_ = get(pz, "datum", 1)
+            pd_ = pd_ if not isinstance(pd_, str) else date.fromisoformat(pd_[:10])
+            portal_je_tag.setdefault(pd_, []).append(pz)
+        km_je_person: dict = {}
+        for kz_ in km_zeilen:
+            km_je_person.setdefault(get(kz_, "kuerzel", 0), []).append(kz_)
+        km_html = " · ".join(
+            f"<b>{_bw_e(kz)}</b> {sum(float(get(x, 'km', 2) or 0) for x in zl):.0f} km "
+            f"({_bw_e(', '.join(sorted({str(get(x, 'kennzeichen', 1)) for x in zl})))})"
+            for kz, zl in km_je_person.items())
 
         today = date.today()
         ab_d = date.fromisoformat(str(ab)[:10]) if ab else None
@@ -8822,6 +8860,18 @@ def reise_detail(code: str, request: Request):
                     f'title="Manuell-Markierung entfernen, damit die automatische Erkennung wieder greift">↺ Auto</button>'
                     f'</form>')
 
+            portal_html = ""
+            for pz in portal_je_tag.get(vd, []):
+                teile = []
+                zr = " – ".join(x for x in (get(pz, "reise_beginn", 2), get(pz, "reise_ende", 3)) if x)
+                za = " – ".join(x for x in (get(pz, "arbeit_beginn", 4), get(pz, "arbeit_ende", 5)) if x)
+                if zr: teile.append("Reise " + _bw_e(zr))
+                if za: teile.append("Arbeit " + _bw_e(za))
+                if get(pz, "notiz", 6): teile.append("„" + _bw_e(get(pz, "notiz", 6)) + "“")
+                if teile:
+                    portal_html += (f'<div style="font-size:11px;color:var(--muted);margin-top:6px">'
+                                    f'📱 Portal · <b>{_bw_e(get(pz, "kuerzel", 0))}</b>: {" · ".join(teile)}</div>')
+
             tage_blocks += f"""<div style="border-bottom:1px solid var(--border)">
               <div style="padding:12px 16px;background:var(--bg)">
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
@@ -8862,6 +8912,7 @@ def reise_detail(code: str, request: Request):
                 </details>
                 {trenn_select(rcode, vid, trennung) if vd and vd.weekday() in (5,6) else ""}
                 {tatsaechliche_zeit_html}
+                {portal_html}
               </div>
               {tagesablauf_html(vd, rcode)}
             </div>"""
@@ -8937,6 +8988,7 @@ def reise_detail(code: str, request: Request):
         </div>
 
         {'<div style="font-size:12px;color:var(--muted);margin-bottom:16px">🌍 ' + laender_kompakt + '</div>' if laender_kompakt else ''}
+        {'<div style="font-size:12px;color:var(--muted);margin-bottom:16px">🚗 Kilometer (aus dem Portal): ' + km_html + '</div>' if km_html else ''}
 
         <div class="card">
           <div class="card-header">
@@ -9304,9 +9356,9 @@ MONTAGE_BLOCK_HTML = """
             <div class="form-group full" id="montage_block" style="display:none">
               <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:var(--bg)">
                 <b style="font-size:13px">🔧 Montage über mehrere Tage</b>
-                <p style="font-size:12px;color:var(--muted);margin:4px 0 8px">Für jeden Tag vom <b>Datum</b> bis zum Tag unten wird ein Termin
-                  angelegt, mit den Uhrzeiten oben (Standard 07:00–16:00). Am Anreise- und am Abreisetag gelten die eigenen Zeiten,
-                  falls eingetragen. Nur ein Tag: Feld leer lassen.</p>
+                <p style="font-size:12px;color:var(--muted);margin:4px 0 8px">Vom <b>Datum</b> bis zum Tag unten entsteht eine Terminserie
+                  mit den Uhrzeiten oben (Standard 07:00–16:00). In Outlook kommt dafür <b>eine einzige Einladung</b> an. Am Anreise- und am Abreisetag
+                  gelten die eigenen Zeiten, falls eingetragen. Nur ein Tag: Feld leer lassen.</p>
                 <div class="form-grid form-grid-2">
                   <div class="form-group full">
                     <label>Montage bis (letzter Tag)</label>
@@ -9533,13 +9585,16 @@ async def termin_neu(code: str, request: Request, zurueck: str = ""):
 
         P = ph()
         db = get_db(); cur = db.cursor()
+        # Mehrtägige Montage = eine Terminserie: alle Tage tragen dieselbe Serien-ID,
+        # Outlook bekommt dafür eine einzige Einladung (siehe mod_kalender).
+        serie_id = uuid.uuid4().hex[:12] if (typ == "montage" and len(tage_liste) > 1) else None
         for tag_t, von_t, bis_t in tage_liste:
             cur.execute(
                 f"INSERT INTO termine (reise_code,datum,uhrzeit_von,uhrzeit_bis,titel,typ,ort,"
-                f"ansprechpartner,telefon,notiz,lat,lon,land_code) "
-                f"VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})",
+                f"ansprechpartner,telefon,notiz,lat,lon,land_code,serie_id) "
+                f"VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})",
                 (rcode, tag_t.isoformat() if tag_t else datum, von_t, bis_t, titel, typ, ort,
-                 ansprechpartner, telefon, notiz, lat, lon, land_code))
+                 ansprechpartner, telefon, notiz, lat, lon, land_code, serie_id))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(ziel, status_code=303)
     except Exception as e:
@@ -9551,9 +9606,14 @@ def termin_bearbeiten_form(code: str, tid: int):
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
-        cur.execute(f"SELECT id,datum,uhrzeit_von,uhrzeit_bis,titel,typ,notiz,ort,ansprechpartner,telefon "
+        cur.execute(f"SELECT id,datum,uhrzeit_von,uhrzeit_bis,titel,typ,notiz,ort,ansprechpartner,telefon,serie_id "
                     f"FROM termine WHERE id={P}", (tid,))
         r = cur.fetchone()
+        serie_anzahl = 0
+        if r and (r["serie_id"] if hasattr(r, "keys") else r[10]):
+            cur.execute(f"SELECT COUNT(*) AS n FROM termine WHERE serie_id={P}", (r["serie_id"] if hasattr(r, "keys") else r[10],))
+            rz = cur.fetchone()
+            serie_anzahl = int((rz["n"] if hasattr(rz, "keys") else rz[0]) or 0)
         cur.close(); db.close()
         if not r:
             return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Termin nicht gefunden.</div>'))
@@ -9563,10 +9623,14 @@ def termin_bearbeiten_form(code: str, tid: int):
         ort_v = g("ort",7) or ""; ansprechpartner_v = g("ansprechpartner",8) or ""; telefon_v = g("telefon",9) or ""
         typ_opts = "".join(
             f'<option value="{v}"{" selected" if v==typ_v else ""}>{l}</option>' for v, l in TERMIN_TYPEN)
+        serie_hinweis = (f'<div class="alert alert-info" style="margin-bottom:12px">🔧 Dieser Tag gehört zu einer Montage-Serie '
+                         f'({serie_anzahl} Tage). Änderungen gelten nur für diesen Tag; in Outlook kommt eine Aktualisierung der Serie.</div>'
+                         if serie_anzahl > 1 else "")
         content = f"""
         <h1 class="page-title">Termin bearbeiten – {rcode}</h1>
         <div class="card" style="max-width:500px">
           <div class="card-body">
+            {serie_hinweis}
             <form method="post" action="/reise/{rcode}/termin/{tid}/bearbeiten">
               <div class="form-grid form-grid-2">
                 <div class="form-group full">
@@ -9637,6 +9701,8 @@ async def termin_bearbeiten(code: str, tid: int, request: Request):
             f"UPDATE termine SET titel={P},typ={P},datum={P},uhrzeit_von={P},uhrzeit_bis={P},"
             f"ort={P},ansprechpartner={P},telefon={P},notiz={P} WHERE id={P}",
             (titel, typ, datum, von, bis, ort, ansprechpartner, telefon, notiz, tid))
+        if typ != "montage":      # kein Montage-Tag mehr: aus der Terminserie lösen (wird ein Einzeltermin)
+            cur.execute(f"UPDATE termine SET serie_id=NULL WHERE id={P}", (tid,))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(f"/reise/{rcode}", status_code=303)
     except Exception as e:
@@ -9983,6 +10049,7 @@ def portal_ansicht(token: str, request: Request):
 
     bewirtung_html = _bw_portal_karte(token, info)
     vorschuss_html = _vs_portal_karte(token, info)
+    unterlagen_html = _portal_unterlagen_karte(token, info)
     ab_txt = fmt_date(info["abreise"]); zu_txt = fmt_date(info["rueckkehr"])
     content = f"""
     <div class="card" style="margin-bottom:16px">
@@ -10006,6 +10073,7 @@ def portal_ansicht(token: str, request: Request):
       </div>
     </div>
     {banner}
+    {unterlagen_html}
     <form method="post" action="/portal/{token}/speichern" id="portalform">
     {km_html}
     {bewirtung_html}
@@ -10021,6 +10089,120 @@ def portal_ansicht(token: str, request: Request):
     {PORTAL_SAMMEL_JS}
     """
     return HTMLResponse(portal_shell(f"Reise {info['reise_code']} – {info['klarname']}", content))
+
+
+def _portal_a1_person(info: dict) -> tuple:
+    """(A1 nötig?, Länder-Liste, Eintrag dieses Reisenden oder None) – ein Fehler hier darf das Portal nie verhindern."""
+    try:
+        st = mod_a1.a1_status(info["reise_code"], reisende_der_reise(info["reise_code"]))
+        person = next((x for x in st["personen"] if x["kuerzel"] == info["kuerzel"]), None)
+        return bool(st["noetig"]), st["laender"], person
+    except Exception as ex:
+        print(f"[Portal] A1-Status nicht ermittelt: {ex}")
+        return False, [], None
+
+
+def _portal_unterlagen_karte(token: str, info: dict) -> str:
+    """Karte „Reiseunterlagen“ im Portal: die Reise-PDFs aus den Einstellungen (z. B. Krankenversicherung – alle für
+    alle Mitarbeiter plus die persönlichen dieses Reisenden) und bei Europa-Reisen seine A1-Bescheinigung."""
+    zeilen = ""
+    try:
+        for d in mod_reisepdf.liste(nur_aktive=True):
+            if d["kuerzel"] and d["kuerzel"] != info["kuerzel"]:
+                continue
+            symbol = "🏥" if "versicher" in (d["titel"] or "").lower() else "📄"
+            zeilen += (f'<a href="/portal/{token}/unterlagen/{d["id"]}" target="_blank" class="btn btn-secondary" '
+                       f'style="width:100%;display:block;text-align:center;margin-bottom:8px">{symbol} {_bw_e(d["titel"])}</a>')
+    except Exception as ex:
+        print(f"[Portal] Reise-PDFs nicht geladen: {ex}")
+    noetig, laender, person = _portal_a1_person(info)
+    if noetig and person:
+        land_txt = mod_a1.laender_text(laender)
+        if person["beleg"]:
+            hinweis = (f'<div style="font-size:12px;color:#92400e;margin:-4px 0 8px">⚠ {_bw_e(person["hinweis"])}</div>'
+                       if person["status"] == "pruefen" and person["hinweis"] else "")
+            zeilen += (f'<a href="/portal/{token}/a1" target="_blank" class="btn btn-secondary" '
+                       f'style="width:100%;display:block;text-align:center;margin-bottom:8px">🇪🇺 A1-Bescheinigung ({land_txt})</a>'
+                       + hinweis)
+        elif person["status"] == "befreit":
+            zeilen += (f'<div style="font-size:12px;color:var(--muted);margin-bottom:8px">🇪🇺 A1-Bescheinigung ({land_txt}): '
+                       f'nicht nötig – {_bw_e(person["hinweis"])}</div>')
+        else:
+            zeilen += (f'<div style="font-size:13px;background:#fef3c7;color:#92400e;border-radius:8px;padding:10px 12px;'
+                       f'margin-bottom:8px">🇪🇺 Für diese Europa-Reise ({land_txt}) brauchst du eine <b>A1-Bescheinigung</b>, '
+                       f'sie liegt noch nicht vor. Bitte oben über „Beleg hochladen“ schicken – sie wird automatisch erkannt '
+                       f'und erscheint hier, sobald sie dir zugeordnet ist.</div>')
+    if not zeilen:
+        return ""
+    return f"""<div class="card" style="margin-bottom:16px">
+      <div class="card-header"><span class="card-title">📄 Reiseunterlagen</span></div>
+      <div class="card-body">
+        <p style="font-size:12px;color:var(--muted);margin:0 0 10px 0">Zum Ansehen, Speichern oder Vorzeigen unterwegs.</p>
+        {zeilen}
+      </div>
+    </div>"""
+
+
+def _datei_antwort(daten_b: bytes, name: str):
+    """Datei inline ausliefern; PDF/Bild wird an den Anfangsbytes erkannt, sonst als Download."""
+    from fastapi.responses import Response
+    if daten_b[:4] == b"%PDF":
+        typ, endung = "application/pdf", ".pdf"
+    elif daten_b[:3] == b"\xff\xd8\xff":
+        typ, endung = "image/jpeg", ".jpg"
+    elif daten_b[:8] == b"\x89PNG\r\n\x1a\n":
+        typ, endung = "image/png", ".png"
+    else:
+        typ, endung = "application/octet-stream", ""
+    sauber = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "Dokument"
+    return Response(content=daten_b, media_type=typ,
+                    headers={"Content-Disposition": f'inline; filename="{sauber}{endung}"',
+                             "Cache-Control": "private, no-store"})
+
+
+@app.get("/portal/{token}/unterlagen/{pid}")
+def portal_unterlage(token: str, pid: int):
+    """Ein Reise-PDF (z. B. Krankenversicherung) für den Reisenden dieses Links – nur wenn es für ihn gilt."""
+    info = zugang_aus_token(token)
+    if not info:
+        return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
+    d = mod_reisepdf.holen(pid)
+    if not d or not d["aktiv"] or (d["kuerzel"] and d["kuerzel"] != info["kuerzel"]):
+        return HTMLResponse(portal_shell("Nicht gefunden", '<p>Dieses Dokument gehört nicht zu deinem Link.</p>'), status_code=404)
+    try:
+        daten_b = mod_reisepdf.pdf_bytes(pid)
+    except Exception as ex:
+        print(f"[Portal] Reise-PDF {pid} nicht ladbar: {ex}")
+        daten_b = None
+    if not daten_b:
+        return HTMLResponse(portal_shell("Nicht verfügbar", '<p>Das Dokument kann gerade nicht geladen werden. Bitte später noch einmal versuchen.</p>'),
+                            status_code=503)
+    return _datei_antwort(daten_b, d["titel"] or f"Dokument_{pid}")
+
+
+@app.get("/portal/{token}/a1")
+def portal_a1_datei(token: str):
+    """Die A1-Bescheinigung des Reisenden dieses Links (nur seine eigene, nur bei Europa-Reisen)."""
+    info = zugang_aus_token(token)
+    if not info:
+        return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
+    noetig, _laender, person = _portal_a1_person(info)
+    if not (noetig and person and person["beleg"]):
+        return HTMLResponse(portal_shell("Nicht gefunden", '<p>Für dich liegt noch keine A1-Bescheinigung vor.</p>'), status_code=404)
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        cur.execute(f"SELECT s3_original FROM belege WHERE id={P} AND reise_code={P}", (person["beleg"]["id"], info["reise_code"]))
+        r = cur.fetchone(); cur.close(); db.close()
+        key = (r["s3_original"] if hasattr(r, "keys") else r[0]) if r else None
+        daten_b = s3_download(key) if key else None
+    except Exception as ex:
+        print(f"[Portal] A1 nicht ladbar: {ex}")
+        daten_b = None
+    if not daten_b:
+        return HTMLResponse(portal_shell("Nicht verfügbar", '<p>Die A1-Bescheinigung kann gerade nicht geladen werden. Bitte später noch einmal versuchen.</p>'),
+                            status_code=503)
+    return _datei_antwort(daten_b, f"A1-Bescheinigung_{info['kuerzel']}")
 
 
 @app.post("/portal/{token}/speichern")

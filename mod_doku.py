@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.41"
+DOKU_GEPRUEFT_FUER = "3.42"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -197,6 +197,8 @@ SEITEN = [
     ("/portal/{token}/anleitung/pdf", "Anleitung für Reisende als PDF", "a-start"),
     ("/portal/{token}/beleg-hochladen", "Reisende laden einen Beleg hoch", "a-belege"),
     ("/portal/{token}/kilometer/{kid}/loeschen", "Kilometer-Eintrag löschen", "a-km"),
+    ("/portal/{token}/unterlagen/{pid}", "Reise-PDF (z. B. Krankenversicherung) im Portal ansehen", "a-start"),
+    ("/portal/{token}/a1", "Eigene A1-Bescheinigung im Portal ansehen (nur bei Reisen in Europa)", "a-start"),
     ("/portal/{token}/bewirtung/neu", "Bewirtungsbeleg im Portal anlegen", "a-bewirtung"),
     ("/portal/{token}/bewirtung/{bid}/bearbeiten", "Bewirtungsbeleg-Entwurf bearbeiten", "a-bewirtung"),
     ("/portal/{token}/bewirtung/{bid}/pruefen", "Bewirtungsbeleg vor dem Bestätigen prüfen", "a-bewirtung"),
@@ -248,6 +250,8 @@ KAPITEL = [
             "**Bewirtungsbeleg erstellen**, wenn du Gäste eingeladen hast.",
             "**Bargeld bestätigen** (Vorschuss, Rückgabe) und selbst abgehobenes Geld eintragen.",
         ]),
+        ("h3", "Reiseunterlagen"),
+        ("p", "Oben im Portal findest du die Karte **📄 Reiseunterlagen**: deine **Krankenversicherung** und weitere Dokumente zur Reise, bei Reisen in Europa auch deine **A1-Bescheinigung**. Antippen öffnet das PDF, so hast du es unterwegs auf dem Handy dabei. Fehlt die A1 noch, steht dort ein Hinweis; schicke sie dann über „Beleg hochladen“."),
         ("p", "Nach der Reise prüft dein Organisator alles und erstellt die Abrechnung. Diese Anleitung erreichst du im "
               "Portal jederzeit über „📖 Anleitung“."),
     ]},
@@ -360,6 +364,8 @@ KAPITEL = [
             ["Ich war mit dem Mietwagen unterwegs.", "Nichts eintragen. Kilometer sind nur für Firmen- oder Privat-Pkw."],
             ["Ich habe Bargeld vom Organisator bekommen.", "In der Karte „Reisevorschuss / Bargeld“ antippen und bestätigen."],
             ["Was gehört in meine Reisemappe?", "Der Reiseplan, hinten angehängt deine Krankenversicherungs-Kopie und bei Reisen in Europa deine **A1-Bescheinigung**. Die A1 musst du auf der Reise dabeihaben. Fehlt sie noch, sag dem Organisator Bescheid oder schicke sie ihm."],
+            ["Wo finde ich meine Krankenversicherung oder die A1-Bescheinigung?", "Im Portal oben in der Karte **📄 Reiseunterlagen**. Die A1 gibt es nur bei Reisen in Europa. Steht dort, dass sie noch fehlt, lade sie über „Beleg hochladen“ hoch oder sag dem Organisator Bescheid."],
+            ["Der Organisator hat etwas geändert (z. B. Mahlzeit oder Land), im Portal sehe ich es noch nicht.", "Das Portal neu öffnen bzw. die Seite neu laden. Änderungen des Büros erscheinen dann auch bei dir."],
             ["Wohin mit Fragen?", "An deinen Organisator."],
         ], [38, 62]),
     ]},
@@ -454,6 +460,17 @@ KAPITEL = [
         ("p", "**Speichern im Portal:** Die Reisenden speichern alle Tage und Kilometer mit **einem** Knopf. Geschrieben werden nur Tage, die sich "
               "wirklich geändert haben. Ein unberührter Tag bleibt dadurch automatisch berechnet und wird nicht als „manuell“ eingefroren. "
               "Eine unlesbare Uhrzeit überspringt nur diesen Tag; der Rest wird gespeichert und die Reisenden sehen einen Hinweis."),
+        ("h3", "Abgleich Portal ↔ Reise-Seite"),
+        ("p", "Portal und Reise-Seite zeigen dieselben Tage und gleichen sich in beide Richtungen ab. **Maßgeblich für Land, Satz und halben Satz ist die Reise-Seite**; das Portal übernimmt sie bei jedem Öffnen."),
+        ("ul", [
+            "**Portal → Reise-Seite:** Mahlzeiten und Reisezeit der Reisenden stehen sofort im Tagesverlauf (der Tag gilt dort als „manuell“). Fehlen auf der Reise-Seite die VMA-Tage noch, werden sie dabei zuerst berechnet. Zusätzlich zeigt der Tagesverlauf unter jedem Tag die Portal-Angaben mit Kürzel (📱 Reise- und Arbeitszeit, Notiz); die Kilometer stehen als eigene Zeile unter den Ländern.",
+            "**Reise-Seite → Portal:** Ändern Sie dort Mahlzeiten, Land oder Satz eines Tages, sehen alle Reisenden das beim nächsten Öffnen des Portals (auch Reisende, die den Tag schon ausgefüllt haben, denn Ihre Änderung ist bewusst). Die Zeit „Reiseantritt/Reiseende (tatsächlich)“ erscheint im Portal als Reisebeginn (erster Tag) bzw. Reiseende (letzter Tag).",
+            "**Automatische Änderungen** (neuer Hotelbeleg mit Frühstück, anderes Land aus Flug oder Hotel, geänderte Reisedaten) gehen ebenfalls ins Portal. Mahlzeiten übernimmt das Portal dabei nur für Tage, die der Reisende noch nie gespeichert hat.",
+            "**Reise verlängert oder verkürzt:** Der erste und letzte Tag bekommen den richtigen Satz (auch wenn sie schon „manuell“ sind). Tage außerhalb der neuen Reisedauer verschwinden aus dem Portal; die Eingaben bleiben gespeichert und sind wieder da, wenn die Reise erneut verlängert wird.",
+            "**Mehrere Reisende:** Die VMA-Tage der Reise-Seite gibt es nur einmal je Reise. Die Mahlzeiten, die ein Reisender zuletzt gespeichert hat, stehen dort; Änderungen der Reise-Seite gelten für alle Reisenden.",
+        ]),
+        ("h3", "Karte „📄 Reiseunterlagen“ im Portal"),
+        ("p", "Oben im Portal steht die Karte **Reiseunterlagen**. Sie enthält die **Reise-PDFs** aus den Einstellungen (zum Beispiel die Krankenversicherung; alle für alle Mitarbeiter plus die persönlichen des Reisenden, pausierte nicht) und bei **Reisen in Europa** die **A1-Bescheinigung** des Reisenden. Liegt sie noch nicht vor, steht dort ein Hinweis, sie über „Beleg hochladen“ zu schicken; ist sie als „nicht nötig“ markiert, steht der Grund da. Zeigt die A1 einen zu kurzen Zeitraum, gibt es einen Warnhinweis. Jeder Reisende sieht nur seine eigenen Dokumente; die Links funktionieren nur mit seinem persönlichen Portal-Link."),
     ]},
     {"id": "b-eingang", "teil": "B", "titel": "Belege hereinbekommen", "bloecke": [
         ("p", "Belege kommen auf drei Wegen in die App. Jeder Beleg wird ausgelesen: Text lesen, Namen und Mailadressen der Mitarbeiter unkenntlich machen "
@@ -588,6 +605,7 @@ KAPITEL = [
         ("p", "**🔧 Montage über mehrere Tage:** Beim Typ „Montage“ erscheint das Feld **„Montage bis (letzter Tag)“**. Die App legt dann für **jeden Tag** von „Datum“ bis zu diesem Tag einen Termin an, "
               "Standard **07:00–16:00** (die Uhrzeiten oben lassen sich ändern). Für den **Anreisetag** und den **Abreisetag** gibt es eigene Zeiten; ein leeres Feld nimmt die Standardzeit. "
               "Die Montage muss im Reisezeitraum liegen (höchstens 60 Tage). Ist „Montage bis“ leer, entsteht nur ein Termin. Jeder Tag ist danach ein eigener Termin und lässt sich einzeln ändern oder löschen."),
+        ("p", "**In Outlook eine Terminserie:** Alle Tage einer mehrtägigen Montage gehören zu einer Serie. Die Mitarbeiter mit Outlook-Haken bekommen dafür **eine einzige Einladung** (eine Mail) statt einer je Tag. Abweichende Zeiten am Anreise-/Abreisetag stehen darin als Ausnahmen, ebenso ein einzeln geänderter Tag. Wird ein Tag gelöscht, kommt eine Aktualisierung mit diesem Tag als Ausnahme; wird die ganze Montage gelöscht, kommt eine Absage der Serie. Beim Bearbeiten eines Tages zeigt die Seite den Hinweis „Teil einer Montage-Serie“. Ändern Sie bei einem Tag den Typ weg von „Montage“, wird er ein eigener Einzeltermin. **Ältere Montagen** (vor Version 3.42 angelegt, mit je Tag einer Einladung) bleiben Einzeltermine; Serien gibt es nur für neu angelegte Montagen."),
         ("h3", "Reiseplan"),
         ("p", "**🗺 Reiseplan** zeigt alle Flüge, Züge und Termine in zeitlicher Reihenfolge. Zwei PDF-Varianten: „für Reisemappe Mitarbeiter“ (mit Anlagen) und „zum Emailversand“ (ohne Buchungscodes, nie mit Anlagen). Mehr dazu im Kapitel „Reisemappe, Reise-PDFs und A1-Bescheinigung“."),
         ("h3", "Änderungen und Umbuchungen"),
@@ -610,6 +628,7 @@ KAPITEL = [
             "**Gilt für:** „Alle Mitarbeiter“ oder ein bestimmter Mitarbeiter (z. B. seine persönliche Versicherungskarte). Der **Titel** erscheint im Inhaltsverzeichnis.",
             "**Pausieren** nimmt ein Dokument vorübergehend aus allen Mappen, **Entfernen** löscht den Eintrag. **Ansehen** öffnet das PDF.",
         ]),
+        ("p", "Dieselben Dokumente (Reise-PDFs und die eigene A1) sehen die Reisenden auch im Portal in der Karte **📄 Reiseunterlagen**, ohne die Mappe zu öffnen. Pausierte Dokumente erscheinen dort ebenfalls nicht."),
         ("h3", "Welche Anlagen kommen in welche Mappe?"),
         ("ul", [
             "Hat die Reise **einen** Reisenden, bekommt die Mappe seine Dokumente automatisch: alle Dokumente „für alle Mitarbeiter“, seine persönlichen Dokumente und seine A1.",
@@ -733,6 +752,7 @@ KAPITEL = [
             "**Änderungen und Stornos** werden automatisch nachgeführt (aktualisierter bzw. abgesagter Termin). Der Abgleich läuft im Takt von `/cron/flug-alerts`.",
             "**Wartezeit:** Änderungen werden erst gesendet, wenn sie [[ruhe_sekunden]] Sekunden unverändert geblieben sind (Einstellung KALENDER_RUHE_SEKUNDEN). Das verhindert eine Mail-Flut beim Korrigieren.",
             "Die Einladung enthält absolute Zeiten (Outlook rechnet in die eigene Zeitzone um); die Ortszeiten stehen zusätzlich im Text.",
+            "**Montage über mehrere Tage** geht als **eine Terminserie** in einer Mail raus (mit Ausnahmen für abweichende Tage). Serien laufen in Berliner Zeit, damit die Uhrzeit über die Zeitumstellung gleich bleibt. Siehe Kapitel „Flug, Bahn und Termine“.",
             "Für **bereits vergangene** Termine werden keine Einladungen mehr gesendet. Sie bleiben „noch nicht gesendet“.",
         ]),
         ("p", "Seite **📅 Outlook** je Reise: Tabelle mit Reisendem, Termin, Status und zuletzt gesendet. **„Jetzt senden / aktualisieren“** überspringt die Wartezeit "
