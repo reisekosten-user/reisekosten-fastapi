@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.42"
+DOKU_GEPRUEFT_FUER = "3.44"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -130,7 +130,10 @@ SEITEN = [
     ("/setup", "Ersteinrichtung: erstes Passwort setzen (nur solange noch niemand eines hat)", "b-rollen"),
     ("/mitarbeiter", "Liste aller Mitarbeiter", "b-mitarbeiter"),
     ("/mitarbeiter/neu", "Mitarbeiter anlegen", "b-mitarbeiter"),
-    ("/mitarbeiter/{kuerzel}/bearbeiten", "Mitarbeiter bearbeiten, Kürzel ändern, Passwort setzen (nur Organisatoren)", "b-mitarbeiter"),
+    ("/mitarbeiter/{kuerzel}/bearbeiten", "Mitarbeiter bearbeiten, Kürzel ändern, Passwort setzen, Visa verwalten", "b-mitarbeiter"),
+    ("/mitarbeiter/{kuerzel}/visum/neu", "Visum eines Mitarbeiters erfassen (Land, gültig von/bis, Kopie)", "b-mitarbeiter"),
+    ("/mitarbeiter/{kuerzel}/visum/{vid}/bearbeiten", "Visum ändern, Kopie ersetzen oder entfernen", "b-mitarbeiter"),
+    ("/mitarbeiter/{kuerzel}/visum/{vid}/ansehen", "Kopie des Visums ansehen", "b-mitarbeiter"),
     ("/reisen", "Liste aller Reisen", "b-reise"),
     ("/reisen/neu", "Neue Reise anlegen", "b-reise"),
     ("/reisen/naechster-code", "Hilfsadresse: nächster freier Reisecode (technisch)", "b-reise"),
@@ -199,6 +202,7 @@ SEITEN = [
     ("/portal/{token}/kilometer/{kid}/loeschen", "Kilometer-Eintrag löschen", "a-km"),
     ("/portal/{token}/unterlagen/{pid}", "Reise-PDF (z. B. Krankenversicherung) im Portal ansehen", "a-start"),
     ("/portal/{token}/a1", "Eigene A1-Bescheinigung im Portal ansehen (nur bei Reisen in Europa)", "a-start"),
+    ("/portal/{token}/visum/{vid}", "Eigenes Visum im Portal ansehen (nur für ein Land dieser Reise)", "a-start"),
     ("/portal/{token}/bewirtung/neu", "Bewirtungsbeleg im Portal anlegen", "a-bewirtung"),
     ("/portal/{token}/bewirtung/{bid}/bearbeiten", "Bewirtungsbeleg-Entwurf bearbeiten", "a-bewirtung"),
     ("/portal/{token}/bewirtung/{bid}/pruefen", "Bewirtungsbeleg vor dem Bestätigen prüfen", "a-bewirtung"),
@@ -415,6 +419,19 @@ KAPITEL = [
             ["Mitarbeiter aktiv", "Inaktive Mitarbeiter können sich nicht anmelden und stehen bei neuen Reisen nicht zur Auswahl. Statt Löschen deaktivieren."],
             ["🔒 Login-Passwort", "Nur für Organisatoren. Setzt ein neues Passwort (mindestens 8 Zeichen, überschreibt das alte). Reisende erhalten kein Passwort."],
         ], [28, 72]),
+        ("h3", "🛂 Visa"),
+        ("p", "Im Profil steht unter dem Formular die Karte **🛂 Visa**. Mit **+ Hinzufügen** erfassen Sie ein Visum: **Land** aus der Liste wählen, **gültig von** und **gültig bis**, "
+              "optional eine Notiz (z. B. Art des Visums) und die **Kopie des Visums** als PDF oder Foto (höchstens 15 MB; ein Foto wird in ein PDF umgewandelt). "
+              "Die Datei ist freiwillig; ohne sie wird nur der Ablauf überwacht. Pro Visum gibt es **Ansehen**, **Bearbeiten** (Daten ändern, Kopie ersetzen oder entfernen) und **Löschen**. "
+              "Ein Land kann mehrere Visa haben (z. B. altes und verlängertes). Sehen und ändern dürfen Organisatoren und der Mitarbeiter selbst."),
+        ("ul", [
+            "**Hinweis im Dashboard:** Läuft ein Visum in den nächsten **4 Wochen** ab oder ist es schon abgelaufen, steht oben im Dashboard die Karte **„🛂 Visa laufen ab“** mit Name, Land und Datum. "
+            "Sie bleibt, bis jemand **OK** klickt. Organisatoren sehen alle Visa, andere Mitarbeiter nur ihre eigenen.",
+            "**Verlängerung:** Erfassen Sie ein neues Visum für dasselbe Land mit späterem Ablauf, meldet die App das alte nicht mehr. Ändern Sie bei einem Visum das Datum „gültig bis“, "
+            "erscheint der Hinweis zum neuen Ablaufdatum wieder (auch wenn vorher OK geklickt wurde). Inaktive Mitarbeiter werden nicht gemeldet.",
+            "**Reise in das Land:** Reist der Mitarbeiter in ein Land, für das er ein Visum hat, das an mindestens einem Reisetag gültig ist, liegt die Kopie im **Portal** (Karte „Reiseunterlagen“) bereit "
+            "und hängt hinten an **seiner Reisemappe** (siehe „Reisemappe, Reise-PDFs und A1-Bescheinigung“). Deckt das Visum nicht die ganze Reise ab, steht im Portal ein Warnhinweis.",
+        ]),
     ]},
     {"id": "b-reise", "teil": "B", "titel": "Reisen anlegen und bearbeiten", "bloecke": [
         ("h3", "Neue Reise"),
@@ -436,11 +453,11 @@ KAPITEL = [
             ["🗺 Reiseplan", "Zeitliche Übersicht aller Flüge, Züge und Termine."],
             ["📅 Outlook", "Outlook-Einladungen der Reise."],
             ["🔄 VMA neu berechnen", "Rechnet die Tage der Reise neu. Normalerweise nicht nötig, die App rechnet automatisch (siehe Verpflegungsmehraufwand)."],
-            ["🔍 VMA-Debug", "Zeigt, wie das Land des Rückreisetags ermittelt wurde."],
             ["✏ Bearbeiten", "Titel, Daten, Reisende und Notiz ändern."],
             ["🌍 + Land", "Weiteres Land mit Zeitraum hinzufügen. Vorhandene Länder lassen sich über ✏ ändern oder löschen."],
         ], [28, 72]),
-        ("p", "Darunter folgen die Karte „🔗 Reisenden-Zugänge (Portal)“ und der „📅 Tagesverlauf & VMA“ mit allen Belegen und Terminen je Tag."),
+        ("p", "Darunter folgen die Karte „🔗 Reisenden-Zugänge (Portal)“ und der „📅 Tagesverlauf & VMA“ mit allen Belegen und Terminen je Tag. "
+              "Rechts oben im Tagesverlauf setzt **↺ Alle Tage auf Auto** bei allen Tagen die Manuell-Markierung zurück und berechnet Land und Sätze neu."),
     ]},
     {"id": "b-portal", "teil": "B", "titel": "Portal-Zugänge für Reisende", "bloecke": [
         ("p", "Jeder Reisende einer Reise hat einen **persönlichen Link** (Token). Er öffnet nur die eigene Reise: Die Reise kommt immer aus dem Link, "
@@ -470,7 +487,7 @@ KAPITEL = [
             "**Mehrere Reisende:** Die VMA-Tage der Reise-Seite gibt es nur einmal je Reise. Die Mahlzeiten, die ein Reisender zuletzt gespeichert hat, stehen dort; Änderungen der Reise-Seite gelten für alle Reisenden.",
         ]),
         ("h3", "Karte „📄 Reiseunterlagen“ im Portal"),
-        ("p", "Oben im Portal steht die Karte **Reiseunterlagen**. Sie enthält die **Reise-PDFs** aus den Einstellungen (zum Beispiel die Krankenversicherung; alle für alle Mitarbeiter plus die persönlichen des Reisenden, pausierte nicht) und bei **Reisen in Europa** die **A1-Bescheinigung** des Reisenden. Liegt sie noch nicht vor, steht dort ein Hinweis, sie über „Beleg hochladen“ zu schicken; ist sie als „nicht nötig“ markiert, steht der Grund da. Zeigt die A1 einen zu kurzen Zeitraum, gibt es einen Warnhinweis. Jeder Reisende sieht nur seine eigenen Dokumente; die Links funktionieren nur mit seinem persönlichen Portal-Link."),
+        ("p", "Oben im Portal steht die Karte **Reiseunterlagen**. Sie enthält die **Reise-PDFs** aus den Einstellungen (zum Beispiel die Krankenversicherung; alle für alle Mitarbeiter plus die persönlichen des Reisenden, pausierte nicht) und bei **Reisen in Europa** die **A1-Bescheinigung** des Reisenden. Liegt sie noch nicht vor, steht dort ein Hinweis, sie über „Beleg hochladen“ zu schicken; ist sie als „nicht nötig“ markiert, steht der Grund da. Zeigt die A1 einen zu kurzen Zeitraum, gibt es einen Warnhinweis. Hat der Reisende für ein Land der Reise ein gültiges **Visum** mit hinterlegter Kopie, steht dort auch ein Knopf **🛂 Visum Land**. Jeder Reisende sieht nur seine eigenen Dokumente; die Links funktionieren nur mit seinem persönlichen Portal-Link."),
     ]},
     {"id": "b-eingang", "teil": "B", "titel": "Belege hereinbekommen", "bloecke": [
         ("p", "Belege kommen auf drei Wegen in die App. Jeder Beleg wird ausgelesen: Text lesen, Namen und Mailadressen der Mitarbeiter unkenntlich machen "
@@ -606,6 +623,11 @@ KAPITEL = [
               "Standard **07:00–16:00** (die Uhrzeiten oben lassen sich ändern). Für den **Anreisetag** und den **Abreisetag** gibt es eigene Zeiten; ein leeres Feld nimmt die Standardzeit. "
               "Die Montage muss im Reisezeitraum liegen (höchstens 60 Tage). Ist „Montage bis“ leer, entsteht nur ein Termin. Jeder Tag ist danach ein eigener Termin und lässt sich einzeln ändern oder löschen."),
         ("p", "**In Outlook eine Terminserie:** Alle Tage einer mehrtägigen Montage gehören zu einer Serie. Die Mitarbeiter mit Outlook-Haken bekommen dafür **eine einzige Einladung** (eine Mail) statt einer je Tag. Abweichende Zeiten am Anreise-/Abreisetag stehen darin als Ausnahmen, ebenso ein einzeln geänderter Tag. Wird ein Tag gelöscht, kommt eine Aktualisierung mit diesem Tag als Ausnahme; wird die ganze Montage gelöscht, kommt eine Absage der Serie. Beim Bearbeiten eines Tages zeigt die Seite den Hinweis „Teil einer Montage-Serie“. Ändern Sie bei einem Tag den Typ weg von „Montage“, wird er ein eigener Einzeltermin. **Ältere Montagen** (vor Version 3.42 angelegt, mit je Tag einer Einladung) bleiben Einzeltermine; Serien gibt es nur für neu angelegte Montagen."),
+        ("p", "**👥 Auch für andere Reisen anlegen:** Sind Kollegen zur selben Zeit unterwegs, zeigt das Formular unten **„Auch für andere Reisen anlegen“**. "
+              "Dort stehen nur Reisen, die sich mit dem eingetragenen Datum (bei Montage: mit dem ganzen Zeitraum) überlagern. Haken setzen, speichern: "
+              "Der Termin wird für **jede gewählte Reise einzeln** angelegt, deren Reisende bekommen ihre **eigene Outlook-Einladung**. "
+              "Bei einer mehrtägigen Montage entsteht je Reise eine eigene Terminserie. Liegt nur ein Teil der Montage in einer anderen Reise, ist sie nicht wählbar (grauer Hinweis). "
+              "Die Termine sind danach unabhängig: Änderungen oder Löschen gelten nur für die jeweilige Reise."),
         ("h3", "Reiseplan"),
         ("p", "**🗺 Reiseplan** zeigt alle Flüge, Züge und Termine in zeitlicher Reihenfolge. Zwei PDF-Varianten: „für Reisemappe Mitarbeiter“ (mit Anlagen) und „zum Emailversand“ (ohne Buchungscodes, nie mit Anlagen). Mehr dazu im Kapitel „Reisemappe, Reise-PDFs und A1-Bescheinigung“."),
         ("h3", "Änderungen und Umbuchungen"),
@@ -631,7 +653,8 @@ KAPITEL = [
         ("p", "Dieselben Dokumente (Reise-PDFs und die eigene A1) sehen die Reisenden auch im Portal in der Karte **📄 Reiseunterlagen**, ohne die Mappe zu öffnen. Pausierte Dokumente erscheinen dort ebenfalls nicht."),
         ("h3", "Welche Anlagen kommen in welche Mappe?"),
         ("ul", [
-            "Hat die Reise **einen** Reisenden, bekommt die Mappe seine Dokumente automatisch: alle Dokumente „für alle Mitarbeiter“, seine persönlichen Dokumente und seine A1.",
+            "Hat die Reise **einen** Reisenden, bekommt die Mappe seine Dokumente automatisch: alle Dokumente „für alle Mitarbeiter“, seine persönlichen Dokumente, seine A1 "
+            "und die Kopien seiner **Visa** für Länder der Reise (Mitarbeiterprofil › 🛂 Visa). Fehlt zu einem passenden Visum die Kopie, steht es unter „Nicht angehängt“.",
             "Bei **mehreren Reisenden** zeigt der Reiseplan je Mitarbeiter einen eigenen Knopf („📄 Reisemappe Name“). Ohne Auswahl enthält die Mappe nur die Dokumente für alle Mitarbeiter, "
             "keine persönlichen Dokumente und keine A1.",
             "Die Variante **„PDF zum Emailversand“** enthält **nie** Anlagen (Versicherungsdaten gehören nicht zu Kunden oder Dritten).",
@@ -685,7 +708,7 @@ KAPITEL = [
             "**🔔 Satz geändert:** Ändert sich Land oder Satz eines Tages gegenüber vorher (z. B. nach einem Hotelbeleg im Ausland), steht am Tag „vorher … → jetzt …“. Mit **OK** ist der Hinweis erledigt.",
             "**Land nicht erkannt:** Gibt es für einen Tag weder Flug noch Hotel noch Land-Eintrag, gilt der Deutschland-Satz. Der Tag zeigt dann den Hinweis „Land nicht erkannt“. Bei einer Auslandsreise den Hotel- oder Flugbeleg hochladen oder **🌍 + Land** eintragen; die Tage werden dann automatisch neu berechnet.",
             "**Rückreisetag:** Hier zählt der letzte Tätigkeitsort vor der Heimreise (Abflugort der ersten Etappe des Tages), nicht der Ankunftsort. "
-            "Bei eintägigen Reisen das zuletzt besuchte ausländische Land. Wie die App entschieden hat, zeigt **🔍 VMA-Debug**.",
+            "Bei eintägigen Reisen das zuletzt besuchte ausländische Land. Wie die App entschieden hat, zeigt die Diagnose-Seite `/reise/<Code>/vma-debug` (ohne Knopf, nur noch per Adresse erreichbar).",
             "Städte mit eigenem Sondersatz (z. B. Los Angeles, New York) werden berücksichtigt.",
             "An- und Abreisetage erhalten je nach Fall den **halben Satz** (Markierung „½ Satz“).",
         ]),
@@ -874,7 +897,8 @@ KAPITEL = [
     {"id": "b-dashboard", "teil": "B", "titel": "Dashboard, Offene Aufgaben und Karte", "bloecke": [
         ("h3", "Dashboard"),
         ("p", "Startseite. Reisen in drei Gruppen: **Aktiv**, **Geplant** (nächste zuerst), **Abgeschlossen** (mit Link zum Abschluss). Dazu: offene Verspätungs-Alarme, "
-              "Hinweise (z. B. Kurs nachtragen), Anzahl Belege im Posteingang und der Knopf **📬 Mails abrufen**."),
+              "Hinweise (z. B. Kurs nachtragen), Anzahl Belege im Posteingang und der Knopf **📬 Mails abrufen**. "
+              "Läuft ein **Visum** in den nächsten 4 Wochen ab, steht oben die Karte **„🛂 Visa laufen ab“**, bis OK geklickt wird (siehe „Mitarbeiter verwalten“)."),
         ("h3", "📋 Offene Aufgaben (`/todo`)"),
         ("p", "Alles, was vor der finalen Abrechnung noch offen ist, über alle Reisen: Beträge in Fremdwährung ohne bestätigten Euro-Betrag, Belege ohne Prüfung, "
               "Buchungen, zu denen nach der Rückkehr noch Rechnung oder Quittung fehlt („🧾 Rechnung/Quittung fehlt noch“, mit Betrag), "
@@ -981,7 +1005,7 @@ KAPITEL = [
             ["„An Habel“ gesperrt", "Ein Beleg ist nicht geprüft oder das Original fehlt. DMS_EMAIL_TO gesetzt?"],
             ["Habel-Mail zu groß", "Summe der Anhänge über HABEL_MAX_MB. Wert erhöhen, soweit der Mailserver es erlaubt."],
             ["Kein Verspätungs-Alarm", "Cron `/cron/flug-alerts` jede Minute eingerichtet? API-Schlüssel gesetzt? „Jetzt testweise abrufen“ zeigt die Diagnose."],
-            ["Falsches Land oder falscher VMA-Satz", "🔍 VMA-Debug ansehen. Notfalls den Satz am Tag manuell überschreiben."],
+            ["Falsches Land oder falscher VMA-Satz", "Am Tag **↺ Auto** klicken oder oben im Tagesverlauf **↺ Alle Tage auf Auto**. Notfalls den Satz am Tag manuell überschreiben. Die Diagnose steht unter `/reise/<Code>/vma-debug`."],
             ["„Kurs nachtragen“ bleibt stehen", "Kurs am Beleg eintragen oder Euro-Betrag final setzen (am besten über die Kreditkarten-Abrechnung)."],
             ["Seite meldet „Spalte fehlt“", "Einmal `/init` aufrufen."],
         ], [34, 66]),

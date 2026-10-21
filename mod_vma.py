@@ -272,6 +272,8 @@ LAENDER_LISTE = [
     ("ID","Indonesien"), ("MY","Malaysia"), ("HK","Hongkong"),
     ("IL","Israel"), ("HU","Ungarn"), ("RO","Rumänien"),
     ("HR","Kroatien"), ("BG","Bulgarien"), ("EG","Ägypten"),
+    ("SK","Slowakei"), ("SI","Slowenien"), ("RS","Serbien"),
+    ("RU","Russland"), ("UA","Ukraine"),
     ("MA","Marokko"), ("NG","Nigeria"), ("KE","Kenia"),
     ("PH","Philippinen"), ("VN","Vietnam"), ("NZ","Neuseeland"),
 ]

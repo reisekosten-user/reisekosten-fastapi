@@ -31,6 +31,7 @@ import mod_zeitzone as zeitzone
 import mod_laender
 import mod_a1
 import mod_reisepdf
+import mod_visa
 import mod_doku
 import mod_beleg
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
@@ -89,6 +90,13 @@ SESSION_SECRET, SESSION_SECRET_HERKUNFT = _session_secret_bestimmen()
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.44", "zeit": "2026-10-21 15:04", "aenderungen": [
+        "Neu: Visa im Mitarbeiterprofil (Karte „🛂 Visa“). Mit „+ Hinzufügen“ Land wählen, gültig von/bis eintragen und optional die Kopie des Visums hochladen (PDF oder Foto).",
+        "Dashboard: Läuft ein Visum in den nächsten 4 Wochen ab oder ist es abgelaufen, erscheint ein Hinweis, bis „OK“ geklickt wird. Reist der Mitarbeiter in das Land, liegt die Visum-Kopie im Portal bereit und hängt an seiner Reisemappe.",
+        "Länderliste „Land hinzufügen“: Russland, Ukraine, Slowakei, Slowenien und Serbien ergänzt (alle Länder mit Verpflegungssatz sind jetzt wählbar)."]},
+    {"version": "3.43", "zeit": "2026-10-21 14:37", "aenderungen": [
+        "Termin hinzufügen: Neue Auswahl „👥 Auch für andere Reisen anlegen“. Es werden nur Reisen vorgeschlagen, die sich zeitlich mit dem Termin überlagern (z. B. Kollegen, die zur selben Zeit unterwegs sind). Der Termin, auch eine mehrtägige Montage, wird für jede gewählte Reise einzeln angelegt; deren Reisende bekommen ihre eigene Outlook-Einladung.",
+        "Reise-Seite: Der Knopf „🔍 VMA-Debug“ entfällt. Neu im Tagesverlauf: „↺ Alle Tage auf Auto“ (setzt alle manuell markierten Tage zurück und rechnet neu). Die Diagnose-Seite bleibt per Adresse erreichbar."]},
     {"version": "3.42", "zeit": "2026-10-21 13:44", "aenderungen": [
         "Montage über mehrere Tage: In Outlook kommt jetzt eine einzige Einladung als Terminserie an (eine Mail statt einer je Tag). Abweichende Zeiten am Anreise-/Abreisetag stehen darin als Ausnahmen; geänderte oder gelöschte Tage und die Absage laufen ebenfalls über diese eine Einladung. Bereits versendete ältere Montagen bleiben Einzeltermine.",
         "Portal und Reise-Seite gleichen sich jetzt in beide Richtungen ab: Mahlzeiten, Land, Sätze, halber Satz und Reisezeiten von der Reise-Seite erscheinen im Portal (auch bei geänderten Reisedaten), Eingaben aus dem Portal landen verlässlich auf der Reise-Seite. Die Reise-Seite zeigt zusätzlich Portal-Zeiten, Notizen und Kilometer.",
@@ -827,6 +835,7 @@ async def startup():
     bearbeitet_nachtragen()
     mod_a1.tabelle_sichern()
     mod_reisepdf.tabelle_sichern()
+    mod_visa.tabelle_sichern()
     try:
         n_mwst = mod_beleg.mwst_flug_bahn_reparieren()
         if n_mwst:
@@ -4328,6 +4337,10 @@ def _reisemappe_mit_anlagen(rcode: str, daten: dict, pdf_bytes: bytes, kuerzel: 
                     anlagen.append(mod_reisepdf.a1_anlage(person["beleg"]["id"], f"A1-Bescheinigung ({person['klarname']})"))
                 elif person["status"] == "fehlt":
                     anlagen.append({"titel": "A1-Bescheinigung", "bytes": None, "fehler": "liegt noch nicht vor"})
+            try:                       # Visa-Kopien für Länder dieser Reise (v3.44) – ein Fehler hier stoppt nichts
+                anlagen += mod_visa.anlagen_fuer(rcode, k, dict(reisende).get(k, ""))
+            except Exception as ex:
+                print(f"[Reisemappe] Visa nicht angehängt: {ex}")
         neu, _probleme = mod_reisepdf.mappe_zusammenbauen(
             pdf_bytes, anlagen, kopf=f"Reise {rcode} – {daten.get('titel') or ''}")
         return neu, k
@@ -5838,6 +5851,7 @@ def init():
         migriere_verknuepfungen_zu_gruppen()
         eigenbelege_pflichtfelder_reparieren()
         bewirtung_kosten_reparieren()
+        mod_visa.tabelle_sichern()
         return {"status": "ok", "version": APP_VERSION,
                 "db": "postgresql" if is_postgres() else "sqlite"}
     except Exception as e:
@@ -6453,6 +6467,7 @@ def dashboard(request: Request):
         # ToDo-Liste – nur für Organisatoren: konsolidierter Überblick über alles,
         # was bis zur finalen Abrechnung noch offen ist (nicht auf den einzelnen
         # Mitarbeiter gefiltert)
+        visa_html = _visa_dashboard_html(request)
         todo_html = ""
         if ist_organisator(request):
             todo_items = todo_liste_laden()
@@ -6499,6 +6514,7 @@ def dashboard(request: Request):
           </div>
         </div>
 
+        {visa_html}
         {todo_html}
         {warn_html}
 
@@ -7429,7 +7445,7 @@ async def mitarbeiter_neu(request: Request):
             '<a href="/mitarbeiter/neu" class="btn btn-secondary">Zurück</a>'))
 
 @app.get("/mitarbeiter/{kuerzel}/bearbeiten", response_class=HTMLResponse)
-def mitarbeiter_bearbeiten_form(kuerzel: str):
+def mitarbeiter_bearbeiten_form(kuerzel: str, request: Request):
     try:
         db = get_db(); cur = db.cursor()
         P = ph()
@@ -7442,17 +7458,18 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
                 '<div class="alert alert-err">Mitarbeiter nicht gefunden.</div>'))
         k = r[0] if isinstance(r, tuple) else r["kuerzel"]
         n = r[1] if isinstance(r, tuple) else r["klarname"]
-        em = (r[2] if isinstance(r, tuple) else r.get("email","")) or ""
+        em = (r[2] if isinstance(r, tuple) else r["email"]) or ""
         a = r[4] if isinstance(r, tuple) else r["aktiv"]
-        em2 = (r[5] if isinstance(r, tuple) else r.get("email2","")) or ""
-        em3 = (r[6] if isinstance(r, tuple) else r.get("email3","")) or ""
-        is_reisend = bool(r[7] if isinstance(r, tuple) else r.get("ist_reisender", True))
-        is_org = bool(r[8] if isinstance(r, tuple) else r.get("ist_organisator", False))
-        kk_typ = (r[9] if isinstance(r, tuple) else r.get("kreditkarten_typ")) or "privat"
-        kk_prozent = r[10] if isinstance(r, tuple) else r.get("kreditkarten_auslandsentgelt_prozent")
+        em2 = (r[5] if isinstance(r, tuple) else r["email2"]) or ""
+        em3 = (r[6] if isinstance(r, tuple) else r["email3"]) or ""
+        is_reisend = bool(r[7] if isinstance(r, tuple) else r["ist_reisender"])
+        is_org = bool(r[8] if isinstance(r, tuple) else r["ist_organisator"])
+        kk_typ = (r[9] if isinstance(r, tuple) else r["kreditkarten_typ"]) or "privat"
+        kk_prozent = r[10] if isinstance(r, tuple) else r["kreditkarten_auslandsentgelt_prozent"]
         if kk_prozent is None: kk_prozent = 1.5
         kal_mail = bool(r[11] if isinstance(r, tuple) else r["kalender_mail"])
         aktiv_check = "checked" if a else ""
+        visa_karte = _visa_karte_html(k, request)
         content = f"""
         <h1 class="page-title">Mitarbeiter bearbeiten</h1>
         <div class="card" style="max-width:480px">
@@ -7529,6 +7546,7 @@ def mitarbeiter_bearbeiten_form(kuerzel: str):
             </form>
           </div>
         </div>
+        {visa_karte}
         <div class="card" style="max-width:480px;margin-top:16px">
           <div class="card-header"><span class="card-title">✏ Kürzel ändern</span></div>
           <div class="card-body">
@@ -7591,6 +7609,7 @@ async def mitarbeiter_kuerzel_aendern(kuerzel: str, request: Request):
         return RedirectResponse(f"/mitarbeiter/{alt}/bearbeiten", status_code=303)
 
     try:
+        mod_visa.tabelle_sichern()          # Tabelle muss existieren, bevor das Kürzel dort umgestellt wird
         P = ph()
         db = get_db(); cur = db.cursor()
 
@@ -7624,6 +7643,7 @@ async def mitarbeiter_kuerzel_aendern(kuerzel: str, request: Request):
         cur.execute(f"UPDATE reise_zugang SET kuerzel={P} WHERE kuerzel={P}", (neu, alt))
         cur.execute(f"UPDATE reisetage_person SET kuerzel={P} WHERE kuerzel={P}", (neu, alt))
         cur.execute(f"UPDATE kalender_versand SET kuerzel={P} WHERE kuerzel={P}", (neu, alt))
+        cur.execute(f"UPDATE visa SET kuerzel={P} WHERE kuerzel={P}", (neu, alt))
         cur.execute(f"DELETE FROM mitarbeiter WHERE kuerzel={P}", (alt,))
 
         db.commit(); cur.close(); db.close()
@@ -8966,7 +8986,6 @@ def reise_detail(code: str, request: Request):
             <a href="/reise/{rcode}/reiseplan" class="btn btn-secondary">🗺 Reiseplan</a>
             <a href="/reise/{rcode}/kalender" class="btn btn-secondary">📅 Outlook</a>
             <a href="/reise/{rcode}/vma-generieren" class="btn btn-secondary">🔄 VMA neu berechnen</a>
-            <a href="/reise/{rcode}/vma-debug" class="btn btn-secondary">🔍 VMA-Debug</a>
             <a href="/reise/{rcode}/bearbeiten" class="btn btn-secondary">✏ Bearbeiten</a>
             <a href="/reise/{rcode}/land/neu" class="btn btn-secondary">🌍 + Land</a>
           </div>
@@ -8993,6 +9012,11 @@ def reise_detail(code: str, request: Request):
         <div class="card">
           <div class="card-header">
             <span class="card-title">📅 Tagesverlauf & VMA</span>
+            <form method="post" action="/reise/{rcode}/vma-alle-zuruecksetzen" style="margin-left:auto"
+                  onsubmit="return confirm('Alle Tage dieser Reise von manuell zurück auf automatisch setzen und neu berechnen?')">
+              <button type="submit" title="Entfernt bei allen Tagen die Manuell-Markierung und berechnet Land und Sätze neu"
+                      style="font-size:12px;color:var(--muted);background:none;border:none;text-decoration:underline;cursor:pointer">↺ Alle Tage auf Auto</button>
+            </form>
           </div>
           {('<div style="padding:12px 16px;background:#fef3c7;color:#92400e;font-size:12px;border-bottom:1px solid var(--border)">⚠ Für diese Reise wurde die VMA noch nicht berechnet – solange fehlen die Tages-Köpfe und Belege werden fälschlich als "außerhalb des Reisezeitraums" angezeigt. <a href="/reise/' + rcode + '/vma-generieren" style="color:#92400e;font-weight:600">🔄 Jetzt VMA berechnen</a></div>' if not vma_tage_rows else '') + (tage_blocks if tage_blocks else '<div class="card-body"><div class="empty-state"><b>Noch keine VMA-Tage berechnet</b><p>Die Tage werden normalerweise automatisch angelegt. Termine sind dafür nicht nötig – bitte einmal berechnen.</p><a href="/reise/' + rcode + '/vma-generieren" class="btn btn-primary" style="margin-top:12px">🔄 VMA berechnen</a></div></div>')}
           {'<div style="padding:12px 16px;display:flex;justify-content:flex-end;gap:24px;background:var(--bg)"><span style="font-size:13px;color:var(--muted)">VMA gesamt: <b style="color:var(--green)">' + f"{vma_tage_summe:.2f}" + ' EUR</b></span>' + (f'<span style="font-size:13px;color:var(--muted)">Trennungspauschale: <b style="color:#7c3aed">{trennung_summe:.2f} EUR</b></span>' if trennung_summe else '') + f'<span style="font-size:13px;font-weight:700">Gesamt: {vma_tage_summe + trennung_summe:.2f} EUR</span></div>' if vma_tage_rows else ''}
@@ -9400,9 +9424,139 @@ MONTAGE_BLOCK_HTML = """
             </script>
 """
 
+def _weitere_reisen_kandidaten(rcode: str) -> list:
+    """Andere Reisen, die sich zeitlich mit der Reise rcode überlagern (z.B. Kollegen, die zur selben
+    Zeit unterwegs sind). Liefert [{"code", "titel", "ab", "zu", "reisende": [(Kürzel, Klarname), ...]}]."""
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        g = lambda r, k, i: r[k] if hasattr(r, "keys") else r[i]
+        cur.execute(f"SELECT abreise, rueckkehr FROM reisen WHERE code={P}", (rcode,))
+        r0 = cur.fetchone()
+        if not r0:
+            cur.close(); db.close(); return []
+        ab0 = _datum_parsen(g(r0, "abreise", 0)); zu0 = _datum_parsen(g(r0, "rueckkehr", 1))
+        if not ab0 or not zu0:
+            cur.close(); db.close(); return []
+        cur.execute(f"SELECT code, titel, abreise, rueckkehr FROM reisen WHERE code<>{P} ORDER BY abreise, code", (rcode,))
+        kand = []
+        for r in cur.fetchall():
+            ab = _datum_parsen(g(r, "abreise", 2)); zu = _datum_parsen(g(r, "rueckkehr", 3))
+            if ab and zu and ab <= zu0 and zu >= ab0:
+                kand.append({"code": g(r, "code", 0), "titel": g(r, "titel", 1) or "", "ab": ab, "zu": zu, "reisende": []})
+        if kand:
+            codes = [k["code"] for k in kand]
+            cur.execute(f"SELECT rm.reise_code, m.kuerzel, m.klarname FROM reise_mitarbeiter rm "
+                        f"JOIN mitarbeiter m ON m.kuerzel=rm.kuerzel "
+                        f"WHERE rm.reise_code IN ({','.join([P] * len(codes))}) ORDER BY m.klarname", tuple(codes))
+            je_reise = {}
+            for r in cur.fetchall():
+                je_reise.setdefault(g(r, "reise_code", 0), []).append((g(r, "kuerzel", 1), g(r, "klarname", 2)))
+            for k in kand:
+                k["reisende"] = je_reise.get(k["code"], [])
+        cur.close(); db.close()
+        return kand
+    except Exception:
+        return []
+
+
+_WEITERE_REISEN_JS = """
+            <script>
+              (function () {
+                var d1 = document.querySelector('input[name=datum]');
+                var d2 = document.querySelector('input[name=datum_bis]');
+                var typ = document.querySelector('select[name=typ]');
+                var zeilen = document.querySelectorAll('.weitere-zeile');
+                var leer = document.getElementById('weitere_leer');
+                function filtern() {
+                  var a = d1.value, b = a;
+                  if (typ.value === 'montage' && d2 && d2.value && d2.value >= a) b = d2.value;
+                  var sichtbar = 0;
+                  zeilen.forEach(function (z) {
+                    var cb = z.querySelector('input'), hint = z.querySelector('.weitere-hinweis');
+                    var zab = z.getAttribute('data-ab'), zzu = z.getAttribute('data-zu');
+                    var ueberlappt = !a || (zab <= b && zzu >= a);
+                    var ganz = !a || (zab <= a && zzu >= b);
+                    z.style.display = ueberlappt ? '' : 'none';
+                    cb.disabled = !ganz;
+                    if (!ganz) cb.checked = false;
+                    hint.style.display = (ueberlappt && !ganz) ? '' : 'none';
+                    if (ueberlappt) sichtbar++;
+                  });
+                  leer.style.display = sichtbar ? 'none' : '';
+                }
+                [d1, d2, typ].forEach(function (el) {
+                  if (el) { el.addEventListener('change', filtern); el.addEventListener('input', filtern); }
+                });
+                filtern();
+              })();
+            </script>"""
+
+
+def _weitere_reisen_block_html(rcode: str) -> str:
+    """Auswahl „Auch für andere Reisen anlegen“ im Termin-Formular (leer, wenn sich keine Reise überlagert)."""
+    kand = _weitere_reisen_kandidaten(rcode)
+    if not kand:
+        return ""
+    zeilen = ""
+    for k in kand:
+        wer = ", ".join(_bw_e(kn) for _, kn in k["reisende"]) or "–"
+        zeilen += (
+            f'<div class="weitere-zeile" data-ab="{k["ab"].isoformat()}" data-zu="{k["zu"].isoformat()}" style="margin:4px 0">'
+            f'<label style="display:flex;gap:8px;align-items:flex-start;font-weight:normal">'
+            f'<input type="checkbox" name="weitere_reisen" value="{_bw_e(k["code"])}" style="margin-top:3px">'
+            f'<span><b>{_bw_e(k["code"])}</b> {_bw_e(k["titel"])}<br>'
+            f'<span style="font-size:12px;color:var(--muted)">👤 {wer} · {fmt_date(k["ab"])} – {fmt_date(k["zu"])}</span>'
+            f'<span class="weitere-hinweis" style="display:none;font-size:12px;color:#b45309"><br>'
+            f'Der Zeitraum liegt nicht komplett in dieser Reise.</span></span></label></div>')
+    return (
+        '<div class="form-group full">'
+        '<label>👥 Auch für andere Reisen anlegen</label>'
+        '<p style="font-size:12px;color:var(--muted);margin:2px 0 6px">Nur Reisen, die sich mit dem Datum überlagern. '
+        'Der Termin wird für jede gewählte Reise einzeln angelegt; deren Reisende bekommen ihre eigene Outlook-Einladung. '
+        'Spätere Änderungen gelten nur für die jeweilige Reise.</p>'
+        f'{zeilen}'
+        '<div id="weitere_leer" style="display:none;font-size:12px;color:var(--muted)">'
+        'Keine andere Reise überlagert sich mit diesem Datum.</div>'
+        '</div>' + _WEITERE_REISEN_JS)
+
+
+def _weitere_reisen_pruefen(rcode: str, codes: list, von: date, bis: date) -> tuple:
+    """Prüft die zusätzlich gewählten Reisen: Sie müssen existieren und den ganzen Zeitraum von..bis abdecken.
+    Gibt (Liste gültiger Reise-Codes ohne rcode, Liste Fehlertexte) zurück."""
+    ok, fehler, gesehen = [], [], {rcode}
+    if not codes:
+        return ok, fehler
+    try:
+        P = ph()
+        db = get_db(); cur = db.cursor()
+        g = lambda r, k, i: r[k] if hasattr(r, "keys") else r[i]
+        for c in codes:
+            c = (c or "").strip().upper()
+            if not c or c in gesehen:
+                continue
+            gesehen.add(c)
+            cur.execute(f"SELECT abreise, rueckkehr FROM reisen WHERE code={P}", (c,))
+            r = cur.fetchone()
+            if not r:
+                fehler.append(f"Reise {c} wurde nicht gefunden.")
+                continue
+            ab = _datum_parsen(g(r, "abreise", 0)); zu = _datum_parsen(g(r, "rueckkehr", 1))
+            if not ab or not zu or not von or not bis or von < ab or bis > zu:
+                fehler.append(f"Reise {c}: Der Termin liegt nicht komplett im Reisezeitraum "
+                              f"({fmt_date(ab) if ab else '?'} – {fmt_date(zu) if zu else '?'}).")
+                continue
+            ok.append(c)
+        cur.close(); db.close()
+    except Exception as e:
+        fehler.append(f"Weitere Reisen konnten nicht geprüft werden: {e}")
+    return ok, fehler
+
+
 @app.get("/reise/{code}/termin/neu", response_class=HTMLResponse)
 def termin_neu_form(code: str, datum: str = "", zurueck: str = ""):
     rcode = code.upper()
+    weitere_block = _weitere_reisen_block_html(rcode)
     typ_opts = "".join(f'<option value="{v}">{l}</option>' for v, l in TERMIN_TYPEN)
     ziel = f"/reise/{rcode}/reiseplan" if zurueck == "reiseplan" else f"/reise/{rcode}"
 
@@ -9496,6 +9650,7 @@ def termin_neu_form(code: str, datum: str = "", zurueck: str = ""):
               <label>Notiz</label>
               <input type="text" name="notiz" placeholder="optional">
             </div>
+            {weitere_block}
           </div>
           <div class="form-actions">
             <button type="submit" class="btn btn-primary">Hinzufügen</button>
@@ -9572,6 +9727,21 @@ async def termin_neu(code: str, request: Request, zurueck: str = ""):
         tage_liste = montage_tage_berechnen(t_erster, t_letzter, std_von, std_bis,
                                             zeiten["anreise_von"], zeiten["anreise_bis"],
                                             zeiten["abreise_von"], zeiten["abreise_bis"])
+
+    # Weitere Reisen (z.B. Kollegen zur selben Zeit unterwegs): derselbe Termin wird je Reise einzeln angelegt.
+    ziel_reisen = [rcode]
+    weitere_codes = [c for c in form.getlist("weitere_reisen") if (c or "").strip()]
+    if weitere_codes:
+        if typ == "montage":
+            w_von, w_bis = t_erster, t_letzter
+        else:
+            w_von = w_bis = _datum_parsen(datum)
+        w_ok, w_fehler = _weitere_reisen_pruefen(rcode, weitere_codes, w_von, w_bis)
+        if w_fehler:
+            return HTMLResponse(shell("Termin",
+                '<div class="alert alert-err">' + "<br>".join(_bw_e(x) for x in w_fehler) + '</div>' + zurueck_link),
+                status_code=400)
+        ziel_reisen += w_ok
     try:
         if google_lat and google_lon:
             lat, lon, land_code = float(google_lat), float(google_lon), (google_land.upper() or None)
@@ -9587,14 +9757,16 @@ async def termin_neu(code: str, request: Request, zurueck: str = ""):
         db = get_db(); cur = db.cursor()
         # Mehrtägige Montage = eine Terminserie: alle Tage tragen dieselbe Serien-ID,
         # Outlook bekommt dafür eine einzige Einladung (siehe mod_kalender).
-        serie_id = uuid.uuid4().hex[:12] if (typ == "montage" and len(tage_liste) > 1) else None
-        for tag_t, von_t, bis_t in tage_liste:
-            cur.execute(
-                f"INSERT INTO termine (reise_code,datum,uhrzeit_von,uhrzeit_bis,titel,typ,ort,"
-                f"ansprechpartner,telefon,notiz,lat,lon,land_code,serie_id) "
-                f"VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})",
-                (rcode, tag_t.isoformat() if tag_t else datum, von_t, bis_t, titel, typ, ort,
-                 ansprechpartner, telefon, notiz, lat, lon, land_code, serie_id))
+        # Bei mehreren Reisen bekommt jede Reise ihre eigene Serien-ID (eigene Einladung je Reise).
+        for ziel_code in ziel_reisen:
+            serie_id = uuid.uuid4().hex[:12] if (typ == "montage" and len(tage_liste) > 1) else None
+            for tag_t, von_t, bis_t in tage_liste:
+                cur.execute(
+                    f"INSERT INTO termine (reise_code,datum,uhrzeit_von,uhrzeit_bis,titel,typ,ort,"
+                    f"ansprechpartner,telefon,notiz,lat,lon,land_code,serie_id) "
+                    f"VALUES ({P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P},{P})",
+                    (ziel_code, tag_t.isoformat() if tag_t else datum, von_t, bis_t, titel, typ, ort,
+                     ansprechpartner, telefon, notiz, lat, lon, land_code, serie_id))
         db.commit(); cur.close(); db.close()
         return RedirectResponse(ziel, status_code=303)
     except Exception as e:
@@ -10132,6 +10304,18 @@ def _portal_unterlagen_karte(token: str, info: dict) -> str:
                        f'margin-bottom:8px">🇪🇺 Für diese Europa-Reise ({land_txt}) brauchst du eine <b>A1-Bescheinigung</b>, '
                        f'sie liegt noch nicht vor. Bitte oben über „Beleg hochladen“ schicken – sie wird automatisch erkannt '
                        f'und erscheint hier, sobald sie dir zugeordnet ist.</div>')
+    try:
+        for v in mod_visa.fuer_reise(info["reise_code"], info["kuerzel"]):
+            if not v["hat_datei"]:
+                continue
+            gueltig = f'gültig bis {mod_visa.datum_text(v["bis"])}'
+            zeilen += (f'<a href="/portal/{token}/visum/{v["id"]}" target="_blank" class="btn btn-secondary" '
+                       f'style="width:100%;display:block;text-align:center;margin-bottom:8px">🛂 Visum {_bw_e(v["land_name"])} ({gueltig})</a>')
+            if not v["ganze_reise"]:
+                zeilen += (f'<div style="font-size:12px;color:#92400e;margin:-4px 0 8px">⚠ Dieses Visum gilt '
+                           f'{mod_visa.datum_text(v["von"])} – {mod_visa.datum_text(v["bis"])}, die Reise dauert länger.</div>')
+    except Exception as ex:
+        print(f"[Portal] Visa nicht geladen: {ex}")
     if not zeilen:
         return ""
     return f"""<div class="card" style="margin-bottom:16px">
@@ -10203,6 +10387,30 @@ def portal_a1_datei(token: str):
         return HTMLResponse(portal_shell("Nicht verfügbar", '<p>Die A1-Bescheinigung kann gerade nicht geladen werden. Bitte später noch einmal versuchen.</p>'),
                             status_code=503)
     return _datei_antwort(daten_b, f"A1-Bescheinigung_{info['kuerzel']}")
+
+
+@app.get("/portal/{token}/visum/{vid}")
+def portal_visum(token: str, vid: int):
+    """Die Visum-Kopie des Reisenden dieses Links – nur sein eigenes Visum, nur für ein Land dieser Reise."""
+    info = zugang_aus_token(token)
+    if not info:
+        return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
+    try:
+        passend = [v for v in mod_visa.fuer_reise(info["reise_code"], info["kuerzel"]) if v["id"] == vid and v["hat_datei"]]
+    except Exception as ex:
+        print(f"[Portal] Visum {vid} nicht geprüft: {ex}")
+        passend = []
+    if not passend:
+        return HTMLResponse(portal_shell("Nicht gefunden", '<p>Dieses Visum gehört nicht zu deiner Reise.</p>'), status_code=404)
+    try:
+        daten_b = mod_visa.pdf_bytes(vid)
+    except Exception as ex:
+        print(f"[Portal] Visum {vid} nicht ladbar: {ex}")
+        daten_b = None
+    if not daten_b:
+        return HTMLResponse(portal_shell("Nicht verfügbar", '<p>Das Visum kann gerade nicht geladen werden. Bitte später noch einmal versuchen.</p>'),
+                            status_code=503)
+    return _datei_antwort(daten_b, f"Visum_{passend[0]['land_name']}_{info['kuerzel']}")
 
 
 @app.post("/portal/{token}/speichern")
@@ -13501,6 +13709,285 @@ def reisepdfs_ansehen(pid: int, request: Request):
         return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Dokument nicht gefunden.</div>'), status_code=404)
     return Response(content=daten_b, media_type="application/pdf",
                     headers={"Content-Disposition": f"inline; filename=Reise-PDF_{pid}.pdf"})
+
+
+# ── Visa im Mitarbeiterprofil (v3.44) ─────────────────────────────────────────────────────
+
+def _visa_darf(request: Request, kuerzel: str) -> bool:
+    """Visa sehen und ändern darf ein Organisator oder der Mitarbeiter selbst."""
+    try:
+        if ist_organisator(request):
+            return True
+        eigen = (request.session.get("kuerzel") or "").strip().upper()
+        return bool(eigen) and eigen == (kuerzel or "").strip().upper()
+    except Exception:
+        return False
+
+
+def _visa_kein_zugriff():
+    return HTMLResponse(shell("Kein Zugriff",
+        '<div class="alert alert-err">Visa dürfen nur Organisatoren und der Mitarbeiter selbst ansehen oder ändern.</div>'),
+        status_code=403)
+
+
+def _visa_klarname(kuerzel: str):
+    """Klarname des Mitarbeiters oder None, wenn es ihn nicht gibt."""
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(f"SELECT klarname FROM mitarbeiter WHERE kuerzel={P}", ((kuerzel or "").strip().upper(),))
+        r = cur.fetchone()
+    finally:
+        cur.close(); db.close()
+    return (r["klarname"] if hasattr(r, "keys") else r[0]) if r else None
+
+
+def _visa_badge(v: dict, heute: date) -> str:
+    st, tage = mod_visa.status(v, heute)
+    if st == "abgelaufen":
+        return f'<span class="badge badge-red">abgelaufen seit {tage} Tag{"en" if tage != 1 else ""}</span>'
+    if st == "bald":
+        return f'<span class="badge badge-amber">läuft in {tage} Tag{"en" if tage != 1 else ""} ab</span>' if tage else \
+               '<span class="badge badge-amber">läuft heute ab</span>'
+    if st == "zukunft":
+        return f'<span class="badge badge-blue">gültig ab {mod_visa.datum_text(v["von"])}</span>'
+    return '<span class="badge badge-green">gültig</span>'
+
+
+def _visa_karte_html(kuerzel: str, request: Request) -> str:
+    """Karte „Visa“ im Mitarbeiterprofil: Liste mit Status, Ansehen, Bearbeiten, Löschen und „+ Hinzufügen“."""
+    if not _visa_darf(request, kuerzel):
+        return ""
+    k = _bw_e(kuerzel)
+    heute = date.today()
+    try:
+        visa = mod_visa.liste(kuerzel)
+    except Exception as ex:
+        print(f"[Visa] Liste nicht geladen: {ex}")
+        visa = []
+    zeilen = ""
+    for v in visa:
+        datei = (f'<a href="/mitarbeiter/{k}/visum/{v["id"]}/ansehen" target="_blank" class="btn btn-secondary btn-sm">📎 Ansehen</a> '
+                 if v["hat_datei"] else '<span style="font-size:12px;color:var(--muted)">keine Datei</span> ')
+        zeilen += (
+            f'<div style="padding:10px 0;border-bottom:1px solid var(--border)">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'
+            f'<b>🛂 {_bw_e(v["land_name"])} ({_bw_e(v["land_code"])})</b>{_visa_badge(v, heute)}</div>'
+            f'<div style="font-size:12px;color:var(--muted);margin:2px 0 6px">'
+            f'{mod_visa.datum_text(v["von"])} – {mod_visa.datum_text(v["bis"])}'
+            f'{" · " + _bw_e(v["notiz"]) if v["notiz"] else ""}</div>'
+            f'<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">{datei}'
+            f'<a href="/mitarbeiter/{k}/visum/{v["id"]}/bearbeiten" class="btn btn-secondary btn-sm">✏ Bearbeiten</a>'
+            f'<form method="post" action="/mitarbeiter/{k}/visum/{v["id"]}/loeschen" style="display:inline" '
+            f'onsubmit="return confirm(\'Dieses Visum wirklich löschen?\')">'
+            f'<button type="submit" class="btn btn-secondary btn-sm">Löschen</button></form></div></div>')
+    return f"""
+        <div class="card" id="visa" style="max-width:480px;margin-top:16px">
+          <div class="card-header"><span class="card-title">🛂 Visa ({len(visa)})</span>
+            <a href="/mitarbeiter/{k}/visum/neu" class="btn btn-primary btn-sm">+ Hinzufügen</a></div>
+          <div class="card-body">
+            <p style="font-size:12px;color:var(--muted);margin:0 0 6px">Läuft ein Visum in den nächsten 4 Wochen ab, erscheint
+              ein Hinweis im Dashboard (bis „OK“ geklickt wird). Reist der Mitarbeiter in das Land, liegt die Kopie im Portal bereit
+              und hängt an der Reisemappe.</p>
+            {zeilen or '<div style="font-size:13px;color:var(--muted);padding:8px 0">Noch kein Visum erfasst.</div>'}
+          </div>
+        </div>"""
+
+
+def _visa_formular(kuerzel: str, klarname: str, v: dict | None = None, fehler: str = "", werte: dict | None = None) -> str:
+    """Formular „Visum hinzufügen / bearbeiten“. v = bestehendes Visum (Bearbeiten), werte = eingegebene Werte nach Fehler."""
+    k = _bw_e(kuerzel)
+    w = werte or {}
+    land = w.get("land") if "land" in w else (v["land_code"] if v else "")
+    von = w.get("von") if "von" in w else (v["von"].isoformat() if v and v["von"] else "")
+    bis = w.get("bis") if "bis" in w else (v["bis"].isoformat() if v and v["bis"] else "")
+    notiz = w.get("notiz") if "notiz" in w else (v["notiz"] if v else "")
+    aktion = f"/mitarbeiter/{k}/visum/{v['id']}/bearbeiten" if v else f"/mitarbeiter/{k}/visum/neu"
+    titel = "Visum bearbeiten" if v else "Visum hinzufügen"
+    meldung = f'<div class="alert alert-err" style="margin-bottom:12px">{_bw_e(fehler)}</div>' if fehler else ""
+    datei_zeile = ""
+    if v and v["hat_datei"]:
+        datei_zeile = (f'<div style="font-size:13px;margin-bottom:6px">📎 Vorhanden: {_bw_e(v["dateiname"] or "Datei")} · '
+                       f'<a href="/mitarbeiter/{k}/visum/{v["id"]}/ansehen" target="_blank">Ansehen</a><br>'
+                       f'<label style="font-weight:400"><input type="checkbox" name="datei_entfernen" value="1" style="width:auto"> '
+                       f'Datei entfernen</label></div>')
+    return f"""
+    <h1 class="page-title">🛂 {titel}</h1>
+    <p style="font-size:13px;color:var(--muted)">{_bw_e(klarname)} ({k})</p>
+    {meldung}
+    <div class="card" style="max-width:480px">
+      <div class="card-body">
+        <form method="post" action="{aktion}" enctype="multipart/form-data">
+          <div class="form-grid">
+            <div class="form-group full"><label>Land <span class="required">*</span></label>
+              <select name="land" required>{mod_laender.land_optionen_html(land, "– Land wählen –")}</select></div>
+            <div class="form-group"><label>Gültig von <span class="required">*</span></label>
+              <input type="date" name="von" value="{_bw_e(von)}" required></div>
+            <div class="form-group"><label>Gültig bis <span class="required">*</span></label>
+              <input type="date" name="bis" value="{_bw_e(bis)}" required></div>
+            <div class="form-group full"><label>Notiz (z. B. Art des Visums)</label>
+              <input type="text" name="notiz" value="{_bw_e(notiz)}" maxlength="200" placeholder="z. B. Business-Visum, Mehrfacheinreise"></div>
+            <div class="form-group full"><label>Kopie des Visums (PDF oder Foto, höchstens {mod_reisepdf.MAX_MB} MB)</label>
+              {datei_zeile}
+              <input type="file" name="datei" accept=".pdf,image/*">
+              <div class="form-hint">Optional. Ohne Datei wird nur der Ablauf überwacht. Eine neue Datei ersetzt die vorhandene.</div></div>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Speichern</button>
+            <a href="/mitarbeiter/{k}/bearbeiten#visa" class="btn btn-secondary">Abbrechen</a>
+          </div>
+        </form>
+      </div>
+    </div>"""
+
+
+def _visa_dashboard_html(request: Request) -> str:
+    """Dashboard-Hinweis: Visa, die in den nächsten 4 Wochen ablaufen oder abgelaufen sind, bis „OK“ geklickt wird.
+    Organisatoren sehen alle, andere Mitarbeiter nur ihre eigenen."""
+    try:
+        if ist_organisator(request):
+            kz = None
+        else:
+            kz = (request.session.get("kuerzel") or "").strip().upper()
+            if not kz:
+                return ""
+        items = mod_visa.ablauf_hinweise(kz)
+    except Exception as ex:
+        print(f"[Visa] Dashboard-Hinweis nicht ermittelt: {ex}")
+        return ""
+    if not items:
+        return ""
+    heute = date.today()
+    zeilen = ""
+    for v in items:
+        tage = (v["bis"] - heute).days
+        if tage < 0:
+            txt = f'ist am {mod_visa.datum_text(v["bis"])} abgelaufen'
+            fg = "#991b1b"
+        else:
+            txt = (f'läuft am {mod_visa.datum_text(v["bis"])} ab ' +
+                   ("(heute)" if tage == 0 else f'(in {tage} Tag{"en" if tage != 1 else ""})'))
+            fg = "#92400e"
+        zeilen += (
+            f'<div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid #fde68a">'
+            f'<span style="flex:1;font-size:13px;font-weight:600;color:{fg}">🛂 {_bw_e(v["klarname"])}: '
+            f'Visum {_bw_e(v["land_name"])} {txt}</span>'
+            f'<a href="/mitarbeiter/{_bw_e(v["kuerzel"])}/bearbeiten#visa" style="font-size:12px;color:#92400e">Profil</a>'
+            f'<form method="post" action="/visum/{v["id"]}/ok" style="margin:0">'
+            f'<button type="submit" class="btn btn-secondary btn-sm">OK</button></form></div>')
+    return (f'<div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:var(--radius);margin-bottom:20px;overflow:hidden">'
+            f'<div style="padding:8px 16px;background:#fef3c7;font-size:11px;font-weight:700;color:#92400e;'
+            f'text-transform:uppercase;letter-spacing:.05em">🛂 Visa laufen ab ({len(items)})</div>{zeilen}</div>')
+
+
+@app.get("/mitarbeiter/{kuerzel}/visum/neu", response_class=HTMLResponse)
+def visum_neu_form(kuerzel: str, request: Request):
+    k = kuerzel.strip().upper()
+    if not _visa_darf(request, k):
+        return _visa_kein_zugriff()
+    name = _visa_klarname(k)
+    if name is None:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Mitarbeiter nicht gefunden.</div>'), status_code=404)
+    return HTMLResponse(shell("Visum hinzufügen", _visa_formular(k, name), "mitarbeiter"))
+
+
+@app.post("/mitarbeiter/{kuerzel}/visum/neu", response_class=HTMLResponse)
+async def visum_neu(kuerzel: str, request: Request, datei: UploadFile = File(None), land: str = Form(""),
+                    von: str = Form(""), bis: str = Form(""), notiz: str = Form("")):
+    k = kuerzel.strip().upper()
+    if not _visa_darf(request, k):
+        return _visa_kein_zugriff()
+    name = _visa_klarname(k)
+    if name is None:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Mitarbeiter nicht gefunden.</div>'), status_code=404)
+    daten_b, dn, ct = None, "", ""
+    if datei is not None and datei.filename:
+        daten_b, dn, ct = await datei.read(), datei.filename, datei.content_type or ""
+    werte = {"land": land, "von": von, "bis": bis, "notiz": notiz}
+    try:
+        mod_visa.hinzufuegen(k, land, von, bis, notiz, daten_b, dn, ct)
+    except ValueError as ex:
+        return HTMLResponse(shell("Visum hinzufügen", _visa_formular(k, name, None, str(ex), werte), "mitarbeiter"), status_code=400)
+    except Exception as ex:
+        return HTMLResponse(shell("Visum hinzufügen", _visa_formular(k, name, None, f"Speichern fehlgeschlagen: {ex}", werte), "mitarbeiter"),
+                            status_code=500)
+    return RedirectResponse(f"/mitarbeiter/{k}/bearbeiten#visa", status_code=303)
+
+
+@app.get("/mitarbeiter/{kuerzel}/visum/{vid}/bearbeiten", response_class=HTMLResponse)
+def visum_bearbeiten_form(kuerzel: str, vid: int, request: Request):
+    k = kuerzel.strip().upper()
+    if not _visa_darf(request, k):
+        return _visa_kein_zugriff()
+    v = mod_visa.holen(vid)
+    name = _visa_klarname(k)
+    if not v or v["kuerzel"] != k or name is None:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Visum nicht gefunden.</div>'), status_code=404)
+    return HTMLResponse(shell("Visum bearbeiten", _visa_formular(k, name, v), "mitarbeiter"))
+
+
+@app.post("/mitarbeiter/{kuerzel}/visum/{vid}/bearbeiten", response_class=HTMLResponse)
+async def visum_bearbeiten(kuerzel: str, vid: int, request: Request, datei: UploadFile = File(None), land: str = Form(""),
+                           von: str = Form(""), bis: str = Form(""), notiz: str = Form(""), datei_entfernen: str = Form("")):
+    k = kuerzel.strip().upper()
+    if not _visa_darf(request, k):
+        return _visa_kein_zugriff()
+    v = mod_visa.holen(vid)
+    name = _visa_klarname(k)
+    if not v or v["kuerzel"] != k or name is None:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Visum nicht gefunden.</div>'), status_code=404)
+    daten_b, dn, ct = None, "", ""
+    if datei is not None and datei.filename:
+        daten_b, dn, ct = await datei.read(), datei.filename, datei.content_type or ""
+    werte = {"land": land, "von": von, "bis": bis, "notiz": notiz}
+    try:
+        mod_visa.aendern(vid, land, von, bis, notiz, daten_b, dn, ct, datei_entfernen=bool(datei_entfernen))
+    except ValueError as ex:
+        return HTMLResponse(shell("Visum bearbeiten", _visa_formular(k, name, v, str(ex), werte), "mitarbeiter"), status_code=400)
+    except Exception as ex:
+        return HTMLResponse(shell("Visum bearbeiten", _visa_formular(k, name, v, f"Speichern fehlgeschlagen: {ex}", werte), "mitarbeiter"),
+                            status_code=500)
+    return RedirectResponse(f"/mitarbeiter/{k}/bearbeiten#visa", status_code=303)
+
+
+@app.post("/mitarbeiter/{kuerzel}/visum/{vid}/loeschen")
+async def visum_loeschen(kuerzel: str, vid: int, request: Request):
+    k = kuerzel.strip().upper()
+    if not _visa_darf(request, k):
+        return _visa_kein_zugriff()
+    v = mod_visa.holen(vid)
+    if v and v["kuerzel"] == k:
+        mod_visa.loeschen(vid)
+    return RedirectResponse(f"/mitarbeiter/{k}/bearbeiten#visa", status_code=303)
+
+
+@app.get("/mitarbeiter/{kuerzel}/visum/{vid}/ansehen")
+def visum_ansehen(kuerzel: str, vid: int, request: Request):
+    k = kuerzel.strip().upper()
+    if not _visa_darf(request, k):
+        return _visa_kein_zugriff()
+    v = mod_visa.holen(vid)
+    if not v or v["kuerzel"] != k or not v["hat_datei"]:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Visum oder Datei nicht gefunden.</div>'), status_code=404)
+    try:
+        daten_b = mod_visa.pdf_bytes(vid)
+    except Exception as ex:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">Datei nicht ladbar: {_bw_e(str(ex))}</div>'), status_code=500)
+    if not daten_b:
+        return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Datei nicht gefunden.</div>'), status_code=404)
+    return _datei_antwort(daten_b, f"Visum_{v['land_name']}_{k}")
+
+
+@app.post("/visum/{vid}/ok")
+async def visum_ok(vid: int, request: Request):
+    """„OK“ im Dashboard: der Ablauf-Hinweis zu diesem Visum verschwindet."""
+    v = mod_visa.holen(vid)
+    if not v:
+        return RedirectResponse("/", status_code=303)
+    if not _visa_darf(request, v["kuerzel"]):
+        return _visa_kein_zugriff()
+    mod_visa.ok_setzen(vid)
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/einstellungen/zuschlaege", response_class=HTMLResponse)
