@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.44"
+DOKU_GEPRUEFT_FUER = "3.45"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -38,8 +38,8 @@ TEILE = {
 UMGEBUNG = [
     ("DATABASE_URL", "Grundbetrieb", "ja", "",
      "Adresse der PostgreSQL-Datenbank. Ohne Angabe läuft die App nur mit einer lokalen Testdatenbank.", True),
-    ("SESSION_SECRET", "Grundbetrieb", "ja", "",
-     "Geheimer Schlüssel für die Anmeldung (Login-Cookie). Lang und zufällig wählen (mindestens 32 Zeichen, z. B. 64 Zeichen aus Buchstaben und Ziffern). Fehlt er, nutzt die App einen aus anderen geheimen Einstellungen abgeleiteten Ersatzschlüssel: sicher, aber bitte trotzdem eintragen. Nach jeder Änderung müssen sich alle einmal neu anmelden.", True),
+    ("SESSION_SECRET", "Grundbetrieb", "nein", "",
+     "Geheimer Schlüssel für die Anmeldung (Login-Cookie). Muss nicht eingetragen werden: Fehlt er, erzeugt die App einmalig einen zufälligen Schlüssel und speichert ihn in der Datenbank (bleibt bei jedem Neustart gleich). Ein eingetragener Wert (mindestens 32 Zeichen, lang und zufällig) hat immer Vorrang. Nach jeder Änderung müssen sich alle einmal neu anmelden.", True),
     ("CRON_SECRET", "Grundbetrieb", "ja", "",
      "Passwort für die automatischen Aufgaben (Adressen /cron/…?key=…). Ohne ihn lehnen alle Cron-Adressen ab.", True),
     ("PORTAL_BASE_URL", "Grundbetrieb", "nein", "",
@@ -100,6 +100,8 @@ UMGEBUNG = [
 
 # Einstellungen, die ersatzweise aus einer anderen Einstellung gelesen werden
 _ERSATZ_EINSTELLUNG = {"SMTP_USER": "IMAP_USER", "SMTP_PASS": "IMAP_PASS"}
+# Woher der Anmeldeschlüssel stammt (setzt main.py): "eingetragen", "datenbank", "abgeleitet" oder "zufällig"
+SESSION_QUELLE = ""
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AUTOMATISCHE AUFGABEN (externer Cron-Dienst, z. B. cron-job.org)
@@ -434,6 +436,9 @@ KAPITEL = [
         ]),
     ]},
     {"id": "b-reise", "teil": "B", "titel": "Reisen anlegen und bearbeiten", "bloecke": [
+        ("h3", "Die Reisenliste"),
+        ("p", "Menü **Reisen** zeigt alle Reisen, die neueste Abreise zuerst. Ganz links steht der **Status** (Geplant, ● Aktiv, Abgeschlossen), "
+              "dann Code, Titel, Abreise, Rückkehr, Mitarbeiter und ein Haken, wenn für die Reise Länder eingetragen sind."),
         ("h3", "Neue Reise"),
         ("p", "Menü **Reisen** › „Neue Reise“. Der **Reisecode** hat die Form `JJ-NNN` (z. B. 26-007). Das Jahr ist das Jahr der **Abreise**, "
               "die laufende Nummer zählt je Jahr hoch."),
@@ -1121,6 +1126,10 @@ def umgebung_status() -> list:
             if ersatz:
                 stand += " (über %s)" % ersatz
             ok = True
+        elif name == "SESSION_SECRET" and SESSION_QUELLE == "datenbank":
+            stand = "automatisch erzeugt (in der Datenbank)"
+            ok = True
+            wert = "datenbank"
         elif standard:
             stand = "Standard: %s" % standard
             ok = True

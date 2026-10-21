@@ -67,17 +67,48 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMAP_HOST    = os.getenv("IMAP_HOST", "")
 IMAP_USER    = os.getenv("IMAP_USER", "")
 IMAP_PASS    = os.getenv("IMAP_PASS", "")
+def _session_secret_aus_datenbank():
+    """Zufälliger Schlüssel, einmalig erzeugt und in der Datenbank gespeichert (Tabelle app_geheimnisse).
+    Er bleibt bei jedem Neustart gleich und hängt von keiner anderen Einstellung ab.
+    Gibt None zurück, wenn die Datenbank nicht erreichbar ist."""
+    import secrets
+    try:
+        db = get_db(); cur = db.cursor()
+        try:
+            cur.execute("CREATE TABLE IF NOT EXISTS app_geheimnisse (name TEXT PRIMARY KEY, wert TEXT NOT NULL)")
+            db.commit()
+            P = ph()
+            cur.execute(f"SELECT wert FROM app_geheimnisse WHERE name={P}", ("session_secret",))
+            r = cur.fetchone()
+            if not r:      # mehrere Prozesse können gleichzeitig starten: der erste Eintrag gewinnt, alle lesen ihn danach
+                cur.execute(f"INSERT INTO app_geheimnisse (name, wert) VALUES ({P},{P}) ON CONFLICT (name) DO NOTHING",
+                            ("session_secret", secrets.token_hex(32)))
+                db.commit()
+                cur.execute(f"SELECT wert FROM app_geheimnisse WHERE name={P}", ("session_secret",))
+                r = cur.fetchone()
+            wert = (r["wert"] if hasattr(r, "keys") else r[0]) if r else None
+        finally:
+            cur.close(); db.close()
+        return wert if wert and len(wert) >= 32 else None
+    except Exception as ex:
+        print(f"[Sicherheit] Schlüssel aus der Datenbank nicht verfügbar: {ex}")
+        return None
+
+
 def _session_secret_bestimmen() -> tuple:
     """Schlüssel zum Signieren des Login-Cookies. Gibt (Schlüssel, Herkunft) zurück.
-    1. Eingetragenes SESSION_SECRET (empfohlen).
-    2. Fehlt es: stabiler Ersatz, abgeleitet aus anderen geheimen Einstellungen (Datenbank-Zugang usw.).
-       Er ist nicht öffentlich bekannt und bleibt bei jedem Neustart gleich.
-    3. Auch das nicht vorhanden (nur lokaler Test): zufälliger Schlüssel je Start.
-    Einen festen, im Quelltext stehenden Standardwert gibt es bewusst nicht mehr."""
+    1. Eingetragenes SESSION_SECRET in Render (hat immer Vorrang).
+    2. Fehlt es: zufälliger Schlüssel, einmalig erzeugt und in der Datenbank gespeichert. Er bleibt bei jedem Neustart gleich.
+    3. Datenbank nicht erreichbar: Ersatz, abgeleitet aus anderen geheimen Einstellungen (Datenbank-Zugang usw.).
+    4. Auch das nicht vorhanden (nur lokaler Test): zufälliger Schlüssel je Start.
+    Einen festen, im Quelltext stehenden Standardwert gibt es bewusst nicht."""
     import hashlib, secrets
     wert = (os.getenv("SESSION_SECRET", "") or "").strip()
     if wert:
         return wert, "eingetragen"
+    aus_db = _session_secret_aus_datenbank()
+    if aus_db:
+        return aus_db, "datenbank"
     basis = "|".join((os.getenv(n, "") or "").strip()
                      for n in ("DATABASE_URL", "CRON_SECRET", "S3_SECRET_KEY", "IMAP_PASS", "OPENAI_API_KEY"))
     if basis.strip("|"):
@@ -85,11 +116,15 @@ def _session_secret_bestimmen() -> tuple:
     return secrets.token_hex(32), "zufällig"
 
 SESSION_SECRET, SESSION_SECRET_HERKUNFT = _session_secret_bestimmen()
+mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der Einstellungen in der Dokumentation
 
 # Versionsverlauf (neueste zuerst). Bei jedem Release OBEN einen Eintrag ergänzen:
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.45", "zeit": "2026-10-21 15:15", "aenderungen": [
+        "Reisen-Übersicht: Die Spalte „Status“ steht jetzt ganz links.",
+        "Anmeldeschlüssel: Ist SESSION_SECRET in Render nicht eingetragen, erzeugt die App einmalig einen zufälligen Schlüssel und speichert ihn in der Datenbank (bleibt bei jedem Neustart gleich). Die Meldung „Fehlende Pflicht-Einstellungen: SESSION_SECRET“ in der Dokumentation entfällt. Ein in Render eingetragener Wert hat weiter Vorrang. Einmalig müssen sich alle neu anmelden."]},
     {"version": "3.44", "zeit": "2026-10-21 15:04", "aenderungen": [
         "Neu: Visa im Mitarbeiterprofil (Karte „🛂 Visa“). Mit „+ Hinzufügen“ Land wählen, gültig von/bis eintragen und optional die Kopie des Visums hochladen (PDF oder Foto).",
         "Dashboard: Läuft ein Visum in den nächsten 4 Wochen ab oder ist es abgelaufen, erscheint ein Hinweis, bis „OK“ geklickt wird. Reist der Mitarbeiter in das Land, liegt die Visum-Kopie im Portal bereit und hängt an seiner Reisemappe.",
@@ -819,8 +854,8 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
 @app.on_event("startup")
 async def startup():
     print(f"[Startup] Herrhammer Reisekosten {APP_VERSION} gestartet")
-    if SESSION_SECRET_HERKUNFT != "eingetragen":
-        print(f"[Startup] SESSION_SECRET fehlt – Ersatzschlüssel ({SESSION_SECRET_HERKUNFT}) aktiv. Bitte in den Einstellungen eintragen.")
+    if SESSION_SECRET_HERKUNFT not in ("eingetragen", "datenbank"):
+        print(f"[Startup] SESSION_SECRET fehlt und die Datenbank war nicht erreichbar – Ersatzschlüssel ({SESSION_SECRET_HERKUNFT}) aktiv.")
     eigenbelege_pflichtfelder_reparieren()
     bewirtung_kosten_reparieren()
     habel_einzel_spalte_sichern()
@@ -7756,6 +7791,7 @@ def reisen_liste():
             ma = get(r,"ma",4); lc = get(r,"laender_count",5)
             vma_ok = "✓" if lc and lc > 0 else '<span style="color:var(--amber)">–</span>'
             zeilen += f"""<tr>
+                <td style="white-space:nowrap">{status(ab,zu)}</td>
                 <td class="td-mono" style="font-weight:700">
                   <a href="/reise/{code}" style="color:var(--blue)">{code}</a></td>
                 <td style="font-weight:500">
@@ -7763,7 +7799,6 @@ def reisen_liste():
                 <td>{fmt_date(ab)}</td><td>{fmt_date(zu)}</td>
                 <td style="color:var(--muted)">{ma or "–"}</td>
                 <td style="text-align:center">{vma_ok}</td>
-                <td>{status(ab,zu)}</td>
                 <td>
                   <a href="/reise/{code}" class="btn btn-secondary btn-sm">Detail</a>
                 </td>
@@ -7777,8 +7812,8 @@ def reisen_liste():
         <div class="card">
           <div class="table-wrap"><table>
             <thead><tr>
-              <th>Code</th><th>Titel</th><th>Abreise</th><th>Rückkehr</th>
-              <th>Mitarbeiter</th><th>VMA</th><th>Status</th><th></th>
+              <th>Status</th><th>Code</th><th>Titel</th><th>Abreise</th><th>Rückkehr</th>
+              <th>Mitarbeiter</th><th>VMA</th><th></th>
             </tr></thead>
             <tbody>
               {zeilen or '<tr><td colspan="8"><div class="empty-state">Keine Reisen – <a href="/reisen/neu">Erste Reise anlegen</a></div></td></tr>'}
@@ -10770,10 +10805,10 @@ def dokumentation_seite(request: Request):
         if fehlt:
             hinweis += ('<div class="alert alert-warn" style="margin-bottom:12px">Fehlende Pflicht-Einstellungen: <b>%s</b> '
                         '(siehe Kapitel C2).</div>' % ", ".join(fehlt))
-        if "SESSION_SECRET" in fehlt:
-            hinweis += ('<div class="alert alert-warn" style="margin-bottom:12px"><b>SESSION_SECRET:</b> Die Anmeldung ist durch einen '
-                        'abgeleiteten Ersatzschlüssel geschützt. Bitte trotzdem in Render unter Environment eintragen '
-                        '(lange Zufallsfolge, mindestens 32 Zeichen). Danach müssen sich alle einmal neu anmelden.</div>')
+        if SESSION_SECRET_HERKUNFT not in ("eingetragen", "datenbank"):
+            hinweis += ('<div class="alert alert-warn" style="margin-bottom:12px"><b>Anmeldeschlüssel:</b> Die Datenbank war beim Start nicht '
+                        'erreichbar, deshalb nutzt die Anmeldung vorübergehend einen Ersatzschlüssel. Nach dem nächsten Neustart mit '
+                        'erreichbarer Datenbank ist das behoben (alle müssen sich dann einmal neu anmelden).</div>')
     knoepfe = ('<a href="/einstellungen/dokumentation/pdf" class="btn btn-primary">📄 PDF herunterladen</a>')
     if org:
         knoepfe += (' <a href="/einstellungen/dokumentation/pdf?teil=A" class="btn btn-secondary">'
