@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.46"
+DOKU_GEPRUEFT_FUER = "3.47"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -614,7 +614,8 @@ KAPITEL = [
         ], [28, 72]),
         ("p", "Die Hinweise **„Auslandsbeleg ohne Wechselkurs – Kurs nachtragen“** (Dashboard, Abrechnung) erscheinen nur, wenn wirklich ein Kurs fehlt. "
               "Nicht gemeldet werden Bewirtungs- und Vorschussbelege sowie Belege mit bestätigtem Euro-Betrag. "
-              "„Betrag final noch nicht bestätigt“ steht in den offenen Aufgaben."),
+              "„Betrag final noch nicht bestätigt“ steht in den offenen Aufgaben und betrifft nur **Bar-Belege in Fremdwährung**. "
+              "Bei Kreditkarten-Belegen kommt der Euro-Betrag mit der Kreditkarten-Abrechnung (eigene Aufgabe „Kreditkarte Ausland“)."),
         ("p", "Die endgültigen Euro-Beträge und echten Auslandsgebühren liefert am genauesten die **Kreditkarten-Abrechnung** (eigenes Kapitel)."),
     ]},
     {"id": "b-plan", "teil": "B", "titel": "Flug, Bahn und Termine", "bloecke": [
@@ -903,9 +904,10 @@ KAPITEL = [
         ("h3", "Dashboard"),
         ("p", "Startseite. Reisen in drei Gruppen: **Aktiv**, **Geplant** (nächste zuerst), **Abgeschlossen** (mit Link zum Abschluss). Dazu: offene Verspätungs-Alarme, "
               "Hinweise (z. B. Kurs nachtragen), Anzahl Belege im Posteingang und der Knopf **📬 Mails abrufen**. "
+              "Der grüne Haken **„✅ Alles in Ordnung“** erscheint nur, wenn weder Alarme noch offene Aufgaben noch Visa-Hinweise vorliegen. "
               "Läuft ein **Visum** in den nächsten 4 Wochen ab, steht oben die Karte **„🛂 Visa laufen ab“**, bis OK geklickt wird (siehe „Mitarbeiter verwalten“)."),
         ("h3", "📋 Offene Aufgaben (`/todo`)"),
-        ("p", "Alles, was vor der finalen Abrechnung noch offen ist, über alle Reisen: Beträge in Fremdwährung ohne bestätigten Euro-Betrag, Belege ohne Prüfung, "
+        ("p", "Alles, was vor der finalen Abrechnung noch offen ist, über alle Reisen: Bar-Belege in Fremdwährung ohne bestätigten Euro-Betrag (bei Kreditkarte: Abgleich mit der Kreditkarten-Abrechnung), Belege ohne Prüfung, "
               "Buchungen, zu denen nach der Rückkehr noch Rechnung oder Quittung fehlt („🧾 Rechnung/Quittung fehlt noch“, mit Betrag), "
               "nicht abgerechnete Reisen mit dem Habel-Stand je Reise (geprüft, bereit, gesendet). "
               "Ganz oben steht die Karte **🛂 A1-Bescheinigung – Reisen in Europa** mit allen Reisen, bei denen eine A1 fehlt, zu prüfen oder nicht zugeordnet ist."),

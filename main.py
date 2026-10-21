@@ -122,6 +122,9 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.47", "zeit": "2026-10-21 16:09", "aenderungen": [
+        "Dashboard: Der grüne Haken „Alles in Ordnung“ erscheint nur noch, wenn es keine Alarme, keine offenen Aufgaben und keine Visa-Hinweise gibt.",
+        "Offene Aufgaben: „Betrag final noch nicht bestätigt“ betrifft nur noch Bar-Belege in Fremdwährung. Kreditkarten-Belege werden nicht mehr doppelt gemeldet (dafür gibt es den Abgleich mit der Kreditkarten-Abrechnung). Gilt auch für „💶 Betrag final offen“ in der Aufgaben-Tabelle."]},
     {"version": "3.46", "zeit": "2026-10-21 15:49", "aenderungen": [
         "Geschwindigkeit: Die App war langsam, weil sie bei jedem Seitenaufruf sehr viele neue Datenbank-Verbindungen aufgebaut hat (Dashboard und „Offene Aufgaben“ je über 100). Die Verbindungen werden jetzt wiederverwendet. Die A1-Aufgaben werden für alle Reisen gesammelt abgefragt (statt je Reise einzeln). Dashboard und Aufgaben-Liste laden dadurch um ein Vielfaches schneller.",
         "Anmeldeprüfung und Datei-Speicher (S3) sparen sich bei jedem Aufruf die Neuverbindung bzw. den Neuaufbau des Clients; die Anmeldeprüfung blockiert andere Anfragen nicht mehr."]},
@@ -5960,15 +5963,16 @@ def todo_liste_laden() -> list:
     aufgaben = []
 
     try:
-        # 1. Betrag final noch nicht bestätigt (Fremdwährung, nur Schätzung vorhanden)
+        # 1. Betrag final noch nicht bestätigt: nur Bar-Belege in Fremdwährung (nur KI-Schätzung vorhanden).
+        #    Kreditkarten-Belege stehen unter 1b (Abgleich mit der VISA-Abrechnung) und werden hier nicht doppelt gemeldet.
         cur.execute(f"""SELECT COUNT(*) FROM belege
             WHERE waehrung != 'EUR' AND betrag_eur_final IS NULL AND betrag_brutto IS NOT NULL
-            AND COALESCE(zahlungsart,'') != 'DurchKunde'""")
+            AND zahlungsart = 'Bar'""")
         n = cur.fetchone()[0]
         if n:
             aufgaben.append({"icon": "💶", "prio": "warn",
-                "text": f'Betrag final noch nicht bestätigt ({n} Beleg{"e" if n!=1 else ""})',
-                "sub": "Fremdwährung, nur KI-Schätzung vorhanden",
+                "text": f'Betrag final noch nicht bestätigt ({n} Bar-Beleg{"e" if n!=1 else ""})',
+                "sub": "Bar in Fremdwährung, nur KI-Schätzung vorhanden",
                 "url": "/todo"})
     except Exception: pass
 
@@ -6117,7 +6121,8 @@ def todo_belege_laden() -> list:
         belegart = g(r,"belegart",10) or ""
         rueckkehr = g(r,"rueckkehr",11)
 
-        if (g(r,"zahlungsart",12) or "") != "DurchKunde" and waehrung != "EUR" \
+        # nur Bar-Belege in Fremdwährung; bei Kreditkarte liefert die VISA-Abrechnung den Euro-Betrag (eigene Aufgabe)
+        if (g(r,"zahlungsart",12) or "") == "Bar" and waehrung != "EUR" \
                 and betrag_eur_final is None and betrag_brutto is not None:
             probleme.append("💶 Betrag final offen")
         if belegart in PRUEF_BELEGARTEN:
@@ -6482,6 +6487,7 @@ def dashboard(request: Request):
         try: cur2.close()
         except: pass
 
+        warn_ok = False
         if alarme:
             warn_items = "".join(
                 f'<div style="display:flex;align-items:center;'
@@ -6503,6 +6509,7 @@ def dashboard(request: Request):
                 f'🔔 Aktionen erforderlich ({len(alarme)})</div>'
                 f'{warn_items}</div>')
         else:
+            warn_ok = True
             warn_html = (
                 f'<div style="background:var(--green-l);border:1px solid #6ee7b7;'
                 f'border-radius:var(--radius);padding:10px 16px;margin-bottom:20px;'
@@ -6514,6 +6521,7 @@ def dashboard(request: Request):
         # Mitarbeiter gefiltert)
         visa_html = _visa_dashboard_html(request)
         todo_html = ""
+        todo_items = []
         if ist_organisator(request):
             todo_items = todo_liste_laden()
             PRIO_FARBEN = {
@@ -6546,6 +6554,10 @@ def dashboard(request: Request):
                     f'border-radius:var(--radius);padding:10px 16px;margin-bottom:20px;'
                     f'font-size:13px;color:#065f46;font-weight:500">'
                     f'✅ Keine offenen Aufgaben – alles final abgerechnet</div>')
+
+        # Der grüne Haken „Alles in Ordnung“ passt nicht, solange Aufgaben oder Visa-Hinweise offen sind
+        if warn_ok and (todo_items or visa_html):
+            warn_html = ""
 
         content = f"""
         <div style="display:flex;align-items:center;justify-content:space-between;
