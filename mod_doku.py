@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.47"
+DOKU_GEPRUEFT_FUER = "3.48"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -521,7 +521,7 @@ KAPITEL = [
         ("p", "**Doppelte Belege** (gleiche Datei) werden erkannt und nicht erneut angelegt. Enthält ein PDF eine **eRechnung** (ZUGFeRD/XML), ist die XML-Datei "
               "auf der Beleg-Seite im Original und unverändert abrufbar."),
         ("p", "**A1-Bescheinigungen** erkennt die App am Inhalt (Überschrift „Bescheinigung über die anzuwendenden Rechtsvorschriften“, „Portable Document A1“, Verordnung 883/2004) "
-              "und legt sie als Belegart **🛂 A1-Bescheinigung** ab, ohne Betrag und ohne Kosten. Bei Scans ohne Text entscheidet die KI, ein Dateiname mit „A1“ hilft. "
+              "und legt sie als Belegart **🛂 A1-Bescheinigung** ab, ohne Betrag und ohne Kosten. Bei Dateien ohne Text (Scans, Fotos, am Bildschirm ausgedruckte PDFs) liest die KI die Seiten als Bild; ein „A1“ im Dateinamen oder im PDF-Titel hilft zusätzlich. "
               "Siehe Kapitel „Reisemappe, Reise-PDFs und A1-Bescheinigung“."),
         ("p", "**Buchung und Rechnung sind keine Duplikate.** Tragen eine Buchungsbestätigung und die dazugehörigen Rechnungen denselben Buchungscode, bleiben es getrennte Belege. "
               "Zwei Rechnungen derselben Buchung gelten nur dann als doppelt, wenn auch die Rechnungsnummer (ohne Nummer: der Betrag) übereinstimmt. "
@@ -686,8 +686,13 @@ KAPITEL = [
             "**Mehrere Reisen:** Eine A1 gehört zu einer Reise. Gilt sie für mehrere Reisen, laden Sie sie bei jeder Reise hoch (die gleiche Datei zweimal bei **derselben** Reise wird als Duplikat erkannt).",
             "Eine A1 ist **kein Kostenbeleg**: ohne Betrag, nicht im Abschluss, in den Kosten oder bei Habel, keine Pflichtfeld-Meldung.",
         ]),
-        ("p", "Die Erkennung beruht auf den Überschriften der amtlichen Bescheinigung (deutsch, englisch, französisch, italienisch, spanisch). Eine Rechnung des Anbieters „A1 Telekom“ wird nicht verwechselt. "
+        ("p", "Die Erkennung beruht auf den Überschriften der amtlichen Bescheinigung (deutsch, englisch, französisch, italienisch, spanisch), bei der deutschen Online-Fassung "
+              "(grüner Kopf „A1“, „Bescheinigung über die Rechtsvorschriften der sozialen Sicherheit …“, Felder 1.1 bis 6.11) auch an den Feldbezeichnungen. Eine Rechnung des Anbieters „A1 Telekom“ wird nicht verwechselt. "
               "Sieht ein Dokument anders aus, stellen Sie auf der Beleg-Seite die Belegart von Hand auf „A1-Bescheinigung“."),
+        ("p", "**Welche Angaben gelesen werden (Online-Fassung):** Name = Feld 1.3 Vorname + 1.2 Nachname (nicht der Geburtsname), Gültigkeit = 2.2 Anfangsdatum bis 2.3 Enddatum, "
+              "Ausgestellt = 6.10 Datum, ausstellende Stelle = 6.1 Name, Reiseland = Land am Ende der Anschrift unter 5.2 (z. B. „… Dobra, PL“). "
+              "Das Feld 2.1 „Mitgliedstaat“ (= Deutschland) ist nicht das Reiseland und wird nicht gelesen. "
+              "Ist die Datei ein reiner **Ausdruck ohne Textebene** („Microsoft: Print To PDF“), werden die Seiten dafür als Bild gelesen – dafür muss die Bibliothek `pypdfium2` installiert sein (steht in `requirements.txt`)."),
     ]},
     {"id": "b-alerts", "teil": "B", "titel": "Verspätungs-Alarme (Flug und Bahn)", "bloecke": [
         ("p", "Die App überwacht Flüge (AeroDataBox) und Züge (Deutsche Bahn, Timetables) nach einem **festen Prüfplan** – nicht editierbar:"),
@@ -1015,6 +1020,7 @@ KAPITEL = [
             ["Falsches Land oder falscher VMA-Satz", "Am Tag **↺ Auto** klicken oder oben im Tagesverlauf **↺ Alle Tage auf Auto**. Notfalls den Satz am Tag manuell überschreiben. Die Diagnose steht unter `/reise/<Code>/vma-debug`."],
             ["„Kurs nachtragen“ bleibt stehen", "Kurs am Beleg eintragen oder Euro-Betrag final setzen (am besten über die Kreditkarten-Abrechnung)."],
             ["Seite meldet „Spalte fehlt“", "Einmal `/init` aufrufen."],
+            ["A1 ohne Name/Zeitraum abgelegt oder „Kein Text“", "Datei war ein Ausdruck ohne Textebene. Seit Version 3.48 werden die Seiten als Bild gelesen; dazu muss `pypdfium2` installiert sein (neue `requirements.txt` auf Render einspielen). Bei einer bereits abgelegten A1 auf der Beleg-Seite **Neu analysieren**."],
             ["Erster Aufruf nach einer Pause dauert 30–60 Sekunden", "Kostenlose Render-Instanzen schlafen nach 15 Minuten ohne Aufruf ein und müssen erst starten. Abhilfe: bezahlte Instanz oder ein Wach-Aufruf von `/health` alle 10 Minuten (z. B. mit einem Uptime-Dienst)."],
             ["Seiten laden dauernd langsam", "Datenbank und App sollten in Render in derselben **Region** liegen (Dashboard der Datenbank → Region). Liegen sie in verschiedenen Regionen, kostet jede Abfrage Zeit. Die Datenbank-Verbindungen werden seit Version 3.46 wiederverwendet; der Datei-Speicher (Hetzner) wird nur beim Hochladen und Öffnen von Belegen angesprochen."],
         ], [34, 66]),

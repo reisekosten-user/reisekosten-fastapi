@@ -122,6 +122,10 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.48", "zeit": "2026-10-22 09:58", "aenderungen": [
+        "A1-Bescheinigung (amtliche Online-Fassung): Bei PDFs ohne Textebene (z. B. „Microsoft: Print To PDF“) hat die App bisher nur eingebettete Bilder gelesen, bei Ihren A1 also nur den grünen Kopfbalken oder gar nichts. Jetzt werden die Seiten als Bild gerendert und von der KI gelesen. Neue Bibliothek: pypdfium2 (neue requirements.txt auf Render einspielen).",
+        "A1-Erkennung und -Auswertung verbessert: neuer Formulartitel („Rechtsvorschriften der sozialen Sicherheit …“), Feldnummern 1.2/1.3 (Name mit Vorname), 2.2/2.3 (Zeitraum), 6.10 (Ausstellungsdatum), 6.1 (Krankenkasse), Reiseland aus 5.2 (statt Spanien/Schweden/Portugal aus den Fußnoten). Auch der PDF-Titel „Bescheinigung A1 – Onlineversion“ zählt als Hinweis.",
+        "Neue Datei-Seitenbilder werden nur bei „gezeichneten“ Seiten gerendert; Scans und Fotos behalten ihr Originalbild in voller Auflösung."]},
     {"version": "3.47", "zeit": "2026-10-21 16:09", "aenderungen": [
         "Dashboard: Der grüne Haken „Alles in Ordnung“ erscheint nur noch, wenn es keine Alarme, keine offenen Aufgaben und keine Visa-Hinweise gibt.",
         "Offene Aufgaben: „Betrag final noch nicht bestätigt“ betrifft nur noch Bar-Belege in Fremdwährung. Kreditkarten-Belege werden nicht mehr doppelt gemeldet (dafür gibt es den Abgleich mit der Kreditkarten-Abrechnung). Gilt auch für „💶 Betrag final offen“ in der Aufgaben-Tabelle."]},

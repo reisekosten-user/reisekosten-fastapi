@@ -96,6 +96,15 @@ _TITEL = (
     (r"certificat\s+concernant\s+la\s+l[ée]gislation", 5),
     (r"certificato\s+relativo\s+alla\s+legislazione", 5),
     (r"certificado\s+relativo\s+a\s+la\s+legislaci[oó]n", 5),
+    (r"rechtsvorschriften\s+der\s+sozialen\s+sicherheit", 5),          # Online-Version: „Bescheinigung über die Rechtsvorschriften der sozialen Sicherheit, die auf den/die Inhaber/in anzuwenden sind“
+    (r"auf\s+den\s*/\s*die\s+inhaber\s*/?\s*(?:in|innen)?\s+anzuwenden\s+sind", 5),
+    (r"koordinierung\s+der\s+systeme\s+der\s+sozialen\s+sicherheit", 3),
+    (r"mitgliedstaat,?\s+dessen\s+rechtsvorschriften", 4),
+    (r"bescheinigung\s+a1\b", 5),
+    (r"anfangsdatum", 1),
+    (r"enddatum", 1),
+    (r"ausstellender\s+tr[äa]ger", 2),
+    (r"statusbest[äa]tigung", 2),
     (r"a1[\s\-]*bescheinigung", 4),
     (r"entsendebescheinigung", 4),
     (r"bescheinigung\s+(?:ueber|über)\s+die\s+entsendung", 4),
@@ -155,7 +164,7 @@ def _name_bereinigen(s) -> str:
 
 def _wert_nach(zeilen: list, labels: str) -> str:
     """Wert hinter einer Beschriftung: auf derselben Zeile oder in der nächsten nicht leeren Zeile."""
-    muster = re.compile(r"(?:^|[\s\d.)])(?:" + labels + r")\b\s*[:：]?\s*(.*)$", re.I)
+    muster = re.compile(r"(?:^|[\s\d.)])(?:" + labels + r")(?![A-Za-zÄÖÜäöüß])\s*[:：]?\s*(.*)$", re.I)
     for i, z in enumerate(zeilen):
         m = muster.search(z)
         if not m:
@@ -172,8 +181,8 @@ def _wert_nach(zeilen: list, labels: str) -> str:
 
 
 _DATUM = re.compile(r"(?<!\d)(\d{1,2})\s*[./]\s*(\d{1,2})\s*[./]\s*(\d{4})(?!\d)|(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
-_KW_VON = re.compile(r"\b(?:vom|von|ab|beginn|begin|start|from|g[üu]ltig\s+ab|valid\s+from)\b", re.I)
-_KW_BIS = re.compile(r"\b(?:bis(?:\s+zum)?|ende|end|until|to|g[üu]ltig\s+bis|valid\s+(?:until|to))\b", re.I)
+_KW_VON = re.compile(r"\b(?:vom|von|ab|beginn|begin|start|from|g[üu]ltig\s+ab|valid\s+from)\b|anfangsdatum", re.I)
+_KW_BIS = re.compile(r"\b(?:bis(?:\s+zum)?|ende|end|until|to|g[üu]ltig\s+bis|valid\s+(?:until|to))\b|enddatum", re.I)
 _KW_GEBURT = re.compile(r"geburt|birth|born|geboren", re.I)
 _KW_AUSGESTELLT = re.compile(r"ausgestellt|ausstellung|issued|date\s+of\s+issue|issue\s+date|erstellt", re.I)
 
@@ -246,22 +255,124 @@ def _aussteller(text: str, zeilen: list) -> str:
     return wert
 
 
+def _abschnitt(text: str, start: str, ende: str | None = None, letzte: bool = False) -> str:
+    """Text hinter der Überschrift `start` (Regex) bis vor `ende`; leer, wenn die Überschrift fehlt."""
+    treffer = list(re.finditer(start, text, re.I))
+    if not treffer:
+        return ""
+    rest = text[(treffer[-1] if letzte else treffer[0]).end():]
+    if ende:
+        e = re.search(ende, rest, re.I)
+        if e:
+            rest = rest[:e.start()]
+    return rest
+
+
+def _datum_hinter(text: str, label: str):
+    """Datum direkt hinter einer Beschriftung (gleiche oder nächste Zeile), sonst None."""
+    m = re.search(r"(?<![A-Za-zÄÖÜäöüß])(?:" + label + r")(?![A-Za-zÄÖÜäöüß])[^\d\n]{0,15}\n?[^\d\n]{0,15}" + _DATUM.pattern, text, re.I)
+    if not m:
+        return None
+    try:
+        g = m.groups()
+        if g[0]:
+            return date(int(g[2]), int(g[1]), int(g[0]))
+        return date(int(g[3]), int(g[4]), int(g[5]))
+    except (ValueError, TypeError):
+        return None
+
+
+def ist_formular(text: str) -> bool:
+    """Ist es die amtliche A1-Bescheinigung mit nummerierten Feldern (1.1 … 6.11)? Dann können die Felder gezielt gelesen werden."""
+    t = str(text or "")
+    treffer = sum(1 for m in (r"anfangsdatum", r"enddatum", r"nachname", r"ausstellender\s+tr[äa]ger",
+                               r"mitgliedstaat", r"statusbest[äa]tigung") if re.search(m, t, re.I))
+    return treffer >= 3
+
+
+def _formular_felder(roh: str, zeilen: list) -> dict:
+    """Liest die amtliche A1 nach Feldnummern/Beschriftungen:
+    1.2 Nachname · 1.3 Vorname(n) · 2.2 Anfangsdatum · 2.3 Enddatum · 5.2 Anschrift am Arbeitsort (Land am Ende, z. B. „…, PL“) ·
+    1.9.4 Ländercode im Aufenthaltsstaat · 6.1 Name des ausstellenden Trägers · 6.10 Datum (= Ausstellungsdatum).
+    NICHT gelesen wird 2.1 „Mitgliedstaat“ (das ist der Staat, dessen Recht gilt, bei uns DE – nicht das Reiseland)
+    und der Geburtsname 1.4."""
+    if not ist_formular(roh):
+        return {}
+    erg = {}
+    person = _abschnitt(roh, r"angaben\s+zur\s+person", r"mitgliedstaat,?\s+dessen") or roh
+    pz = [z for z in (re.sub(r"[ \t]+", " ", x).strip() for x in person.splitlines()) if z]
+    nach = _wert_nach(pz, r"nachname|familienname")
+    vor = _wert_nach(pz, r"vorname(?:\(n\)|n)?")
+    if nach:
+        erg["nachname"] = nach
+    if vor:
+        erg["vorname"] = vor
+    zeitraum = _abschnitt(roh, r"mitgliedstaat,?\s+dessen\s+rechtsvorschriften[^\n]*", r"statusbest|\(\*\)") or roh
+    von, bis = _datum_hinter(zeitraum, r"anfangsdatu[mn]"), _datum_hinter(zeitraum, r"enddatu[mn]")
+    # Beschriftung schlecht lesbar (z. B. Texterkennung): die zwei Daten in diesem Feld sind Anfang und Ende
+    in_feld = [d for d, _a in _daten_mit_kontext(zeitraum)]
+    if len(in_feld) >= 2 and in_feld[0] <= in_feld[1]:
+        von, bis = von or in_feld[0], bis or in_feld[1]
+    if von:
+        erg["von"] = von
+    if bis and (not von or bis >= von):
+        erg["bis"] = bis
+    traeger = _abschnitt(roh, r"ausstellender\s+tr[äa]ger", None, letzte=True)
+    if traeger:
+        ausgestellt = _datum_hinter(traeger, r"datum")
+        if ausgestellt:
+            erg["ausgestellt"] = ausgestellt
+        tz = [z for z in (re.sub(r"[ \t]+", " ", x).strip() for x in traeger.splitlines()) if z]
+        for i, z in enumerate(tz):
+            m = re.match(r"^(?:\d{1,2}(?:\.\d{1,2}){0,2}\.?\s*)?Name\b(?!\s*\()\s*[:：]?\s*(.*)$", z, re.I)
+            if m:
+                wert = m.group(1).strip(" :-–")
+                if not wert and i + 1 < len(tz):
+                    wert = tz[i + 1].strip()
+                if wert:
+                    erg["aussteller"] = re.sub(r"\s+", " ", wert)[:80]
+                break
+    # Land, in dem gearbeitet wird: Ende der Anschrift unter 5.2 („…, 72210 Dobra, PL“), ersatzweise 1.9.4
+    laender = []
+    arbeitsort = _abschnitt(roh, r"(?:5\.2\s*)?anschrift\(en\)\s+oder[^\n]*\n[^\n]*(?:erwerbst[äa]tig|werden)[^\n]*", r"5\.3|oder:\s*keine\s+feste|ausstellender\s+tr[äa]ger", letzte=True)
+    for z in arbeitsort.splitlines():
+        m = re.search(r"(?:^|[\s,;])([A-Z]{2})\s*$", z.strip())
+        if m and m.group(1) in A1_LAENDER and m.group(1) not in laender:
+            laender.append(m.group(1))
+    for c in _laender(arbeitsort):
+        if c not in laender:
+            laender.append(c)
+    aufenthalt = _abschnitt(person, r"anschrift\s+im\s+aufenthaltsstaat")
+    for m in re.finditer(r"L[äa]nder\s*code\s*[:：]?\s*([A-Za-z]{2})\b", aufenthalt):
+        c = m.group(1).upper()
+        if c in A1_LAENDER and c not in laender:
+            laender.append(c)
+    erg["laender"] = laender
+    return erg
+
+
 def a1_auswerten(text, dateiname: str = "") -> dict:
-    """Liest die Angaben der A1-Bescheinigung (so gut es der Text hergibt; fehlende Angaben bleiben leer)."""
+    """Liest die Angaben der A1-Bescheinigung (so gut es der Text hergibt; fehlende Angaben bleiben leer).
+    Die amtliche Fassung mit nummerierten Feldern wird gezielt gelesen, alles andere nach Stichworten."""
     roh = str(text or "")
     zeilen = [re.sub(r"[ \t]+", " ", z).strip() for z in roh.splitlines()]
     zeilen = [z for z in zeilen if z]
-    nachname = _wert_nach(zeilen, r"nachname|familienname|surname|last\s*name|family\s*name")
-    vorname = _wert_nach(zeilen, r"vorname[n]?|first\s*name|given\s*name[s]?|forename")
+    form = _formular_felder(roh, zeilen)
+    nachname = form.get("nachname") or _wert_nach(zeilen, r"nachname|familienname|surname|last\s*name|family\s*name")
+    vorname = form.get("vorname") or _wert_nach(zeilen, r"vorname(?:\(n\)|n)?|first\s*name|given\s*name[s]?|forename")
     if not nachname and not vorname:
         voll = _wert_nach(zeilen, r"name")
         if voll and not re.search(r"stelle|institution|tr[äa]ger|kasse|versicherung", voll, re.I):
             nachname = voll
     name = " ".join(x for x in (vorname, nachname) if x)
     von, bis = _zeitraum(roh)
-    ausgestellt = next((d for d, a in _daten_mit_kontext(roh) if a == "ausgestellt"), None)
+    von, bis = form.get("von") or von, form.get("bis") or bis
+    ausgestellt = form.get("ausgestellt") or next((d for d, a in _daten_mit_kontext(roh) if a == "ausgestellt"), None)
+    # Beim amtlichen Formular stehen in den Fußnoten Spanien/Schweden/Portugal – dort nicht nach Ländern suchen
+    laender = form["laender"] if form else _laender(roh)
     return {"name": name, "vorname": vorname, "nachname": nachname, "von": von, "bis": bis,
-            "ausgestellt": ausgestellt, "laender": _laender(roh), "aussteller": _aussteller(roh, zeilen),
+            "ausgestellt": ausgestellt, "laender": laender,
+            "aussteller": form.get("aussteller") or _aussteller(roh, zeilen),
             "dateiname": dateiname}
 
 
@@ -282,6 +393,15 @@ def ki_ergebnis(felder: dict, dateiname: str = "") -> dict:
     }
 
 
+def _als_liste(v) -> list:
+    """Die KI liefert Ländercodes mal als Liste, mal als Text („PL“ oder „PL, CZ“): immer eine Liste aus Texten."""
+    if isinstance(v, str):
+        return [x for x in re.split(r"[\s,;/]+", v) if x]
+    if isinstance(v, (list, tuple)):
+        return [x for x in v if isinstance(x, str)]
+    return []
+
+
 def a1_pruefen(ki: dict) -> dict | None:
     """Falls die KI ein Dokument als A1 eingestuft hat: Ergebnis auf A1-Form bringen (keine Pflichtfeld-Fehler,
     kein Betrag). Sonst None."""
@@ -290,7 +410,9 @@ def a1_pruefen(ki: dict) -> dict | None:
     fest = ki_ergebnis({"name": ki.get("reisender"), "aussteller": ki.get("anbieter"),
                         "von": _als_datum(ki.get("event_datum_von")), "bis": _als_datum(ki.get("event_datum_bis")),
                         "ausgestellt": _als_datum(ki.get("belegdatum")),
-                        "laender": [c for c in (ki.get("a1_laender") or []) if c in A1_LAENDER]})
+                        "laender": list(dict.fromkeys(
+                            c.strip().upper() for c in _als_liste(ki.get("a1_laender")) + _als_liste(ki.get("land_beleg"))
+                            if c.strip().upper() in A1_LAENDER))})
     return fest
 
 

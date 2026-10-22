@@ -397,13 +397,81 @@ def _bild_optimieren(bild_bytes: bytes, content_type: str) -> tuple:
         return bild_bytes, content_type
 
 
+VEKTOR_SEITE_BYTES = 20000   # Seiten mit mehr Zeichenbefehlen als so vielen Bytes gelten als „gezeichnet“, nicht als Scan
+SEITE_DPI = 150              # Auflösung beim Umwandeln einer gezeichneten Seite in ein Bild (A4 = ca. 1240 x 1754 Pixel)
+
+
+def _seite_ist_gezeichnet(seite) -> bool:
+    """True bei Seiten, deren Inhalt aus Linien/Schrift-Umrissen besteht (z. B. „Microsoft: Print To PDF“ ohne Textebene).
+    Ein Scan oder ein aus einem Foto erzeugtes PDF besteht dagegen nur aus einem Bild und hat einen winzigen Inhaltsstrom."""
+    try:
+        inhalt = seite.get_contents()
+        return inhalt is not None and len(inhalt.get_data()) > VEKTOR_SEITE_BYTES
+    except Exception:
+        return False
+
+
+def _seite_rendern(pdf_bytes: bytes, seiten_nr: int, dpi: int = SEITE_DPI):
+    """Die ganze Seite als JPEG-Bild (Bytes) oder None. Zuerst pypdfium2 (steht in requirements.txt),
+    ersatzweise das Programm pdftoppm, falls es auf dem Rechner installiert ist."""
+    try:
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(pdf_bytes)
+        try:
+            bild = pdf[seiten_nr].render(scale=dpi / 72).to_pil().convert("RGB")
+        finally:
+            pdf.close()
+        buf = io.BytesIO()
+        bild.save(buf, format="JPEG", quality=90)
+        return buf.getvalue()
+    except Exception as e:
+        print(f"[Seitenbilder] pypdfium2: {e}")
+    try:
+        import shutil, subprocess, tempfile, os
+        if not shutil.which("pdftoppm"):
+            return None
+        with tempfile.TemporaryDirectory() as tmp:
+            pfad = os.path.join(tmp, "in.pdf")
+            with open(pfad, "wb") as f:
+                f.write(pdf_bytes)
+            subprocess.run(["pdftoppm", "-jpeg", "-r", str(dpi), "-f", str(seiten_nr + 1), "-l", str(seiten_nr + 1),
+                            pfad, os.path.join(tmp, "s")], check=True, timeout=60)
+            for name in sorted(os.listdir(tmp)):
+                if name.startswith("s") and name.endswith(".jpg"):
+                    with open(os.path.join(tmp, name), "rb") as f:
+                        return f.read()
+    except Exception as e:
+        print(f"[Seitenbilder] pdftoppm: {e}")
+    return None
+
+
+def pdf_titel_lesen(pdf_bytes: bytes) -> str:
+    """Der Titel in den PDF-Eigenschaften (z. B. „Bescheinigung A1 - Onlineversion“), sonst leer."""
+    try:
+        from pypdf import PdfReader
+        t = (PdfReader(io.BytesIO(pdf_bytes)).metadata or {}).get("/Title")
+        return str(t or "").strip()
+    except Exception:
+        return ""
+
+
 def pdf_seitenbilder(pdf_bytes: bytes, max_seiten: int = MAX_KI_SEITEN) -> list:
-    """Das eingebettete Bild je PDF-Seite (Scans, aus Fotos erzeugte PDFs), höchstens max_seiten Stück.
-    Seiten ohne Bild werden übersprungen. Leere Liste = kein Scan."""
+    """Je PDF-Seite ein Bild für die KI, höchstens max_seiten Stück:
+    - Scan / aus Foto erzeugtes PDF: das eingebettete Bild in voller Auflösung,
+    - gezeichnete Seite (Formular als „Print To PDF“ ohne Textebene, nur Schrift-Umrisse): die Seite wird als Bild
+      gerendert. Früher wurde hier nur das eingebettete Bild gelesen – bei solchen Seiten ein Kopfbalken oder gar nichts.
+    Seiten ohne Bild und ohne Zeichnung werden übersprungen. Leere Liste = nichts zu lesen."""
     try:
         from pypdf import PdfReader
         erg = []
-        for seite in PdfReader(io.BytesIO(pdf_bytes)).pages:
+        for nr, seite in enumerate(PdfReader(io.BytesIO(pdf_bytes)).pages):
+            if _seite_ist_gezeichnet(seite):
+                bild = _seite_rendern(pdf_bytes, nr)
+                if bild:
+                    erg.append(bild)
+                    if len(erg) >= max_seiten:
+                        break
+                    continue
             try:
                 bilder = list(seite.images)
             except Exception as e:
@@ -494,6 +562,17 @@ WICHTIG bei "belegart" (niemals leer lassen):
   "belegdatum" das Ausstellungsdatum, "anbieter" die ausstellende Stelle (Krankenkasse oder
   Rentenversicherung); es gibt keinen Betrag. "transportart" bleibt leer. Eine Rechnung des
   Telekommunikationsanbieters "A1 Telekom" ist KEINE A1-Bescheinigung.
+  Die amtliche deutsche Online-Fassung erkennst du am grünen Kopf "A1" mit EU-Flagge, dem Titel "Bescheinigung über
+  die Rechtsvorschriften der sozialen Sicherheit, die auf den/die Inhaber/in anzuwenden sind", "Verordnungen (EG)
+  Nr. 883/2004 und Nr. 987/2009", 3 Seiten und nummerierten Feldern (1.1 bis 6.11). Dafür gilt genau:
+  "reisender" = Feld 1.3 Vorname(n) + Feld 1.2 Nachname (Vorname zuerst; NICHT der Geburtsname 1.4),
+  "event_datum_von" = Feld 2.2 Anfangsdatum, "event_datum_bis" = Feld 2.3 Enddatum (leer, wenn keines steht),
+  "belegdatum" = Feld 6.10 Datum (Ausstellungsdatum, NICHT das Geburtsdatum 1.5),
+  "anbieter" = Feld 6.1 Name des ausstellenden Trägers (z. B. Techniker Krankenkasse, AOK Bayern),
+  "a1_laender" = Liste der ISO-Ländercodes des Staates, in dem gearbeitet wird: Land am Ende der Anschrift unter
+  Feld 5.2 (z. B. "Bladkowo 1c, 72210 Dobra, PL" -> ["PL"]), ersatzweise Feld 1.9.4 Ländercode; "land_beleg" = derselbe Code.
+  NICHT verwenden: Feld 2.1 Mitgliedstaat (das ist der Staat, dessen Recht gilt, bei uns immer DE) und die
+  Ländercodes 1.8.4, 4.4.2, 6.5 (alle in Deutschland). Die Fußnoten (Spanien, Schweden, Portugal) sind keine Reiseländer.
 - "Sonstiges" NUR, wenn das Dokument keinen bezahlten Betrag enthält und weder Buchung
   noch Änderung ist.
 
@@ -529,6 +608,7 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
   "tanken_preis_pro_einheit": 1.789,
   "tanken_tankstelle": "Name und Ort",
   "tanken_kennzeichen": "Kennzeichen falls sichtbar",
+  "a1_laender": "nur bei A1Bescheinigung: Liste der ISO-Ländercodes des Arbeitsortes, z.B. [\"PL\"], sonst null",
   "pflichtfelder_ok": true,
   "fehlende_pflichtfelder": []
 }"""
@@ -729,6 +809,17 @@ WICHTIG bei "belegart" (niemals leer lassen):
   "belegdatum" das Ausstellungsdatum, "anbieter" die ausstellende Stelle (Krankenkasse oder
   Rentenversicherung); es gibt keinen Betrag. "transportart" bleibt leer. Eine Rechnung des
   Telekommunikationsanbieters "A1 Telekom" ist KEINE A1-Bescheinigung.
+  Die amtliche deutsche Online-Fassung erkennst du am grünen Kopf "A1" mit EU-Flagge, dem Titel "Bescheinigung über
+  die Rechtsvorschriften der sozialen Sicherheit, die auf den/die Inhaber/in anzuwenden sind", "Verordnungen (EG)
+  Nr. 883/2004 und Nr. 987/2009", 3 Seiten und nummerierten Feldern (1.1 bis 6.11). Dafür gilt genau:
+  "reisender" = Feld 1.3 Vorname(n) + Feld 1.2 Nachname (Vorname zuerst; NICHT der Geburtsname 1.4),
+  "event_datum_von" = Feld 2.2 Anfangsdatum, "event_datum_bis" = Feld 2.3 Enddatum (leer, wenn keines steht),
+  "belegdatum" = Feld 6.10 Datum (Ausstellungsdatum, NICHT das Geburtsdatum 1.5),
+  "anbieter" = Feld 6.1 Name des ausstellenden Trägers (z. B. Techniker Krankenkasse, AOK Bayern),
+  "a1_laender" = Liste der ISO-Ländercodes des Staates, in dem gearbeitet wird: Land am Ende der Anschrift unter
+  Feld 5.2 (z. B. "Bladkowo 1c, 72210 Dobra, PL" -> ["PL"]), ersatzweise Feld 1.9.4 Ländercode; "land_beleg" = derselbe Code.
+  NICHT verwenden: Feld 2.1 Mitgliedstaat (das ist der Staat, dessen Recht gilt, bei uns immer DE) und die
+  Ländercodes 1.8.4, 4.4.2, 6.5 (alle in Deutschland). Die Fußnoten (Spanien, Schweden, Portugal) sind keine Reiseländer.
 - "Sonstiges" NUR, wenn das Dokument keinen bezahlten Betrag enthält und weder Buchung
   noch Änderung ist.
 
@@ -802,6 +893,7 @@ JSON-Format:
       "hinweis": "z.B. operated by Edelweiss"
     }
   ],
+  "a1_laender": "nur bei A1Bescheinigung: Liste der ISO-Ländercodes des Arbeitsortes, z.B. [\"PL\"], sonst null",
   "pflichtfelder_ok": true,
   "fehlende_pflichtfelder": []
 }
@@ -1395,7 +1487,9 @@ async def beleg_verarbeiten(
     is_image = content_type in BILD_TYPEN
     ohne_text = len(rohtext.strip()) < 20
     a1_felder = None
-    if dokumentart == mod_a1.BELEGART or mod_a1.a1_erkennen(rohtext, dateiname):
+    # Ohne Text hilft neben dem Dateinamen der Titel in den PDF-Eigenschaften („Bescheinigung A1 - Onlineversion“)
+    name_hinweis = f"{dateiname} {pdf_titel_lesen(original_pdf)}" if ohne_text else dateiname
+    if dokumentart == mod_a1.BELEGART or mod_a1.a1_erkennen(rohtext, name_hinweis):
         a1_felder = mod_a1.a1_auswerten(rohtext, dateiname)
     a1_scan = a1_felder is not None and ohne_text
 
