@@ -32,6 +32,7 @@ import mod_laender
 import mod_a1
 import mod_reisepdf
 import mod_visa
+import mod_visum
 import mod_doku
 import mod_beleg
 from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
@@ -122,6 +123,14 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.50", "zeit": "2026-10-25 07:05", "aenderungen": [
+        "Neu: Einreisegenehmigungen (eTA, ESTA, eVisa, ETIAS) als eigene Belegart. Die KI erkennt sie (auch am Dateinamen, z. B. „eTA_Kanada.pdf“) und legt sie unter der Kategorie „Visum“ ab: ohne Betrag als „🛂 Einreisegenehmigung“ (keine Pflichtfelder, keine Mahnung wegen Betrag oder Bezahlart), mit Gebühr als Quittung bzw. Rechnung, die in den Kosten der Reise zählt. Das Wort „Visa“ einer Kreditkarte und „ETA“ als Ankunftszeit lösen nichts aus.",
+        "Visum-Vorschlag fürs Mitarbeiterprofil: Die Beleg-Seite zeigt Art, Land, Gültigkeit, Einreisen, Aufenthaltsdauer und Antragsnummer, den passenden Mitarbeiter (vorausgewählt nach dem Namen auf dem Dokument) und ob das Visum die Reise abdeckt. Ein Klick übernimmt es ins Visa-Profil, mit der Kopie des Belegs als Datei. Offene Vorschläge stehen unter „Offene Aufgaben“.",
+        "Bereits abgelegte Belege (z. B. eTA als „Sonstiges“): Die Beleg-Seite bietet „Als Einreisegenehmigung einstufen“ an; die Angaben werden aus dem Beleg-Text gelesen. Genehmigungen vor der Reise stehen im Tagesverlauf ohne Warnung „Belege außerhalb des Reisezeitraums“."]},
+    {"version": "3.49", "zeit": "2026-10-23 10:56", "aenderungen": [
+        "VMA-Städtesätze: Die App erkennt Städte jetzt auch in anderer Schreibweise. Beispiel: Der Hotelbeleg sagt „New Delhi“, die amtliche Liste führt „Neu Delhi“ – bisher galt deshalb nur der Landessatz Indien. Ebenso Kolkata = Kalkutta, Bengaluru = Bangalore, Bombay = Mumbai, Milan = Mailand, Rome = Rom, Mexico City = Mexiko Stadt u. a.",
+        "Hotel-Adresse: Die Stadt wird nicht mehr nur aus dem letzten Adressteil gelesen. „Janpath, New Delhi 110001, India“ oder „Straße 1, 110001 New Delhi“ werden erkannt (Land am Ende, Postleitzahl vor dem Ort). Straßennamen mit Städtenamen („Rue de Paris“) lösen keinen Städtesatz aus.",
+        "Land + Ort von Hand (Reise-Seite „🌍 + Land“, z. B. Indien – Neu Delhi) gilt jetzt auch dann, wenn die Automatik zwar das Land, aber keine Stadt gefunden hat. Eine automatisch erkannte Stadt hat weiter Vorrang."]},
     {"version": "3.48", "zeit": "2026-10-22 09:58", "aenderungen": [
         "A1-Bescheinigung (amtliche Online-Fassung): Bei PDFs ohne Textebene (z. B. „Microsoft: Print To PDF“) hat die App bisher nur eingebettete Bilder gelesen, bei Ihren A1 also nur den grünen Kopfbalken oder gar nichts. Jetzt werden die Seiten als Bild gerendert und von der KI gelesen. Neue Bibliothek: pypdfium2 (neue requirements.txt auf Render einspielen).",
         "A1-Erkennung und -Auswertung verbessert: neuer Formulartitel („Rechtsvorschriften der sozialen Sicherheit …“), Feldnummern 1.2/1.3 (Name mit Vorname), 2.2/2.3 (Zeitraum), 6.10 (Ausstellungsdatum), 6.1 (Krankenkasse), Reiseland aus 5.2 (statt Spanien/Schweden/Portugal aus den Fußnoten). Auch der PDF-Titel „Bescheinigung A1 – Onlineversion“ zählt als Hinweis.",
@@ -1269,7 +1278,7 @@ def beleg_detail(bid: int, request: Request):
             "Flug":"#dbeafe:#1e40af","Hotel":"#dcfce7:#166534",
             "Bahn":"#e0e7ff:#3730a3","Taxi":"#fef3c7:#92400e",
             "Mietwagen":"#fce7f3:#9d174d","Bewirtung":"#fff7ed:#9a3412",
-            "Tanken":"#f0fdf4:#14532d","Sonstiges":"#f1f5f9:#475569"
+            "Tanken":"#f0fdf4:#14532d","Visum":"#fef9c3:#854d0e","Sonstiges":"#f1f5f9:#475569"
         }
         tc = typ_farben.get(typ or "Sonstiges","#f1f5f9:#475569").split(":")
         typ_badge = (f'<span style="background:{tc[0]};color:{tc[1]};'
@@ -1392,6 +1401,21 @@ def beleg_detail(bid: int, request: Request):
         # Verknüpfung: Buchungsbestätigung (Betrag x) ↔ Rechnungen/Quittungen (x1 + x2 = x), siehe mod_belegdeckung
         verknuepfung_karte_html = _verknuepfung_karte(bid2, rcode)
 
+        # Einreisegenehmigung (eTA/ESTA/eVisa): Vorschlag fürs Visa-Profil des Mitarbeiters (v3.50)
+        visum_karte_html = ""
+        try:
+            if mod_visum.ist_visum_beleg(typ, belegart, ki):
+                vs = mod_visum.vorschlag(ki, mod_visa._reisezeitraum(rcode) if rcode else (None, None))
+                if vs:
+                    wahl, kand = (mod_visum.kandidaten(reisender, rcode)
+                                  if benutzer_ist_organisator and vs["status"] == "offen" else ("", []))
+                    visum_karte_html = mod_visum.karte_html(bid2, vs, wahl, kand, bool(benutzer_ist_organisator))
+            elif (typ or "") in ("", "Sonstiges") and belegart not in (mod_a1.BELEGART, "Buchungsbestaetigung", "Flugaenderung") \
+                    and mod_visum.ist_visum_dokument(rohtext or "", f"{dateiname} {ki.get('transportart_freitext') or ''}"):
+                visum_karte_html = mod_visum.hinweis_html(bid2, bool(benutzer_ist_organisator))
+        except Exception as ex:
+            print(f"[Visum] Karte nicht aufgebaut: {ex}")
+
         bewirtung_karte_html = _bewirtung_karte(bid2) + _vorschuss_karte(bid2)
 
         pruef_karte_html = ""
@@ -1462,7 +1486,7 @@ def beleg_detail(bid: int, request: Request):
           {typ_badge}
           {status_badge}
         </div>
-        {aenderung_html}{aenderung_hinweis_html}
+        {aenderung_html}{aenderung_hinweis_html}{visum_karte_html}
         {f'''<div class="alert" style="background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;
              padding:12px 16px;border-radius:8px;margin-bottom:16px">
           ✈ Als <b>Flugänderung/Umbuchung</b> erkannt – die neuen Flugdaten stehen unten im Beleg,
@@ -1496,6 +1520,7 @@ def beleg_detail(bid: int, request: Request):
                       <option value="Buchungsbestaetigung"{' selected' if belegart=='Buchungsbestaetigung' else ''}>Buchungsbestätigung</option>
                       <option value="Flugaenderung"{' selected' if belegart=='Flugaenderung' else ''}>✈ Flugänderung/Umbuchung</option>
                       <option value="A1Bescheinigung"{' selected' if belegart=='A1Bescheinigung' else ''}>🛂 A1-Bescheinigung</option>
+                      <option value="Einreisegenehmigung"{' selected' if belegart=='Einreisegenehmigung' else ''}>🛂 Einreisegenehmigung (eTA/ESTA/eVisa)</option>
                       <option value="Tankbeleg"{' selected' if belegart=='Tankbeleg' else ''}>Tankbeleg (Rechnung)</option>
                       <option value="Hotel"{' selected' if belegart=='Hotel' else ''}>Hotel</option>
                       <option value="Taxi"{' selected' if belegart=='Taxi' else ''}>Taxi</option>
@@ -1536,7 +1561,7 @@ def beleg_detail(bid: int, request: Request):
                       <option value="Unbekannt"{' selected' if zahlungsart=='Unbekannt' else ''}>❓ Unbekannt</option>
                     </select>
                   </form>
-                  {'' if zahlungsart or belegart in ('Buchungsbestaetigung', 'A1Bescheinigung') else '<span style="font-size:11px;color:#b45309;margin-left:6px">⚠ bitte nachtragen</span>'}
+                  {'' if zahlungsart or belegart in ('Buchungsbestaetigung', 'A1Bescheinigung', 'Einreisegenehmigung') else '<span style="font-size:11px;color:#b45309;margin-left:6px">⚠ bitte nachtragen</span>'}
                   {kreditkarte_dropdown_html}
                 </dd>
                 {f'<dt style="color:var(--muted);font-size:12px">Netto</dt><dd>{float(betrag_netto):.2f} {waehrung}</dd>' if betrag_netto else ""}
@@ -1732,7 +1757,7 @@ def beleg_daten_bearbeiten_form(bid: int, request: Request):
         buchungscode_v = v(g("buchungscode",10)); rechnr_v = v(g("rechnungsnummer",11))
         event_zeit_v = v(g("event_zeit",12))
 
-        transportarten = ["Hotel","Flug","Bahn","Mietwagen","Taxi","Tanken","Verpflegung","Bewirtung","Sonstiges"]
+        transportarten = ["Hotel","Flug","Bahn","Mietwagen","Taxi","Tanken","Verpflegung","Bewirtung","Visum","Sonstiges"]
         typ_opts = "".join(f'<option value="{t}"{" selected" if t==transportart_v else ""}>{t}</option>' for t in transportarten)
 
         content = f"""
@@ -1889,8 +1914,8 @@ async def beleg_daten_bearbeiten(bid: int, request: Request):
             elif g("belegart",6) in EIGENBELEG_ARTEN:
                 # Eigenbelege (Bewirtung, Vorschuss) sind von der App vollständig erzeugt: nur Datum und Titel nötig
                 pflicht = [f for f in pflicht if f in ("belegdatum","anbieter")]
-            elif g("belegart",6) == mod_a1.BELEGART:
-                pflicht = []              # A1-Bescheinigung: kein Kostenbeleg, keine Pflichtfelder
+            elif g("belegart",6) in (mod_a1.BELEGART, mod_visum.BELEGART):
+                pflicht = []              # A1-Bescheinigung / Einreisegenehmigung ohne Betrag: keine Pflichtfelder
             fehlend = [f for f in pflicht if not pflicht_werte.get(f)]
             pflicht_ok = len(fehlend) == 0
             status = "ok" if pflicht_ok else "fehlerhaft"
@@ -3093,6 +3118,11 @@ async def beleg_belegart_speichern(bid: int, request: Request):
             if r and g("event_datum_von",1) and g("belegdatum",2) and g("transportart",3) and g("anbieter",4):
                 cur.execute(f"UPDATE belege SET pflichtfelder_ok=TRUE, fehlende_felder='[]', "
                             f"status='ok' WHERE id={P}", (bid,))
+        if belegart == mod_visum.BELEGART:
+            # erst speichern und die Verbindung schließen, damit die zweite Verbindung den Beleg nicht blockiert
+            db.commit(); cur.close(); db.close()
+            mod_visum.beleg_einstufen(bid)       # liest die Visum-Angaben, setzt Kategorie „Visum“, Land und Pflichtfelder
+            return RedirectResponse(f"/beleg/{bid}", status_code=303)
         if belegart == mod_a1.BELEGART:
             # A1-Bescheinigung: kein Betrag, keine Pflichtfelder der Kostenbelege
             cur.execute(f"UPDATE belege SET pflichtfelder_ok=TRUE, fehlende_felder='[]', "
@@ -3101,6 +3131,44 @@ async def beleg_belegart_speichern(bid: int, request: Request):
         return RedirectResponse(f"/beleg/{bid}", status_code=303)
     except Exception as e:
         return JSONResponse({"fehler": str(e)}, status_code=500)
+
+# ── Einreisegenehmigung (eTA/ESTA/eVisa): Vorschlag ins Visa-Profil übernehmen (v3.50) ─────────────
+
+@app.post("/beleg/{bid}/visum/uebernehmen")
+async def beleg_visum_uebernehmen(bid: int, request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren können ein Visum ins Profil übernehmen.</div>'), status_code=403)
+    form = await request.form()
+    try:
+        mod_visum.uebernehmen(bid, form.get("kuerzel") or "", form.get("land") or "", form.get("von") or "",
+                              form.get("bis") or "", form.get("notiz") or "")
+    except ValueError as ex:
+        return HTMLResponse(shell("Visum übernehmen",
+            f'<div class="alert alert-err" style="margin-bottom:12px">{_bw_e(str(ex))}</div>'
+            f'<a href="/beleg/{bid}#visum" class="btn btn-secondary">← Zurück zum Beleg</a>'), status_code=400)
+    except Exception as ex:
+        return HTMLResponse(shell("Visum übernehmen",
+            f'<div class="alert alert-err" style="margin-bottom:12px">Übernehmen fehlgeschlagen: {_bw_e(str(ex))}</div>'
+            f'<a href="/beleg/{bid}#visum" class="btn btn-secondary">← Zurück zum Beleg</a>'), status_code=500)
+    return RedirectResponse(f"/beleg/{bid}#visum", status_code=303)
+
+
+@app.post("/beleg/{bid}/visum/verwerfen")
+async def beleg_visum_verwerfen(bid: int, request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    mod_visum.status_setzen(bid, "verworfen")
+    return RedirectResponse(f"/beleg/{bid}#visum", status_code=303)
+
+
+@app.post("/beleg/{bid}/visum/offen")
+async def beleg_visum_offen(bid: int, request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    mod_visum.status_setzen(bid, "offen")
+    return RedirectResponse(f"/beleg/{bid}#visum", status_code=303)
+
 
 @app.post("/beleg/{bid}/zuordnen")
 async def beleg_zuordnen(bid: int, request: Request):
@@ -3248,7 +3316,7 @@ def belege_unzugeordnet():
             "Flug":"#dbeafe:#1e40af","Hotel":"#dcfce7:#166534",
             "Bahn":"#e0e7ff:#3730a3","Taxi":"#fef3c7:#92400e",
             "Mietwagen":"#fce7f3:#9d174d","Bewirtung":"#fff7ed:#9a3412",
-            "Tanken":"#f0fdf4:#14532d","Sonstiges":"#f1f5f9:#475569"
+            "Tanken":"#f0fdf4:#14532d","Visum":"#fef9c3:#854d0e","Sonstiges":"#f1f5f9:#475569"
         }
 
         karten = ""
@@ -3421,7 +3489,7 @@ def belege_liste(request: Request):
                 return False
             if f_problem == "fehler" and it["status"] != "fehler":
                 return False
-            if f_problem == "zahlungsart" and (it["zahlungsart"] or it["belegart"] in ("Buchungsbestaetigung", "A1Bescheinigung")):
+            if f_problem == "zahlungsart" and (it["zahlungsart"] or it["belegart"] in ("Buchungsbestaetigung", "A1Bescheinigung", "Einreisegenehmigung")):
                 return False
             if f_problem == "kreditkarte" and not (it["zahlungsart"] == "Kreditkarte" and it["id"] not in kk_abgeglichen):
                 return False
@@ -3445,7 +3513,7 @@ def belege_liste(request: Request):
         typ_farben = {
             "Flug": "badge-blue", "Hotel": "badge-green", "Bahn": "badge-blue",
             "Taxi": "badge-amber", "Mietwagen": "badge-red", "Tanken": "badge-green",
-            "Verpflegung": "badge-amber", "Bewirtung": "badge-amber", "Sonstiges": "badge-gray"
+            "Verpflegung": "badge-amber", "Bewirtung": "badge-amber", "Visum": "badge-amber", "Sonstiges": "badge-gray"
         }
         zeilen = ""
         for it in anzeige:
@@ -6074,6 +6142,16 @@ def todo_liste_laden() -> list:
                 "url": f"/reise/{a1_t[0]['reise_code']}#a1" if len(a1_t) == 1 else "/todo"})
     except Exception: pass
 
+    try:
+        # 8. Einreisegenehmigung (eTA/ESTA/eVisa): Vorschlag fürs Visa-Profil noch nicht übernommen
+        vv = mod_visum.offene_vorschlaege()
+        if vv:
+            aufgaben.append({"icon": "🛂", "prio": "warn",
+                "text": f'Visum-Vorschlag prüfen ({len(vv)})',
+                "sub": ", ".join(mod_visum.todo_text(t) for t in vv[:3]) + (" …" if len(vv) > 3 else ""),
+                "url": f"/beleg/{vv[0]['id']}#visum" if len(vv) == 1 else "/todo"})
+    except Exception: pass
+
     cur.close(); db.close()
     return aufgaben
 
@@ -6242,6 +6320,21 @@ def todo_seite(request: Request):
                           f'<td>{_bw_e(mod_a1.todo_text(t))}</td>'
                           f'<td><a href="/reise/{t["reise_code"]}#a1" class="btn btn-secondary btn-sm">A1 verwalten</a></td></tr>')
 
+        try:
+            visum_offen = mod_visum.offene_vorschlaege()
+        except Exception:
+            visum_offen = []
+        visum_zeilen = "".join(
+            f'<tr><td><a href="/beleg/{t["id"]}#visum" style="color:var(--blue);font-weight:600;text-decoration:none">#{t["id"]}</a></td>'
+            f'<td>{_bw_e(t["reise_code"] or "–")}</td><td>{_bw_e(mod_visum.todo_text(t))}</td><td>{_bw_e(t["anbieter"] or "–")}</td>'
+            f'<td><a href="/beleg/{t["id"]}#visum" class="btn btn-secondary btn-sm">Vorschlag prüfen</a></td></tr>'
+            for t in visum_offen)
+        visum_card = (
+            f'<div class="card" style="margin-bottom:20px"><div class="card-header"><span class="card-title">'
+            f'🛂 Visum-Vorschläge – ins Visa-Profil übernehmen ({len(visum_offen)})</span></div><div class="table-wrap"><table>'
+            f'<thead><tr><th>Beleg</th><th>Reise</th><th>Visum</th><th>Anbieter</th><th></th></tr></thead>'
+            f'<tbody>{visum_zeilen}</tbody></table></div></div>') if visum_offen else ""
+
         content = f"""
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
           <h1 class="page-title" style="margin:0">📋 Offene Aufgaben</h1>
@@ -6260,6 +6353,7 @@ def todo_seite(request: Request):
             </table>
           </div>
         </div>
+        {visum_card}
 
         <div class="card" style="margin-bottom:20px">
           <div class="card-header"><span class="card-title">Belege mit offenen Punkten ({len(belege)})</span></div>
@@ -8560,7 +8654,8 @@ def reise_detail(code: str, request: Request):
             "Flug": ("✈", "#dbeafe", "#1e40af"), "Hotel": ("🏨", "#dcfce7", "#166534"),
             "Mietwagen": ("🚗", "#ede9fe", "#5b21b6"), "Taxi": ("🚕", "#fef3c7", "#92400e"),
             "Bahn": ("🚆", "#e0e7ff", "#3730a3"), "Tanken": ("⛽", "#fee2e2", "#991b1b"),
-            "Bewirtung": ("🍽", "#fff7ed", "#9a3412"), "Sonstiges": ("📄", "#f1f5f9", "#475569"),
+            "Bewirtung": ("🍽", "#fff7ed", "#9a3412"), "Visum": ("🛂", "#fef9c3", "#854d0e"),
+            "Sonstiges": ("📄", "#f1f5f9", "#475569"),
         }
 
         def zeit_aus_beleg(b):
@@ -8715,8 +8810,11 @@ def reise_detail(code: str, request: Request):
             zeichen = "=" if (eigen_final is not None or anteil) else "≈"
             return f"{text} ({zeichen} {eur_x:.2f} EUR)"
 
+        visum_bids = set()          # Einreisegenehmigungen (oft Wochen vor der Reise): eigene Überschrift statt Warnung
         for b in beleg_rows_tag:
             bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
+            if typ == "Visum":
+                visum_bids.add(bid)
             belegart_b = get(b,"belegart",15) or ""
             gruppe_b = get(b,"beleg_gruppe_id",16)
             hat_segmente_b = typ in ("Flug","Bahn","Mietwagen") and bool(segmente_aus_ki_json(get(b,"ki_json",8)))
@@ -8782,7 +8880,8 @@ def reise_detail(code: str, request: Request):
                     add_event(bis_d, "", f"{icon} Mietwagen abgeben · {anbieter}",
                               f"{fmt_date(bis_d)}" if bis_d else "", bid, None, bg, fg)
             else:
-                d = to_d(get(b,"event_datum_von",9)) or to_d(get(b,"belegdatum",6))
+                d = (to_d(get(b,"belegdatum",6)) or to_d(get(b,"event_datum_von",9))) if typ == "Visum" \
+                    else (to_d(get(b,"event_datum_von",9)) or to_d(get(b,"belegdatum",6)))
                 zeit = get(b,"event_zeit",14) or ""
                 titel_txt = f"{icon} {typ}" + (f" – {freitext}" if freitext else "") + f" · {anbieter}"
                 add_event(d, zeit, titel_txt, f"{fmt_date(d)}" if d else "", bid, bet_s, bg, fg)
@@ -9011,9 +9110,16 @@ def reise_detail(code: str, request: Request):
                             else date.fromisoformat(get(vt,"datum",1)[:10]) for vt in vma_tage_rows}
         ausserhalb_tage = sorted(d for d in events_by_date.keys() if d not in tage_im_bereich)
         if ausserhalb_tage:
-            tage_blocks += ('<div style="padding:10px 16px;font-size:12px;color:#b45309;'
-                             'font-style:italic;background:#fffbeb">⚠ Belege außerhalb des '
-                             'Reisezeitraums (Datum passt nicht zur Reisedauer)</div>')
+            nur_visum = all(e[1] != "beleg" or e[2] in visum_bids
+                            for d in ausserhalb_tage for e in events_by_date.get(d, []))
+            if nur_visum:
+                tage_blocks += ('<div style="padding:10px 16px;font-size:12px;color:var(--muted);'
+                                 'background:var(--bg)">🛂 Einreisegenehmigungen vor oder nach der Reise '
+                                 '(die Kosten zählen zur Reise)</div>')
+            else:
+                tage_blocks += ('<div style="padding:10px 16px;font-size:12px;color:#b45309;'
+                                 'font-style:italic;background:#fffbeb">⚠ Belege außerhalb des '
+                                 'Reisezeitraums (Datum passt nicht zur Reisedauer)</div>')
             for d in ausserhalb_tage:
                 wt = wochentage[d.weekday()]
                 datum_txt = f"{wt} {d.day:02d}.{d.month:02d}.{d.year}"

@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.48"
+DOKU_GEPRUEFT_FUER = "3.50"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -431,6 +431,10 @@ KAPITEL = [
             "Sie bleibt, bis jemand **OK** klickt. Organisatoren sehen alle Visa, andere Mitarbeiter nur ihre eigenen.",
             "**Verlängerung:** Erfassen Sie ein neues Visum für dasselbe Land mit späterem Ablauf, meldet die App das alte nicht mehr. Ändern Sie bei einem Visum das Datum „gültig bis“, "
             "erscheint der Hinweis zum neuen Ablaufdatum wieder (auch wenn vorher OK geklickt wurde). Inaktive Mitarbeiter werden nicht gemeldet.",
+            "**Aus einem Beleg übernehmen:** Wird eine eTA/ESTA/eVisa als Beleg erkannt, zeigt die **Beleg-Seite** die Karte **🛂 Visum-Vorschlag** mit Art, Land, Gültigkeit, Einreisen, Aufenthaltsdauer und Antragsnummer. "
+            "Der Mitarbeiter ist vorausgewählt, wenn der Name auf dem Dokument zu genau einer Person passt (Reisende der Reise stehen oben in der Liste). Prüfen Sie die Felder (leere Angaben tragen Sie ein) und klicken Sie **Ins Visa-Profil übernehmen**: "
+            "Das Visum liegt dann im Profil, die Notiz nennt die Art, die Kopie des Belegs hängt als Datei dran. Die Karte meldet auch, ob das Visum die Reise abdeckt oder vorher abläuft. "
+            "**Nicht übernehmen** schließt den Vorschlag; **Vorschlag wieder öffnen** holt ihn zurück. Ein zweites Übernehmen legt kein doppeltes Visum an. Offene Vorschläge stehen unter „Offene Aufgaben“.",
             "**Reise in das Land:** Reist der Mitarbeiter in ein Land, für das er ein Visum hat, das an mindestens einem Reisetag gültig ist, liegt die Kopie im **Portal** (Karte „Reiseunterlagen“) bereit "
             "und hängt hinten an **seiner Reisemappe** (siehe „Reisemappe, Reise-PDFs und A1-Bescheinigung“). Deckt das Visum nicht die ganze Reise ab, steht im Portal ein Warnhinweis.",
         ]),
@@ -523,6 +527,11 @@ KAPITEL = [
         ("p", "**A1-Bescheinigungen** erkennt die App am Inhalt (Überschrift „Bescheinigung über die anzuwendenden Rechtsvorschriften“, „Portable Document A1“, Verordnung 883/2004) "
               "und legt sie als Belegart **🛂 A1-Bescheinigung** ab, ohne Betrag und ohne Kosten. Bei Dateien ohne Text (Scans, Fotos, am Bildschirm ausgedruckte PDFs) liest die KI die Seiten als Bild; ein „A1“ im Dateinamen oder im PDF-Titel hilft zusätzlich. "
               "Siehe Kapitel „Reisemappe, Reise-PDFs und A1-Bescheinigung“."),
+        ("p", "**Einreisegenehmigungen (eTA, ESTA, eVisa, ETIAS)** erkennt die KI und die App an Begriffen wie „eTA“, „ESTA“, „e-Visa“, „Einreisegenehmigung“ in Text und Dateiname. "
+              "Sie bekommen die Kategorie **Visum**. Ohne Betrag auf dem Dokument ist die Belegart **🛂 Einreisegenehmigung** (keine Pflichtfelder, keine Mahnung wegen Betrag oder Bezahlart); "
+              "die Gebühr kommt oft als eigene Quittung, die als Quittung der Kategorie Visum läuft und in den Kosten der Reise zählt. Eine Genehmigung und ihre Gebührenquittung mit gleicher Antragsnummer sind keine Duplikate. "
+              "Gelesen werden Art, Land, Gültigkeit, Einreisen (einfach/mehrfach), Aufenthaltsdauer und Antragsnummer; was nicht auf dem Dokument steht, bleibt leer. "
+              "Auf der **Beleg-Seite** erscheint die Karte **🛂 Visum-Vorschlag** (siehe „Mitarbeiter verwalten“). Genehmigungen liegen oft Wochen vor der Reise; im Tagesverlauf stehen sie dann unter „Einreisegenehmigungen vor oder nach der Reise“ ohne Warnung."),
         ("p", "**Buchung und Rechnung sind keine Duplikate.** Tragen eine Buchungsbestätigung und die dazugehörigen Rechnungen denselben Buchungscode, bleiben es getrennte Belege. "
               "Zwei Rechnungen derselben Buchung gelten nur dann als doppelt, wenn auch die Rechnungsnummer (ohne Nummer: der Betrag) übereinstimmt. "
               "Beim Eingang werden Buchungsbestätigung und Rechnungen mit **gleichem Buchungscode in derselben Reise automatisch verknüpft** (siehe „Beleg prüfen und ergänzen“)."),
@@ -560,6 +569,7 @@ KAPITEL = [
             ["Buchungsbestätigung", "nein", "Betrag ist hier optional. Liefert Flug-/Zugdaten. Braucht Rechnungen oder Quittungen (siehe unten)."],
             ["✈ Flugänderung/Umbuchung", "nein", "Löst die Änderungsklärung aus (siehe „Flug, Bahn und Termine“)."],
             ["🛂 A1-Bescheinigung", "nein", "Kein Kostenbeleg: ohne Betrag, nicht in Abschluss und Kosten, keine Pflichtfelder. Siehe „Reisemappe, Reise-PDFs und A1-Bescheinigung“."],
+            ["🛂 Einreisegenehmigung (eTA/ESTA/eVisa)", "nein", "Die Genehmigung selbst, meist ohne Betrag (Kategorie **Visum**). Keine Pflichtfelder, erzeugt einen Vorschlag fürs Visa-Profil. Steht ein Betrag auf dem Dokument, ist es eine Quittung bzw. Rechnung der Kategorie Visum und läuft wie jeder Kostenbeleg."],
             ["Tankbeleg (Rechnung), Hotel, Taxi, Bewirtung, Sonstige Kosten, Sonstiges", "nein", "Zur Einordnung der Ausgabe. Nicht prüfpflichtig für die Habel-Übergabe. Liefert die KI für einen Beleg mit Betrag „Sonstiges“, setzt die App automatisch „Quittung“. Bei vorhandenen Belegen zeigt die Beleg-Seite den Knopf „Als Quittung einstufen“."],
         ], [42, 16, 42]),
         ("h3", "Bezahlarten"),
@@ -720,7 +730,8 @@ KAPITEL = [
             "**Land nicht erkannt:** Gibt es für einen Tag weder Flug noch Hotel noch Land-Eintrag, gilt der Deutschland-Satz. Der Tag zeigt dann den Hinweis „Land nicht erkannt“. Bei einer Auslandsreise den Hotel- oder Flugbeleg hochladen oder **🌍 + Land** eintragen; die Tage werden dann automatisch neu berechnet.",
             "**Rückreisetag:** Hier zählt der letzte Tätigkeitsort vor der Heimreise (Abflugort der ersten Etappe des Tages), nicht der Ankunftsort. "
             "Bei eintägigen Reisen das zuletzt besuchte ausländische Land. Wie die App entschieden hat, zeigt die Diagnose-Seite `/reise/<Code>/vma-debug` (ohne Knopf, nur noch per Adresse erreichbar).",
-            "Städte mit eigenem Sondersatz (z. B. Los Angeles, New York) werden berücksichtigt.",
+            "**Städte mit eigenem Sondersatz** (z. B. Los Angeles, New York, Neu Delhi, Mumbai) werden berücksichtigt. Die Stadt kommt aus Flug-Ziel, Hotel-Adresse oder Hotel-Ort; englische und andere Schreibweisen gelten (New Delhi = Neu Delhi, Kolkata = Kalkutta). Der Tag zeigt dann z. B. „Indien – Neu Delhi“. Voraussetzung: Die Stadt steht unter **VMA-Sätze** in der Liste (sonst dort **Import** klicken).",
+            "**Stadt wird nicht erkannt:** Auf der Reise-Seite **🌍 + Land** wählen, Land und **Ort** (z. B. Indien, Neu Delhi) mit Von/Bis eintragen. Der Satz der Stadt gilt dann an den Tagen mit diesem Land. Alternativ am Tag den Satz manuell überschreiben.",
             "An- und Abreisetage erhalten je nach Fall den **halben Satz** (Markierung „½ Satz“).",
         ]),
         ("h3", "Mahlzeiten-Abzüge"),
@@ -915,7 +926,8 @@ KAPITEL = [
         ("p", "Alles, was vor der finalen Abrechnung noch offen ist, über alle Reisen: Bar-Belege in Fremdwährung ohne bestätigten Euro-Betrag (bei Kreditkarte: Abgleich mit der Kreditkarten-Abrechnung), Belege ohne Prüfung, "
               "Buchungen, zu denen nach der Rückkehr noch Rechnung oder Quittung fehlt („🧾 Rechnung/Quittung fehlt noch“, mit Betrag), "
               "nicht abgerechnete Reisen mit dem Habel-Stand je Reise (geprüft, bereit, gesendet). "
-              "Ganz oben steht die Karte **🛂 A1-Bescheinigung – Reisen in Europa** mit allen Reisen, bei denen eine A1 fehlt, zu prüfen oder nicht zugeordnet ist."),
+              "Ganz oben steht die Karte **🛂 A1-Bescheinigung – Reisen in Europa** mit allen Reisen, bei denen eine A1 fehlt, zu prüfen oder nicht zugeordnet ist. "
+              "Darunter erscheint bei Bedarf die Karte **🛂 Visum-Vorschläge**: erkannte Einreisegenehmigungen, die noch nicht ins Visa-Profil übernommen oder verworfen wurden."),
         ("h3", "🗺 Karte (`/maps`)"),
         ("p", "Zeigt, wo sich zugeordnete Mitarbeiter bei laufenden Reisen aktuell befinden."),
     ]},
@@ -1017,6 +1029,8 @@ KAPITEL = [
             ["„An Habel“ gesperrt", "Ein Beleg ist nicht geprüft oder das Original fehlt. DMS_EMAIL_TO gesetzt?"],
             ["Habel-Mail zu groß", "Summe der Anhänge über HABEL_MAX_MB. Wert erhöhen, soweit der Mailserver es erlaubt."],
             ["Kein Verspätungs-Alarm", "Cron `/cron/flug-alerts` jede Minute eingerichtet? API-Schlüssel gesetzt? „Jetzt testweise abrufen“ zeigt die Diagnose."],
+            ["eTA/ESTA/eVisa als „Sonstiges“ abgelegt", "Auf der Beleg-Seite erscheint der gelbe Hinweis **Als Einreisegenehmigung einstufen**, alternativ die Belegart von Hand wählen. Die App liest dann Art, Land und Gültigkeit aus dem Beleg-Text. Bei Fotos ohne Text hilft **Neu analysieren**."],
+            ["Visum-Vorschlag ohne Gültigkeit", "Die Angabe steht nicht auf dem Dokument (z. B. nur die Bestätigungs-Mail). Datum im Vorschlag selbst eintragen oder das PDF der Genehmigung statt der Mail hochladen."],
             ["Falsches Land oder falscher VMA-Satz", "Am Tag **↺ Auto** klicken oder oben im Tagesverlauf **↺ Alle Tage auf Auto**. Notfalls den Satz am Tag manuell überschreiben. Die Diagnose steht unter `/reise/<Code>/vma-debug`."],
             ["„Kurs nachtragen“ bleibt stehen", "Kurs am Beleg eintragen oder Euro-Betrag final setzen (am besten über die Kreditkarten-Abrechnung)."],
             ["Seite meldet „Spalte fehlt“", "Einmal `/init` aufrufen."],

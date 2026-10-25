@@ -72,6 +72,7 @@ from mod_geo import adresse_geokodieren
 from mod_vma import IATA_KOORDINATEN
 from mod_vma_tage import vma_auto_aktualisieren, vma_auto_fuer_beleg
 import mod_a1
+import mod_visum
 
 
 def _segment_koordinaten_praezisieren(ki_result: dict) -> None:
@@ -267,7 +268,7 @@ def pdf_text_lesen(pdf_bytes: bytes) -> str:
     except: return ""
 
 
-MWST_NIE_BERECHNEN = ("Flug", "Bahn")   # Fahrpreise: MwSt. nur übernehmen, wenn aufgedruckt
+MWST_NIE_BERECHNEN = ("Flug", "Bahn", "Visum")   # Fahrpreise und Visa-Gebühren: MwSt. nur übernehmen, wenn aufgedruckt
 
 
 def _zahlen_im_text(text: str) -> list:
@@ -573,6 +574,14 @@ WICHTIG bei "belegart" (niemals leer lassen):
   Feld 5.2 (z. B. "Bladkowo 1c, 72210 Dobra, PL" -> ["PL"]), ersatzweise Feld 1.9.4 Ländercode; "land_beleg" = derselbe Code.
   NICHT verwenden: Feld 2.1 Mitgliedstaat (das ist der Staat, dessen Recht gilt, bei uns immer DE) und die
   Ländercodes 1.8.4, 4.4.2, 6.5 (alle in Deutschland). Die Fußnoten (Spanien, Schweden, Portugal) sind keine Reiseländer.
+- "Einreisegenehmigung" = elektronische Einreisegenehmigung oder Visum (eTA Kanada, ESTA USA, eVisa Indien, ETIAS,
+  UK ETA, K-ETA, NZeTA, Visum-Bestätigung, Genehmigungsschreiben einer Botschaft). Dann ist "transportart" = "Visum",
+  "transportart_freitext" z. B. "eTA Kanada", "anbieter" die Behörde oder der Vermittler, "reisender" der Name der Person,
+  "belegdatum" das Ausstellungs- bzw. Genehmigungsdatum, "buchungscode" die Antrags- oder Genehmigungsnummer.
+  "event_datum_von"/"event_datum_bis" bleiben leer; Art, Land und Gültigkeit stehen im Feld "visum". Steht auf dem
+  Dokument kein bezahlter Betrag, bleiben die Betragsfelder leer (die Gebühr kommt oft auf einem eigenen Beleg).
+  Zahlungsbestätigung oder Rechnung über die Gebühr (z. B. 7 CAD, 21 USD) ist belegart "Quittung" bzw. "Rechnung"
+  mit transportart "Visum". Die Kreditkarte "Visa" ist KEIN Visum.
 - "Sonstiges" NUR, wenn das Dokument keinen bezahlten Betrag enthält und weder Buchung
   noch Änderung ist.
 
@@ -581,8 +590,8 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
 
 """ + """{
   "belegdatum": "DD.MM.YYYY",
-  "belegart": "Rechnung|Quittung|Flugaenderung|A1Bescheinigung|Sonstiges",
-  "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Sonstiges",
+  "belegart": "Rechnung|Quittung|Flugaenderung|A1Bescheinigung|Einreisegenehmigung|Sonstiges",
+  "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Visum|Sonstiges",
   "transportart_freitext": "nur wenn Sonstiges",
   "anbieter": "Name des Anbieters",
   "rechnungsnummer": "Belegnummer",
@@ -609,6 +618,7 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
   "tanken_tankstelle": "Name und Ort",
   "tanken_kennzeichen": "Kennzeichen falls sichtbar",
   "a1_laender": "nur bei A1Bescheinigung: Liste der ISO-Ländercodes des Arbeitsortes, z.B. [\"PL\"], sonst null",
+  "visum": "nur bei Einreisegenehmigung/Visum, sonst null: {\"art\":\"eTA|ESTA|eVisa|ETIAS|Visum\",\"land_code\":\"ISO-Code des Ziellandes\",\"gueltig_von\":\"DD.MM.YYYY\",\"gueltig_bis\":\"DD.MM.YYYY\",\"einreisen\":\"einfach|mehrfach\",\"max_aufenthalt_tage\":90,\"antragsnummer\":\"...\"} – nur Angaben, die auf dem Dokument stehen, sonst null",
   "pflichtfelder_ok": true,
   "fehlende_pflichtfelder": []
 }"""
@@ -644,7 +654,7 @@ Setze pflichtfelder_ok=false wenn ein Pflichtfeld fehlt.
                 fehlend = [f for f in pflicht if not result.get(f)]
                 result["pflichtfelder_ok"] = len(fehlend) == 0
                 result["fehlende_pflichtfelder"] = fehlend
-                return result
+                return mwst_pruefen(mod_visum.nachbearbeiten(result, "", dateiname))
             return {"fehler": "Kein JSON", "pflichtfelder_ok": False,
                     "fehlende_pflichtfelder": [f"Kein JSON: {raw[:150]}"]}
     except Exception as e:
@@ -820,6 +830,14 @@ WICHTIG bei "belegart" (niemals leer lassen):
   Feld 5.2 (z. B. "Bladkowo 1c, 72210 Dobra, PL" -> ["PL"]), ersatzweise Feld 1.9.4 Ländercode; "land_beleg" = derselbe Code.
   NICHT verwenden: Feld 2.1 Mitgliedstaat (das ist der Staat, dessen Recht gilt, bei uns immer DE) und die
   Ländercodes 1.8.4, 4.4.2, 6.5 (alle in Deutschland). Die Fußnoten (Spanien, Schweden, Portugal) sind keine Reiseländer.
+- "Einreisegenehmigung" = elektronische Einreisegenehmigung oder Visum (eTA Kanada, ESTA USA, eVisa Indien, ETIAS,
+  UK ETA, K-ETA, NZeTA, Visum-Bestätigung, Genehmigungsschreiben einer Botschaft). Dann ist "transportart" = "Visum",
+  "transportart_freitext" z. B. "eTA Kanada", "anbieter" die Behörde oder der Vermittler, "reisender" der Name der Person,
+  "belegdatum" das Ausstellungs- bzw. Genehmigungsdatum, "buchungscode" die Antrags- oder Genehmigungsnummer.
+  "event_datum_von"/"event_datum_bis" bleiben leer; Art, Land und Gültigkeit stehen im Feld "visum". Steht auf dem
+  Dokument kein bezahlter Betrag, bleiben die Betragsfelder leer (die Gebühr kommt oft auf einem eigenen Beleg).
+  Zahlungsbestätigung oder Rechnung über die Gebühr (z. B. 7 CAD, 21 USD) ist belegart "Quittung" bzw. "Rechnung"
+  mit transportart "Visum". Die Kreditkarte "Visa" ist KEIN Visum.
 - "Sonstiges" NUR, wenn das Dokument keinen bezahlten Betrag enthält und weder Buchung
   noch Änderung ist.
 
@@ -829,8 +847,8 @@ Setze pflichtfelder_ok=false und liste fehlende_pflichtfelder wenn ein Pflichtfe
 JSON-Format:
 """ + """{
   "belegdatum": "DD.MM.YYYY",
-  "belegart": "Rechnung|Buchungsbestaetigung|Quittung|Flugaenderung|A1Bescheinigung|Sonstiges",
-  "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Sonstiges",
+  "belegart": "Rechnung|Buchungsbestaetigung|Quittung|Flugaenderung|A1Bescheinigung|Einreisegenehmigung|Sonstiges",
+  "transportart": "Hotel|Flug|Bahn|Mietwagen|Taxi|Tanken|Verpflegung|Bewirtung|Visum|Sonstiges",
   "transportart_freitext": "nur wenn Sonstiges",
   "anbieter": "Name des Anbieters",
   "rechnungsnummer": "Rechnungs- oder Belegnummer",
@@ -894,6 +912,7 @@ JSON-Format:
     }
   ],
   "a1_laender": "nur bei A1Bescheinigung: Liste der ISO-Ländercodes des Arbeitsortes, z.B. [\"PL\"], sonst null",
+  "visum": "nur bei Einreisegenehmigung/Visum, sonst null: {\"art\":\"eTA|ESTA|eVisa|ETIAS|Visum\",\"land_code\":\"ISO-Code des Ziellandes\",\"gueltig_von\":\"DD.MM.YYYY\",\"gueltig_bis\":\"DD.MM.YYYY\",\"einreisen\":\"einfach|mehrfach\",\"max_aufenthalt_tage\":90,\"antragsnummer\":\"...\"} – nur Angaben, die auf dem Dokument stehen, sonst null",
   "pflichtfelder_ok": true,
   "fehlende_pflichtfelder": []
 }
@@ -923,7 +942,7 @@ JSON-Format:
                 fehlend = [f for f in pflicht if not result.get(f)]
                 result["pflichtfelder_ok"] = len(fehlend) == 0
                 result["fehlende_pflichtfelder"] = fehlend
-                return result
+                return mwst_pruefen(mod_visum.nachbearbeiten(result, rohtext, dateiname), rohtext)
             return {"fehler": "Kein JSON in Antwort", "raw": raw[:300],
                     "pflichtfelder_ok": False,
                     "fehlende_pflichtfelder": [f"Kein JSON: {raw[:150]}"]}
@@ -1318,6 +1337,8 @@ def _beleg_klasse(art) -> str:
         return "buchung"
     if "aenderung" in a or "änderung" in a:
         return "aenderung"
+    if a == "einreisegenehmigung":
+        return "genehmigung"
     return "beleg"
 
 
