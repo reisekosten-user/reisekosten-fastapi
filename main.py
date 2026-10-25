@@ -123,6 +123,9 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.51", "zeit": "2026-10-25 08:37", "aenderungen": [
+        "Fehler behoben: Beim Umschreiben eines Belegs (Belegart „Einreisegenehmigung“ wählen oder „Als Einreisegenehmigung einstufen“) kam „Object of type Decimal is not JSON serializable“. Die Datenbank liefert Beträge als Dezimalzahl, das wurde nicht in das KI-Datenfeld des Belegs übernommen. Betrag und Datum werden jetzt richtig gespeichert.",
+        "Der Fehler trat nur auf dem Live-System (Postgres) auf, nicht im Test mit SQLite. Ein Test bildet diese Eigenheit der Datenbank jetzt nach."]},
     {"version": "3.50", "zeit": "2026-10-25 07:05", "aenderungen": [
         "Neu: Einreisegenehmigungen (eTA, ESTA, eVisa, ETIAS) als eigene Belegart. Die KI erkennt sie (auch am Dateinamen, z. B. „eTA_Kanada.pdf“) und legt sie unter der Kategorie „Visum“ ab: ohne Betrag als „🛂 Einreisegenehmigung“ (keine Pflichtfelder, keine Mahnung wegen Betrag oder Bezahlart), mit Gebühr als Quittung bzw. Rechnung, die in den Kosten der Reise zählt. Das Wort „Visa“ einer Kreditkarte und „ETA“ als Ankunftszeit lösen nichts aus.",
         "Visum-Vorschlag fürs Mitarbeiterprofil: Die Beleg-Seite zeigt Art, Land, Gültigkeit, Einreisen, Aufenthaltsdauer und Antragsnummer, den passenden Mitarbeiter (vorausgewählt nach dem Namen auf dem Dokument) und ob das Visum die Reise abdeckt. Ein Klick übernimmt es ins Visa-Profil, mit der Kopie des Belegs als Datei. Offene Vorschläge stehen unter „Offene Aufgaben“.",

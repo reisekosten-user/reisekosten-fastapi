@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import date, datetime
+from decimal import Decimal
 from html import escape
 
 from mod_db import get_db, ph
@@ -31,6 +32,19 @@ def _g(row, key, idx):
 
 def _s(v) -> str:
     return str(v).strip() if v is not None else ""
+
+
+def _json_default(o):
+    """Postgres liefert Beträge als Decimal und Daten als date – beides muss in JSON geschrieben werden können."""
+    if isinstance(o, Decimal):
+        return float(o)
+    if isinstance(o, (date, datetime)):
+        return o.isoformat()
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
+def _json(o) -> str:
+    return json.dumps(o, ensure_ascii=False, default=_json_default)
 
 
 # ── Datum ─────────────────────────────────────────────────────────
@@ -452,7 +466,7 @@ def _ki_speichern(bid: int, ki: dict) -> None:
     P = ph()
     db = get_db(); cur = db.cursor()
     try:
-        cur.execute(f"UPDATE belege SET ki_json={P} WHERE id={P}", (json.dumps(ki, ensure_ascii=False), bid))
+        cur.execute(f"UPDATE belege SET ki_json={P} WHERE id={P}", (_json(ki), bid))
         db.commit()
     finally:
         cur.close(); db.close()
@@ -545,7 +559,10 @@ def beleg_einstufen(bid: int) -> bool:
         bd = datum_aus(_g(r, "belegdatum", 3))
         if bd:
             ki["belegdatum"] = datum_text(bd)
-        ki["betrag_brutto"] = _g(r, "betrag_brutto", 4)
+        try:
+            ki["betrag_brutto"] = float(_g(r, "betrag_brutto", 4)) if _g(r, "betrag_brutto", 4) is not None else None
+        except (TypeError, ValueError):
+            ki["betrag_brutto"] = None
         for feld, i in (("transportart_freitext", 5), ("land_beleg", 6), ("buchungscode", 7), ("reisender", 8)):
             if _g(r, feld, i):
                 ki[feld] = _g(r, feld, i)
@@ -557,9 +574,9 @@ def beleg_einstufen(bid: int) -> bool:
         cur.execute(f"""UPDATE belege SET ki_json={P}, belegart={P}, transportart={P}, transportart_freitext={P},
                         land_beleg={P}, buchungscode={P}, event_datum_von=belegdatum, event_datum_bis=NULL,
                         pflichtfelder_ok={P}, fehlende_felder={P}, status={P} WHERE id={P}""",
-                    (json.dumps(ki, ensure_ascii=False), ki.get("belegart"), ki.get("transportart"),
+                    (_json(ki), ki.get("belegart"), ki.get("transportart"),
                      ki.get("transportart_freitext"), ki.get("land_beleg"), ki.get("buchungscode"),
-                     not fehlend, json.dumps(fehlend, ensure_ascii=False), "ok" if not fehlend else "fehlerhaft", bid))
+                     not fehlend, _json(fehlend), "ok" if not fehlend else "fehlerhaft", bid))
         db.commit()
     finally:
         cur.close(); db.close()

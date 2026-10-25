@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.50"
+DOKU_GEPRUEFT_FUER = "3.51"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
