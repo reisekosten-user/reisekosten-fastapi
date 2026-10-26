@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.51"
+DOKU_GEPRUEFT_FUER = "3.53"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -512,6 +512,8 @@ KAPITEL = [
             "Ob ein Anhang ein Beleg ist, entscheidet sein **Inhalt** (PDF, JPG, PNG, WEBP, HEIC, TIF), nicht die Angabe der Mail. Auch kleine, vom Handy weitergeleitete PDFs werden erkannt. "
             "Nur kleine eingebettete **Bilder** (Logos in der Signatur) und Kalender-/Kontaktdateien werden ignoriert. Ein PDF in einer als Anhang weitergeleiteten Mail wird ebenfalls gefunden.",
             "Verarbeitete Mails werden im Postfach **gelöscht**. Doppelte Weiterleitungen werden über die Message-ID erkannt.",
+            "**Kalender-Antworten sind kein Beleg:** Nimmt ein Reisender die Kalendereinladung der App an oder lehnt sie ab, geht die Antwort („Accepted: …“) an dieses Postfach. "
+            "Solche Mails und Abwesenheitsnotizen werden **übersprungen**: kein Beleg, die Mail bleibt als gelesen im Postfach. Das Ergebnis nennt Anzahl und Betreff.",
             "Das Ergebnis zeigt: Mails verarbeitet, Belege erstellt, Duplikate, Fehler (mit Details). Wurde der Mailtext zum Beleg, obwohl die Mail weitere Teile hat oder im Text einen Anhang nennt, "
             "steht darunter **„⚠ Mails ohne erkannten Anhang“** mit der Liste der Mail-Teile (Typ, Name, Größe). Dann die Mail erneut weiterleiten und die Liste mitschicken.",
         ]),
@@ -1017,6 +1019,7 @@ KAPITEL = [
     {"id": "c-fehler", "teil": "C", "titel": "Fehlersuche", "bloecke": [
         ("tab", ["Beobachtung", "Prüfen / Lösung"], [
             ["Beleg landet im Posteingang", "Reisecode fehlt oder ist falsch (Form JJ-NNN, Reise muss existieren). Beleg dort einer Reise zuordnen."],
+            ["Beleg „Mail: Accepted: …“ oder „Declined: …“", "Antwort auf eine Kalendereinladung, die vor Version 3.52 als Beleg abgelegt wurde. Auf der Beleg-Seite löschen. Neue Antworten werden übersprungen."],
             ["„IMAP nicht konfiguriert“", "IMAP_HOST, IMAP_USER, IMAP_PASS setzen."],
             ["„IMAP-Verbindung fehlgeschlagen“", "Zugangsdaten und Server des Postfachs prüfen."],
             ["Beleg: „Fehlende Pflichtfelder“", "Auf der Beleg-Seite „✏ Daten nachtragen“."],
@@ -1034,6 +1037,7 @@ KAPITEL = [
             ["Falsches Land oder falscher VMA-Satz", "Am Tag **↺ Auto** klicken oder oben im Tagesverlauf **↺ Alle Tage auf Auto**. Notfalls den Satz am Tag manuell überschreiben. Die Diagnose steht unter `/reise/<Code>/vma-debug`."],
             ["„Kurs nachtragen“ bleibt stehen", "Kurs am Beleg eintragen oder Euro-Betrag final setzen (am besten über die Kreditkarten-Abrechnung)."],
             ["Seite meldet „Spalte fehlt“", "Einmal `/init` aufrufen."],
+            ["Scan-Rechnung komplett falsch oder gar nicht erkannt (Werte erfunden)", "Der Scan besteht aus vielen schmalen Bildstreifen (typisch bei Scannern/DMS). Seit Version 3.53 wird die ganze Seite gerendert; dazu muss `pypdfium2` installiert sein. Bei einem bereits falsch abgelegten Beleg auf der Beleg-Seite **Neu analysieren**."],
             ["A1 ohne Name/Zeitraum abgelegt oder „Kein Text“", "Datei war ein Ausdruck ohne Textebene. Seit Version 3.48 werden die Seiten als Bild gelesen; dazu muss `pypdfium2` installiert sein (neue `requirements.txt` auf Render einspielen). Bei einer bereits abgelegten A1 auf der Beleg-Seite **Neu analysieren**."],
             ["Erster Aufruf nach einer Pause dauert 30–60 Sekunden", "Kostenlose Render-Instanzen schlafen nach 15 Minuten ohne Aufruf ein und müssen erst starten. Abhilfe: bezahlte Instanz oder ein Wach-Aufruf von `/health` alle 10 Minuten (z. B. mit einem Uptime-Dienst)."],
             ["Seiten laden dauernd langsam", "Datenbank und App sollten in Render in derselben **Region** liegen (Dashboard der Datenbank → Region). Liegen sie in verschiedenen Regionen, kostet jede Abfrage Zeit. Die Datenbank-Verbindungen werden seit Version 3.46 wiederverwendet; der Datei-Speicher (Hetzner) wird nur beim Hochladen und Öffnen von Belegen angesprochen."],

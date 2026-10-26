@@ -123,6 +123,12 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.53", "zeit": "2026-10-26 16:40", "aenderungen": [
+        "Fehler behoben: Gescannte PDFs, die der Drucker/das DMS in viele schmale Bildstreifen zerlegt hat (Fall Fly Away, Rechnung 9719: 135 Streifen je Seite), wurden nicht erkannt. Die App schickte nur den ersten Streifen (ein dünner Strich) an die KI, die dann Werte erfand (Berlin → New York, 450 €). Solche Seiten werden jetzt als ganze Seite gerendert und von der KI gelesen.",
+        "Kann eine Seite nicht gerendert werden (pypdfium2 fehlt), liest die App sie nur mit einem brauchbaren Einzelbild, sonst gar nicht (Meldung „Kein Text“) – nie mehr mit einem Streifen. Bereits falsch abgelegte Belege: auf der Beleg-Seite „Neu analysieren“."]},
+    {"version": "3.52", "zeit": "2026-10-26 11:10", "aenderungen": [
+        "Fehler behoben: Zu- und Absagen auf Kalendereinladungen (Betreff „Accepted: …“, „Declined: …“) wurden als Beleg abgelegt und von der KI analysiert. Sie entstehen, wenn ein Reisender die Einladung der App in Google Kalender oder Outlook annimmt: Die Antwort geht an das Reisekosten-Postfach.",
+        "Der Mail-Abruf erkennt Kalender-Antworten (und Abwesenheitsnotizen) am Kalender-Teil der Mail, legt keinen Beleg an und lässt die Mail ungelöscht, nur als gelesen markiert. Das Ergebnis „Mails abgerufen“ nennt die Anzahl und den Betreff der übersprungenen Mails."]},
     {"version": "3.51", "zeit": "2026-10-25 08:37", "aenderungen": [
         "Fehler behoben: Beim Umschreiben eines Belegs (Belegart „Einreisegenehmigung“ wählen oder „Als Einreisegenehmigung einstufen“) kam „Object of type Decimal is not JSON serializable“. Die Datenbank liefert Beträge als Dezimalzahl, das wurde nicht in das KI-Datenfeld des Belegs übernommen. Betrag und Datum werden jetzt richtig gespeichert.",
         "Der Fehler trat nur auf dem Live-System (Postgres) auf, nicht im Test mit SQLite. Ein Test bildet diese Eigenheit der Datenbank jetzt nach."]},
@@ -3699,6 +3705,13 @@ async def mails_abrufen():
             fehler_html += (f'<div class="alert alert-warn" style="margin-top:12px"><b>⚠ Mails ohne erkannten Anhang:</b>'
                             f'<ul style="padding-left:16px">{items_h}</ul></div>')
 
+        skip_html = ""
+        if result.get("uebersprungen_details"):
+            from html import escape as _he2
+            items_s = "".join(f'<li style="margin:4px 0;font-size:12px">{_he2(d)}</li>' for d in result["uebersprungen_details"])
+            skip_html = (f'<div class="alert alert-info" style="margin-top:12px"><b>Übersprungen (kein Beleg, Mail bleibt als gelesen im Postfach):</b>'
+                         f'<ul style="padding-left:16px">{items_s}</ul></div>')
+
         body = f'''
         <h1 class="page-title">📬 Mails abgerufen</h1>
         <div class="alert alert-ok" style="margin-bottom:16px">
@@ -3706,8 +3719,10 @@ async def mails_abrufen():
           {result.get("belege_erstellt",0)} Belege erstellt &nbsp;·&nbsp;
           {result.get("duplikate",0)} Duplikate &nbsp;·&nbsp;
           {result.get("fehler",0)} Fehler
+          {f'&nbsp;·&nbsp; {result["uebersprungen"]} übersprungen (Kalender-/Abwesenheits-Antworten)' if result.get("uebersprungen") else ""}
         </div>
         {fehler_html}
+        {skip_html}
         <div style="display:flex;gap:8px;margin-top:16px">
           <a href="/belege" class="btn btn-primary">📋 Belege ansehen</a>
           <a href="/unzugeordnet" class="btn btn-secondary">📬 Posteingang</a>

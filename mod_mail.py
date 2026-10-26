@@ -424,6 +424,53 @@ def mail_body_text(msg) -> tuple:
 
     return body[:50000], attachments
 
+# ── Mails, die nie ein Beleg sind ─────────────────────────────────────────────
+# Die App verschickt Kalendereinladungen (Organisator = Reisekosten-Postfach). Nimmt ein Reisender sie an, schickt sein
+# Kalender („Accepted: …“) eine Antwort an genau dieses Postfach. Ohne Filter würde daraus ein „Beleg“ samt KI-Analyse.
+_KAL_METHODEN = ("REPLY", "COUNTER", "DECLINECOUNTER")
+_KAL_PARTSTAT = {"ACCEPTED": "angenommen", "DECLINED": "abgelehnt", "TENTATIVE": "vorläufig", "DELEGATED": "weitergeleitet"}
+_KAL_BETREFF = re.compile(
+    r"^\s*(?:Accepted|Declined|Tentatively\s+Accepted|Tentative|Akzeptiert|Angenommen|Zugesagt|Abgelehnt|Abgesagt|"
+    r"Vorläufig\s+\w+|Accepté\w*|Refusé\w*|Aceptad\w+|Rechazad\w+)\s*:", re.I)
+_KAL_TEXT = re.compile(
+    r"has\s+(?:accepted|declined|tentatively\s+accepted)\s+this\s+invitation|hat\s+die\s+Einladung\s+(?:angenommen|abgelehnt)"
+    r"|hat\s+(?:zugesagt|abgesagt)|Sent\s+by\s+Google\s+Calendar|Gesendet\s+von\s+Google\s+Kalender", re.I)
+
+
+def automatische_antwort(msg, betreff: str = "", body: str = "") -> str:
+    """
+    Erkennt Mails, die nie ein Beleg sind: Antworten auf Kalendereinladungen (Zusage, Absage, Gegenvorschlag) und
+    Abwesenheits-Antworten (Auto-Submitted: auto-replied). Gibt einen Kurztext zurück, sonst "".
+    Maßgeblich ist der Kalender-Teil der Mail (text/calendar mit METHOD:REPLY). Fehlt er, müssen Betreff UND Text
+    nach einer Kalender-Antwort aussehen – ein Betreff wie „Accepted: Ihre Zahlung“ allein reicht nicht.
+    """
+    try:
+        for part in msg.walk():
+            if part.is_multipart():
+                continue
+            if part.get_content_type() not in ("text/calendar", "application/ics"):
+                continue
+            methode = str(part.get_param("method") or "").strip().upper()
+            try:
+                ics = (part.get_payload(decode=True) or b"").decode("utf-8", "ignore")
+            except Exception:
+                ics = ""
+            if not methode:
+                m = re.search(r"^METHOD:\s*([A-Za-z]+)", ics, re.M | re.I)
+                methode = m.group(1).upper() if m else ""
+            if methode in _KAL_METHODEN:
+                m = re.search(r"PARTSTAT=([A-Za-z\-]+)", ics, re.I)
+                status = _KAL_PARTSTAT.get(m.group(1).upper(), "") if m else ""
+                return "Kalender-Antwort" + (f" ({status})" if status else "")
+    except Exception:
+        pass
+    if str(msg.get("Auto-Submitted") or "").strip().lower().startswith("auto-replied"):
+        return "automatische Antwort (z. B. Abwesenheit)"
+    if _KAL_BETREFF.match(betreff or "") and _KAL_TEXT.search(body or ""):
+        return "Kalender-Antwort"
+    return ""
+
+
 async def fetch_mails() -> dict:
     """
     Holt alle Mails aus dem IMAP-Postfach und verarbeitet sie als Belege.
@@ -437,6 +484,7 @@ async def fetch_mails() -> dict:
     fehler_liste = []
     hinweise = []
     duplikate = 0
+    uebersprungen = []        # Kalender-Antworten u. ä.: kein Beleg, Mail bleibt (als gelesen) im Postfach
 
     try:
         mail = imaplib.IMAP4_SSL(IMAP_HOST, timeout=IMAP_TIMEOUT)
@@ -472,6 +520,14 @@ async def fetch_mails() -> dict:
                 cur.close(); db.close()
 
             body, attachments = mail_body_text(msg)
+
+            # Zusage/Absage zu einer Kalendereinladung, Abwesenheitsnotiz: kein Beleg. Nur als gelesen markieren, nicht löschen.
+            auto = automatische_antwort(msg, betreff, body)
+            if auto:
+                uebersprungen.append(f"„{betreff[:70]}“ – {auto}")
+                mail.store(mid, "+FLAGS", "\\Seen")
+                continue
+
             full_text = f"Von: {absender}\nBetreff: {betreff}\n\n{body}"
 
             # Reisecode aus Betreff (z.B. 26-001)
@@ -563,7 +619,9 @@ async def fetch_mails() -> dict:
         "duplikate": duplikate,
         "fehler": len(fehler_liste),
         "fehler_details": fehler_liste,
-        "hinweise": hinweise
+        "hinweise": hinweise,
+        "uebersprungen": len(uebersprungen),
+        "uebersprungen_details": uebersprungen,
     }
 
 

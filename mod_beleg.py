@@ -412,6 +412,25 @@ def _seite_ist_gezeichnet(seite) -> bool:
         return False
 
 
+STREIFEN_MIN_PX = 100   # ein eingebettetes Bild, dessen kurze Seite kleiner ist, ist ein Streifen und kein lesbarer Beleg
+
+
+def _bild_masse(bild) -> tuple:
+    """(Breite, Höhe) eines in der PDF-Seite eingebetteten Bildes; (0, 0), wenn es sich nicht lesen lässt."""
+    try:
+        return bild.image.size
+    except Exception:
+        return (0, 0)
+
+
+def _seite_ist_streifen(bilder: list) -> bool:
+    """True, wenn eine Scan-Seite nicht aus EINEM lesbaren Bild besteht: Manche Drucker/DMS-Programme zerlegen die Seite in viele
+    schmale Bildstreifen (z. B. 135 Stück je 2478 x 26 Pixel). Das erste Bild allein ist dann nur ein dünner Strich."""
+    if len(bilder) > 1:
+        return True
+    return bool(bilder) and min(_bild_masse(bilder[0])) < STREIFEN_MIN_PX
+
+
 def _seite_rendern(pdf_bytes: bytes, seiten_nr: int, dpi: int = SEITE_DPI):
     """Die ganze Seite als JPEG-Bild (Bytes) oder None. Zuerst pypdfium2 (steht in requirements.txt),
     ersatzweise das Programm pdftoppm, falls es auf dem Rechner installiert ist."""
@@ -461,6 +480,9 @@ def pdf_seitenbilder(pdf_bytes: bytes, max_seiten: int = MAX_KI_SEITEN) -> list:
     - Scan / aus Foto erzeugtes PDF: das eingebettete Bild in voller Auflösung,
     - gezeichnete Seite (Formular als „Print To PDF“ ohne Textebene, nur Schrift-Umrisse): die Seite wird als Bild
       gerendert. Früher wurde hier nur das eingebettete Bild gelesen – bei solchen Seiten ein Kopfbalken oder gar nichts.
+    - Scan in Streifen (mehrere Bilder je Seite oder nur ein dünner Streifen): die ganze Seite wird gerendert. Früher bekam die
+      KI nur den ersten Streifen und erfand die Angaben. Lässt sich die Seite nicht rendern, wird sie nur mit einem
+      brauchbaren Einzelbild gelesen, sonst übersprungen (lieber „nichts gelesen“ als erfundene Werte).
     Seiten ohne Bild und ohne Zeichnung werden übersprungen. Leere Liste = nichts zu lesen."""
     try:
         from pypdf import PdfReader
@@ -478,7 +500,17 @@ def pdf_seitenbilder(pdf_bytes: bytes, max_seiten: int = MAX_KI_SEITEN) -> list:
             except Exception as e:
                 print(f"[Seitenbilder] Seite übersprungen: {e}")
                 continue
-            if bilder:
+            if bilder and _seite_ist_streifen(bilder):
+                bild = _seite_rendern(pdf_bytes, nr)
+                if bild:
+                    erg.append(bild)
+                else:
+                    brauchbar = [b for b in bilder if min(_bild_masse(b)) >= STREIFEN_MIN_PX]
+                    if brauchbar:
+                        erg.append(max(brauchbar, key=lambda b: len(b.data)).data)
+                    else:
+                        print(f"[Seitenbilder] Seite {nr + 1}: nur Bildstreifen und keine Möglichkeit zum Rendern (pypdfium2 fehlt?)")
+            elif bilder:
                 erg.append(bilder[0].data)
             if len(erg) >= max_seiten:
                 break
