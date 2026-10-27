@@ -22,6 +22,48 @@ SMTP_VERBINDUNG_TIMEOUT = 15                                      # Wartezeit f�
 IMAP_TIMEOUT = 30                                                 # Wartezeit je Schritt beim Mailserver (IMAP); danach Abbruch statt Hängen
 
 from mod_db import get_db, ph, is_postgres
+
+
+# ── Verschlüsselte Verbindung zum Mailserver (IMAP und SMTP) ───────────────────
+# imaplib und smtplib prüfen von sich aus NICHTS (kein Zertifikat, kein Servername). Wer sich zwischen App und Mailserver
+# schaltet, könnte das Postfach-Passwort mitlesen. Deshalb bekommen beide einen prüfenden Kontext (wie ein Browser).
+# Notausgang: Einstellung MAIL_TLS_PRUEFEN=0, falls der Mailserver ein ungültiges Zertifikat hat.
+def tls_pruefen_aktiv() -> bool:
+    return os.getenv("MAIL_TLS_PRUEFEN", "1").strip().lower() not in ("0", "nein", "false", "aus", "off")
+
+
+def _tls_kontext(pruefen: bool | None = None) -> ssl.SSLContext:
+    """TLS-Kontext für IMAP/SMTP. pruefen=None: nach Einstellung MAIL_TLS_PRUEFEN (Standard: prüfen)."""
+    if pruefen is None:
+        pruefen = tls_pruefen_aktiv()
+    if not pruefen:
+        return ssl._create_unverified_context()
+    try:
+        import certifi                                        # dieselbe, gepflegte Zertifikatsliste wie bei httpx/boto3
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def _tls_hinweis(e: Exception) -> str:
+    """Zusatz für die Fehlermeldung, wenn das Zertifikat des Mailservers abgelehnt wurde, sonst leer."""
+    if isinstance(e, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(e):
+        return (" – Das Zertifikat des Mailservers ist nicht gültig oder passt nicht zum eingestellten Servernamen. "
+                "Servernamen (IMAP_HOST / SMTP_HOST) prüfen. Nur zur Überbrückung in Render MAIL_TLS_PRUEFEN=0 eintragen.")
+    return ""
+
+
+def _tls_test(host: str, port: int, timeout: float = 6.0) -> tuple:
+    """(ok, Text) – prüft das Zertifikat des Servers (streng, unabhängig von MAIL_TLS_PRUEFEN), ohne Anmeldung.
+    Nur für Ports mit sofortiger Verschlüsselung (IMAP 993, SMTP 465)."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as roh:
+            with _tls_kontext(True).wrap_socket(roh, server_hostname=host) as t:
+                return True, "gültig (%s)" % t.version()
+    except ssl.SSLCertVerificationError as e:
+        return False, "Zertifikat wird nicht akzeptiert: %s" % (getattr(e, "verify_message", None) or e)
+    except Exception as e:
+        return False, "%s: %s" % (type(e).__name__, e)
 from mod_beleg import beleg_verarbeiten, get_s3, s3_download, lade_ma_daten
 from mod_anon import anonymisieren
 
@@ -134,6 +176,12 @@ def smtp_diagnose() -> dict:
         elif ok:
             smtp_ok.append((h, p))
 
+    if imap_ok:
+        ok, txt = _tls_test(IMAP_HOST, 993)
+        z("ok" if ok else "fehler", "Zertifikat Mail-Eingang %s:993 – %s" % (IMAP_HOST, txt))
+        if not ok:
+            fazit.append("Das Zertifikat des Mail-Eingangs wird nicht akzeptiert. Seit Version 3.54 prüft die App es. "
+                         "Servernamen (IMAP_HOST) prüfen; nur zur Überbrückung MAIL_TLS_PRUEFEN=0 setzen.")
     if SMTP_HOST and SMTP_USER and SMTP_PASS and (SMTP_HOST, SMTP_PORT) in smtp_ok:
         ok, txt = _login_test()
         z("ok" if ok else "fehler", "Anmeldung an %s:%d – %s" % (SMTP_HOST, SMTP_PORT, txt))
@@ -163,20 +211,23 @@ _SITZUNG = threading.local()
 
 def _verbinden():
     """Neue, angemeldete SMTP-Verbindung."""
-    if SMTP_PORT == 465:
-        server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_VERBINDUNG_TIMEOUT)
-    else:
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_VERBINDUNG_TIMEOUT)
+    ctx = _tls_kontext()
+    server = None
     try:
-        if SMTP_PORT != 465:
-            server.starttls()
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_VERBINDUNG_TIMEOUT, context=ctx)
+        else:
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_VERBINDUNG_TIMEOUT)
+            server.starttls(context=ctx)
         server.login(SMTP_USER, SMTP_PASS)
         try:
             server.sock.settimeout(SMTP_TIMEOUT)             # ab jetzt längere Wartezeit fürs Senden
         except Exception:
             pass
-    except Exception:
+    except Exception as e:
         _schliessen(server)
+        if isinstance(e, ssl.SSLCertVerificationError):
+            raise ssl.SSLError("%s%s" % (e, _tls_hinweis(e))) from e
         raise
     return server
 
@@ -487,14 +538,14 @@ async def fetch_mails() -> dict:
     uebersprungen = []        # Kalender-Antworten u. ä.: kein Beleg, Mail bleibt (als gelesen) im Postfach
 
     try:
-        mail = imaplib.IMAP4_SSL(IMAP_HOST, timeout=IMAP_TIMEOUT)
+        mail = imaplib.IMAP4_SSL(IMAP_HOST, timeout=IMAP_TIMEOUT, ssl_context=_tls_kontext())
         mail.login(IMAP_USER, IMAP_PASS)
         mail.select("INBOX")
         # Nur ungelesene Mails
         _, data = mail.search(None, "UNSEEN")
         ids = data[0].split() if data and data[0] else []
     except Exception as e:
-        return {"fehler": f"IMAP-Verbindung fehlgeschlagen: {e}"}
+        return {"fehler": f"IMAP-Verbindung fehlgeschlagen: {e}{_tls_hinweis(e)}"}
 
     for mid in ids:
         try:

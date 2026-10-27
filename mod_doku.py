@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.53"
+DOKU_GEPRUEFT_FUER = "3.54"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -66,6 +66,8 @@ UMGEBUNG = [
      "Anmeldename des Postfachs (vollständige Mailadresse). Dient zugleich als Absender, wenn SMTP_USER fehlt.", False),
     ("IMAP_PASS", "Mail-Eingang (IMAP)", "ja", "",
      "Passwort des Postfachs. Gilt auch für den Versand, wenn SMTP_PASS fehlt.", True),
+    ("MAIL_TLS_PRUEFEN", "Mail-Eingang (IMAP)", "nein", "1",
+     "Die App prüft Zertifikat und Namen des Mailservers (IMAP und SMTP). Nur wenn der Mailserver ein ungültiges Zertifikat hat und sich das nicht beheben lässt: 0 eintragen, um die Prüfung vorübergehend abzuschalten.", False),
     ("SMTP_HOST", "Mail-Ausgang (SMTP)", "ja", "",
      "Postausgangsserver (z. B. smtp.udag.de). Für Outlook-Einladungen, Portal-Mails, Alerts und die Habel-Übergabe.", False),
     ("SMTP_PORT", "Mail-Ausgang (SMTP)", "nein", "465",
@@ -1021,6 +1023,7 @@ KAPITEL = [
             ["Beleg landet im Posteingang", "Reisecode fehlt oder ist falsch (Form JJ-NNN, Reise muss existieren). Beleg dort einer Reise zuordnen."],
             ["Beleg „Mail: Accepted: …“ oder „Declined: …“", "Antwort auf eine Kalendereinladung, die vor Version 3.52 als Beleg abgelegt wurde. Auf der Beleg-Seite löschen. Neue Antworten werden übersprungen."],
             ["„IMAP nicht konfiguriert“", "IMAP_HOST, IMAP_USER, IMAP_PASS setzen."],
+            ["„Zertifikat des Mailservers ist nicht gültig“ (Mail-Abruf oder Versand)", "Seit Version 3.54 prüft die App das Zertifikat. Servername in IMAP_HOST / SMTP_HOST muss genau dem Namen im Zertifikat des Anbieters entsprechen (Mail-Diagnose zeigt die Zeile „Zertifikat Mail-Eingang“). Nur zur Überbrückung in Render MAIL_TLS_PRUEFEN=0 eintragen und den Anbieter fragen."],
             ["„IMAP-Verbindung fehlgeschlagen“", "Zugangsdaten und Server des Postfachs prüfen."],
             ["Beleg: „Fehlende Pflichtfelder“", "Auf der Beleg-Seite „✏ Daten nachtragen“."],
             ["Beleg wird nicht ausgelesen", "OPENAI_API_KEY prüfen; `/test-openai` aufrufen."],

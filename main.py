@@ -123,6 +123,9 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.54", "zeit": "2026-10-27 05:50", "aenderungen": [
+        "Sicherheit (Meldung von Render zu eMudhra, Node.js und PHP; wir nutzen weder Node.js noch PHP): Der Mail-Abruf und der Mailversand (IMAP/SMTP) prüfen jetzt das Zertifikat und den Namen des Mailservers, bisher prüften sie nichts. Wird das Zertifikat abgelehnt, nennt die Fehlermeldung den Grund; die Mail-Diagnose zeigt eine Zeile „Zertifikat Mail-Eingang“. Notausgang: In Render MAIL_TLS_PRUEFEN=0 eintragen (nur zur Überbrückung).",
+        "requirements.txt: certifi 2026.10.23 fest eingetragen (Zertifikatsliste ohne die kompromittierten eMudhra-Zertifikate; gilt für OpenAI, S3 und alle anderen HTTPS-Abrufe), Pillow 13.0.0, pypdf 6.21.2 und python-multipart 0.0.32 (bekannte Sicherheitslücken beim Lesen manipulierter Bilder, PDFs und Uploads). Die Schwachstellen-Prüfung der ganzen Umgebung meldet danach nichts mehr."]},
     {"version": "3.53", "zeit": "2026-10-26 16:40", "aenderungen": [
         "Fehler behoben: Gescannte PDFs, die der Drucker/das DMS in viele schmale Bildstreifen zerlegt hat (Fall Fly Away, Rechnung 9719: 135 Streifen je Seite), wurden nicht erkannt. Die App schickte nur den ersten Streifen (ein dünner Strich) an die KI, die dann Werte erfand (Berlin → New York, 450 €). Solche Seiten werden jetzt als ganze Seite gerendert und von der KI gelesen.",
         "Kann eine Seite nicht gerendert werden (pypdfium2 fehlt), liest die App sie nur mit einem brauchbaren Einzelbild, sonst gar nicht (Meldung „Kein Text“) – nie mehr mit einem Streifen. Bereits falsch abgelegte Belege: auf der Beleg-Seite „Neu analysieren“."]},
