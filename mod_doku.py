@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.61"
+DOKU_GEPRUEFT_FUER = "3.62"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -694,7 +694,7 @@ KAPITEL = [
               "Bei einer mehrtägigen Montage entsteht je Reise eine eigene Terminserie. Liegt nur ein Teil der Montage in einer anderen Reise, ist sie nicht wählbar (grauer Hinweis). "
               "Die Termine sind danach unabhängig: Änderungen oder Löschen gelten nur für die jeweilige Reise."),
         ("h3", "Reiseplan"),
-        ("p", "**🗺 Reiseplan** zeigt alle Flüge, Züge und Termine in zeitlicher Reihenfolge. Zwei PDF-Varianten: „für Reisemappe Mitarbeiter“ (mit Anlagen) und „zum Emailversand“ (ohne Buchungscodes, nie mit Anlagen). Mehr dazu im Kapitel „Reisemappe, Reise-PDFs und A1-Bescheinigung“. Das PDF ist bewusst schlicht gehalten: graues Tagesband, Uhrzeit links mit Zeitleiste, Typ als kleiner grauer Text; unten stehen Stand und Seitenzahl."),
+        ("p", "**🗺 Reiseplan** zeigt alle Flüge, Züge und Termine in zeitlicher Reihenfolge. Zwei PDF-Varianten: „für Reisemappe Mitarbeiter“ (mit Anlagen) und „zum Emailversand“ (ohne Buchungscodes, nie mit Anlagen). Mehr dazu im Kapitel „Reisemappe, Reise-PDFs und A1-Bescheinigung“. Das PDF ist bewusst schlicht gehalten: hellblaues Tagesband, Uhrzeit links mit Zeitleiste, vor jedem Ereignis ein kleines Piktogramm (Flug, Bahn, Auto, Hotel, Parken, Termin …), Typ als kleiner grauer Text; oben rechts steht das Logo (Datei `static/logo3.png`), unten Stand und Seitenzahl."),
         ("p", "**Hotelzeiten:** Steht im Hotelbeleg keine Check-in- oder Check-out-Zeit, nimmt die App **Check-in 16:00** und **Check-out 10:00** an (jeweils Ortszeit des Hotels). Im Reiseplan, im Tagesablauf und in der Outlook-Einladung steht dann „ab 16:00“ bzw. „bis 10:00“. Eine Zeit aus dem Beleg wird unverändert angezeigt."),
         ("h3", "Änderungen und Umbuchungen"),
         ("ul", [

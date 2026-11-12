@@ -126,6 +126,9 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.62", "zeit": "2026-11-12 20:30", "aenderungen": [
+        "Neu: Reiseplan-PDF mit hellblauen Tagesbändern, dem Logo oben rechts (Datei static/logo3.png) und einem kleinen Piktogramm vor jedem Ereignis (Flug, Bahn, Mietwagen/Taxi, Hotel, Parken, Termin, Montage, Sonstiges).",
+    ]},
     {"version": "3.61", "zeit": "2026-11-12 20:13", "aenderungen": [
         "Neu: Das Reiseplan-PDF hat ein ruhigeres, kompakteres Layout („Zeitleiste“): graues Tagesband, Uhrzeit links mit Zeitleiste, Typ als kleiner grauer Text, keine bunten Farbflächen mehr. Fuß mit Stand und Seitenzahl.",
         "Behoben: Ansprechpartner und Telefon erscheinen im PDF als Klartext („Tel. …“) statt als Kästchen.",
@@ -4353,24 +4356,105 @@ def reiseplan_anzeigen(code: str):
     return HTMLResponse(shell(f"Reiseplan {rcode}", content, "reisen"))
 
 
+# ── Piktogramme für das Reiseplan-PDF (v3.62) ─────────────────────────────────────────────
+# Die PDF-Standardschrift kann keine Emojis darstellen. Darum werden die kleinen Symbole als
+# Vektorgrafik direkt gezeichnet (Zeichenfläche 10 x 10 Einheiten, einfarbig).
+
+def _pikto_name(ev: dict) -> str:
+    """Welches Piktogramm gehört zu einem Ereignis des Reiseplans?"""
+    typ = (ev or {}).get("typ")
+    if typ == "termin":
+        sym = (ev or {}).get("icon") or ""
+        if sym in ("🚕", "🚗"): return "auto"
+        if sym == "🏨": return "hotel"
+        if sym == "🔧": return "zahnrad"
+        if sym == "📌": return "pin"
+        return "kalender"
+    return {"flug": "flug", "bahn": "bahn", "mietwagen": "auto", "hotel": "hotel", "parken": "parken"}.get(typ, "pin")
+
+
+def _pikto_zeichnen(c, name: str, x: float, y: float, groesse: float, farbe) -> None:
+    """Zeichnet das Piktogramm mit linker unterer Ecke (x, y) und Kantenlänge 'groesse' (in Punkt)."""
+    import math
+    c.saveState()
+    c.translate(x, y)
+    c.scale(groesse / 10.0, groesse / 10.0)
+    c.setFillColor(farbe); c.setStrokeColor(farbe); c.setLineWidth(0.9)
+
+    def weiss(): c.setFillColorRGB(1, 1, 1); c.setStrokeColorRGB(1, 1, 1)
+    def farbig(): c.setFillColor(farbe); c.setStrokeColor(farbe)
+    def poly(punkte, fill=1, stroke=0):
+        p = c.beginPath(); p.moveTo(*punkte[0])
+        for q in punkte[1:]: p.lineTo(*q)
+        p.close(); c.drawPath(p, fill=fill, stroke=stroke)
+
+    if name == "flug":
+        c.translate(5, 5); c.rotate(45); c.translate(-5, -5)
+        poly([(5, 10), (5.8, 8.6), (5.8, 6.2), (10, 3.6), (10, 2.4), (5.8, 4), (5.8, 1.8), (7.2, 0.8), (7.2, 0),
+              (5, 0.6), (2.8, 0), (2.8, 0.8), (4.2, 1.8), (4.2, 4), (0, 2.4), (0, 3.6), (4.2, 6.2), (4.2, 8.6)])
+    elif name == "bahn":
+        c.roundRect(2, 2.6, 6, 7.4, 1.3, stroke=0, fill=1)
+        weiss(); c.rect(3.1, 6.3, 3.8, 2.5, stroke=0, fill=1)
+        c.circle(3.9, 4.1, 0.65, stroke=0, fill=1); c.circle(6.1, 4.1, 0.65, stroke=0, fill=1)
+        farbig(); c.setLineWidth(1.1)
+        c.line(3.2, 2.6, 2.0, 0.2); c.line(6.8, 2.6, 8.0, 0.2); c.line(1.2, 0.2, 8.8, 0.2)
+    elif name == "auto":
+        c.roundRect(0, 2.4, 10, 3.3, 1.0, stroke=0, fill=1)
+        poly([(2.1, 5.5), (3.5, 8.6), (6.9, 8.6), (8.3, 5.5)])
+        weiss(); poly([(3.0, 5.9), (3.9, 7.9), (5.1, 7.9), (5.1, 5.9)]); poly([(5.6, 5.9), (5.6, 7.9), (6.6, 7.9), (7.4, 5.9)])
+        c.setLineWidth(0.9)
+        c.circle(2.7, 2.4, 1.75, stroke=1, fill=0); c.circle(7.3, 2.4, 1.75, stroke=1, fill=0)
+        farbig(); c.circle(2.7, 2.4, 1.35, stroke=0, fill=1); c.circle(7.3, 2.4, 1.35, stroke=0, fill=1)
+    elif name == "hotel":
+        c.rect(1.5, 0, 7, 10, stroke=0, fill=1)
+        weiss()
+        for fx in (2.8, 5.6):
+            for fy in (6.6, 4.2):
+                c.rect(fx, fy, 1.6, 1.6, stroke=0, fill=1)
+        c.rect(4.2, 0, 1.6, 2.6, stroke=0, fill=1)
+    elif name == "parken":
+        c.roundRect(0.3, 0.3, 9.4, 9.4, 1.8, stroke=0, fill=1)
+        weiss(); c.setFont("Helvetica-Bold", 8.6); c.drawCentredString(5, 2.2, "P")
+    elif name == "kalender":
+        c.roundRect(0.8, 0.3, 8.4, 8.4, 1.0, stroke=1, fill=0)
+        c.rect(0.8, 6.3, 8.4, 2.4, stroke=0, fill=1)
+        c.setLineWidth(1.1); c.line(3, 7.6, 3, 10); c.line(7, 7.6, 7, 10)
+        for fx in (2.2, 4.3, 6.4):
+            for fy in (1.6, 3.7):
+                c.rect(fx, fy, 1.4, 1.4, stroke=0, fill=1)
+    elif name == "zahnrad":
+        c.translate(5, 5)
+        for i in range(8):
+            c.saveState(); c.rotate(i * 45); c.rect(-0.9, 3.2, 1.8, 1.8, stroke=0, fill=1); c.restoreState()
+        c.circle(0, 0, 3.6, stroke=0, fill=1)
+        weiss(); c.circle(0, 0, 1.4, stroke=0, fill=1)
+    else:   # pin (Ort / Sonstiges)
+        c.circle(5, 6.4, 3.4, stroke=0, fill=1)
+        poly([(1.9, 5.2), (5, 0), (8.1, 5.2)])
+        weiss(); c.circle(5, 6.4, 1.3, stroke=0, fill=1)
+    c.restoreState()
+
+
 def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> bytes:
     """
     Baut das Reiseplan-PDF (Layout „Zeitleiste“, v3.61). Zwei Varianten über ohne_buchungscode:
     - False: für den Reisenden selbst, mit allen Buchungscodes.
     - True: identischer Inhalt, aber ohne Buchungscodes – z.B. zum Weitergeben an Kunden/Dritte.
-    Aufbau: je Tag ein dezentes graues Band, darunter die Ereignisse mit Uhrzeit links und einer
-    Zeitleiste (Linie mit Punkt). Der Typ (FLUG, HOTEL …) steht als kleiner grauer Text hinter dem Titel.
-    Kopf: Reisecode, Titel, Zeitraum; Fuß: Stand und Seitenzahl.
+    Aufbau: je Tag ein dezentes hellblaues Band, darunter die Ereignisse mit Uhrzeit links, einer
+    Zeitleiste (Linie mit Punkt) und einem kleinen Piktogramm vor dem Titel. Der Typ (FLUG, HOTEL …)
+    steht als kleiner grauer Text hinter dem Titel.
+    Kopf: Reisecode, Titel, Zeitraum und (wenn vorhanden) das Logo oben rechts; Fuß: Stand und Seitenzahl.
     """
     from reportlab.lib.pagesizes import A4
     from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, Table,
-                                    TableStyle, KeepTogether, Flowable)
+                                    TableStyle, KeepTogether, Flowable, Image)
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import mm
     from reportlab.lib import colors
+    from reportlab.lib.utils import ImageReader
 
     TXT = colors.HexColor("#1f2937"); GRAU = colors.HexColor("#6b7280")
-    LINIE = colors.HexColor("#d1d5db"); HELL = colors.HexColor("#f3f4f6"); AKZ = colors.HexColor("#334155")
+    LINIE = colors.HexColor("#d1d5db"); BAND = colors.HexColor("#e3ebf7"); AKZ = colors.HexColor("#0f2d6e")
 
     def esc(s):
         return (str(s) if s is not None else "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -4405,6 +4489,7 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> by
         def __init__(self, ev, erste, letzte):
             super().__init__()
             self.erste, self.letzte = erste, letzte
+            self.pikto = _pikto_name(ev)
             self.zeit = Paragraph(esc(pdf_text(ev.get("zeit"))), s_zeit)
             label = PDF_TYP_LABEL.get(ev.get("typ"), "SONSTIGES")
             self.titel = Paragraph(esc(pdf_text(ev.get("titel"))) + '&nbsp;&nbsp;<font size="7" color="#6b7280">%s</font>' % label, s_ev)
@@ -4418,7 +4503,7 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> by
 
         def wrap(self, aw, ah):
             self.w = aw
-            tw = aw - 36 * mm
+            tw = aw - 43 * mm
             self.h1 = self.titel.wrap(tw, ah)[1]
             self.h2 = self.sub.wrap(tw, ah)[1] if self.sub else 0
             self.zeit.wrap(22 * mm, ah)
@@ -4432,9 +4517,10 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> by
             c.setFillColor(AKZ); c.setStrokeColor(colors.white); c.setLineWidth(1.5)
             c.circle(x, h - 8.5, 2.2, stroke=1, fill=1)
             self.zeit.drawOn(c, 0, h - 3.5 - self.zeit.height + 0.5)
-            self.titel.drawOn(c, 36 * mm, h - 3.5 - self.h1)
+            _pikto_zeichnen(c, self.pikto, 34 * mm, h - 3.5 - 9.6, 9.6, AKZ)
+            self.titel.drawOn(c, 43 * mm, h - 3.5 - self.h1)
             if self.sub:
-                self.sub.drawOn(c, 36 * mm, h - 3.5 - self.h1 - self.h2)
+                self.sub.drawOn(c, 43 * mm, h - 3.5 - self.h1 - self.h2)
 
     stand = datetime.now(zeitzone.land_zone("DE")).strftime("%d.%m.%Y")
 
@@ -4450,14 +4536,35 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> by
     doc.addPageTemplates([PageTemplate(id="rp", onPage=fuss, frames=[
         Frame(15 * mm, 16 * mm, 180 * mm, 267 * mm, leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)])])
 
-    story = [Paragraph(f"Reiseplan {esc(rcode)}", s_titel),
-             Paragraph(esc(pdf_text(daten["titel"])) + f" · {fmt_date(daten['abreise'])} – {fmt_date(daten['rueckkehr'])}", s_kopf),
-             Spacer(1, 3 * mm)]
+    kopf_links = [Paragraph(f"Reiseplan {esc(rcode)}", s_titel),
+                  Paragraph(esc(pdf_text(daten["titel"])) + f" · {fmt_date(daten['abreise'])} – {fmt_date(daten['rueckkehr'])}", s_kopf)]
+    # Logo oben rechts (dieselbe Datei wie im übrigen Programm); fehlt sie, bleibt der Kopf ohne Logo.
+    logo = None
+    for kandidat in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "logo3.png"),
+                     os.path.join("static", "logo3.png")):
+        if os.path.exists(kandidat):
+            try:
+                iw, ih = ImageReader(kandidat).getSize()
+                hoehe = 11 * mm; breite = min(hoehe * iw / float(ih), 42 * mm); hoehe = breite * ih / float(iw)
+                logo = Image(kandidat, width=breite, height=hoehe, mask="auto")
+                logo.hAlign = "RIGHT"
+                logo_breite = breite
+            except Exception:
+                logo = None
+            break
+    if logo is not None:
+        kopf = Table([[kopf_links, logo]], colWidths=[180 * mm - logo_breite - 4 * mm, logo_breite + 4 * mm])
+        kopf.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+                                  ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                  ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+        story = [kopf, Spacer(1, 3 * mm)]
+    else:
+        story = kopf_links + [Spacer(1, 3 * mm)]
 
     for d in sorted(daten["tage"].keys()):
         band = Table([[Paragraph(f'{wochentage[d.weekday()]}, {d.strftime("%d.%m.%Y")}', s_tag)]], colWidths=[180 * mm])
         band.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), HELL),
+            ("BACKGROUND", (0, 0), (-1, -1), BAND),
             ("TOPPADDING", (0, 0), (-1, -1), 3.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5), ("LEFTPADDING", (0, 0), (-1, -1), 6)]))
         evs = daten["tage"][d]
         zeilen = [Zeile(ev, i == 0, i == len(evs) - 1) for i, ev in enumerate(evs)]
