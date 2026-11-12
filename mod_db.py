@@ -198,7 +198,12 @@ def get_schema() -> list[str]:
                 abreise     DATE NOT NULL,
                 rueckkehr   DATE NOT NULL,
                 notiz       TEXT,
-                erstellt    TIMESTAMP DEFAULT NOW()
+                erstellt    TIMESTAMP DEFAULT NOW(),
+                status          TEXT DEFAULT 'aktiv',
+                status_datum    TEXT,
+                status_notiz    TEXT,
+                nachfolger_code TEXT,
+                vorgaenger_code TEXT
             )""",
             """CREATE TABLE IF NOT EXISTS reise_mitarbeiter (
                 reise_code  TEXT NOT NULL,
@@ -485,7 +490,12 @@ def get_schema() -> list[str]:
                 abreise     TEXT NOT NULL,
                 rueckkehr   TEXT NOT NULL,
                 notiz       TEXT,
-                erstellt    TEXT DEFAULT (datetime('now'))
+                erstellt    TEXT DEFAULT (datetime('now')),
+                status          TEXT DEFAULT 'aktiv',
+                status_datum    TEXT,
+                status_notiz    TEXT,
+                nachfolger_code TEXT,
+                vorgaenger_code TEXT
             )""",
             """CREATE TABLE IF NOT EXISTS reise_mitarbeiter (
                 reise_code  TEXT REFERENCES reisen(code) ON DELETE CASCADE,
@@ -758,6 +768,11 @@ def get_migrations() -> list[str]:
     schlägt eine fehl (z.B. Spalte existiert schon), wird sie übersprungen.
     """
     return [
+        "ALTER TABLE reisen ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'aktiv'",
+        "ALTER TABLE reisen ADD COLUMN IF NOT EXISTS status_datum TEXT",
+        "ALTER TABLE reisen ADD COLUMN IF NOT EXISTS status_notiz TEXT",
+        "ALTER TABLE reisen ADD COLUMN IF NOT EXISTS nachfolger_code TEXT",
+        "ALTER TABLE reisen ADD COLUMN IF NOT EXISTS vorgaenger_code TEXT",
         "ALTER TABLE mitarbeiter ADD COLUMN email2 TEXT",
         "ALTER TABLE mitarbeiter ADD COLUMN email3 TEXT",
         "ALTER TABLE vma_tage ADD COLUMN IF NOT EXISTS reise_code TEXT",

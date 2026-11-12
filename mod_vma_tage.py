@@ -26,15 +26,104 @@ def vma_berechnen(voll: float, halb: float, ist_halb: bool,
     return round(brutto, 2), round(netto, 2)
 
 
+# Schreibweisen derselben Stadt: Die amtliche Liste (BMF) führt deutsche Namen („Neu Delhi“, „Kalkutta“, „Mailand“),
+# Hotelbelege und Flugtickets tragen meist die englische oder die Landesschreibweise („New Delhi“, „Kolkata“, „Milan“).
+# Jede Gruppe = dieselbe Stadt; Vergleich ohne Groß-/Kleinschreibung, Umlaute (ü = ue) und Satzzeichen.
+_ORTS_GRUPPEN = (
+    ("neu delhi", "new delhi", "delhi", "nueva delhi", "nouvelle delhi"),
+    ("kalkutta", "kolkata", "calcutta"),
+    ("bangalore", "bengaluru", "bengalooru"),
+    ("mumbai", "bombay"),
+    ("chennai", "madras"),
+    ("rom", "rome", "roma"),
+    ("mailand", "milan", "milano"),
+    ("turin", "torino"),
+    ("neapel", "naples", "napoli"),
+    ("florenz", "florence", "firenze"),
+    ("venedig", "venice", "venezia"),
+    ("athen", "athens", "athina"),
+    ("bruessel", "brussels", "bruxelles", "brussel"),
+    ("genf", "geneva", "geneve", "ginevra"),
+    ("zuerich", "zurich"),
+    ("wien", "vienna"),
+    ("prag", "prague", "praha"),
+    ("warschau", "warsaw", "warszawa"),
+    ("krakau", "krakow", "cracow"),
+    ("kairo", "cairo", "el qahira"),
+    ("peking", "beijing"),
+    ("tokio", "tokyo"),
+    ("hongkong", "hong kong"),
+    ("moskau", "moscow", "moskva"),
+    ("sankt petersburg", "st petersburg", "saint petersburg", "saint-petersburg"),
+    ("kiew", "kyiv", "kiev"),
+    ("bukarest", "bucharest", "bucuresti"),
+    ("belgrad", "belgrade", "beograd"),
+    ("lissabon", "lisbon", "lisboa"),
+    ("kopenhagen", "copenhagen", "kobenhavn"),
+    ("kapstadt", "cape town"),
+    ("mexiko stadt", "mexico city", "ciudad de mexico"),
+    ("new york", "new york city", "nyc"),
+    ("washington", "washington dc", "washington d c"),
+    ("luxemburg", "luxembourg"),
+    ("daressalam", "dar es salaam"),
+    ("addis abeba", "addis ababa"),
+    ("ho chi minh stadt", "ho chi minh city", "saigon"),
+    ("jakarta", "djakarta"),
+        ("sao paulo", "sao paolo"),
+    ("rio de janeiro", "rio"),
+)
+
+
+def _ort_schluessel(text) -> str:
+    """Vergleichsform eines Ortsnamens: klein, ä/ö/ü/ß aufgelöst, übrige Akzente weg, Satzzeichen = Leerzeichen."""
+    import unicodedata
+    t = str(text or "").casefold()
+    for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        t = t.replace(a, b)
+    t = "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", " ", t).strip()
+
+
+_ORT_GRUPPE = {}
+for _g in _ORTS_GRUPPEN:
+    _schl = frozenset(_ort_schluessel(x) for x in _g)
+    for _x in _schl:
+        _ORT_GRUPPE[_x] = _schl
+
+
+def _ort_varianten(text) -> set:
+    """Der Name selbst und alle bekannten anderen Schreibweisen derselben Stadt."""
+    k = _ort_schluessel(text)
+    return set(_ORT_GRUPPE.get(k, ())) | ({k} if k else set())
+
+
+def _orte_aus_adresse(adresse, ort_roh=None) -> list:
+    """Mögliche Städte aus einer Hotel-Adresse, die wahrscheinlichste zuerst: erst der vom Beleg gelesene Ort,
+    dann die Adressteile von hinten nach vorn (ohne die Straße, ohne Postleitzahlen). So wird auch
+    „Janpath, New Delhi 110001, India“ oder „Straße 1, 110001 New Delhi“ gefunden, nicht nur der letzte Teil."""
+    erg = []
+    if ort_roh and str(ort_roh).strip():
+        erg.append(str(ort_roh).strip())
+    teile = [t.strip() for t in str(adresse or "").split(",") if t.strip()]
+    for t in reversed(teile[1:]):
+        t = re.sub(r"\b[A-Z]{1,3}-\d+\b", " ", t)       # D-97199
+        t = re.sub(r"\b\d[\d\- ]*\b", " ", t)             # Postleitzahlen
+        t = re.sub(r"\s+", " ", t).strip(" -.")
+        if t and t not in erg:
+            erg.append(t)
+    return erg
+
+
 def _staedte_override(db, land: str, ort: str | None) -> dict | None:
     """
     Prüft, ob für "ort" ein eigener importierter Städte-Satz existiert (z.B.
-    Los Angeles, New York, Turin – teurer/günstiger als der Landesdurchschnitt).
+    Los Angeles, New York, Turin, Neu Delhi – teurer/günstiger als der Landesdurchschnitt).
     Zentral an EINER Stelle, damit alle Automatik-Pfade (Flug-Segment-Ankunft,
     Hotel-Beleg, Rückreisetag-Regel) konsequent denselben Satz für denselben
     Ort finden – vorher hat nur der Ankunftstag den Städte-Satz gefunden, der
     Abreisetag nicht, wodurch derselbe Ort (z.B. Turin) je nach Tag einen
     anderen VMA-Satz bekam.
+    Der Vergleich kennt andere Schreibweisen (New Delhi = Neu Delhi, Kolkata = Kalkutta, Milan = Mailand …).
     """
     if not land or not ort:
         return None
@@ -44,10 +133,21 @@ def _staedte_override(db, land: str, ort: str | None) -> dict | None:
         cur.close()
     except Exception:
         return None
-    ort_norm = ort.strip().lower()
-    treffer = next((s for s in staedte if s.strip().lower() == ort_norm
-                     or ort_norm in s.strip().lower()
-                     or s.strip().lower() in ort_norm), None)
+    varianten = _ort_varianten(ort)
+    if not varianten:
+        return None
+    # 1. Treffer: gleicher Name (auch in anderer Schreibweise)
+    treffer = next((s for s in staedte if varianten & _ort_varianten(s)), None)
+    if not treffer:
+        # 2. Treffer: Die Stadt steckt als ganzes Wort im Text („Neu Delhi 110001“, „Los Angeles International Airport“).
+        #    Umgekehrt (Text steckt im Städtenamen) nur bei mindestens zwei Wörtern – sonst würde das Land
+        #    „Mexiko“ die Stadt „Mexiko Stadt“ treffen.
+        def _steckt_in(klein, gross):
+            return f" {klein} " in f" {gross} "
+        treffer = next((s for s in staedte
+                        if any(len(a) >= 4 and len(b) >= 4 and
+                               (_steckt_in(b, a) or (len(a.split()) >= 2 and _steckt_in(a, b)))
+                               for a in varianten for b in _ort_varianten(s))), None)
     if not treffer:
         return None
     try:
@@ -57,6 +157,43 @@ def _staedte_override(db, land: str, ort: str | None) -> dict | None:
         return {"voll": info["voll"], "halb": info["halb"], "ort": treffer}
     except Exception:
         return None
+
+
+def _staedte_override_adresse(db, land: str, adresse, ort_roh=None) -> dict | None:
+    """Städte-Satz für ein Hotel: der Reihe nach alle möglichen Orte aus Beleg-Ort und Adresse prüfen."""
+    for kandidat in _orte_aus_adresse(adresse, ort_roh):
+        o = _staedte_override(db, land, kandidat)
+        if o:
+            return o
+    return None
+
+
+def _manueller_ortssatz(db, reise_code: str, land: str, datum_s: str) -> dict | None:
+    """Hat jemand für dieses Land und diesen Tag unter „🌍 + Land“ bewusst einen Ort gewählt (z. B. Indien – Neu Delhi),
+    gilt dessen Satz, wenn die Automatik zwar das Land, aber keine Stadt gefunden hat."""
+    if not land:
+        return None
+    P = ph()
+    try:
+        cur = db.cursor()
+        cur.execute(f"""SELECT ort, vma_voll, vma_halb FROM reise_laender
+            WHERE reise_code={P} AND land_code={P} AND ort IS NOT NULL AND ort<>''
+            AND datum_von<={P} AND datum_bis>={P} ORDER BY id LIMIT 1""", (reise_code, land, datum_s, datum_s))
+        row = cur.fetchone()
+        cur.close()
+    except Exception:
+        try: db.rollback()
+        except Exception: pass
+        return None
+    if not row:
+        return None
+    ort = row[0] if isinstance(row, tuple) else row["ort"]
+    voll = row[1] if isinstance(row, tuple) else row["vma_voll"]
+    halb = row[2] if isinstance(row, tuple) else row["vma_halb"]
+    if voll is None or halb is None:
+        return None
+    return {"voll": float(voll), "halb": float(halb), "ort": ort}
+
 
 def land_fuer_letzten_tag(reise_code: str, datum: date, db, eintaegig: bool, debug: bool = False):
     """
@@ -193,7 +330,7 @@ def land_fuer_tag(reise_code: str, datum: date, db,
             # einen einzelnen zufällig aufgefallenen Fall.
             if not sonderfall_override:
                 cur_h = db.cursor()
-                cur_h.execute(f"""SELECT hotel_adresse FROM belege
+                cur_h.execute(f"""SELECT hotel_adresse, event_ort_von FROM belege
                     WHERE reise_code={P} AND transportart='Hotel'
                     AND hotel_checkin_datum<={P} AND hotel_checkout_datum>={P}
                     LIMIT 1""", (reise_code, datum_s, datum_s))
@@ -201,11 +338,10 @@ def land_fuer_tag(reise_code: str, datum: date, db,
                 cur_h.close()
                 if hrow:
                     hadresse = hrow[0] if isinstance(hrow, tuple) else hrow["hotel_adresse"]
-                    if hadresse and "," in hadresse:
-                        ort_teil = hadresse.rsplit(",", 1)[-1].strip()
-                        ort_teil = re.sub(r'^\d+\s*', '', ort_teil).strip()
-                        if ort_teil:
-                            sonderfall_override = _staedte_override(db, sonderfall_land, ort_teil)
+                    hort = hrow[1] if isinstance(hrow, tuple) else hrow["event_ort_von"]
+                    sonderfall_override = _staedte_override_adresse(db, sonderfall_land, hadresse, hort)
+            if not sonderfall_override:
+                sonderfall_override = _manueller_ortssatz(db, reise_code, sonderfall_land, datum_s)
 
             if sonderfall_override:
                 lname = f'{VMA_SAETZE.get(sonderfall_land, {}).get("name", sonderfall_land)} – {sonderfall_override["ort"]}'
@@ -256,6 +392,11 @@ def land_fuer_tag(reise_code: str, datum: date, db,
             lname = f'{VMA_SAETZE.get(letztes_land, {}).get("name", letztes_land)} – {override["ort"]}'
             cur.close()
             return letztes_land, lname, "Flug-Segment (Städte-Satz)", override
+        manuell = _manueller_ortssatz(db, reise_code, letztes_land, datum_s)
+        if manuell:
+            lname = f'{VMA_SAETZE.get(letztes_land, {}).get("name", letztes_land)} – {manuell["ort"]}'
+            cur.close()
+            return letztes_land, lname, "Flug-Segment (Ort manuell gewählt)", manuell
         lname = VMA_SAETZE.get(letztes_land, {}).get("name", letztes_land)
         cur.close()
         return letztes_land, lname, "Flug-Segment", None
@@ -272,7 +413,7 @@ def land_fuer_tag(reise_code: str, datum: date, db,
     # – "DE" ist der allgemeine Rückfallwert, wenn nichts Genaueres erkannt
     # wurde, also die unsicherste Angabe, und soll bei einer Dublette nicht
     # "gewinnen".
-    cur.execute(f"""SELECT land_beleg, hotel_adresse FROM belege
+    cur.execute(f"""SELECT land_beleg, hotel_adresse, event_ort_von FROM belege
         WHERE reise_code={P} AND transportart='Hotel'
         AND hotel_checkin_datum<={P} AND hotel_checkout_datum>={P}
         ORDER BY (land_beleg = 'DE') ASC, (hotel_checkin_datum = {P}) DESC, id DESC""",
@@ -281,18 +422,20 @@ def land_fuer_tag(reise_code: str, datum: date, db,
     if row:
         land = (row[0] if isinstance(row, tuple) else row["land_beleg"]) or ""
         adresse = (row[1] if isinstance(row, tuple) else row["hotel_adresse"]) or ""
+        hotel_ort = (row[2] if isinstance(row, tuple) else row["event_ort_von"]) or ""
         if land and land in VMA_SAETZE:
-            # Stadt aus der Adresse extrahieren (letzter Teil nach dem Komma,
-            # PLZ-Ziffern entfernt) und gegen importierte Städte-Sätze prüfen
-            ort_teil = None
-            if adresse and "," in adresse:
-                ort_teil = adresse.rsplit(",", 1)[-1].strip()
-                ort_teil = re.sub(r'^\d+\s*', '', ort_teil).strip()
-            override = _staedte_override(db, land, ort_teil) if ort_teil else None
+            # Stadt aus Beleg-Ort und Adresse bestimmen (alle Adressteile ohne Straße und Postleitzahl,
+            # auch andere Schreibweisen wie „New Delhi“) und gegen importierte Städte-Sätze prüfen
+            override = _staedte_override_adresse(db, land, adresse, hotel_ort)
             if override:
                 lname = f'{VMA_SAETZE.get(land, {}).get("name", land)} – {override["ort"]}'
                 cur.close()
                 return land, lname, "Hotel-Beleg (Städte-Satz)", override
+            manuell = _manueller_ortssatz(db, reise_code, land, datum_s)
+            if manuell:
+                lname = f'{VMA_SAETZE.get(land, {}).get("name", land)} – {manuell["ort"]}'
+                cur.close()
+                return land, lname, "Hotel-Beleg (Ort manuell gewählt)", manuell
             lname = VMA_SAETZE.get(land, {}).get("name", land)
             cur.close()
             return land, lname, "Hotel-Beleg", None
@@ -354,8 +497,11 @@ def vma_tage_generieren(reise_code: str, db) -> int:
     cur = db.cursor()
     P = ph()
 
-    cur.execute(f"SELECT abreise, rueckkehr FROM reisen WHERE code={P}", (reise_code,))
+    cur.execute(f"SELECT abreise, rueckkehr, status FROM reisen WHERE code={P}", (reise_code,))
     r = cur.fetchone()
+    if r and ((r["status"] if hasattr(r, "keys") else r[2]) or "aktiv") != "aktiv":
+        cur.close()
+        return 0                                  # abgesagte/verschobene Reise: keine VMA-Tage mehr berechnen
     if not r:
         cur.close(); return 0
 

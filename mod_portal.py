@@ -568,7 +568,7 @@ def cron_portal_mails() -> dict:
     ziel_datum = (date.today() + timedelta(days=PORTAL_TAGE_VORHER)).isoformat()
     P = ph()
     db = get_db(); cur = db.cursor()
-    cur.execute(f"SELECT code, titel, abreise, rueckkehr, erstellt FROM reisen WHERE abreise={P}", (ziel_datum,))
+    cur.execute(f"SELECT code, titel, abreise, rueckkehr, erstellt FROM reisen WHERE abreise={P} AND COALESCE(status,'aktiv')='aktiv'", (ziel_datum,))
     reisen = cur.fetchall()
     cur.close(); db.close()
 

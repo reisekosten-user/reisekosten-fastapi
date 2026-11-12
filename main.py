@@ -32,6 +32,8 @@ import mod_laender
 import mod_a1
 import mod_reisepdf
 import mod_visa
+import mod_abwicklung as abw
+import mod_aufraeumen
 import mod_visum
 import mod_doku
 import mod_beleg
@@ -123,6 +125,11 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.57", "zeit": "2026-11-12 11:25", "aenderungen": [
+        "Neu: Einstellungen › „Kalender-Antworten aufräumen“. Die Seite listet alte Belege „Mail: Accepted: …“ (Antworten auf Outlook-Einladungen, die vor Version 3.52 als Beleg abgelegt wurden) und löscht die markierten. Belege mit Betrag, geprüfte, an Habel gesendete und Belege einer Bewirtung oder Bargeld-Buchung bleiben stehen."]},
+    {"version": "3.56", "zeit": "2026-11-12 11:08", "aenderungen": [
+        "Neu: Reise absagen oder verschieben. Auf der Reise-Seite gibt es den Knopf „Absagen / verschieben“. Beim Verschieben (auch ins nächste Jahr) entsteht automatisch eine neue Reise mit Reisenden, Ländern und Terminen; die alte Reise bleibt mit allen Belegen und Stornokosten als „verschoben“ stehen. Beim Stornieren bleibt sie als „storniert“ stehen. Die Outlook-Einladungen der alten Reise werden sofort abgesagt, auf Wunsch geht eine Info-Mail an die Reisenden.",
+        "Neu: Checkliste „Abwicklung“ je abgesagter Reise. Sie führt Flüge, Bahn, Hotels, Mietwagen, Visum, A1, Termine und Vorschuss auf. Je Punkt: Status (kostenlos storniert, Erstattung erwartet, umgebucht, Gutschein …), Betrag, Frist und Notiz. Offene Punkte und erwartete Erstattungen stehen auf der ToDo-Seite, bis alles erledigt ist. Abgesagte Reisen erscheinen nicht mehr im Dashboard, in der Verspätungsprüfung, bei den Portal-Mails und den A1-Aufgaben."]},
     {"version": "3.55", "zeit": "2026-11-12 08:10", "aenderungen": [
         "Neu: Hotels kommen jetzt auch als Outlook-Einladung. Ein ganztägiger Eintrag vom Check-in- bis zum Check-out-Tag (blockiert keine Zeit) mit Hotelname und Adresse im Feld „Ort“, dazu Check-in/-out-Zeit, Nächte, Buchungscode und ein Karten-Link. So öffnet der Reisende die Adresse direkt in Google Maps.",
         "Ein Aufenthalt ergibt einen Eintrag, auch wenn Buchungsbestätigung und Rechnung beide als Beleg vorliegen. Ändern sich Datum oder Adresse, wird der Eintrag aktualisiert, bei Stornierung abgesagt. Hotels ohne Check-in-Datum stehen unter „Nicht berücksichtigt“. Schon beendete Aufenthalte werden nicht mehr eingeladen."]},
@@ -912,6 +919,7 @@ async def startup():
     mod_a1.tabelle_sichern()
     mod_reisepdf.tabelle_sichern()
     mod_visa.tabelle_sichern()
+    abw.tabelle_sichern()
     try:
         n_mwst = mod_beleg.mwst_flug_bahn_reparieren()
         if n_mwst:
@@ -6088,7 +6096,7 @@ def todo_liste_laden() -> list:
         cur.execute(f"""SELECT COUNT(*) FROM belege b
             JOIN reisen r ON r.code = b.reise_code
             WHERE b.belegart IN {PRUEF_SQL} AND b.geprueft = {'FALSE' if is_postgres() else '0'}
-            AND r.rueckkehr < {P}""", (today,))
+            AND r.rueckkehr < {P} AND COALESCE(r.status,'aktiv') = 'aktiv'""", (today,))
         n = cur.fetchone()[0]
         if n:
             aufgaben.append({"icon": "✅", "prio": "danger",
@@ -6132,7 +6140,7 @@ def todo_liste_laden() -> list:
         # 5. Reisen abgeschlossen (Rückkehr liegt bereits zurück), aber noch
         # mindestens ein Rechnungs-/Quittungsbeleg ungeprüft oder ungesendet
         cur.execute(f"""SELECT DISTINCT r.code, r.titel FROM reisen r
-            WHERE r.rueckkehr < {P} AND EXISTS (
+            WHERE r.rueckkehr < {P} AND COALESCE(r.status,'aktiv') = 'aktiv' AND EXISTS (
                 SELECT 1 FROM belege b WHERE b.reise_code = r.code
                 AND b.belegart IN {PRUEF_SQL}
                 AND (b.geprueft = {'FALSE' if is_postgres() else '0'} OR b.dms_versendet_am IS NULL)
@@ -6176,6 +6184,20 @@ def todo_liste_laden() -> list:
                 "url": f"/beleg/{vv[0]['id']}#visum" if len(vv) == 1 else "/todo"})
     except Exception: pass
 
+    try:
+        # 9. Abgesagte/verschobene Reisen: offene Punkte der Abwicklung und erwartete Erstattungen
+        for t in abw.offene_aufgaben():
+            teile = []
+            if t["offen"]:
+                teile.append(f'{t["offen"]} Punkt{"e" if t["offen"] != 1 else ""} offen')
+            if t["erstattung"]:
+                teile.append(f'Erstattung erwartet{(" " + abw.euro(t["erstattung_summe"])) if t["erstattung_summe"] else ""}')
+            aufgaben.append({"icon": "🚫", "prio": "warn",
+                "text": f'Abwicklung {t["code"]} ({"verschoben" if t["status"] == "verschoben" else "storniert"})',
+                "sub": " · ".join(teile) + (f' – {t["titel"]}' if t["titel"] else ""),
+                "url": f'/reise/{t["code"]}/abwicklung'})
+    except Exception: pass
+
     cur.close(); db.close()
     return aufgaben
 
@@ -6191,7 +6213,8 @@ def todo_belege_laden() -> list:
 
     cur.execute(f"""SELECT b.id, b.reise_code, b.anbieter, b.betrag_brutto, b.waehrung,
             b.belegdatum, b.betrag_eur_final, b.geprueft, b.dms_versendet_am,
-            b.pflichtfelder_ok, b.belegart, r.rueckkehr, b.zahlungsart
+            b.pflichtfelder_ok, b.belegart,
+            CASE WHEN COALESCE(r.status,'aktiv') = 'aktiv' THEN r.rueckkehr ELSE NULL END AS rueckkehr, b.zahlungsart
         FROM belege b LEFT JOIN reisen r ON r.code = b.reise_code
         ORDER BY b.erstellt DESC""")
     rows = cur.fetchall()
@@ -6261,7 +6284,7 @@ def todo_reisen_laden() -> list:
     P = ph()
     today = date.today().isoformat()
     cur.execute(f"""SELECT DISTINCT r.code, r.titel, r.rueckkehr FROM reisen r
-        WHERE r.rueckkehr < {P} AND EXISTS (
+        WHERE r.rueckkehr < {P} AND COALESCE(r.status,'aktiv') = 'aktiv' AND EXISTS (
             SELECT 1 FROM belege b WHERE b.reise_code = r.code
             AND b.belegart IN {PRUEF_SQL}
             AND (b.geprueft = {'FALSE' if is_postgres() else '0'} OR b.dms_versendet_am IS NULL)
@@ -6359,12 +6382,26 @@ def todo_seite(request: Request):
             f'<thead><tr><th>Beleg</th><th>Reise</th><th>Visum</th><th>Anbieter</th><th></th></tr></thead>'
             f'<tbody>{visum_zeilen}</tbody></table></div></div>') if visum_offen else ""
 
+        abw_zeilen = ""
+        for t in abw.offene_aufgaben():
+            abw_zeilen += (f'<tr><td><a href="/reise/{t["code"]}/abwicklung" style="color:var(--blue);font-weight:600;'
+                           f'text-decoration:none">{t["code"]}</a></td><td>{_bw_e(t["titel"])}</td>'
+                           f'<td>{"verschoben" if t["status"] == "verschoben" else "storniert"}</td>'
+                           f'<td>{t["offen"]} offen{(", Erstattung erwartet " + abw.euro(t["erstattung_summe"])) if t["erstattung"] else ""}</td>'
+                           f'<td><a href="/reise/{t["code"]}/abwicklung" class="btn btn-secondary btn-sm">Abwicklung</a></td></tr>')
+        abw_card = (
+            '<div class="card" style="margin-bottom:20px"><div class="card-header"><span class="card-title">'
+            '🚫 Abgesagte / verschobene Reisen – Abwicklung offen</span></div><div class="table-wrap"><table>'
+            '<thead><tr><th>Reise</th><th>Titel</th><th>Status</th><th>Offen</th><th></th></tr></thead>'
+            f'<tbody>{abw_zeilen}</tbody></table></div></div>') if abw_zeilen else ""
+
         content = f"""
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
           <h1 class="page-title" style="margin:0">📋 Offene Aufgaben</h1>
           <a href="/" class="btn btn-secondary">← Dashboard</a>
         </div>
         {kk_banner}
+        {abw_card}
 
         <div class="card" style="margin-bottom:20px">
           <div class="card-header"><span class="card-title">🛂 A1-Bescheinigung – Reisen in Europa ({len(a1_liste)})</span></div>
@@ -6444,6 +6481,7 @@ def dashboard(request: Request):
                 STRING_AGG(rm.kuerzel, ', ' ORDER BY rm.kuerzel) as ma
                 FROM reisen r
                 LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
+                WHERE COALESCE(r.status,'aktiv') = 'aktiv'
                 GROUP BY r.code, r.titel, r.abreise, r.rueckkehr
                 ORDER BY r.abreise DESC""")
         else:
@@ -6451,6 +6489,7 @@ def dashboard(request: Request):
                 GROUP_CONCAT(rm.kuerzel, ', ') as ma
                 FROM reisen r
                 LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
+                WHERE COALESCE(r.status,'aktiv') = 'aktiv'
                 GROUP BY r.code, r.titel, r.abreise, r.rueckkehr
                 ORDER BY r.abreise DESC""")
         alle_reisen = cur.fetchall()
@@ -7146,7 +7185,7 @@ def dashboard_maps(debug: str = ""):
                 FROM reisen r
                 LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
                 LEFT JOIN mitarbeiter m ON m.kuerzel = rm.kuerzel
-                WHERE r.abreise <= %s AND r.rueckkehr >= %s
+                WHERE r.abreise <= %s AND r.rueckkehr >= %s AND COALESCE(r.status,'aktiv') = 'aktiv'
                 GROUP BY r.code, r.titel, r.abreise, r.rueckkehr""", (today.isoformat(), today.isoformat()))
         else:
             cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
@@ -7155,7 +7194,7 @@ def dashboard_maps(debug: str = ""):
                 FROM reisen r
                 LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
                 LEFT JOIN mitarbeiter m ON m.kuerzel = rm.kuerzel
-                WHERE r.abreise <= ? AND r.rueckkehr >= ?
+                WHERE r.abreise <= ? AND r.rueckkehr >= ? AND COALESCE(r.status,'aktiv') = 'aktiv'
                 GROUP BY r.code, r.titel, r.abreise, r.rueckkehr""", (today.isoformat(), today.isoformat()))
         aktive_reisen = cur.fetchall()
 
@@ -7901,20 +7940,22 @@ def reisen_liste():
         if is_postgres():
             cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
                            STRING_AGG(rm.kuerzel, ', ' ORDER BY rm.kuerzel) as ma,
-                           COUNT(DISTINCT rl.id) as laender_count
+                           COUNT(DISTINCT rl.id) as laender_count,
+                           r.status, r.nachfolger_code
                            FROM reisen r
                            LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
                            LEFT JOIN reise_laender rl ON rl.reise_code = r.code
-                           GROUP BY r.code, r.titel, r.abreise, r.rueckkehr
+                           GROUP BY r.code, r.titel, r.abreise, r.rueckkehr, r.status, r.nachfolger_code
                            ORDER BY r.abreise DESC""")
         else:
             cur.execute("""SELECT r.code, r.titel, r.abreise, r.rueckkehr,
                            GROUP_CONCAT(rm.kuerzel, ', ') as ma,
-                           COUNT(DISTINCT rl.id) as laender_count
+                           COUNT(DISTINCT rl.id) as laender_count,
+                           r.status, r.nachfolger_code
                            FROM reisen r
                            LEFT JOIN reise_mitarbeiter rm ON rm.reise_code = r.code
                            LEFT JOIN reise_laender rl ON rl.reise_code = r.code
-                           GROUP BY r.code, r.titel, r.abreise, r.rueckkehr
+                           GROUP BY r.code, r.titel, r.abreise, r.rueckkehr, r.status, r.nachfolger_code
                            ORDER BY r.abreise DESC""")
         rows = cur.fetchall()
         cur.close(); db.close()
@@ -7933,9 +7974,17 @@ def reisen_liste():
             code = get(r,"code",0); titel = get(r,"titel",1)
             ab = get(r,"abreise",2); zu = get(r,"rueckkehr",3)
             ma = get(r,"ma",4); lc = get(r,"laender_count",5)
+            r_status = get(r,"status",6) or "aktiv"; r_folge = get(r,"nachfolger_code",7)
             vma_ok = "✓" if lc and lc > 0 else '<span style="color:var(--amber)">–</span>'
+            if r_status == "verschoben":
+                status_zelle = ('<span class="badge badge-gray">Verschoben</span>' +
+                                (f' <a href="/reise/{r_folge}" style="font-size:12px">→ {r_folge}</a>' if r_folge else ""))
+            elif r_status == "storniert":
+                status_zelle = '<span class="badge badge-gray">Storniert</span>'
+            else:
+                status_zelle = status(ab,zu)
             zeilen += f"""<tr>
-                <td style="white-space:nowrap">{status(ab,zu)}</td>
+                <td style="white-space:nowrap">{status_zelle}</td>
                 <td class="td-mono" style="font-weight:700">
                   <a href="/reise/{code}" style="color:var(--blue)">{code}</a></td>
                 <td style="font-weight:500">
@@ -8225,6 +8274,124 @@ async def reise_neu(request: Request):
             f'<div class="alert alert-err">{e}</div>'
             f'<pre style="font-size:11px">{traceback.format_exc()[:400]}</pre>'
             '<a href="/reisen/neu" class="btn btn-secondary">Zurück</a>'))
+
+# ── Reise absagen / verschieben (v3.56) ─────────────────────────────────────────────────────────────────
+def _nur_organisator(request: Request):
+    if ist_organisator(request):
+        return None
+    return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+
+
+@app.get("/reise/{code}/absage", response_class=HTMLResponse)
+def reise_absage_formular(code: str, request: Request):
+    if (nein := _nur_organisator(request)):
+        return nein
+    v = abw.vorschau(code.upper())
+    if not v:
+        return HTMLResponse(shell("Nicht gefunden", '<div class="alert alert-err">Reise nicht gefunden.</div>'), status_code=404)
+    if v["status"] != "aktiv":
+        return RedirectResponse(f"/reise/{v['code']}/abwicklung", status_code=303)
+    return HTMLResponse(shell(f"Absagen {v['code']}", abw.absage_formular_html(v), "reisen"))
+
+
+@app.post("/reise/{code}/absage", response_class=HTMLResponse)
+async def reise_absage_ausfuehren(code: str, request: Request):
+    if (nein := _nur_organisator(request)):
+        return nein
+    form = await request.form()
+    w = {k: (form.get(k) or "").strip() for k in ("art", "grund", "neue_abreise", "neue_rueckkehr", "zusatz")}
+    w["info_mail"] = bool(form.get("info_mail"))
+    w["bestaetigt"] = bool(form.get("bestaetigt"))
+    try:
+        erg = abw.absagen(code.upper(), w["art"], w["grund"], w["neue_abreise"], w["neue_rueckkehr"],
+                          w["info_mail"], w["zusatz"], w["bestaetigt"])
+    except Exception as ex:
+        import traceback
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{ex}</div>'
+                                  f'<pre style="font-size:11px">{traceback.format_exc()[:600]}</pre>', "reisen"))
+    v = abw.vorschau(code.upper())
+    if not v:
+        return HTMLResponse(shell("Nicht gefunden", '<div class="alert alert-err">Reise nicht gefunden.</div>'), status_code=404)
+    if erg.get("fehler"):
+        return HTMLResponse(shell(f"Absagen {v['code']}", abw.absage_formular_html(v, erg["fehler"], w), "reisen"))
+    if erg.get("rueckfrage"):
+        return HTMLResponse(shell(f"Absagen {v['code']}", abw.absage_formular_html(
+            v, "Die Reise hat schon begonnen – bitte unten bestätigen.", w), "reisen"))
+    teile = []
+    if erg.get("neu"):
+        teile.append(f"Neue Reise {erg['neu']['code']} angelegt ({erg['neu']['termine']} Termin(e) übernommen).")
+    if erg.get("outlook"):
+        teile.append("Outlook: " + erg["outlook"] + ".")
+    if erg.get("mail"):
+        teile.append("Info-Mail: " + erg["mail"] + ".")
+    return _abwicklung_seite(v["code"], " ".join(teile))
+
+
+def _abwicklung_seite(code: str, meldung: str = "") -> HTMLResponse:
+    db = get_db()
+    try:
+        inhalt = abw.abwicklung_html(db, code.upper(), meldung)
+    finally:
+        db.close()
+    if inhalt is None:
+        return HTMLResponse(shell("Nicht gefunden", '<div class="alert alert-err">Reise nicht gefunden.</div>'), status_code=404)
+    return HTMLResponse(shell(f"Abwicklung {code.upper()}", inhalt, "reisen"))
+
+
+@app.get("/reise/{code}/abwicklung", response_class=HTMLResponse)
+def reise_abwicklung_seite(code: str, request: Request):
+    if (nein := _nur_organisator(request)):
+        return nein
+    return _abwicklung_seite(code)
+
+
+@app.post("/reise/{code}/abwicklung/speichern", response_class=HTMLResponse)
+async def reise_abwicklung_speichern(code: str, request: Request):
+    if (nein := _nur_organisator(request)):
+        return nein
+    form = await request.form()
+    fehler = abw.speichern(code, (form.get("schluessel") or "").strip(), (form.get("status") or "").strip(),
+                           form.get("betrag"), form.get("frist") or "", form.get("notiz") or "")
+    if fehler:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{fehler}</div>'
+                                  f'<a href="/reise/{code.upper()}/abwicklung" class="btn btn-secondary">Zurück</a>', "reisen"))
+    return RedirectResponse(f"/reise/{code.upper()}/abwicklung", status_code=303)
+
+
+@app.post("/reise/{code}/abwicklung/neu", response_class=HTMLResponse)
+async def reise_abwicklung_neu(code: str, request: Request):
+    if (nein := _nur_organisator(request)):
+        return nein
+    form = await request.form()
+    fehler = abw.frei_anlegen(code, form.get("titel") or "")
+    if fehler:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{fehler}</div>'
+                                  f'<a href="/reise/{code.upper()}/abwicklung" class="btn btn-secondary">Zurück</a>', "reisen"))
+    return RedirectResponse(f"/reise/{code.upper()}/abwicklung", status_code=303)
+
+
+@app.post("/reise/{code}/abwicklung/loeschen", response_class=HTMLResponse)
+async def reise_abwicklung_loeschen(code: str, request: Request):
+    if (nein := _nur_organisator(request)):
+        return nein
+    form = await request.form()
+    abw.frei_loeschen(code, (form.get("schluessel") or "").strip())
+    return RedirectResponse(f"/reise/{code.upper()}/abwicklung", status_code=303)
+
+
+@app.post("/reise/{code}/reaktivieren", response_class=HTMLResponse)
+def reise_reaktivieren(code: str, request: Request):
+    if (nein := _nur_organisator(request)):
+        return nein
+    try:
+        erg = abw.reaktivieren(code.upper())
+    except Exception as ex:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{ex}</div>', "reisen"))
+    if erg.get("fehler"):
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{erg["fehler"]}</div>'
+                                  f'<a href="/reise/{code.upper()}" class="btn btn-secondary">Zurück</a>', "reisen"))
+    return RedirectResponse(f"/reise/{code.upper()}", status_code=303)
+
 
 # ── Reise Detail ───────────────────────────────────────────────────────────────
 # ── Überschneidende Flug-/Zug-Segmente (Dubletten über mehrere Belege) ───────
@@ -9154,7 +9321,11 @@ def reise_detail(code: str, request: Request):
                   {tagesablauf_html(d, rcode)}
                 </div>"""
 
+        abw_knopf = (f'<a href="/reise/{rcode}/abwicklung" class="btn btn-secondary">📋 Abwicklung</a>'
+                     if abw.status_von(rcode) != "aktiv" else
+                     f'<a href="/reise/{rcode}/absage" class="btn btn-secondary">🚫 Absagen / verschieben</a>')
         content = f"""
+        {abw.banner_html(rcode)}{abw.vorgaenger_html(rcode)}
         {_aenderungs_banner_fuer_reise(rcode)}
         {_ueberschneidungs_banner_fuer_reise(rcode)}
         <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:20px;flex-wrap:wrap">
@@ -9179,6 +9350,7 @@ def reise_detail(code: str, request: Request):
             <a href="/reise/{rcode}/vma-generieren" class="btn btn-secondary">🔄 VMA neu berechnen</a>
             <a href="/reise/{rcode}/bearbeiten" class="btn btn-secondary">✏ Bearbeiten</a>
             <a href="/reise/{rcode}/land/neu" class="btn btn-secondary">🌍 + Land</a>
+            {abw_knopf}
           </div>
         </div>
 
@@ -10924,6 +11096,27 @@ def mail_diagnose_starten(request: Request):
     except Exception as ex:
         erg = {"zeilen": [("fehler", "Diagnose abgebrochen: %s" % ex)], "fazit": []}
     return HTMLResponse(_mail_diagnose_seite(erg))
+
+
+@app.get("/einstellungen/kalender-antworten", response_class=HTMLResponse)
+def kalender_antworten_anzeigen(request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    sperre = lambda bid: _bewirtung_sperre(bid) or _vorschuss_sperre(bid)
+    return HTMLResponse(shell("Kalender-Antworten aufräumen", mod_aufraeumen.seite_html(sperre), "einstellungen"))
+
+
+@app.post("/einstellungen/kalender-antworten", response_class=HTMLResponse)
+async def kalender_antworten_loeschen(request: Request):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff", '<div class="alert alert-err">Nur Organisatoren.</div>'), status_code=403)
+    form = await request.form()
+    sperre = lambda bid: _bewirtung_sperre(bid) or _vorschuss_sperre(bid)
+    try:
+        erg = mod_aufraeumen.loeschen(form.getlist("ids"), sperre)
+    except Exception as ex:
+        return HTMLResponse(shell("Fehler", f'<div class="alert alert-err">{ex}</div>', "einstellungen"))
+    return HTMLResponse(shell("Kalender-Antworten aufräumen", mod_aufraeumen.seite_html(sperre, erg), "einstellungen"))
 
 
 # ── Dokumentation (Handbuch) ──────────────────────────────────────────────────
@@ -13744,6 +13937,8 @@ def einstellungen_uebersicht(request: Request):
          "für alle Mitarbeiter oder nur für einen.", "/einstellungen/reise-pdfs"),
         ("🔧", "Mail-Diagnose", "Prüft den Mail-Postausgang Schritt für Schritt (es wird keine Mail gesendet).",
          "/einstellungen/mail-diagnose"),
+        ("🧹", "Kalender-Antworten aufräumen", "Alte „Accepted: …“-Antworten auf Outlook-Einladungen, die als Beleg abgelegt wurden, "
+         "auflisten und löschen.", "/einstellungen/kalender-antworten"),
         ("📖", "Dokumentation", "Handbuch für Reisende und Organisatoren, alle Einstellungen und Funktionen – "
          "als Seite und PDF.", "/einstellungen/dokumentation"),
     ]

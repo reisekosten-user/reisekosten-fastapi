@@ -335,7 +335,9 @@ def ueberwachte_segmente_laden(debug: bool = False):
                     AND (
                         (event_datum_von >= {P} AND event_datum_von <= {P})
                         OR event_datum_von IS NULL
-                    )""",
+                    )
+                    AND (reise_code IS NULL OR reise_code NOT IN
+                         (SELECT code FROM reisen WHERE COALESCE(status,'aktiv') <> 'aktiv'))""",
                 (fenster_von.isoformat(), fenster_bis.isoformat()))
     rows = cur.fetchall()
     cur.close(); db.close()

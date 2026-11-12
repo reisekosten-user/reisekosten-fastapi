@@ -731,7 +731,7 @@ def a1_todos(heute: date | None = None) -> list:
     db = get_db(); cur = db.cursor()
     P = ph()
     try:
-        cur.execute(f"SELECT code, titel, abreise, rueckkehr FROM reisen WHERE rueckkehr >= {P} ORDER BY abreise",
+        cur.execute(f"SELECT code, titel, abreise, rueckkehr FROM reisen WHERE rueckkehr >= {P} AND COALESCE(status,'aktiv')='aktiv' ORDER BY abreise",
                     (heute.isoformat(),))
         reisen = cur.fetchall()
     finally:

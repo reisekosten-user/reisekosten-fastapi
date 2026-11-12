@@ -761,13 +761,15 @@ def _lade_teilnehmer(cur, code: str) -> list:
 def _lade_soll(cur, code: str) -> dict | None:
     """Liefert {'reise','teilnehmer','soll': {(kuerzel,schluessel): ev},'probleme'} oder None."""
     P = ph()
-    cur.execute("SELECT code, titel, abreise, rueckkehr FROM reisen WHERE code=" + P, (code,))
+    cur.execute("SELECT code, titel, abreise, rueckkehr, status FROM reisen WHERE code=" + P, (code,))
     r = cur.fetchone()
     if not r:
         return None
     reise = {"code": _g(r, "code", 0), "titel": _g(r, "titel", 1) or "",
              "abreise": _g(r, "abreise", 2), "rueckkehr": _g(r, "rueckkehr", 3)}
     teilnehmer = [t for t in _lade_teilnehmer(cur, code) if t["aktiv"]]
+    if (_g(r, "status", 4) or "aktiv") != "aktiv":          # abgesagte/verschobene Reise: nichts mehr einladen,
+        return {"reise": reise, "teilnehmer": teilnehmer, "soll": {}, "probleme": []}   # bestehende Einladungen werden abgesagt
     probleme, ankuenfte, ereignisse = [], [], []
     cur.execute("SELECT id, transportart, anbieter, reisender, ki_json FROM belege "
                 "WHERE reise_code=" + P + " AND transportart IN ('Flug','Bahn') "

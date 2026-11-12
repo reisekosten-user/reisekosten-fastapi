@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.55"
+DOKU_GEPRUEFT_FUER = "3.57"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -161,6 +161,9 @@ SEITEN = [
     ("/reise/{code}/habel/vorschau", "Vorschau der Habel-Mail (sendet nichts)", "b-habel"),
     ("/reise/{code}/habel/datei/{datei}", "Einzelne Datei der Habel-Mail öffnen", "b-habel"),
     ("/reise/{code}/kalender", "Outlook-Einladungen der Reise: Status und „Jetzt senden“", "b-kalender"),
+    ("/einstellungen/kalender-antworten", "Alte Kalender-Antworten („Mail: Accepted: …“) als Belege auflisten und löschen", "b-eingang"),
+    ("/reise/{code}/absage", "Reise absagen oder verschieben (Formular)", "b-absage"),
+    ("/reise/{code}/abwicklung", "Checkliste der abgesagten/verschobenen Reise: Erstattungen, Umbuchungen, Gutscheine", "b-absage"),
     ("/reise/{code}/vorschuss", "Reisevorschuss und Bargeld-Konto der Reise", "b-vorschuss"),
     ("/reise/{code}/vorschuss/neu", "Vorschuss-Buchung erfassen (Auszahlung/Rückgabe)", "b-vorschuss"),
     ("/reise/{code}/vorschuss/{bid}/bearbeiten", "Vorschuss-Buchung bearbeiten (nur Entwurf)", "b-vorschuss"),
@@ -443,7 +446,7 @@ KAPITEL = [
     ]},
     {"id": "b-reise", "teil": "B", "titel": "Reisen anlegen und bearbeiten", "bloecke": [
         ("h3", "Die Reisenliste"),
-        ("p", "Menü **Reisen** zeigt alle Reisen, die neueste Abreise zuerst. Ganz links steht der **Status** (Geplant, ● Aktiv, Abgeschlossen), "
+        ("p", "Menü **Reisen** zeigt alle Reisen, die neueste Abreise zuerst. Ganz links steht der **Status** (Geplant, ● Aktiv, Abgeschlossen, Verschoben mit Link auf die neue Reise, Storniert), "
               "dann Code, Titel, Abreise, Rückkehr, Mitarbeiter und ein Haken, wenn für die Reise Länder eingetragen sind."),
         ("h3", "Neue Reise"),
         ("p", "Menü **Reisen** › „Neue Reise“. Der **Reisecode** hat die Form `JJ-NNN` (z. B. 26-007). Das Jahr ist das Jahr der **Abreise**, "
@@ -463,12 +466,52 @@ KAPITEL = [
             ["💵 Vorschuss", "Reisevorschuss und Bargeld-Konto."],
             ["🗺 Reiseplan", "Zeitliche Übersicht aller Flüge, Züge und Termine."],
             ["📅 Outlook", "Outlook-Einladungen der Reise."],
+            ["🚫 Absagen / verschieben", "Reise stornieren oder auf einen neuen Zeitraum verschieben (siehe „Reise absagen oder verschieben“). Bei einer abgesagten Reise heißt der Knopf „📋 Abwicklung“."],
             ["🔄 VMA neu berechnen", "Rechnet die Tage der Reise neu. Normalerweise nicht nötig, die App rechnet automatisch (siehe Verpflegungsmehraufwand)."],
             ["✏ Bearbeiten", "Titel, Daten, Reisende und Notiz ändern."],
             ["🌍 + Land", "Weiteres Land mit Zeitraum hinzufügen. Vorhandene Länder lassen sich über ✏ ändern oder löschen."],
         ], [28, 72]),
         ("p", "Darunter folgen die Karte „🔗 Reisenden-Zugänge (Portal)“ und der „📅 Tagesverlauf & VMA“ mit allen Belegen und Terminen je Tag. "
               "Rechts oben im Tagesverlauf setzt **↺ Alle Tage auf Auto** bei allen Tagen die Manuell-Markierung zurück und berechnet Land und Sätze neu."),
+    ]},
+    {"id": "b-absage", "teil": "B", "titel": "Reise absagen oder verschieben", "bloecke": [
+        ("p", "Muss eine Reise ausfallen oder wird sie auf einen anderen Termin gelegt (auch ins nächste Jahr), wickelt man das mit dem Knopf "
+              "**🚫 Absagen / verschieben** auf der Reise-Seite ab. Nur Organisatoren sehen und nutzen ihn."),
+        ("h3", "Verschieben oder stornieren"),
+        ("tab", ["Auswahl", "Was passiert"], [
+            ["Verschieben", "Es entsteht automatisch eine **neue Reise** mit eigenem Code (Jahr der neuen Abreise, z. B. 27-001). Titel, Reisende, Länder (mit den aktuellen VMA-Sätzen) und Termine werden übernommen und um die Verschiebung versetzt. "
+                            "Vorgeschlagen wird genau 52 Wochen später (gleicher Wochentag). Die alte Reise bleibt mit allen Belegen und Stornokosten stehen und bekommt den Status „verschoben“ mit Link auf die neue Reise."],
+            ["Stornieren", "Die Reise bleibt mit allen Belegen stehen und bekommt den Status „storniert“."],
+            ["Grund", "Freitext, erscheint auf der Reise-Seite und in der Info-Mail."],
+            ["Info-Mail an die Reisenden", "Haken, standardmäßig aus. Kurze Mail an alle Reisenden mit E-Mail-Adresse: Grund, ggf. neuer Zeitraum und der Hinweis, Buchungen nicht selbst zu ändern. Ein Zusatztext ist möglich."],
+        ], [28, 72]),
+        ("p", "In beiden Fällen werden die **Outlook-Einladungen der alten Reise sofort abgesagt**. Für die neue Reise gehen die Einladungen wie gewohnt automatisch raus. "
+              "VMA-Tage und Portal-Einträge der alten Reise werden entfernt, sofern die Reise noch nicht begonnen hat. Hat sie schon begonnen, fragt die App nach und behält diese Angaben. "
+              "Eine abgesagte Reise taucht nicht mehr im Dashboard, in der Verspätungsprüfung, bei den Portal-Mails und bei den A1-Aufgaben auf."),
+        ("h3", "Die Checkliste (Abwicklung)"),
+        ("p", "Nach dem Absagen öffnet sich die Checkliste, später über **📋 Abwicklung** auf der Reise-Seite erreichbar. Sie führt alle Buchungen der Reise auf: "
+              "Flug, Bahn, Hotel, Mietwagen, Visum/Einreisegenehmigung und A1-Bescheinigung, dazu Termine, Reisevorschuss, die Outlook-Absage und die Info-Mail. "
+              "Bestätigung und Rechnung derselben Buchung (gleicher Buchungscode) erscheinen als ein Punkt."),
+        ("tab", ["Status", "Bedeutung"], [
+            ["Offen", "Noch nicht geklärt. Bleibt auf der ToDo-Seite."],
+            ["Kostenlos storniert", "Storniert, es entstehen keine Kosten."],
+            ["Erstattung erwartet", "Geld kommt zurück. Betrag und Frist eintragen. Bleibt auf der ToDo-Seite, bis „Erstattung erhalten“ gesetzt ist."],
+            ["Erstattung erhalten", "Das Geld ist da."],
+            ["Storniert – keine Erstattung", "Kosten sind angefallen; Betrag eintragen."],
+            ["Umgebucht", "Die Buchung wurde geändert. Die neue Buchung gehört in die neue Reise."],
+            ["Gutschein erhalten", "Betrag und „gültig bis“ eintragen."],
+            ["Gilt weiter / wieder verwendbar", "Z. B. ein Ticket oder Visum, das für die neue Reise gilt."],
+            ["Entfällt", "Punkt ist nicht relevant."],
+        ], [32, 68]),
+        ("p", "Je Punkt gibt es Betrag, Frist („Erstattung bis“ oder „Gutschein gültig bis“) und eine Notiz. Mit **+ Hinzufügen** lassen sich eigene Punkte ergänzen, z. B. „Mietwagen bei Sixt abbestellen“. "
+              "Bei Einreisegenehmigung und A1 steht der Hinweis, dass sie für die neue Reise meist neu beantragt werden müssen."),
+        ("p", "**ToDo:** Solange Punkte offen sind oder eine Erstattung erwartet wird, steht die Reise auf der Seite „Offene Aufgaben“ und im Dashboard. Sind alle Punkte erledigt, verschwindet sie dort."),
+        ("h3", "Belege und Kosten"),
+        ("p", "Vorhandene Belege bleiben in der alten Reise. Neue Buchungen für den neuen Termin kommen in die neue Reise. Stornorechnungen und Erstattungen bleiben bei der alten Reise, "
+              "damit die Kosten dort nachvollziehbar sind."),
+        ("h3", "Wieder aktivieren"),
+        ("p", "**↩ Reise wieder aktivieren** (oben in der Checkliste) macht die Absage rückgängig: VMA-Tage werden neu berechnet, die Outlook-Einladungen kommen neu, die Checkliste wird gelöscht. "
+              "Eine beim Verschieben angelegte neue Reise bleibt bestehen und muss bei Bedarf von Hand bereinigt werden."),
     ]},
     {"id": "b-portal", "teil": "B", "titel": "Portal-Zugänge für Reisende", "bloecke": [
         ("p", "Jeder Reisende einer Reise hat einen **persönlichen Link** (Token). Er öffnet nur die eigene Reise: Die Reise kommt immer aus dem Link, "
@@ -515,7 +558,7 @@ KAPITEL = [
             "Nur kleine eingebettete **Bilder** (Logos in der Signatur) und Kalender-/Kontaktdateien werden ignoriert. Ein PDF in einer als Anhang weitergeleiteten Mail wird ebenfalls gefunden.",
             "Verarbeitete Mails werden im Postfach **gelöscht**. Doppelte Weiterleitungen werden über die Message-ID erkannt.",
             "**Kalender-Antworten sind kein Beleg:** Nimmt ein Reisender die Kalendereinladung der App an oder lehnt sie ab, geht die Antwort („Accepted: …“) an dieses Postfach. "
-            "Solche Mails und Abwesenheitsnotizen werden **übersprungen**: kein Beleg, die Mail bleibt als gelesen im Postfach. Das Ergebnis nennt Anzahl und Betreff.",
+            "Solche Mails und Abwesenheitsnotizen werden **übersprungen**: kein Beleg, die Mail bleibt als gelesen im Postfach. Das Ergebnis nennt Anzahl und Betreff. Ältere Antworten, die schon als Beleg abgelegt wurden, räumt Einstellungen › „Kalender-Antworten aufräumen“ auf.",
             "Das Ergebnis zeigt: Mails verarbeitet, Belege erstellt, Duplikate, Fehler (mit Details). Wurde der Mailtext zum Beleg, obwohl die Mail weitere Teile hat oder im Text einen Anhang nennt, "
             "steht darunter **„⚠ Mails ohne erkannten Anhang“** mit der Liste der Mail-Teile (Typ, Name, Größe). Dann die Mail erneut weiterleiten und die Liste mitschicken.",
         ]),
@@ -1022,7 +1065,7 @@ KAPITEL = [
     {"id": "c-fehler", "teil": "C", "titel": "Fehlersuche", "bloecke": [
         ("tab", ["Beobachtung", "Prüfen / Lösung"], [
             ["Beleg landet im Posteingang", "Reisecode fehlt oder ist falsch (Form JJ-NNN, Reise muss existieren). Beleg dort einer Reise zuordnen."],
-            ["Beleg „Mail: Accepted: …“ oder „Declined: …“", "Antwort auf eine Kalendereinladung, die vor Version 3.52 als Beleg abgelegt wurde. Auf der Beleg-Seite löschen. Neue Antworten werden übersprungen."],
+            ["Beleg „Mail: Accepted: …“ oder „Declined: …“", "Antwort auf eine Kalendereinladung, die vor Version 3.52 als Beleg abgelegt wurde. Alle auf einmal löschen: Einstellungen › „Kalender-Antworten aufräumen“. Neue Antworten werden übersprungen."],
             ["„IMAP nicht konfiguriert“", "IMAP_HOST, IMAP_USER, IMAP_PASS setzen."],
             ["„Zertifikat des Mailservers ist nicht gültig“ (Mail-Abruf oder Versand)", "Seit Version 3.54 prüft die App das Zertifikat. Servername in IMAP_HOST / SMTP_HOST muss genau dem Namen im Zertifikat des Anbieters entsprechen (Mail-Diagnose zeigt die Zeile „Zertifikat Mail-Eingang“). Nur zur Überbrückung in Render MAIL_TLS_PRUEFEN=0 eintragen und den Anbieter fragen."],
             ["„IMAP-Verbindung fehlgeschlagen“", "Zugangsdaten und Server des Postfachs prüfen."],
