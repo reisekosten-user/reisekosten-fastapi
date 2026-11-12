@@ -2,9 +2,14 @@
 mod_kalender.py – Outlook-/Exchange-Kalendereinladungen für Reisesegmente und Termine.
 
 Prinzip: Jeder Reisende mit gesetztem Haken "Kalendereinladungen" (Profil,
-mitarbeiter.kalender_mail) bekommt für jedes Flug-/Bahnsegment seiner Reise und
-für jeden manuell angelegten Termin eine Einladung per E-Mail (iCalendar,
+mitarbeiter.kalender_mail) bekommt für jedes Flug-/Bahnsegment seiner Reise, für jedes
+Hotel und für jeden manuell angelegten Termin eine Einladung per E-Mail (iCalendar,
 METHOD:REQUEST). Outlook/Exchange legt sie automatisch in den Kalender.
+
+Hotels: ein ganztägiger Eintrag vom Check-in- bis zum Check-out-Tag (zeigt sich als Balken, blockiert
+keine Zeit). Im Feld „Ort“ stehen Hotelname und Adresse, damit sich daraus direkt Google Maps / Apple
+Karten öffnen lassen; im Text steht zusätzlich ein Karten-Link. Schlüssel: Check-in-Datum (zwei Belege
+zum selben Aufenthalt, z. B. Buchungsbestätigung und Rechnung, ergeben EINEN Eintrag).
 
 Abgleich statt Einzel-Auslöser: kalender_abgleich() vergleicht den SOLL-Stand
 (aktuelle Segmente/Termine der Reise) mit dem bereits gesendeten IST-Stand
@@ -37,6 +42,7 @@ import json
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import quote_plus
 
 from mod_db import get_db, ph, is_postgres
 from mod_zeit import utc_offset_parsen
@@ -45,7 +51,7 @@ import mod_mail
 from mod_mail import sende_mail
 
 RUHE_SEKUNDEN = int(os.getenv("KALENDER_RUHE_SEKUNDEN", "120") or "120")
-ERINNERUNG_MIN = {"Flug": 180, "Bahn": 45, "Termin": 30}
+ERINNERUNG_MIN = {"Flug": 180, "Bahn": 45, "Termin": 30, "Hotel": 0}
 UID_DOMAIN = "reisekosten.herrhammer"
 PRODID = "-//Herrhammer Reisekosten//Kalender 1.0//DE"
 _LOCK_ID = 7310021
@@ -382,6 +388,66 @@ def _segment_ereignisse(beleg: dict, ankuenfte: list, probleme: list) -> list:
     return out
 
 
+def _hotel_ort(name, adresse, ort) -> str:
+    """Text für das Feld „Ort“: Hotelname und Adresse (so findet Google Maps das Hotel), sonst Name und Ort."""
+    name, adresse, ort = (str(x or "").strip() for x in (name, adresse, ort))
+    if adresse:
+        text = adresse if (not name or name.lower() in adresse.lower()) else "%s, %s" % (name, adresse)
+    else:
+        text = name
+    if ort and ort.lower() not in text.lower():
+        text = ("%s, %s" % (text, ort)) if text else ort
+    return text
+
+
+def _karten_link(ort_text, lat, lon) -> str:
+    """Link, der in Google Maps (und auf dem Handy in der Karten-App) das Hotel zeigt."""
+    if ort_text:
+        return "https://www.google.com/maps/search/?api=1&query=" + quote_plus(ort_text)
+    try:
+        return "https://www.google.com/maps/search/?api=1&query=%.6f,%.6f" % (float(lat), float(lon))
+    except (TypeError, ValueError):
+        return ""
+
+
+def _uhrzeit(wert) -> str:
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})", str(wert or ""))
+    return "%02d:%s" % (int(m.group(1)), m.group(2)) if m and int(m.group(1)) <= 23 and int(m.group(2)) <= 59 else ""
+
+
+def _hotel_ereignisse(hotels: list, probleme: list) -> list:
+    """Ein ganztägiger Eintrag je Hotelaufenthalt (Check-in-Tag bis Check-out-Tag)."""
+    out = []
+    for h in hotels:
+        name = str(h.get("hotel_name") or h.get("anbieter") or "").strip()
+        marke = "Beleg #%s (Hotel %s)" % (h.get("id"), name or "ohne Namen")
+        d_in = _datum(h.get("hotel_checkin_datum")) or _datum(h.get("event_datum_von"))
+        if not d_in:
+            probleme.append("%s: Check-in-Datum fehlt – kein Termin." % marke)
+            continue
+        d_out = _datum(h.get("hotel_checkout_datum")) or _datum(h.get("event_datum_bis"))
+        try:
+            if not d_out and h.get("hotel_naechte"):
+                d_out = d_in + timedelta(days=int(h["hotel_naechte"]))
+        except (TypeError, ValueError):
+            pass
+        bis_bekannt = bool(d_out and d_out >= d_in)
+        ort_text = _hotel_ort(name, h.get("hotel_adresse"), h.get("event_ort_von"))
+        code = str(h.get("buchungscode") or "").strip()
+        out.append({
+            "schluessel": "hotel|%s" % d_in.isoformat(), "art": "Hotel", "nummer": name, "name": name,
+            "adresse": str(h.get("hotel_adresse") or "").strip(), "ort_text": ort_text,
+            "karte": _karten_link(ort_text, h.get("hotel_lat"), h.get("hotel_lon")),
+            "checkin_zeit": _uhrzeit(h.get("hotel_checkin_zeit")), "checkout_zeit": _uhrzeit(h.get("hotel_checkout_zeit")),
+            "naechte": (int(h["hotel_naechte"]) if str(h.get("hotel_naechte") or "").isdigit() else None),
+            "buchungscode": "" if code.upper().startswith("MAIL:") else code,
+            "datum": d_in, "bis": d_out if bis_bekannt else d_in, "bis_bekannt": bis_bekannt,
+            "ganztag": True, "utc_ab": None, "utc_an": None, "naiv_ab": None, "naiv_an": None,
+            "zeit_geschaetzt": False, "reisender": h.get("reisender") or "", "beleg_id": h.get("id"),
+        })
+    return out
+
+
 def _termin_ereignisse(termine: list, ankuenfte: list) -> list:
     out = []
     for t in termine:
@@ -501,6 +567,24 @@ def _komponieren(ev: dict, reise: dict, klarname: str) -> dict:
         z.append("Bei Änderungen der Buchung wird dieser Termin automatisch aktualisiert.")
         return {"summary": summary, "location": ort_ab, "description": "\n".join(z),
                 "erinnerung": ERINNERUNG_MIN[ev["art"]]}
+    if ev["art"] == "Hotel":
+        z = ["Hotel: " + (ev["name"] or "–")]
+        if ev["ort_text"]:
+            z.append("Adresse: " + ev["ort_text"])
+        z.append("Check-in: %s%s" % (_datum_text(ev["datum"]), (" ab " + ev["checkin_zeit"]) if ev["checkin_zeit"] else ""))
+        if ev["bis_bekannt"]:
+            z.append("Check-out: %s%s" % (_datum_text(ev["bis"]), (" bis " + ev["checkout_zeit"]) if ev["checkout_zeit"] else ""))
+        if ev["naechte"]:
+            z.append("Nächte: %d" % ev["naechte"])
+        if ev["buchungscode"]:
+            z.append("Buchungscode: " + ev["buchungscode"])
+        if ev["karte"]:
+            z.append("Karte: " + ev["karte"])
+        z.append("Gast: " + (klarname or ev.get("reisender") or ""))
+        z.append(reise_zeile)
+        z.append("Bei Änderungen der Buchung wird dieser Termin automatisch aktualisiert.")
+        return {"summary": "🏨 " + (ev["name"] or "Hotel"), "location": ev["ort_text"], "description": "\n".join(z),
+                "erinnerung": ERINNERUNG_MIN["Hotel"]}
     # manueller Termin
     summary = "%s %s" % (_TERMIN_ICON.get(ev["typ"], "📌"), ev["titel"])
     z = []
@@ -640,11 +724,17 @@ def _inhalt(ev: dict, reise: dict, klarname: str) -> dict:
         return _inhalt_serie(ev, reise, klarname)
     k = _komponieren(ev, reise, klarname)
     if ev["ganztag"]:
-        start, ende = ev["datum"].isoformat(), (ev["datum"] + timedelta(days=1)).isoformat()
+        letzter_tag = ev.get("bis") or ev["datum"]            # Hotel: Check-out-Tag gehört mit dazu
+        start, ende = ev["datum"].isoformat(), (letzter_tag + timedelta(days=1)).isoformat()
     else:
         start, ende = _iso(ev["utc_ab"]), _iso(ev["utc_an"])
-    k.update({"start": start, "ende": ende, "ganztag": bool(ev["ganztag"]),
-              "start_text": _lokal_text(ev["naiv_ab"]) if ev["naiv_ab"] else ev["datum"].strftime("%d.%m.%Y")})
+    if ev["naiv_ab"]:
+        start_text = _lokal_text(ev["naiv_ab"])
+    elif ev.get("bis") and ev["bis"] != ev["datum"]:
+        start_text = "%s – %s" % (ev["datum"].strftime("%d.%m.%Y"), ev["bis"].strftime("%d.%m.%Y"))
+    else:
+        start_text = ev["datum"].strftime("%d.%m.%Y")
+    k.update({"start": start, "ende": ende, "ganztag": bool(ev["ganztag"]), "start_text": start_text})
     return k
 
 
@@ -686,6 +776,13 @@ def _lade_soll(cur, code: str) -> dict | None:
         beleg = {"id": _g(b, "id", 0), "transportart": _g(b, "transportart", 1), "anbieter": _g(b, "anbieter", 2),
                  "reisender": _g(b, "reisender", 3), "ki_json": _g(b, "ki_json", 4)}
         ereignisse += _segment_ereignisse(beleg, ankuenfte, probleme)
+    hotel_spalten = ("id", "reisender", "anbieter", "buchungscode", "hotel_name", "hotel_adresse", "hotel_lat", "hotel_lon",
+                     "hotel_checkin_datum", "hotel_checkin_zeit", "hotel_checkout_datum", "hotel_checkout_zeit",
+                     "hotel_naechte", "event_ort_von", "event_datum_von", "event_datum_bis")
+    cur.execute("SELECT " + ", ".join(hotel_spalten) + " FROM belege WHERE reise_code=" + P +
+                " AND transportart='Hotel' AND aenderung_status IS NULL ORDER BY id", (code,))
+    hotels = [{k: _g(h, k, i) for i, k in enumerate(hotel_spalten)} for h in cur.fetchall()]
+    ereignisse += _hotel_ereignisse(hotels, probleme)
     cur.execute("SELECT id, datum, uhrzeit_von, uhrzeit_bis, titel, typ, ort, ansprechpartner, telefon, notiz, land_code, "
                 "serie_id FROM termine WHERE reise_code=" + P + " ORDER BY datum, uhrzeit_von", (code,))
     termine = []
@@ -716,7 +813,8 @@ def _lade_soll(cur, code: str) -> dict | None:
             if alt is None:
                 soll[(t["kuerzel"], ev["schluessel"])] = dict(ev)
             else:                                           # Dublette aus 2. Beleg: Lücken füllen
-                for f in ("sitz", "ab_term", "an_term", "klasse", "gesellschaft"):
+                for f in ("sitz", "ab_term", "an_term", "klasse", "gesellschaft", "name", "adresse", "ort_text", "karte",
+                          "checkin_zeit", "checkout_zeit", "naechte", "buchungscode"):
                     if not alt.get(f) and ev.get(f):
                         alt[f] = ev[f]
     return {"reise": reise, "teilnehmer": teilnehmer, "soll": soll, "probleme": probleme}
@@ -840,8 +938,8 @@ def _reise_abgleichen(db, cur, code: str, sofort: bool, jetzt: datetime, erg: di
             continue
         if z is None:
             ende_utc = ev["utc_an"] or ev["utc_ab"]
-            if ev["ganztag"] and ev["datum"] < jetzt.date():
-                continue
+            if ev["ganztag"] and (ev.get("bis") or ev["datum"]) < jetzt.date():
+                continue                                     # Aufenthalt/Termin ist schon vorbei
             if (not ev["ganztag"]) and ende_utc < jetzt:
                 continue                                     # Vergangenes nicht neu einladen
             z = {"kuerzel": kz, "schluessel": key, "uid": _uid(code, kz, key), "seq_nr": -1,

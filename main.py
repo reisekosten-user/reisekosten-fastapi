@@ -123,6 +123,9 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.55", "zeit": "2026-11-12 08:10", "aenderungen": [
+        "Neu: Hotels kommen jetzt auch als Outlook-Einladung. Ein ganztägiger Eintrag vom Check-in- bis zum Check-out-Tag (blockiert keine Zeit) mit Hotelname und Adresse im Feld „Ort“, dazu Check-in/-out-Zeit, Nächte, Buchungscode und ein Karten-Link. So öffnet der Reisende die Adresse direkt in Google Maps.",
+        "Ein Aufenthalt ergibt einen Eintrag, auch wenn Buchungsbestätigung und Rechnung beide als Beleg vorliegen. Ändern sich Datum oder Adresse, wird der Eintrag aktualisiert, bei Stornierung abgesagt. Hotels ohne Check-in-Datum stehen unter „Nicht berücksichtigt“. Schon beendete Aufenthalte werden nicht mehr eingeladen."]},
     {"version": "3.54", "zeit": "2026-10-27 05:50", "aenderungen": [
         "Sicherheit (Meldung von Render zu eMudhra, Node.js und PHP; wir nutzen weder Node.js noch PHP): Der Mail-Abruf und der Mailversand (IMAP/SMTP) prüfen jetzt das Zertifikat und den Namen des Mailservers, bisher prüften sie nichts. Wird das Zertifikat abgelehnt, nennt die Fehlermeldung den Grund; die Mail-Diagnose zeigt eine Zeile „Zertifikat Mail-Eingang“. Notausgang: In Render MAIL_TLS_PRUEFEN=0 eintragen (nur zur Überbrückung).",
         "requirements.txt: certifi 2026.10.23 fest eingetragen (Zertifikatsliste ohne die kompromittierten eMudhra-Zertifikate; gilt für OpenAI, S3 und alle anderen HTTPS-Abrufe), Pillow 13.0.0, pypdf 6.21.2 und python-multipart 0.0.32 (bekannte Sicherheitslücken beim Lesen manipulierter Bilder, PDFs und Uploads). Die Schwachstellen-Prüfung der ganzen Umgebung meldet danach nichts mehr."]},
@@ -7537,7 +7540,7 @@ def mitarbeiter_neu_form():
                 <input type="checkbox" name="kalender_mail" value="1" style="width:auto;margin:0">
                 📅 Reisetermine als Outlook-Einladung senden
               </label>
-              <div class="form-hint">Für jeden Flug, Zug und manuell angelegten Termin geht eine Kalender-Einladung an E-Mail-Adresse 1 (Zeiten, Nummer, Sitz, Terminal/Gleis). Änderungen und Stornierungen werden automatisch nachgeführt.</div>
+              <div class="form-hint">Für jeden Flug, Zug, jedes Hotel und manuell angelegten Termin geht eine Kalender-Einladung an E-Mail-Adresse 1 (Zeiten, Nummer, Sitz, Terminal/Gleis, Hotel mit Adresse für die Karten-App). Änderungen und Stornierungen werden automatisch nachgeführt.</div>
             </div>
             <div class="form-group full">
               <label>Rolle <span class="required">*</span></label>
@@ -7680,7 +7683,7 @@ def mitarbeiter_bearbeiten_form(kuerzel: str, request: Request):
                            style="width:auto;margin:0">
                     📅 Reisetermine als Outlook-Einladung senden
                   </label>
-                  <div class="form-hint">Für jeden Flug, Zug und manuell angelegten Termin geht eine Kalender-Einladung an E-Mail-Adresse 1 (Zeiten, Nummer, Sitz, Terminal/Gleis). Änderungen und Stornierungen werden automatisch nachgeführt.</div>
+                  <div class="form-hint">Für jeden Flug, Zug, jedes Hotel und manuell angelegten Termin geht eine Kalender-Einladung an E-Mail-Adresse 1 (Zeiten, Nummer, Sitz, Terminal/Gleis, Hotel mit Adresse für die Karten-App). Änderungen und Stornierungen werden automatisch nachgeführt.</div>
                 </div>
                 <div class="form-group full">
                   <label>Rolle</label>
@@ -10858,7 +10861,7 @@ def _kalender_seite(rcode: str, ergebnis: dict | None = None) -> str:
         '<div class="table-wrap"><table><thead><tr><th>Reisender</th><th>Termin</th><th>Status</th><th>Zuletzt gesendet</th></tr></thead>'
         '<tbody>%s</tbody></table></div></div>'
         '<p style="font-size:12px;color:var(--muted);margin-top:12px">Neue und geänderte Termine gehen automatisch '
-        'ca. 2–4 Minuten nach der letzten Änderung raus; „Jetzt senden“ erledigt es sofort. Entfallene Flüge/Züge/Termine '
+        'ca. 2–4 Minuten nach der letzten Änderung raus; „Jetzt senden“ erledigt es sofort. Entfallene Flüge/Züge/Hotels/Termine '
         'werden in Outlook abgesagt. Eingeladen wird an E-Mail-Adresse 1 des Profils.</p>'
         % (e(reise["code"]), e(reise["titel"]), e(reise["code"]), banner, probleme, tn, e(reise["code"]),
            zl or '<tr><td colspan="4"><div class="empty-state">Keine Termine – oder bei niemandem ist die Einladung aktiviert.</div></td></tr>'))

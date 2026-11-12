@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.54"
+DOKU_GEPRUEFT_FUER = "3.55"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -355,7 +355,7 @@ KAPITEL = [
     {"id": "a-nachrichten", "teil": "A", "titel": "Mails, die du bekommst", "bloecke": [
         ("tab", ["Mail", "Wann", "Was du tun musst"], [
             ["Portal-Link", "[[portal_tage]] Tage vor der Abreise", "Link speichern und Reisetage ausfüllen."],
-            ["Outlook-Einladung", "Für jeden Flug, Zug und Termin – wenn dein Organisator das für dich aktiviert hat",
+            ["Outlook-Einladung", "Für jeden Flug, Zug, jedes Hotel (mit Adresse für Google Maps) und jeden Termin – wenn dein Organisator das für dich aktiviert hat",
              "Nichts. Änderungen und Stornos werden automatisch nachgeführt (aktualisierter oder abgesagter Termin)."],
             ["Verspätungs-Alarm", "Flug oder Zug ist ab 15 Minuten verspätet, storniert oder umgeleitet",
              "Nichts, nur zur Information. Auch die Organisatoren bekommen den Alarm."],
@@ -416,7 +416,7 @@ KAPITEL = [
             ["Klarname", "Voller Name. Wird auch bei der Anonymisierung der Belege berücksichtigt."],
             ["E-Mail-Adresse 1", "Hauptadresse: Empfang von Portal-Link, Outlook-Einladungen und Alarmen. Muss eingetragen sein, sonst ist „Link senden“ gesperrt."],
             ["E-Mail-Adresse 2 / 3", "Weitere Adressen (optional). Sie werden bei der Anonymisierung der Belege mit berücksichtigt."],
-            ["📅 Outlook-Einladung", "Haken: Der Mitarbeiter bekommt für jeden Flug, Zug und manuellen Termin eine Einladung an E-Mail-Adresse 1."],
+            ["📅 Outlook-Einladung", "Haken: Der Mitarbeiter bekommt für jeden Flug, Zug, jedes Hotel und jeden manuellen Termin eine Einladung an E-Mail-Adresse 1."],
             ["Rolle", "✈ Reisender und/oder 📋 Organisator (siehe „Anmeldung, Rollen und Zugriff“)."],
             ["Kreditkartentyp", "Privat- oder Firmenkreditkarte. Bei Bezahlart „Kreditkarte“ wird die Karte als „Privatkreditkarte-KÜRZEL“ bzw. „Firmenkreditkarte-KÜRZEL“ angeboten."],
             ["Auslandseinsatzentgelt (%)", "Gebühr der Bank bei Zahlungen in Fremdwährung (Standard 1,5). Wird bei Kreditkartenbelegen in Fremdwährung automatisch berechnet und zum Betrag addiert. 0, wenn die Karte keine Gebühr hat."],
@@ -795,14 +795,15 @@ KAPITEL = [
         ("p", "Solange Buchungen unbestätigt sind, ist die Abrechnung als „vorläufig“ gekennzeichnet."),
     ]},
     {"id": "b-kalender", "teil": "B", "titel": "Outlook-Einladungen", "bloecke": [
-        ("p", "Bekommt ein Mitarbeiter den Haken **„📅 Reisetermine als Outlook-Einladung senden“**, erhält er für jeden **Flug, Zug und manuellen Termin** eine "
+        ("p", "Bekommt ein Mitarbeiter den Haken **„📅 Reisetermine als Outlook-Einladung senden“**, erhält er für jeden **Flug, Zug, jedes Hotel und jeden manuellen Termin** eine "
               "Kalender-Einladung an E-Mail-Adresse 1 (Zeiten, Nummer, Sitz, Terminal/Gleis). Erinnerungen: Flug 3 Stunden, Bahn 45 Minuten, Termin 30 Minuten vorher."),
         ("ul", [
             "**Änderungen und Stornos** werden automatisch nachgeführt (aktualisierter bzw. abgesagter Termin). Der Abgleich läuft im Takt von `/cron/flug-alerts`.",
             "**Wartezeit:** Änderungen werden erst gesendet, wenn sie [[ruhe_sekunden]] Sekunden unverändert geblieben sind (Einstellung KALENDER_RUHE_SEKUNDEN). Das verhindert eine Mail-Flut beim Korrigieren.",
             "Die Einladung enthält absolute Zeiten (Outlook rechnet in die eigene Zeitzone um); die Ortszeiten stehen zusätzlich im Text.",
             "**Montage über mehrere Tage** geht als **eine Terminserie** in einer Mail raus (mit Ausnahmen für abweichende Tage). Serien laufen in Berliner Zeit, damit die Uhrzeit über die Zeitumstellung gleich bleibt. Siehe Kapitel „Flug, Bahn und Termine“.",
-            "Für **bereits vergangene** Termine werden keine Einladungen mehr gesendet. Sie bleiben „noch nicht gesendet“.",
+            "**Hotels:** Ein ganztägiger Eintrag vom Check-in- bis zum Check-out-Tag (blockiert keine Zeit). Im Feld „Ort“ stehen Hotelname und Adresse, damit sich daraus direkt Google Maps oder die Karten-App öffnen lässt; im Text stehen außerdem Check-in/-out-Zeit, Nächte, Buchungscode und ein Karten-Link. Mehrere Belege zum selben Aufenthalt (Buchungsbestätigung und Rechnung) ergeben **einen** Eintrag. Ohne Check-in-Datum im Beleg gibt es keinen Eintrag (Hinweis unter „Nicht berücksichtigt“).",
+            "Für **bereits vergangene** Termine und beendete Hotelaufenthalte werden keine Einladungen mehr gesendet. Sie bleiben „noch nicht gesendet“.",
         ]),
         ("p", "Seite **📅 Outlook** je Reise: Tabelle mit Reisendem, Termin, Status und zuletzt gesendet. **„Jetzt senden / aktualisieren“** überspringt die Wartezeit "
               "und zeigt: neu gesendet, aktualisiert, abgesagt, Fehler. Unter „Nicht berücksichtigt“ stehen Termine, die nicht eingeladen werden konnten (mit Grund)."),
@@ -1031,7 +1032,7 @@ KAPITEL = [
             ["Portal-Link beginnt nicht mit https://", "Weder PORTAL_BASE_URL noch die Render-Adresse sind bekannt. PORTAL_BASE_URL in Render eintragen (z. B. https://reisekosten.onrender.com)."],
             ["Mail „gesendet“, kommt aber nicht an", "Spam-/Junk-Ordner und Quarantäne des Empfängers prüfen. Jede Mail trägt Datum und eine eindeutige Message-ID. Postausgang mit der Mail-Diagnose prüfen."],
             ["„Link senden“ gesperrt", "Beim Mitarbeiter fehlt E-Mail-Adresse 1."],
-            ["Outlook-Einladung fehlt", "Haken im Profil? E-Mail-Adresse 1? Termin schon vorbei? Mail-Diagnose starten."],
+            ["Outlook-Einladung fehlt", "Haken im Profil? E-Mail-Adresse 1? Termin schon vorbei? Bei Hotels: Steht im Beleg ein Check-in-Datum und ist der Reisende dem Beleg richtig zugeordnet? Mail-Diagnose starten."],
             ["„An Habel“ gesperrt", "Ein Beleg ist nicht geprüft oder das Original fehlt. DMS_EMAIL_TO gesetzt?"],
             ["Habel-Mail zu groß", "Summe der Anhänge über HABEL_MAX_MB. Wert erhöhen, soweit der Mailserver es erlaubt."],
             ["Kein Verspätungs-Alarm", "Cron `/cron/flug-alerts` jede Minute eingerichtet? API-Schlüssel gesetzt? „Jetzt testweise abrufen“ zeigt die Diagnose."],
