@@ -28,6 +28,7 @@ import mod_vorschuss as vs
 import mod_kalender as kal
 import mod_zuschlag as zs
 import mod_zeitzone as zeitzone
+from mod_zeit import hotel_zeit, hotel_zeit_zu_utc, HOTEL_CHECKIN_STANDARD, HOTEL_CHECKOUT_STANDARD
 import mod_laender
 import mod_a1
 import mod_reisepdf
@@ -125,6 +126,14 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.61", "zeit": "2026-11-12 20:13", "aenderungen": [
+        "Neu: Das Reiseplan-PDF hat ein ruhigeres, kompakteres Layout („Zeitleiste“): graues Tagesband, Uhrzeit links mit Zeitleiste, Typ als kleiner grauer Text, keine bunten Farbflächen mehr. Fuß mit Stand und Seitenzahl.",
+        "Behoben: Ansprechpartner und Telefon erscheinen im PDF als Klartext („Tel. …“) statt als Kästchen.",
+    ]},
+    {"version": "3.60", "zeit": "2026-11-12 20:10", "aenderungen": [
+        "Neu: Steht im Hotelbeleg keine Check-in- oder Check-out-Zeit, gilt jetzt Check-in 16:00 und Check-out 10:00 (jeweils Ortszeit des Hotels). Im Reiseplan, im Tagesablauf und in der Outlook-Einladung steht dann „ab 16:00“ bzw. „bis 10:00“; Zeiten aus dem Beleg bleiben unverändert.",
+        "Verbessert: Die Hotelzeit wird mit der Zeitzone des Hotellands (inkl. Sommer-/Winterzeit) umgerechnet, damit „Aktuell in / Als nächstes“ stimmen. Im Reiseplan sind die Ereignisse eines Tages jetzt auch mit Hotelzeiten korrekt nach Uhrzeit sortiert.",
+    ]},
     {"version": "3.59", "zeit": "2026-11-12 13:44", "aenderungen": [
         "Neu: Im Reiseportal der Mitarbeiter steht in der Karte „Reiseunterlagen“ ganz oben der Knopf „Reiseplan (PDF)“. Das PDF (Flüge, Bahn, Hotels, Termine, mit Buchungscodes) wird bei jedem Öffnen neu erstellt und ist daher immer aktuell. Bei abgesagten oder verschobenen Reisen und solange der Reiseplan leer ist, erscheint der Knopf nicht."]},
     {"version": "3.58", "zeit": "2026-11-12 12:53", "aenderungen": [
@@ -4233,15 +4242,19 @@ def reiseplan_daten_laden(reise_code: str):
         if typ == "Hotel":
             hname = g(b,"hotel_name",5) or anbieter or "Hotel"
             hadresse = g(b,"hotel_adresse",6) or ""
-            ci_d = _datum_parsen(g(b,"hotel_checkin_datum",7)); ci_z = g(b,"hotel_checkin_zeit",8) or ""
-            co_d = _datum_parsen(g(b,"hotel_checkout_datum",9)); co_z = g(b,"hotel_checkout_zeit",10) or ""
+            ci_d = _datum_parsen(g(b,"hotel_checkin_datum",7))
+            co_d = _datum_parsen(g(b,"hotel_checkout_datum",9))
+            # v3.60: Fehlt die Zeit im Beleg, gilt Check-in 16:00 / Check-out 10:00 (Ortszeit des Hotels),
+            # angezeigt als "ab 16:00" / "bis 10:00"; eine Zeit aus dem Beleg steht unverändert da.
+            ci_z, ci_ang = hotel_zeit(g(b,"hotel_checkin_zeit",8), HOTEL_CHECKIN_STANDARD)
+            co_z, co_ang = hotel_zeit(g(b,"hotel_checkout_zeit",10), HOTEL_CHECKOUT_STANDARD)
             if ci_d:
-                ereignisse.append((ci_d, ci_z or "14:00", {
-                    "icon": "🏨", "typ": "hotel", "titel": f"Check-in: {hname}", "zeit": ci_z, "sub": hadresse,
+                ereignisse.append((ci_d, ci_z, {
+                    "icon": "🏨", "typ": "hotel", "titel": f"Check-in: {hname}", "zeit": ("ab " if ci_ang else "") + ci_z, "sub": hadresse,
                     "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else "", "ist_buchungscode": True}))
             if co_d:
-                ereignisse.append((co_d, co_z or "11:00", {
-                    "icon": "🏨", "typ": "hotel", "titel": f"Check-out: {hname}", "zeit": co_z, "sub": hadresse,
+                ereignisse.append((co_d, co_z, {
+                    "icon": "🏨", "typ": "hotel", "titel": f"Check-out: {hname}", "zeit": ("bis " if co_ang else "") + co_z, "sub": hadresse,
                     "extra": "", "ist_buchungscode": False}))
         else:
             segs = segmente_aus_ki_json(g(b,"ki_json",4))
@@ -4281,11 +4294,12 @@ def reiseplan_daten_laden(reise_code: str):
             "sub": " · ".join(sub_parts), "extra": notiz_t, "ist_buchungscode": False}))
     cur.close(); db.close()
 
+    # Sortierung nach der Sortierzeit (nicht nach dem Anzeigetext, der bei Hotels "ab 16:00" lautet)
     tage = {}
-    for d, _, ev in ereignisse:
-        tage.setdefault(d, []).append(ev)
+    for d, sz, ev in ereignisse:
+        tage.setdefault(d, []).append((str(sz or ""), ev))
     for d in tage:
-        tage[d].sort(key=lambda e: e.get("zeit") or "")
+        tage[d] = [ev for _sz, ev in sorted(tage[d], key=lambda x: x[0])]
     return {"titel": titel, "abreise": abreise, "rueckkehr": rueckkehr, "tage": tage}
 
 
@@ -4341,120 +4355,116 @@ def reiseplan_anzeigen(code: str):
 
 def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> bytes:
     """
-    Baut das Reiseplan-PDF. Zwei Varianten über ohne_buchungscode steuerbar:
-    - False: für den Reisenden selbst, mit allen Buchungscodes (wie bisher).
-    - True: identischer Inhalt, aber ohne Buchungscodes – z.B. zum Weitergeben
-      an Kunden/Dritte, ohne dass die eigenen Buchungsreferenzen sichtbar sind.
-    Tabellen-Layout mit leichten Hintergrundfarben je Ereignistyp, damit
-    Flug/Bahn/Hotel/Termin auf einen Blick unterscheidbar sind, und einem
-    farbigen Tagesbalken für klare Tagesumbrüche.
+    Baut das Reiseplan-PDF (Layout „Zeitleiste“, v3.61). Zwei Varianten über ohne_buchungscode:
+    - False: für den Reisenden selbst, mit allen Buchungscodes.
+    - True: identischer Inhalt, aber ohne Buchungscodes – z.B. zum Weitergeben an Kunden/Dritte.
+    Aufbau: je Tag ein dezentes graues Band, darunter die Ereignisse mit Uhrzeit links und einer
+    Zeitleiste (Linie mit Punkt). Der Typ (FLUG, HOTEL …) steht als kleiner grauer Text hinter dem Titel.
+    Kopf: Reisecode, Titel, Zeitraum; Fuß: Stand und Seitenzahl.
     """
     from reportlab.lib.pagesizes import A4
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, Table,
+                                    TableStyle, KeepTogether, Flowable)
+    from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import mm
     from reportlab.lib import colors
+
+    TXT = colors.HexColor("#1f2937"); GRAU = colors.HexColor("#6b7280")
+    LINIE = colors.HexColor("#d1d5db"); HELL = colors.HexColor("#f3f4f6"); AKZ = colors.HexColor("#334155")
 
     def esc(s):
         return (str(s) if s is not None else "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
-    # Leichte, helle Hintergrundfarben je Ereignistyp
-    FARBEN = {
-        "flug":      colors.HexColor("#dbeafe"),
-        "bahn":      colors.HexColor("#dcfce7"),
-        "mietwagen": colors.HexColor("#ede9fe"),
-        "hotel":     colors.HexColor("#fef3c7"),
-        "termin":    colors.HexColor("#fce7f3"),
-        "parken":    colors.HexColor("#e2e8f0"),
-        "sonstiges": colors.HexColor("#f1f5f9"),
-    }
-    TAGESBALKEN_FARBE = colors.HexColor("#1e3a5f")
+    def pdf_text(s):
+        """Emojis (👤 📞 🏨 …) kann die PDF-Standardschrift nicht darstellen (würden als Kästchen erscheinen):
+        Ansprechpartner/Telefon werden zu Klartext, alle übrigen Emojis entfallen. Die HTML-Ansicht behält sie."""
+        t = str(s or "").replace("👤 ", "").replace("👤", "").replace("📞 ", "Tel. ").replace("📞", "Tel. ")
+        t = "".join(ch for ch in t if not (0x1F000 <= ord(ch) <= 0x1FFFF or ord(ch) in (0xFE0F, 0x200D)))
+        return " ".join(t.split())
 
-    # WICHTIG: reportlab/PDF-Standardschriften stellen komplexe, mehrfarbige
-    # Emojis (🏨🅿️📌🤝 etc.) nicht zuverlässig dar – landet oft als "■"
-    # (fehlendes Glyphen-Rechteck). Statt Emojis daher feste, klar lesbare
-    # Text-Kürzel je Ereignistyp; die HTML-Ansicht im Browser behält die
-    # echten Emojis, das betrifft NUR das PDF.
     PDF_TYP_LABEL = {
         "flug": "FLUG", "bahn": "BAHN", "mietwagen": "MIETWAGEN",
         "hotel": "HOTEL", "termin": "TERMIN", "parken": "PARKEN", "sonstiges": "SONSTIGES",
     }
+    wochentage = ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag","Samstag","Sonntag"]
 
-    def zeit_formatieren(zeit_roh: str) -> str:
-        """
-        Formatiert eine Zeit-/Zeitraumangabe für die schmale Zeitspalte.
-        WICHTIG: Bei einem Zeitraum (z.B. "12:00–13:40") NIE dem Paragraph
-        das automatische Umbrechen überlassen – das bricht sonst mitten in
-        der Uhrzeit um (z.B. "13:" / "40"), weil der Bindestrich als
-        Umbruchstelle gilt und der Rest dann nicht mehr passt. Stattdessen
-        gezielt NACH der ersten Uhrzeit umbrechen, sieht sauber aus und ist
-        bei jeder Spaltenbreite vorhersehbar.
-        """
-        if not zeit_roh:
-            return "–"
-        if "–" in zeit_roh:
-            ab, an = zeit_roh.split("–", 1)
-            return f"{esc(ab)}<br/>–{esc(an)}"
-        return esc(zeit_roh)
+    def stil(name, **kw):
+        basis = dict(fontName="Helvetica", fontSize=9, leading=11.5, textColor=TXT)
+        basis.update(kw)
+        return ParagraphStyle(name, **basis)
+
+    s_titel = stil("RpTitel", fontName="Helvetica-Bold", fontSize=17, leading=20, textColor=AKZ)
+    s_kopf = stil("RpKopf", fontSize=9.5, textColor=GRAU)
+    s_tag = stil("RpTag", fontName="Helvetica-Bold", fontSize=10, leading=12, textColor=AKZ)
+    s_zeit = stil("RpZeit", fontName="Helvetica-Bold", fontSize=8.8, alignment=2)
+    s_ev = stil("RpEv", fontName="Helvetica-Bold", fontSize=9.2)
+    s_sub = stil("RpSub", fontSize=8, leading=10, textColor=GRAU)
+
+    class Zeile(Flowable):
+        """Eine Ereigniszeile: Uhrzeit links, Zeitleiste (Linie + Punkt), Titel und Details rechts."""
+        def __init__(self, ev, erste, letzte):
+            super().__init__()
+            self.erste, self.letzte = erste, letzte
+            self.zeit = Paragraph(esc(pdf_text(ev.get("zeit"))), s_zeit)
+            label = PDF_TYP_LABEL.get(ev.get("typ"), "SONSTIGES")
+            self.titel = Paragraph(esc(pdf_text(ev.get("titel"))) + '&nbsp;&nbsp;<font size="7" color="#6b7280">%s</font>' % label, s_ev)
+            teile = [esc(pdf_text(ev.get("sub")))]
+            # Buchungscode nur zeigen, wenn NICHT die buchungscode-freie Variante gewählt ist UND dieses
+            # "extra"-Feld tatsächlich ein Buchungscode ist (bei Terminen ist "extra" nur eine Notiz).
+            if ev.get("extra") and not (ohne_buchungscode and ev.get("ist_buchungscode")):
+                teile.append(esc(pdf_text(ev.get("extra"))))
+            zeile = " · ".join(t for t in teile if t)
+            self.sub = Paragraph(zeile, s_sub) if zeile else None
+
+        def wrap(self, aw, ah):
+            self.w = aw
+            tw = aw - 36 * mm
+            self.h1 = self.titel.wrap(tw, ah)[1]
+            self.h2 = self.sub.wrap(tw, ah)[1] if self.sub else 0
+            self.zeit.wrap(22 * mm, ah)
+            self.height = self.h1 + self.h2 + 7
+            return aw, self.height
+
+        def draw(self):
+            c = self.canv; x = 27 * mm; h = self.height
+            c.setStrokeColor(LINIE); c.setLineWidth(1)
+            c.line(x, h - 8.5 if self.letzte else 0, x, h - 8.5 if self.erste else h)
+            c.setFillColor(AKZ); c.setStrokeColor(colors.white); c.setLineWidth(1.5)
+            c.circle(x, h - 8.5, 2.2, stroke=1, fill=1)
+            self.zeit.drawOn(c, 0, h - 3.5 - self.zeit.height + 0.5)
+            self.titel.drawOn(c, 36 * mm, h - 3.5 - self.h1)
+            if self.sub:
+                self.sub.drawOn(c, 36 * mm, h - 3.5 - self.h1 - self.h2)
+
+    stand = datetime.now(zeitzone.land_zone("DE")).strftime("%d.%m.%Y")
+
+    def fuss(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7.5); canvas.setFillColor(GRAU)
+        canvas.drawString(15 * mm, 9 * mm, f"Reiseplan {rcode} · Stand {stand}")
+        canvas.drawRightString(195 * mm, 9 * mm, f"Seite {doc.page}")
+        canvas.restoreState()
 
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4,
-        leftMargin=16*mm, rightMargin=16*mm, topMargin=16*mm, bottomMargin=16*mm)
-    styles = getSampleStyleSheet()
-    titel_stil = ParagraphStyle("EvTitel", parent=styles["Normal"], fontSize=10, fontName="Helvetica-Bold", leading=13)
-    sub_stil = ParagraphStyle("EvSub", parent=styles["Normal"], fontSize=8.5, textColor=colors.HexColor("#475569"), leading=11)
-    zeit_stil = ParagraphStyle("EvZeit", parent=styles["Normal"], fontSize=9, fontName="Helvetica-Bold", alignment=1, leading=11)
+    doc = BaseDocTemplate(buf, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm, topMargin=14 * mm, bottomMargin=16 * mm)
+    doc.addPageTemplates([PageTemplate(id="rp", onPage=fuss, frames=[
+        Frame(15 * mm, 16 * mm, 180 * mm, 267 * mm, leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)])])
 
-    story = [Paragraph(f"Reiseplan {esc(rcode)}", styles["Title"]),
-             Paragraph(esc(daten["titel"]), styles["Heading2"]),
-             Paragraph(f"{fmt_date(daten['abreise'])} – {fmt_date(daten['rueckkehr'])}", styles["Normal"]),
-             Spacer(1, 5*mm)]
+    story = [Paragraph(f"Reiseplan {esc(rcode)}", s_titel),
+             Paragraph(esc(pdf_text(daten["titel"])) + f" · {fmt_date(daten['abreise'])} – {fmt_date(daten['rueckkehr'])}", s_kopf),
+             Spacer(1, 3 * mm)]
 
-    wochentage = ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag","Samstag","Sonntag"]
     for d in sorted(daten["tage"].keys()):
-        tagesblock = []
-        # Farbiger Tagesbalken als eigene Mini-Tabelle (Paragraphs selbst
-        # können keinen Hintergrund haben) – sorgt für einen klaren,
-        # auffälligen Umbruch zwischen den Tagen.
-        tag_tbl = Table([[Paragraph(f'<font color="white"><b>{wochentage[d.weekday()]}, {d.strftime("%d.%m.%Y")}</b></font>',
-                                     styles["Normal"])]], colWidths=[178*mm])
-        tag_tbl.setStyle(TableStyle([
-            ("BACKGROUND",(0,0),(-1,-1), TAGESBALKEN_FARBE),
-            ("TOPPADDING",(0,0),(-1,-1), 5), ("BOTTOMPADDING",(0,0),(-1,-1), 5),
-            ("LEFTPADDING",(0,0),(-1,-1), 8),
-        ]))
-        tagesblock.append(tag_tbl)
-        tagesblock.append(Spacer(1, 2*mm))
-
-        for ev in daten["tage"][d]:
-            farbe = FARBEN.get(ev.get("typ"), FARBEN["sonstiges"])
-            label = PDF_TYP_LABEL.get(ev.get("typ"), "SONSTIGES")
-            inhalt = f'<font size="7" color="#475569"><b>{label}</b></font>&nbsp;&nbsp;{esc(ev["titel"])}'
-            text_teile = [Paragraph(inhalt, titel_stil)]
-            if ev.get("sub"):
-                text_teile.append(Paragraph(esc(ev["sub"]), sub_stil))
-            # Buchungscode nur zeigen, wenn NICHT die buchungscode-freie
-            # Variante gewählt ist UND dieses "extra"-Feld tatsächlich ein
-            # Buchungscode ist (bei Terminen ist "extra" nur eine Notiz und
-            # bleibt in jeder Variante erhalten).
-            if ev.get("extra") and not (ohne_buchungscode and ev.get("ist_buchungscode")):
-                text_teile.append(Paragraph(esc(ev["extra"]), sub_stil))
-
-            zeile = Table([[Paragraph(zeit_formatieren(ev["zeit"]), zeit_stil), text_teile]],
-                           colWidths=[24*mm, 154*mm])
-            zeile.setStyle(TableStyle([
-                ("BACKGROUND",(0,0),(-1,-1), farbe),
-                ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-                ("TOPPADDING",(0,0),(-1,-1), 5), ("BOTTOMPADDING",(0,0),(-1,-1), 5),
-                ("LEFTPADDING",(0,0),(0,0), 4), ("LEFTPADDING",(1,0),(1,0), 8),
-                ("LINEBELOW",(0,0),(-1,-1), 0.5, colors.white),
-            ]))
-            tagesblock.append(zeile)
-        tagesblock.append(Spacer(1, 4*mm))
-        # KeepTogether: Tagesbalken soll nicht alleine am Seitenende hängen,
-        # ohne dass noch Inhalt des Tages mit auf dieselbe Seite passt.
-        story.append(KeepTogether(tagesblock[:2] + [tagesblock[2]] if len(tagesblock) > 2 else tagesblock))
-        story.extend(tagesblock[3:] if len(tagesblock) > 3 else [])
+        band = Table([[Paragraph(f'{wochentage[d.weekday()]}, {d.strftime("%d.%m.%Y")}', s_tag)]], colWidths=[180 * mm])
+        band.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), HELL),
+            ("TOPPADDING", (0, 0), (-1, -1), 3.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5), ("LEFTPADDING", (0, 0), (-1, -1), 6)]))
+        evs = daten["tage"][d]
+        zeilen = [Zeile(ev, i == 0, i == len(evs) - 1) for i, ev in enumerate(evs)]
+        # Tagesband bleibt nie allein am Seitenende: es wandert mit dem ersten Ereignis zusammen.
+        story.append(KeepTogether([band, Spacer(1, 1.5 * mm)] + zeilen[:1]))
+        story.extend(zeilen[1:])
+        story.append(Spacer(1, 4 * mm))
 
     doc.build(story)
     return buf.getvalue()
@@ -6982,20 +6992,21 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
         land = g("land_beleg",0)
         d = _datum_parsen(g("hotel_checkin_datum",1))
-        ci_zeit = g("hotel_checkin_zeit",2) or "14:00"
+        ci_zeit, _ci_ang = hotel_zeit(g("hotel_checkin_zeit",2), HOTEL_CHECKIN_STANDARD)
         hotel_name = g("hotel_name",3)
         hotel_lat = g("hotel_lat",4); hotel_lon = g("hotel_lon",5)
         hotel_adresse = g("hotel_adresse",6)
         d_checkout = _datum_parsen(g("hotel_checkout_datum",7))
-        co_zeit = g("hotel_checkout_zeit",8) or "11:00"
+        co_zeit, _co_ang = hotel_zeit(g("hotel_checkout_zeit",8), HOTEL_CHECKOUT_STANDARD)
         hotel_koord = (float(hotel_lat), float(hotel_lon)) if hotel_lat is not None and hotel_lon is not None else None
         if not land or not d: continue
-        # Hotels haben kein UTC-Offset-Feld im Schema -> Rückfall auf MESZ
-        # (segment_zeit_zu_utc's Standard), damit der Vergleich mit den jetzt
-        # UTC-bewussten Flug-/Bahnzeiten trotzdem konsistent bleibt.
-        dt = segment_zeit_zu_utc(d, ci_zeit, None)
+        # Hotels haben kein UTC-Offset-Feld im Schema -> Die Hotelzeit gilt als Ortszeit des
+        # Hotellands (v3.60, mit Sommer-/Winterzeit); ist das Land unbekannt, bleibt der
+        # frühere Rückfall auf MESZ, damit der Vergleich mit den UTC-bewussten Flug-/Bahnzeiten
+        # trotzdem konsistent bleibt.
+        dt = hotel_zeit_zu_utc(d, ci_zeit, land)
         if dt is None: continue
-        dt_checkout = segment_zeit_zu_utc(d_checkout, co_zeit, None) if d_checkout else None
+        dt_checkout = hotel_zeit_zu_utc(d_checkout, co_zeit, land) if d_checkout else None
 
         # WICHTIG (allgemeingültig, nicht nur "am selben Tag"): Die
         # Check-in-Uhrzeit ist oft nur ein GENERISCHER Standardwert (z.B.
@@ -7081,18 +7092,19 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                 kommende_kandidaten.append((s["dt_ab"], s["typ"], detail, s["dt_ab_anzeige"]))
         cur2 = db.cursor()
         cur2.execute(f"""SELECT hotel_checkin_datum, hotel_checkin_zeit, hotel_name, hotel_adresse,
-            hotel_checkout_datum, hotel_checkout_zeit
+            hotel_checkout_datum, hotel_checkout_zeit, land_beleg
             FROM belege WHERE reise_code={P} AND transportart='Hotel'""", (reise_code,))
         for row in cur2.fetchall():
             g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
             d = _datum_parsen(g("hotel_checkin_datum",0))
-            ci_zeit = g("hotel_checkin_zeit",1) or "14:00"
+            ci_zeit, _ci_ang = hotel_zeit(g("hotel_checkin_zeit",1), HOTEL_CHECKIN_STANDARD)
             hotel_name = g("hotel_name",2)
             hotel_adresse = g("hotel_adresse",3)
             d_checkout = _datum_parsen(g("hotel_checkout_datum",4))
-            co_zeit = g("hotel_checkout_zeit",5) or "11:00"
+            co_zeit, _co_ang = hotel_zeit(g("hotel_checkout_zeit",5), HOTEL_CHECKOUT_STANDARD)
+            hotel_land = g("land_beleg",6)
             if not d: continue
-            dt_hotel = segment_zeit_zu_utc(d, ci_zeit, None)
+            dt_hotel = hotel_zeit_zu_utc(d, ci_zeit, hotel_land)
             if dt_hotel is None: continue
             # WICHTIG – dieselbe Korrektur wie bei "Last" (herkunft): die
             # Check-in-Zeit ist oft nur ein genereller Standardwert. Gibt es
@@ -7100,7 +7112,7 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
             # erst Zwischenstopp, dann Weiterflug zum Hotel-Ort), kann der
             # Reisende unmöglich vorher schon einchecken – sonst würde "Next:"
             # fälschlich das Hotel VOR dem eigentlich nächsten Flug zeigen.
-            dt_checkout = segment_zeit_zu_utc(d_checkout, co_zeit, None) if d_checkout else None
+            dt_checkout = hotel_zeit_zu_utc(d_checkout, co_zeit, hotel_land) if d_checkout else None
             fenster_ende = dt_checkout or (dt_hotel + timedelta(hours=24))
             spaeteste_ankunft = max(
                 (s["dt_an"] for s in segmente if dt_hotel < s["dt_an"] <= fenster_ende),
@@ -9064,8 +9076,11 @@ def reise_detail(code: str, request: Request):
             elif typ == "Hotel":
                 ci_d = to_d(get(b,"hotel_checkin_datum",11)) or to_d(get(b,"event_datum_von",9))
                 co_d = to_d(get(b,"hotel_checkout_datum",12)) or to_d(get(b,"event_datum_bis",10))
-                ci_z = get(b,"hotel_checkin_zeit",7) or ""
-                co_z = get(b,"hotel_checkout_zeit",13) or ""
+                # v3.60: Standardzeiten, wenn der Beleg keine nennt (Anzeige "ab 16:00" / "bis 10:00")
+                ci_z, ci_ang = hotel_zeit(get(b,"hotel_checkin_zeit",7), HOTEL_CHECKIN_STANDARD)
+                co_z, co_ang = hotel_zeit(get(b,"hotel_checkout_zeit",13), HOTEL_CHECKOUT_STANDARD)
+                ci_z = ("ab " if ci_ang else "") + ci_z
+                co_z = ("bis " if co_ang else "") + co_z
                 add_event(ci_d, ci_z, f"{icon} Hotel einchecken · {anbieter}",
                           f"{fmt_date(ci_d)}" if ci_d else "", bid, bet_s, bg, fg)
                 if bet_s: kosten_vergeben = True
@@ -9111,7 +9126,10 @@ def reise_detail(code: str, request: Request):
                 sub_t = " · ".join(sub_parts)
                 eintraege.append((von or "99:99", "termin", tid, f"{icon} {titel_t}", sub_t, zeit_txt, None, None))
 
-            eintraege.sort(key=lambda x: x[0])
+            def _sortzeit(z):
+                m = re.search(r"(\d{1,2}):(\d{2})", str(z or ""))
+                return "%02d:%s" % (int(m.group(1)), m.group(2)) if m else "99:99"
+            eintraege.sort(key=lambda x: _sortzeit(x[0]))
             if not eintraege:
                 return '<div style="padding:12px 16px;font-size:12px;color:var(--muted);font-style:italic">Keine Termine oder Belege an diesem Tag.</div>'
 
@@ -9136,7 +9154,7 @@ def reise_detail(code: str, request: Request):
                     sub_html += (f'<div style="font-size:11px;color:#7c3aed;margin-top:1px">🍽 davon Bewirtung '
                                  f'{_tt["teilbetrag"]:.2f} {_tt["waehrung"]} ({_tt["nummer"]})</div>')
                 rows += f"""<div style="display:flex;gap:12px;padding:8px 16px;border-bottom:1px solid var(--border);align-items:flex-start">
-                    <div style="width:44px;flex-shrink:0;font-size:12px;color:var(--muted);font-weight:600;padding-top:1px">{zeit_disp}</div>
+                    <div style="width:58px;flex-shrink:0;font-size:12px;color:var(--muted);font-weight:600;padding-top:1px">{zeit_disp}</div>
                     <div style="flex:1;font-size:13px">{titel_txt}{sub_html}</div>
                     <div style="text-align:right;white-space:nowrap;display:flex;gap:8px;align-items:center">{rechts_html}{link}</div>
                 </div>"""

@@ -45,7 +45,7 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote_plus
 
 from mod_db import get_db, ph, is_postgres
-from mod_zeit import utc_offset_parsen
+from mod_zeit import utc_offset_parsen, hotel_zeit, HOTEL_CHECKIN_STANDARD, HOTEL_CHECKOUT_STANDARD
 from mod_beleg import _namens_tokens
 import mod_mail
 from mod_mail import sende_mail
@@ -571,9 +571,12 @@ def _komponieren(ev: dict, reise: dict, klarname: str) -> dict:
         z = ["Hotel: " + (ev["name"] or "–")]
         if ev["ort_text"]:
             z.append("Adresse: " + ev["ort_text"])
-        z.append("Check-in: %s%s" % (_datum_text(ev["datum"]), (" ab " + ev["checkin_zeit"]) if ev["checkin_zeit"] else ""))
+        # v3.60: Fehlt die Zeit im Beleg, gilt Check-in 16:00 / Check-out 10:00 (Ortszeit des Hotels).
+        ci, ci_ang = hotel_zeit(ev["checkin_zeit"], HOTEL_CHECKIN_STANDARD)
+        z.append("Check-in: %s ab %s%s" % (_datum_text(ev["datum"]), ci, " (Standardzeit, Ortszeit)" if ci_ang else ""))
         if ev["bis_bekannt"]:
-            z.append("Check-out: %s%s" % (_datum_text(ev["bis"]), (" bis " + ev["checkout_zeit"]) if ev["checkout_zeit"] else ""))
+            co, co_ang = hotel_zeit(ev["checkout_zeit"], HOTEL_CHECKOUT_STANDARD)
+            z.append("Check-out: %s bis %s%s" % (_datum_text(ev["bis"]), co, " (Standardzeit, Ortszeit)" if co_ang else ""))
         if ev["naechte"]:
             z.append("Nächte: %d" % ev["naechte"])
         if ev["buchungscode"]:

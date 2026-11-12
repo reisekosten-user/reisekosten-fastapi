@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.59"
+DOKU_GEPRUEFT_FUER = "3.61"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -694,7 +694,8 @@ KAPITEL = [
               "Bei einer mehrtägigen Montage entsteht je Reise eine eigene Terminserie. Liegt nur ein Teil der Montage in einer anderen Reise, ist sie nicht wählbar (grauer Hinweis). "
               "Die Termine sind danach unabhängig: Änderungen oder Löschen gelten nur für die jeweilige Reise."),
         ("h3", "Reiseplan"),
-        ("p", "**🗺 Reiseplan** zeigt alle Flüge, Züge und Termine in zeitlicher Reihenfolge. Zwei PDF-Varianten: „für Reisemappe Mitarbeiter“ (mit Anlagen) und „zum Emailversand“ (ohne Buchungscodes, nie mit Anlagen). Mehr dazu im Kapitel „Reisemappe, Reise-PDFs und A1-Bescheinigung“."),
+        ("p", "**🗺 Reiseplan** zeigt alle Flüge, Züge und Termine in zeitlicher Reihenfolge. Zwei PDF-Varianten: „für Reisemappe Mitarbeiter“ (mit Anlagen) und „zum Emailversand“ (ohne Buchungscodes, nie mit Anlagen). Mehr dazu im Kapitel „Reisemappe, Reise-PDFs und A1-Bescheinigung“. Das PDF ist bewusst schlicht gehalten: graues Tagesband, Uhrzeit links mit Zeitleiste, Typ als kleiner grauer Text; unten stehen Stand und Seitenzahl."),
+        ("p", "**Hotelzeiten:** Steht im Hotelbeleg keine Check-in- oder Check-out-Zeit, nimmt die App **Check-in 16:00** und **Check-out 10:00** an (jeweils Ortszeit des Hotels). Im Reiseplan, im Tagesablauf und in der Outlook-Einladung steht dann „ab 16:00“ bzw. „bis 10:00“. Eine Zeit aus dem Beleg wird unverändert angezeigt."),
         ("h3", "Änderungen und Umbuchungen"),
         ("ul", [
             "Wird ein Beleg als **Flugänderung/Umbuchung** eingestuft, erscheint oben auf der Reise-Seite „n Änderungen warten auf Klärung“. "
@@ -847,7 +848,7 @@ KAPITEL = [
             "**Wartezeit:** Änderungen werden erst gesendet, wenn sie [[ruhe_sekunden]] Sekunden unverändert geblieben sind (Einstellung KALENDER_RUHE_SEKUNDEN). Das verhindert eine Mail-Flut beim Korrigieren.",
             "Die Einladung enthält absolute Zeiten (Outlook rechnet in die eigene Zeitzone um); die Ortszeiten stehen zusätzlich im Text.",
             "**Montage über mehrere Tage** geht als **eine Terminserie** in einer Mail raus (mit Ausnahmen für abweichende Tage). Serien laufen in Berliner Zeit, damit die Uhrzeit über die Zeitumstellung gleich bleibt. Siehe Kapitel „Flug, Bahn und Termine“.",
-            "**Hotels:** Ein ganztägiger Eintrag vom Check-in- bis zum Check-out-Tag (blockiert keine Zeit). Im Feld „Ort“ stehen Hotelname und Adresse, damit sich daraus direkt Google Maps oder die Karten-App öffnen lässt; im Text stehen außerdem Check-in/-out-Zeit, Nächte, Buchungscode und ein Karten-Link. Mehrere Belege zum selben Aufenthalt (Buchungsbestätigung und Rechnung) ergeben **einen** Eintrag. Ohne Check-in-Datum im Beleg gibt es keinen Eintrag (Hinweis unter „Nicht berücksichtigt“).",
+            "**Hotels:** Ein ganztägiger Eintrag vom Check-in- bis zum Check-out-Tag (blockiert keine Zeit). Im Feld „Ort“ stehen Hotelname und Adresse, damit sich daraus direkt Google Maps oder die Karten-App öffnen lässt; im Text stehen außerdem Check-in/-out-Zeit (fehlt sie im Beleg: 16:00 bzw. 10:00 als Standardzeit), Nächte, Buchungscode und ein Karten-Link. Mehrere Belege zum selben Aufenthalt (Buchungsbestätigung und Rechnung) ergeben **einen** Eintrag. Ohne Check-in-Datum im Beleg gibt es keinen Eintrag (Hinweis unter „Nicht berücksichtigt“).",
             "Für **bereits vergangene** Termine und beendete Hotelaufenthalte werden keine Einladungen mehr gesendet. Sie bleiben „noch nicht gesendet“.",
         ]),
         ("p", "Seite **📅 Outlook** je Reise: Tabelle mit Reisendem, Termin, Status und zuletzt gesendet. **„Jetzt senden / aktualisieren“** überspringt die Wartezeit "

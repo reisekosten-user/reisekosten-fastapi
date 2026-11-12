@@ -13,6 +13,38 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 
+# ── Hotel-Standardzeiten (v3.60) ────────────────────────────────────────────────────────
+# Steht im Beleg keine Check-in-/Check-out-Zeit, gilt: Check-in 16:00, Check-out 10:00 –
+# jeweils in der Ortszeit des Hotels.
+HOTEL_CHECKIN_STANDARD = "16:00"
+HOTEL_CHECKOUT_STANDARD = "10:00"
+
+
+def hotel_zeit(roh, standard: str) -> tuple:
+    """(Uhrzeit 'HH:MM', angenommen?) – fehlt die Zeit im Beleg oder ist sie ungültig, gilt die Standardzeit."""
+    import re
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})", str(roh or ""))
+    if m and int(m.group(1)) <= 23 and int(m.group(2)) <= 59:
+        return "%02d:%s" % (int(m.group(1)), m.group(2)), False
+    return standard, True
+
+
+def hotel_zeit_zu_utc(datum: date | None, zeit: str | None, land_code) -> datetime | None:
+    """Hotel-Uhrzeit (Ortszeit des Hotels) als UTC. Bekanntes Hotelland -> Zeitzone des Landes samt
+    Sommer-/Winterzeit; sonst wie bisher der MESZ-Rückfall von segment_zeit_zu_utc."""
+    if not datum or not zeit:
+        return None
+    import mod_zeitzone as zz
+    code = str(land_code or "").strip().upper()[:2]
+    if code in zz.LAND_ZONE:
+        try:
+            h, m = str(zeit).split(":")[:2]
+            return zz.instant(datum, int(h) * 60 + int(m), zz.land_zone(code))
+        except Exception:
+            pass
+    return segment_zeit_zu_utc(datum, zeit, None)
+
+
 def utc_offset_parsen(offset_str: str | None) -> timedelta | None:
     """Parst '+02:00', '-05:00', '+0200', 'UTC', 'GMT', 'Z' zu einem timedelta."""
     if not offset_str:
