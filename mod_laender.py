@@ -129,3 +129,24 @@ def land_optionen_html(gewaehlt=None, leer_text: str = "– kein Land –") -> s
     teile.extend(opt(c, f"{c} – {n}") for c, n in LAENDER_ALLE)
     teile.append("</optgroup>")
     return "".join(teile)
+
+
+def land_optionen_vma_html(gewaehlt=None) -> str:
+    """<option>-Liste für die Reise-Formulare (Reise neu, Land hinzufügen/bearbeiten): erst häufige Reiseländer,
+    dann alle Länder A–Z, Anzeige „Name (CC)“. Ein gespeicherter Wert außerhalb der Liste bleibt als Option erhalten."""
+    wahl = (gewaehlt or "").strip().upper()
+
+    def opt(code, name):
+        sel = " selected" if code == wahl else ""
+        return f'<option value="{escape(code)}"{sel}>{escape(name)} ({escape(code)})</option>'
+
+    teile = []
+    if wahl and wahl not in LAND_NAMEN:
+        teile.append(opt(wahl, "Unbekanntes Land"))
+    teile.append('<optgroup label="Häufige Reiseländer">')
+    teile.extend(opt(c, LAND_NAMEN[c]) for c in HAEUFIGE if c in LAND_NAMEN)
+    teile.append("</optgroup>")
+    teile.append('<optgroup label="Alle Länder A–Z">')
+    teile.extend(opt(c, n) for c, n in LAENDER_ALLE)
+    teile.append("</optgroup>")
+    return "".join(teile)

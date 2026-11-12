@@ -67,6 +67,10 @@ VMA_SAETZE: dict[str, dict] = {
     "PH": {"name": "Philippinen",        "voll": 37.00,  "halb": 18.50},
     "VN": {"name": "Vietnam",            "voll": 35.00,  "halb": 17.50},
     "NZ": {"name": "Neuseeland",         "voll": 55.00,  "halb": 27.50},
+    # Baltikum: amtliche BMF-Sätze ab 1.1.2026 (24 Std. / An- und Abreisetag)
+    "EE": {"name": "Estland",            "voll": 39.00,  "halb": 26.00},
+    "LV": {"name": "Lettland",           "voll": 46.00,  "halb": 31.00},
+    "LT": {"name": "Litauen",            "voll": 48.00,  "halb": 32.00},
 }
 
 # IATA → ISO-Ländercode – VOLLSTÄNDIGE öffentliche Flughafendatenbank
@@ -600,10 +604,36 @@ def vma_fuer_land_erweitert(cur, land_code: str, ort: str | None = None) -> dict
         n = row[0] if isinstance(row, tuple) else row["land_name"]
         v = row[1] if isinstance(row, tuple) else row["vma_voll"]
         h = row[2] if isinstance(row, tuple) else row["vma_halb"]
-        return {"land_name": n, "voll": float(v), "halb": float(h), "quelle": "importiert"}
+        from mod_laender import land_name as _kn
+        return {"land_name": _kn(land_code) or n, "voll": float(v), "halb": float(h), "quelle": "importiert"}
 
-    s = VMA_SAETZE.get(land_code, {"name": land_code, "voll": 28.00, "halb": 14.00})
+    from mod_laender import land_name as _klarname
+    s = VMA_SAETZE.get(land_code, {"name": _klarname(land_code) or land_code, "voll": 28.00, "halb": 14.00})
     return {"land_name": s["name"], "voll": s["voll"], "halb": s["halb"], "quelle": "code (nicht importiert)"}
+
+
+def saetze_alle() -> dict:
+    """Länder-Sätze für die Formulare (Vorschau im Browser): fest hinterlegte Werte, darüber die importierten BMF-Sätze.
+    Länder ohne Satz fehlen im Ergebnis (die Formulare weisen dann auf den Import hin)."""
+    from mod_db import get_db
+    from mod_laender import land_name as _klarname
+    erg = {k: {"name": v["name"], "voll": v["voll"], "halb": v["halb"], "importiert": False} for k, v in VMA_SAETZE.items()}
+    try:
+        db = get_db(); cur = db.cursor()
+        try:
+            cur.execute("SELECT land_code, land_name, vma_voll, vma_halb FROM vma_saetze WHERE ort IS NULL")
+            for r in cur.fetchall():
+                k = (r["land_code"] if hasattr(r, "keys") else r[0]) or ""
+                n = (r["land_name"] if hasattr(r, "keys") else r[1]) or ""
+                v = r["vma_voll"] if hasattr(r, "keys") else r[2]
+                h = r["vma_halb"] if hasattr(r, "keys") else r[3]
+                if k and v is not None and h is not None:
+                    erg[k.upper()] = {"name": _klarname(k) or n or k, "voll": float(v), "halb": float(h), "importiert": True}
+        finally:
+            cur.close(); db.close()
+    except Exception as ex:
+        print(f"[VMA] importierte Sätze nicht geladen: {ex}")
+    return erg
 
 
 def staedte_fuer_land(cur, land_code: str) -> list[str]:

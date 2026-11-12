@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.57"
+DOKU_GEPRUEFT_FUER = "3.58"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -456,7 +456,7 @@ KAPITEL = [
             ["Abreise / Rückkehr", "Zeitraum der Reise (Pflicht)."],
             ["Mitarbeiter", "Ein oder mehrere Reisende (Mehrfachauswahl mit Strg-/Cmd-Klick)."],
             ["Notiz", "Optional, z. B. Kundenprojekt oder Messe."],
-            ["🌍 Länder & VMA-Sätze", "Länder mit Von/Bis-Datum. Daraus wird die VMA berechnet. Beim Auswählen erscheint der Satz (voll / halb)."],
+            ["🌍 Länder & VMA-Sätze", "Länder mit Von/Bis-Datum. Daraus wird die VMA berechnet. Die Auswahl enthält alle Länder (häufige Reiseländer zuerst, dann A–Z). Beim Auswählen erscheint der Satz (voll / halb). Steht dort „noch kein VMA-Satz hinterlegt“, einmal unter „VMA-Sätze“ importieren."],
         ], [28, 72]),
         ("h3", "Die Reise-Seite"),
         ("p", "Oben stehen Reisecode, Titel, Status (**In n Tagen** / **Aktiv** / **Abgeschlossen**) und Kennzahlen: VMA gesamt netto, Trennungspauschale, Kosten (Rechnungen)."),

@@ -18,7 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 # ── Module importieren ────────────────────────────────────────────────────────
 from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schema, get_migrations, repair_legacy_columns, migriere_verknuepfungen_zu_gruppen
 from mod_vma import (VMA_SAETZE, IATA_TO_LAND, LAENDER_LISTE, vma_fuer_land,
-                      importiere_aktuelle_saetze, vma_fuer_land_erweitert, STADT_ZU_LAND)
+                      importiere_aktuelle_saetze, vma_fuer_land_erweitert, STADT_ZU_LAND, saetze_alle)
 from mod_anon import anonymisieren
 from mod_kk import (abrechnung_parsen, abrechnung_zuordnen, mitarbeiter_finden, auswahl_wert,
                     zuordnungen_laden as kk_zuordnungen_laden,
@@ -125,6 +125,8 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.58", "zeit": "2026-11-12 12:53", "aenderungen": [
+        "Behoben: In den Länder-Auswahllisten (Reise neu, Land hinzufügen, Land bearbeiten) fehlten viele Länder, z. B. Estland, Lettland und Litauen. Die Auswahl enthält jetzt alle Länder (häufige zuerst, dann A–Z). Die Satzvorschau zeigt die importierten BMF-Sätze; fehlt für ein Land noch ein Satz, steht ein Hinweis auf den Import. Estland, Lettland und Litauen sind zusätzlich mit den amtlichen Sätzen 2026 hinterlegt (39/26, 46/31, 48/32 €)."]},
     {"version": "3.57", "zeit": "2026-11-12 11:25", "aenderungen": [
         "Neu: Einstellungen › „Kalender-Antworten aufräumen“. Die Seite listet alte Belege „Mail: Accepted: …“ (Antworten auf Outlook-Einladungen, die vor Version 3.52 als Beleg abgelegt wurden) und löscht die markierten. Belege mit Betrag, geprüfte, an Habel gesendete und Belege einer Bewirtung oder Bargeld-Buchung bleiben stehen."]},
     {"version": "3.56", "zeit": "2026-11-12 11:08", "aenderungen": [
@@ -8047,9 +8049,7 @@ def reise_neu_form():
         f'{get(r,"kuerzel",0)} – {get(r,"klarname",1)}</option>'
         for r in ma_rows)
 
-    land_opts = "".join(
-        f'<option value="{code}">{name} ({code})</option>'
-        for code, name in LAENDER_LISTE)
+    land_opts = mod_laender.land_optionen_vma_html()
 
     # Vorschau-Code
     try:
@@ -8147,7 +8147,7 @@ def reise_neu_form():
     </div>
 
     <script>
-    const VMA = {json.dumps({k: v for k, v in VMA_SAETZE.items()})};
+    const VMA = {json.dumps(saetze_alle())};
     const LAND_OPTS = `{land_opts}`;
 
     function updateRueckkehr(v) {{
@@ -8183,6 +8183,16 @@ def reise_neu_form():
                 row.after(hint);
             }}
             hint.textContent = info.name + ': ' + info.voll + ' EUR/Tag (voll) · ' + info.halb + ' EUR/Tag (halber Satz)';
+        }} else {{
+            const row = sel.closest('.laender-zeile');
+            let hint = row.querySelector('.vma-hint');
+            if (!hint) {{
+                hint = document.createElement('div');
+                hint.className = 'vma-hint';
+                hint.style.cssText = 'grid-column:1/-1;font-size:11px;color:#b45309;margin-top:-4px;margin-bottom:4px';
+                row.after(hint);
+            }}
+            hint.textContent = sel.value ? 'Für dieses Land ist noch kein VMA-Satz hinterlegt – bitte unter „VMA-Sätze“ importieren.' : '';
         }}
     }}
 
@@ -8258,8 +8268,8 @@ async def reise_neu(request: Request):
             lvon = land_vons[i] if i < len(land_vons) else ""
             lbis = land_bis_list[i] if i < len(land_bis_list) else ""
             if not lvon or not lbis: continue
-            lname = VMA_SAETZE.get(lcode, {}).get("name", lcode)
-            vvoll, vhalb = vma_fuer_land(lcode)
+            info_l = vma_fuer_land_erweitert(cur, lcode, None)      # importierter Satz, sonst fester Ersatzwert
+            lname, vvoll, vhalb = info_l["land_name"], info_l["voll"], info_l["halb"]
             cur.execute(
                 f"INSERT INTO reise_laender (reise_code,datum_von,datum_bis,land_code,land_name,vma_voll,vma_halb) "
                 f"VALUES ({P},{P},{P},{P},{P},{P},{P})",
@@ -9499,9 +9509,7 @@ async def reise_bearbeiten(code: str, request: Request):
 @app.get("/reise/{code}/land/neu", response_class=HTMLResponse)
 def land_neu_form(code: str):
     rcode = code.upper()
-    land_opts = "".join(
-        f'<option value="{lc}">{name} ({lc})</option>'
-        for lc, name in LAENDER_LISTE)
+    land_opts = mod_laender.land_optionen_vma_html()
     content = f"""
     <h1 class="page-title">Land hinzufügen – {rcode}</h1>
     <div class="card" style="max-width:500px">
@@ -9614,9 +9622,7 @@ def land_bearbeiten_form(code: str, lid: int):
         lcode = get(r,"land_code",3)
         vvoll = get(r,"vma_voll",4) or 0; vhalb = get(r,"vma_halb",5) or 0
 
-        land_opts = "".join(
-            f'<option value="{lc}"{" selected" if lc==lcode else ""}>{name} ({lc})</option>'
-            for lc, name in LAENDER_LISTE)
+        land_opts = mod_laender.land_optionen_vma_html(lcode)
 
         content = f"""
         <h1 class="page-title">Land bearbeiten – {rcode}</h1>
@@ -9656,7 +9662,7 @@ def land_bearbeiten_form(code: str, lid: int):
           </div>
         </div>
         <script>
-        const VMA = {json.dumps(VMA_SAETZE)};
+        const VMA = {json.dumps(saetze_alle())};
         function showVMA(code) {{
             const info = VMA[code];
             if (info) {{
@@ -9678,7 +9684,7 @@ async def land_bearbeiten(code: str, lid: int, request: Request):
     dbis = (form.get("datum_bis") or "").strip()
     vvoll = float(form.get("vma_voll") or 0)
     vhalb = float(form.get("vma_halb") or 0)
-    lname = VMA_SAETZE.get(lcode, {}).get("name", lcode)
+    lname = VMA_SAETZE.get(lcode, {}).get("name") or mod_laender.land_name(lcode) or lcode
     try:
         P = ph()
         db = get_db(); cur = db.cursor()
