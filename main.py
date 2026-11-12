@@ -125,6 +125,8 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.59", "zeit": "2026-11-12 13:44", "aenderungen": [
+        "Neu: Im Reiseportal der Mitarbeiter steht in der Karte „Reiseunterlagen“ ganz oben der Knopf „Reiseplan (PDF)“. Das PDF (Flüge, Bahn, Hotels, Termine, mit Buchungscodes) wird bei jedem Öffnen neu erstellt und ist daher immer aktuell. Bei abgesagten oder verschobenen Reisen und solange der Reiseplan leer ist, erscheint der Knopf nicht."]},
     {"version": "3.58", "zeit": "2026-11-12 12:53", "aenderungen": [
         "Behoben: In den Länder-Auswahllisten (Reise neu, Land hinzufügen, Land bearbeiten) fehlten viele Länder, z. B. Estland, Lettland und Litauen. Die Auswahl enthält jetzt alle Länder (häufige zuerst, dann A–Z). Die Satzvorschau zeigt die importierten BMF-Sätze; fehlt für ein Land noch ein Satz, steht ein Hinweis auf den Import. Estland, Lettland und Litauen sind zusätzlich mit den amtlichen Sätzen 2026 hinterlegt (39/26, 46/31, 48/32 €)."]},
     {"version": "3.57", "zeit": "2026-11-12 11:25", "aenderungen": [
@@ -10647,6 +10649,16 @@ def _portal_unterlagen_karte(token: str, info: dict) -> str:
     """Karte „Reiseunterlagen“ im Portal: die Reise-PDFs aus den Einstellungen (z. B. Krankenversicherung – alle für
     alle Mitarbeiter plus die persönlichen dieses Reisenden) und bei Europa-Reisen seine A1-Bescheinigung."""
     zeilen = ""
+    try:                                   # Reiseplan als PDF: wird bei jedem Öffnen frisch erzeugt (v3.59)
+        if abw.status_von(info["reise_code"]) == "aktiv":
+            plan = reiseplan_daten_laden(info["reise_code"])
+            if plan and plan.get("tage"):
+                zeilen += (f'<a href="/portal/{token}/reiseplan" target="_blank" class="btn btn-primary" '
+                           f'style="width:100%;display:block;text-align:center;margin-bottom:4px">🗺 Reiseplan (PDF)</a>'
+                           f'<div style="font-size:12px;color:var(--muted);margin:0 0 10px">Flüge, Bahn, Hotels und Termine. '
+                           f'Wird bei jedem Öffnen neu erstellt und ist daher immer aktuell.</div>')
+    except Exception as ex:
+        print(f"[Portal] Reiseplan-Link nicht erzeugt: {ex}")
     try:
         for d in mod_reisepdf.liste(nur_aktive=True):
             if d["kuerzel"] and d["kuerzel"] != info["kuerzel"]:
@@ -10731,6 +10743,33 @@ def portal_unterlage(token: str, pid: int):
         return HTMLResponse(portal_shell("Nicht verfügbar", '<p>Das Dokument kann gerade nicht geladen werden. Bitte später noch einmal versuchen.</p>'),
                             status_code=503)
     return _datei_antwort(daten_b, d["titel"] or f"Dokument_{pid}")
+
+
+@app.get("/portal/{token}/reiseplan")
+def portal_reiseplan_pdf(token: str):
+    """Reiseplan der Reise als PDF (mit Buchungscodes, ohne Anlagen). Wird bei jedem Aufruf frisch erzeugt, damit der
+    Reisende immer den aktuellen Stand sieht. Abgesagte oder verschobene Reisen haben keinen Reiseplan mehr."""
+    info = zugang_aus_token(token)
+    if not info:
+        return HTMLResponse(portal_shell("Link ungültig", '<p>Ungültiger Link.</p>'), status_code=404)
+    rcode = info["reise_code"]
+    if abw.status_von(rcode) != "aktiv":
+        return HTMLResponse(portal_shell("Reise nicht mehr aktuell",
+            '<p>Diese Reise wurde verschoben oder abgesagt. Einen neuen Reiseplan gibt es mit der neuen Reise.</p>'), status_code=404)
+    try:
+        daten = reiseplan_daten_laden(rcode)
+        if not daten or not daten.get("tage"):
+            return HTMLResponse(portal_shell("Noch kein Reiseplan",
+                '<p>Für diese Reise liegen noch keine Flüge, Hotels oder Termine vor.</p>'), status_code=404)
+        pdf_bytes = _reiseplan_pdf_bauen(rcode, daten, False)
+    except Exception as ex:
+        print(f"[Portal] Reiseplan nicht erzeugt: {ex}")
+        return HTMLResponse(portal_shell("Nicht verfügbar",
+            '<p>Der Reiseplan kann gerade nicht erstellt werden. Bitte später noch einmal versuchen.</p>'), status_code=503)
+    from fastapi.responses import Response
+    return Response(content=pdf_bytes, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="Reiseplan_{re.sub(r"[^A-Za-z0-9-]", "", rcode)}.pdf"',
+                             "Cache-Control": "private, no-store"})
 
 
 @app.get("/portal/{token}/a1")

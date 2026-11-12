@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.58"
+DOKU_GEPRUEFT_FUER = "3.59"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -209,6 +209,7 @@ SEITEN = [
     ("/portal/{token}/kilometer/{kid}/loeschen", "Kilometer-Eintrag löschen", "a-km"),
     ("/portal/{token}/unterlagen/{pid}", "Reise-PDF (z. B. Krankenversicherung) im Portal ansehen", "a-start"),
     ("/portal/{token}/a1", "Eigene A1-Bescheinigung im Portal ansehen (nur bei Reisen in Europa)", "a-start"),
+    ("/portal/{token}/reiseplan", "Reiseplan als PDF im Portal ansehen (immer aktuell)", "a-start"),
     ("/portal/{token}/visum/{vid}", "Eigenes Visum im Portal ansehen (nur für ein Land dieser Reise)", "a-start"),
     ("/portal/{token}/bewirtung/neu", "Bewirtungsbeleg im Portal anlegen", "a-bewirtung"),
     ("/portal/{token}/bewirtung/{bid}/bearbeiten", "Bewirtungsbeleg-Entwurf bearbeiten", "a-bewirtung"),
@@ -263,6 +264,7 @@ KAPITEL = [
         ]),
         ("h3", "Reiseunterlagen"),
         ("p", "Oben im Portal findest du die Karte **📄 Reiseunterlagen**: deine **Krankenversicherung** und weitere Dokumente zur Reise, bei Reisen in Europa auch deine **A1-Bescheinigung**. Antippen öffnet das PDF, so hast du es unterwegs auf dem Handy dabei. Fehlt die A1 noch, steht dort ein Hinweis; schicke sie dann über „Beleg hochladen“."),
+        ("p", "Ganz oben in dieser Karte steht der Knopf **🗺 Reiseplan (PDF)** mit deinen Flügen, Zügen, Hotels und Terminen. Das PDF wird bei **jedem Öffnen neu erstellt**: Ändert sich der Reiseplan, siehst du beim nächsten Antippen den neuen Stand. Eine auf dem Handy gespeicherte Kopie wird nicht automatisch aktualisiert; öffne den Knopf im Portal einfach noch einmal."),
         ("p", "Nach der Reise prüft dein Organisator alles und erstellt die Abrechnung. Diese Anleitung erreichst du im "
               "Portal jederzeit über „📖 Anleitung“."),
     ]},
@@ -541,7 +543,7 @@ KAPITEL = [
             "**Mehrere Reisende:** Die VMA-Tage der Reise-Seite gibt es nur einmal je Reise. Die Mahlzeiten, die ein Reisender zuletzt gespeichert hat, stehen dort; Änderungen der Reise-Seite gelten für alle Reisenden.",
         ]),
         ("h3", "Karte „📄 Reiseunterlagen“ im Portal"),
-        ("p", "Oben im Portal steht die Karte **Reiseunterlagen**. Sie enthält die **Reise-PDFs** aus den Einstellungen (zum Beispiel die Krankenversicherung; alle für alle Mitarbeiter plus die persönlichen des Reisenden, pausierte nicht) und bei **Reisen in Europa** die **A1-Bescheinigung** des Reisenden. Liegt sie noch nicht vor, steht dort ein Hinweis, sie über „Beleg hochladen“ zu schicken; ist sie als „nicht nötig“ markiert, steht der Grund da. Zeigt die A1 einen zu kurzen Zeitraum, gibt es einen Warnhinweis. Hat der Reisende für ein Land der Reise ein gültiges **Visum** mit hinterlegter Kopie, steht dort auch ein Knopf **🛂 Visum Land**. Jeder Reisende sieht nur seine eigenen Dokumente; die Links funktionieren nur mit seinem persönlichen Portal-Link."),
+        ("p", "Oben im Portal steht die Karte **Reiseunterlagen**. Sie enthält die **Reise-PDFs** aus den Einstellungen (zum Beispiel die Krankenversicherung; alle für alle Mitarbeiter plus die persönlichen des Reisenden, pausierte nicht) und bei **Reisen in Europa** die **A1-Bescheinigung** des Reisenden. Ganz oben steht der Knopf **🗺 Reiseplan (PDF)**: der Reiseplan der Reise (mit Buchungscodes, ohne Anlagen), der bei jedem Öffnen neu erstellt wird und deshalb immer dem aktuellen Stand entspricht. Er erscheint, sobald die Reise Flüge, Hotels oder Termine hat, und verschwindet bei abgesagten oder verschobenen Reisen. Liegt die A1 noch nicht vor, steht dort ein Hinweis, sie über „Beleg hochladen“ zu schicken; ist sie als „nicht nötig“ markiert, steht der Grund da. Zeigt die A1 einen zu kurzen Zeitraum, gibt es einen Warnhinweis. Hat der Reisende für ein Land der Reise ein gültiges **Visum** mit hinterlegter Kopie, steht dort auch ein Knopf **🛂 Visum Land**. Jeder Reisende sieht nur seine eigenen Dokumente; die Links funktionieren nur mit seinem persönlichen Portal-Link."),
     ]},
     {"id": "b-eingang", "teil": "B", "titel": "Belege hereinbekommen", "bloecke": [
         ("p", "Belege kommen auf drei Wegen in die App. Jeder Beleg wird ausgelesen: Text lesen, Namen und Mailadressen der Mitarbeiter unkenntlich machen "
