@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.64"
+DOKU_GEPRUEFT_FUER = "3.65"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -721,7 +721,7 @@ KAPITEL = [
             "Hier laden Sie PDFs hoch, die in jede Reisemappe gehören, zum Beispiel die **Kopie der Krankenversicherung**. Auch ein Foto (JPG/PNG) geht; es wird in ein PDF umgewandelt. "
             "Höchstens 15 MB und 60 Seiten, kein Passwortschutz.",
             "**Gilt für:** „Alle Mitarbeiter“ oder ein bestimmter Mitarbeiter (z. B. seine persönliche Versicherungskarte). Der **Titel** erscheint im Inhaltsverzeichnis.",
-            "**Pausieren** nimmt ein Dokument vorübergehend aus allen Mappen, **Entfernen** löscht den Eintrag. **Ansehen** öffnet das PDF.",
+            "**Titel ändern** korrigiert z. B. einen Tippfehler (Datei, Zuordnung und QR-Link bleiben gleich). **Pausieren** nimmt ein Dokument vorübergehend aus allen Mappen, **Entfernen** löscht den Eintrag. **Ansehen** öffnet das PDF.",
             "**Nur QR-Code** (nur bei „Alle Mitarbeiter“, z. B. für die **Weltpolice**): Das Dokument wird **nicht** mitgedruckt. Am Ende des Reiseplans steht stattdessen ein QR-Code mit einem dauerhaften Link; "
             "wer ihn mit dem Handy scannt, sieht das Dokument sofort, auch ohne Anmeldung. Das gilt nur für die Reisemappe, nicht für das PDF zum Emailversand. "
             "Der Link bleibt gleich, auch wenn Sie das Dokument mit **Datei ersetzen** durch eine neue Version austauschen; bereits gedruckte QR-Codes bleiben so gültig. **Pausieren** oder **Entfernen** sperrt den Link. "

@@ -128,6 +128,9 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.65", "zeit": "2026-11-13 11:30", "aenderungen": [
+        "Reise-PDFs: Der Titel eines Dokuments lässt sich jetzt ändern (Einstellungen › Reise-PDFs › „Titel ändern“), z. B. bei einem Tippfehler. Datei, Zuordnung und QR-Link bleiben gleich; der neue Titel erscheint im Inhaltsverzeichnis, unter dem QR-Code und im Portal.",
+    ]},
     {"version": "3.64", "zeit": "2026-11-13 11:06", "aenderungen": [
         "Reisemappe: Große Dokumente wie die Weltpolice werden nicht mehr mitgedruckt. Am Ende des Reiseplans steht nur noch ein QR-Code mit einem dauerhaften Link ins Portal (Einstellungen › Reise-PDFs › „Nur QR-Code“; Datei ersetzen ändert den Link nicht). Nicht im E-Mail-PDF.",
         "Korrektur Hotel-Abgleich: Ein Flug um 7:00 vor dem Standard-Check-out (10:00) oder eine Landung nach dem Standard-Check-in (16:00) steht jetzt in der richtigen Reihenfolge (Reiseplan, Tagesablauf). Die Karte hält ein Hotel nicht mehr fest, wenn der Flug woanders landet.",
@@ -14370,7 +14373,11 @@ def _reisepdf_seite(ok: str = "", fehler: str = "") -> str:
                          f'style="display:block;margin-top:6px"><input type="file" name="datei" accept=".pdf,image/*" required '
                          f'style="font-size:12px;max-width:190px"> '
                          f'<button type="submit" class="btn btn-secondary btn-sm">Datei ersetzen</button></form>')
-        zeilen += (f'<tr><td><b>{_bw_e(d["titel"])}</b><div style="{leise}">{_bw_e(d["dateiname"] or "")}</div>{qr_info}</td>'
+        titel_form = (f'<form method="post" action="/einstellungen/reise-pdfs/{d["id"]}/titel" style="display:block;margin-top:6px">'
+                      f'<input type="text" name="titel" value="{_bw_e(d["titel"])}" required maxlength="120" '
+                      f'style="font-size:12px;width:200px"> '
+                      f'<button type="submit" class="btn btn-secondary btn-sm">Titel ändern</button></form>')
+        zeilen += (f'<tr><td><b>{_bw_e(d["titel"])}</b><div style="{leise}">{_bw_e(d["dateiname"] or "")}</div>{titel_form}{qr_info}</td>'
                    f'<td>{gilt}</td><td>{d["seiten"] or "?"} S. · {kb} KB</td><td>{akt_txt}</td>'
                    f'<td style="white-space:nowrap">'
                    f'<a href="/einstellungen/reise-pdfs/{d["id"]}/ansehen" target="_blank" class="btn btn-secondary btn-sm">Ansehen</a> '
@@ -14478,6 +14485,18 @@ async def reisepdfs_qr(pid: int, request: Request):
         return HTMLResponse(shell("Reise-PDFs", _reisepdf_seite(fehler=str(ex)), "einstellungen"), status_code=400)
     return RedirectResponse("/einstellungen/reise-pdfs?ok=" + urllib.parse.quote(
         "Ab jetzt nur noch als QR-Code in der Reisemappe" if not d["nur_qr"] else "Wird wieder an die Reisemappe angehängt"), status_code=303)
+
+
+@app.post("/einstellungen/reise-pdfs/{pid}/titel", response_class=HTMLResponse)
+async def reisepdfs_titel(pid: int, request: Request, titel: str = Form("")):
+    """Titel ändern (z. B. Tippfehler). Datei, Zuordnung und QR-Link bleiben gleich."""
+    if not ist_organisator(request):
+        return _reisepdf_kein_zugriff()
+    try:
+        mod_reisepdf.umbenennen(pid, titel)
+    except ValueError as ex:
+        return HTMLResponse(shell("Reise-PDFs", _reisepdf_seite(fehler=str(ex)), "einstellungen"), status_code=400)
+    return RedirectResponse("/einstellungen/reise-pdfs?ok=" + urllib.parse.quote("Titel geändert"), status_code=303)
 
 
 @app.post("/einstellungen/reise-pdfs/{pid}/ersetzen", response_class=HTMLResponse)

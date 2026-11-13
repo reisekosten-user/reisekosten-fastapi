@@ -220,6 +220,22 @@ def ersetzen(pid: int, daten: bytes, dateiname: str, content_type: str = "") -> 
         cur.close(); db.close()
 
 
+def umbenennen(pid: int, titel: str) -> None:
+    """Ändert nur den Titel (z. B. bei einem Tippfehler). Zuordnung, Datei und QR-Link bleiben unverändert."""
+    titel = (titel or "").strip()[:120]
+    if not titel:
+        raise ValueError("Bitte einen Titel eingeben.")
+    if not holen(pid):
+        raise ValueError("Dokument nicht gefunden.")
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(f"UPDATE {TABELLE} SET titel={P} WHERE id={P}", (titel, pid))
+        db.commit()
+    finally:
+        cur.close(); db.close()
+
+
 def qr_setzen(pid: int, an: bool) -> str:
     """Schaltet „nur als QR-Code“ ein oder aus. Die Kennung entsteht beim ersten Einschalten und bleibt für immer gleich
     (auch nach dem Ausschalten), damit bereits gedruckte QR-Codes gültig bleiben. Rückgabe: die Kennung."""
