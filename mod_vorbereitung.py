@@ -39,13 +39,21 @@ def _g(row, key, idx):
 
 
 def _d(x) -> date | None:
-    """Datum aus date, datetime oder 'YYYY-MM-DD…' (SQLite liefert Text, PostgreSQL Datumswerte)."""
+    """Datum aus date, datetime, 'DD.MM.YYYY' (so stehen Flug-/Bahnsegmente aus der Beleg-Analyse im ki_json)
+    oder 'YYYY-MM-DD…' (SQLite liefert Text, PostgreSQL Datumswerte)."""
     if isinstance(x, datetime):
         return x.date()
     if isinstance(x, date):
         return x
+    txt = str(x or "").strip()
+    m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})", txt)
+    if m:
+        try:
+            return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return None
     try:
-        return date.fromisoformat(str(x)[:10])
+        return date.fromisoformat(txt[:10])
     except Exception:
         return None
 

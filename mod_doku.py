@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.63"
+DOKU_GEPRUEFT_FUER = "3.64"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -208,6 +208,7 @@ SEITEN = [
     ("/portal/{token}/beleg-hochladen", "Reisende laden einen Beleg hoch", "a-belege"),
     ("/portal/{token}/kilometer/{kid}/loeschen", "Kilometer-Eintrag löschen", "a-km"),
     ("/portal/{token}/unterlagen/{pid}", "Reise-PDF (z. B. Krankenversicherung) im Portal ansehen", "a-start"),
+    ("/portal/dokument/{qr_token}", "Dauerhafter Link hinter dem QR-Code am Ende der Reisemappe (z. B. Weltpolice), ohne Anmeldung", "b-reisemappe"),
     ("/portal/{token}/a1", "Eigene A1-Bescheinigung im Portal ansehen (nur bei Reisen in Europa)", "a-start"),
     ("/portal/{token}/reiseplan", "Reiseplan als PDF im Portal ansehen (immer aktuell)", "a-start"),
     ("/portal/{token}/visum/{vid}", "Eigenes Visum im Portal ansehen (nur für ein Land dieser Reise)", "a-start"),
@@ -695,7 +696,7 @@ KAPITEL = [
               "Die Termine sind danach unabhängig: Änderungen oder Löschen gelten nur für die jeweilige Reise."),
         ("h3", "Reiseplan"),
         ("p", "**🗺 Reiseplan** zeigt alle Flüge, Züge und Termine in zeitlicher Reihenfolge. Zwei PDF-Varianten: „für Reisemappe Mitarbeiter“ (mit Anlagen) und „zum Emailversand“ (ohne Buchungscodes, nie mit Anlagen). Mehr dazu im Kapitel „Reisemappe, Reise-PDFs und A1-Bescheinigung“. Das PDF ist bewusst schlicht gehalten: hellblaues Tagesband, Uhrzeit links mit Zeitleiste, vor jedem Ereignis ein kleines Piktogramm (Flug, Bahn, Auto, Hotel, Parken, Termin …), Typ als kleiner grauer Text; oben rechts steht das Logo (Datei `static/logo3.png`), unten Stand und Seitenzahl."),
-        ("p", "**Hotelzeiten:** Steht im Hotelbeleg keine Check-in- oder Check-out-Zeit, nimmt die App **Check-in 16:00** und **Check-out 10:00** an (jeweils Ortszeit des Hotels). Im Reiseplan, im Tagesablauf und in der Outlook-Einladung steht dann „ab 16:00“ bzw. „bis 10:00“. Eine Zeit aus dem Beleg wird unverändert angezeigt."),
+        ("p", "**Hotelzeiten:** Steht im Hotelbeleg keine Check-in- oder Check-out-Zeit, nimmt die App **Check-in 16:00** und **Check-out 10:00** an (jeweils Ortszeit des Hotels). Im Reiseplan, im Tagesablauf und in der Outlook-Einladung steht dann „ab 16:00“ bzw. „bis 10:00“. Eine Zeit aus dem Beleg wird unverändert angezeigt. Geht am Check-out-Tag **früher** ein Flug, ein Zug oder ein Mietwagen ab, steht der Check-out davor („vor 07:00“); landet am Check-in-Tag **später** ein Flug oder Zug am Hotelort, steht der Check-in danach („ab 19:05“). Flüge an anderen Orten ändern daran nichts."),
         ("h3", "Änderungen und Umbuchungen"),
         ("ul", [
             "Wird ein Beleg als **Flugänderung/Umbuchung** eingestuft, erscheint oben auf der Reise-Seite „n Änderungen warten auf Klärung“. "
@@ -721,6 +722,10 @@ KAPITEL = [
             "Höchstens 15 MB und 60 Seiten, kein Passwortschutz.",
             "**Gilt für:** „Alle Mitarbeiter“ oder ein bestimmter Mitarbeiter (z. B. seine persönliche Versicherungskarte). Der **Titel** erscheint im Inhaltsverzeichnis.",
             "**Pausieren** nimmt ein Dokument vorübergehend aus allen Mappen, **Entfernen** löscht den Eintrag. **Ansehen** öffnet das PDF.",
+            "**Nur QR-Code** (nur bei „Alle Mitarbeiter“, z. B. für die **Weltpolice**): Das Dokument wird **nicht** mitgedruckt. Am Ende des Reiseplans steht stattdessen ein QR-Code mit einem dauerhaften Link; "
+            "wer ihn mit dem Handy scannt, sieht das Dokument sofort, auch ohne Anmeldung. Das gilt nur für die Reisemappe, nicht für das PDF zum Emailversand. "
+            "Der Link bleibt gleich, auch wenn Sie das Dokument mit **Datei ersetzen** durch eine neue Version austauschen; bereits gedruckte QR-Codes bleiben so gültig. **Pausieren** oder **Entfernen** sperrt den Link. "
+            "Mit **Wieder anhängen** wird das Dokument wieder ganz in die Mappe gedruckt. Die Adresse im QR-Code stammt aus `PORTAL_BASE_URL` (sonst aus der von Render gesetzten Adresse). Tragen Sie dort Ihre feste Internetadresse ein, bevor Sie Mappen drucken – ein gedruckter Link soll sich nie ändern.",
         ]),
         ("p", "Dieselben Dokumente (Reise-PDFs und die eigene A1) sehen die Reisenden auch im Portal in der Karte **📄 Reiseunterlagen**, ohne die Mappe zu öffnen. Pausierte Dokumente erscheinen dort ebenfalls nicht."),
         ("h3", "Welche Anlagen kommen in welche Mappe?"),

@@ -28,7 +28,8 @@ import mod_vorschuss as vs
 import mod_kalender as kal
 import mod_zuschlag as zs
 import mod_zeitzone as zeitzone
-from mod_zeit import hotel_zeit, hotel_zeit_zu_utc, HOTEL_CHECKIN_STANDARD, HOTEL_CHECKOUT_STANDARD
+from mod_zeit import (hotel_zeit, hotel_zeit_zu_utc, HOTEL_CHECKIN_STANDARD, HOTEL_CHECKOUT_STANDARD,
+                      ort_passt, checkout_vor_abreise, checkin_nach_ankunft)
 import mod_laender
 import mod_a1
 import mod_reisepdf
@@ -54,7 +55,7 @@ from mod_vma_tage import (vma_berechnen, land_fuer_tag, trennungspauschale_berec
                            vma_auto_aktualisieren, vma_auto_fuer_beleg)
 from mod_auth import (passwort_hashen, passwort_pruefen, login_pruefen,
                        hat_bereits_passwoerter, passwoerter_bekannt, pfad_ist_offen, ist_organisator)
-from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_token,
+from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_token, basis_url,
                          tage_sicherstellen, tage_laden, tag_speichern,
                          reisende_der_reise, zugaenge_der_reise, portal_mail_senden,
                          cron_portal_mails, PORTAL_TAGE_VORHER, portal_aenderungen_speichern,
@@ -127,6 +128,11 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.64", "zeit": "2026-11-13 11:06", "aenderungen": [
+        "Reisemappe: Große Dokumente wie die Weltpolice werden nicht mehr mitgedruckt. Am Ende des Reiseplans steht nur noch ein QR-Code mit einem dauerhaften Link ins Portal (Einstellungen › Reise-PDFs › „Nur QR-Code“; Datei ersetzen ändert den Link nicht). Nicht im E-Mail-PDF.",
+        "Korrektur Hotel-Abgleich: Ein Flug um 7:00 vor dem Standard-Check-out (10:00) oder eine Landung nach dem Standard-Check-in (16:00) steht jetzt in der richtigen Reihenfolge (Reiseplan, Tagesablauf). Die Karte hält ein Hotel nicht mehr fest, wenn der Flug woanders landet.",
+        "Korrektur Reisevorbereitung: Flüge und Züge mit deutschem Datum (TT.MM.JJJJ) wurden nicht erkannt und lösten fälschlich „Kein Transport zwischen den Hotels“ aus.",
+    ]},
     {"version": "3.63", "zeit": "2026-11-13 06:34", "aenderungen": [
         "Neu: Reisevorbereitung – oben in der Reise (nur für Organisatoren) zeigt ein Hinweis, wie viele Hotelnächte noch nicht gebucht sind. Nachtflüge und Nachtzüge decken die Nacht ab; bei später Ankunft (z.B. 01:30) bleibt die Nacht offen und wird mit Hinweis genannt.",
         "Neu: Hinweis, wenn zwei aufeinanderfolgende Hotels weit auseinander liegen (ab 50 km oder anderes Land) und dazwischen kein Flug, keine Bahn, kein Mietwagen und keine Fahrt gebucht ist.",
@@ -4195,6 +4201,21 @@ async def beleg_gesamtbetrag_speichern(bid: int, request: Request):
         return JSONResponse({"fehler": str(e)}, status_code=500)
 
 
+def _hotelzeit_abgleichen(art: str, datum, zeit: str, angenommen: bool, h_koord, fahrten) -> tuple:
+    """v3.64: Angenommene Hotel-Standardzeit gegen Flug/Bahn/Mietwagen AM HOTELORT abgleichen.
+    art: 'ci' (Check-in) oder 'co' (Check-out); fahrten: [(typ, d_ab, ab_zeit, d_an, an_zeit, von_koord, nach_koord)].
+    Rückgabe: (Sortierzeit, Anzeigetext oder None). Eine Zeit aus dem Beleg bleibt immer unverändert."""
+    if datum is None:
+        return zeit, None
+    if art == "co":
+        abreisen = [f[2] for f in fahrten
+                    if f[1] == datum and f[2] and f[0] in ("flug", "bahn", "mietwagen") and ort_passt(f[5], h_koord)]
+        return checkout_vor_abreise(zeit, angenommen, abreisen)
+    ankuenfte = [f[4] for f in fahrten
+                 if f[3] == datum and f[4] and f[0] in ("flug", "bahn") and ort_passt(f[6], h_koord)]
+    return checkin_nach_ankunft(zeit, angenommen, ankuenfte)
+
+
 def reiseplan_daten_laden(reise_code: str):
     """
     Sammelt alle Reiseplan-relevanten Ereignisse für eine Reise – BEWUSST OHNE
@@ -4218,7 +4239,7 @@ def reiseplan_daten_laden(reise_code: str):
     cur.execute(f"""SELECT transportart, anbieter, buchungscode, rechnungsnummer,
                     ki_json, hotel_name, hotel_adresse, hotel_checkin_datum, hotel_checkin_zeit,
                     hotel_checkout_datum, hotel_checkout_zeit, transportart_freitext,
-                    event_datum_von, event_datum_bis, event_ort_von
+                    event_datum_von, event_datum_bis, event_ort_von, hotel_lat, hotel_lon
                     FROM belege WHERE reise_code={P}
                     AND transportart IN ('Flug','Bahn','Mietwagen','Hotel','Sonstiges')""", (reise_code,))
     for b in cur.fetchall():
@@ -4258,14 +4279,21 @@ def reiseplan_daten_laden(reise_code: str):
             # angezeigt als "ab 16:00" / "bis 10:00"; eine Zeit aus dem Beleg steht unverändert da.
             ci_z, ci_ang = hotel_zeit(g(b,"hotel_checkin_zeit",8), HOTEL_CHECKIN_STANDARD)
             co_z, co_ang = hotel_zeit(g(b,"hotel_checkout_zeit",10), HOTEL_CHECKOUT_STANDARD)
+            try:
+                h_lat, h_lon = g(b,"hotel_lat",15), g(b,"hotel_lon",16)
+                h_koord = (float(h_lat), float(h_lon)) if h_lat is not None and h_lon is not None else None
+            except (TypeError, ValueError):
+                h_koord = None
             if ci_d:
                 ereignisse.append((ci_d, ci_z, {
                     "icon": "🏨", "typ": "hotel", "titel": f"Check-in: {hname}", "zeit": ("ab " if ci_ang else "") + ci_z, "sub": hadresse,
-                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else "", "ist_buchungscode": True}))
+                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else "", "ist_buchungscode": True,
+                    "_hotel": ("ci", ci_ang, h_koord)}))
             if co_d:
                 ereignisse.append((co_d, co_z, {
                     "icon": "🏨", "typ": "hotel", "titel": f"Check-out: {hname}", "zeit": ("bis " if co_ang else "") + co_z, "sub": hadresse,
-                    "extra": "", "ist_buchungscode": False}))
+                    "extra": "", "ist_buchungscode": False,
+                    "_hotel": ("co", co_ang, h_koord)}))
         else:
             segs = segmente_aus_ki_json(g(b,"ki_json",4))
             icon = {"Flug": "✈", "Bahn": "🚆", "Mietwagen": "🚗"}.get(typ, "📍")
@@ -4278,10 +4306,19 @@ def reiseplan_daten_laden(reise_code: str):
                 nummer = s.get("transport_nummer") or anbieter
                 terminal = s.get("abreise_terminal")
                 zeit_txt = f'{s.get("abreise_zeit","")}–{s.get("ankunft_zeit","")}'.strip("–")
+
+                def _k(praefix, s=s):
+                    try:
+                        return (float(s.get(f"{praefix}_lat")), float(s.get(f"{praefix}_lon")))
+                    except (TypeError, ValueError):
+                        return None
                 ereignisse.append((d_ab, s.get("abreise_zeit") or "", {
                     "icon": icon, "typ": typ_key, "titel": f"{nummer}: {von_ort} → {nach_ort}", "zeit": zeit_txt,
                     "sub": f"Terminal {terminal}" if terminal else "",
-                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else "", "ist_buchungscode": True}))
+                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else "", "ist_buchungscode": True,
+                    "_fahrt": (typ_key, d_ab, str(s.get("abreise_zeit") or ""),
+                               _datum_parsen(s.get("ankunft_datum")) or d_ab, str(s.get("ankunft_zeit") or ""),
+                               _k("von"), _k("nach"))}))
 
     TERMIN_ICON = {"termin": "🤝", "kundenbesuch": "🤝", "fahrt": "🚕",
                    "mietwagen": "🚗", "hotel": "🏨", "montage": "🔧", "sonstiges": "📌"}
@@ -4303,6 +4340,23 @@ def reiseplan_daten_laden(reise_code: str):
             # deshalb auch in der Buchungscode-freien PDF-Variante erhalten.
             "sub": " · ".join(sub_parts), "extra": notiz_t, "ist_buchungscode": False}))
     cur.close(); db.close()
+
+    # v3.64: Angenommene Hotel-Standardzeiten gegen Flug/Bahn/Mietwagen am Hotelort abgleichen:
+    # Flug 07:00 -> Check-out davor ("vor 07:00"); Landung 19:00 -> Check-in danach ("ab 19:00").
+    # Eine Zeit aus dem Beleg bleibt unverändert; Flüge an anderen Orten ändern nichts.
+    fahrten_alle = [e2["_fahrt"] for _d, _sz, e2 in ereignisse if e2.get("_fahrt")]
+    neu_liste = []
+    for d, sz, ev in ereignisse:
+        h = ev.get("_hotel")
+        if h:
+            art, angenommen, h_koord = h
+            sz, anzeige = _hotelzeit_abgleichen(art, d, str(sz or ""), angenommen, h_koord, fahrten_alle)
+            if anzeige:
+                ev["zeit"] = anzeige
+        neu_liste.append((d, sz, ev))
+    ereignisse = neu_liste
+    for _d, _sz, ev in ereignisse:
+        ev.pop("_hotel", None); ev.pop("_fahrt", None)
 
     # Sortierung nach der Sortierzeit (nicht nach dem Anzeigetext, der bei Hotels "ab 16:00" lautet)
     tage = {}
@@ -4442,7 +4496,7 @@ def _pikto_zeichnen(c, name: str, x: float, y: float, groesse: float, farbe) -> 
     c.restoreState()
 
 
-def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> bytes:
+def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool, qr_links=None) -> bytes:
     """
     Baut das Reiseplan-PDF (Layout „Zeitleiste“, v3.61). Zwei Varianten über ohne_buchungscode:
     - False: für den Reisenden selbst, mit allen Buchungscodes.
@@ -4451,6 +4505,8 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> by
     Zeitleiste (Linie mit Punkt) und einem kleinen Piktogramm vor dem Titel. Der Typ (FLUG, HOTEL …)
     steht als kleiner grauer Text hinter dem Titel.
     Kopf: Reisecode, Titel, Zeitraum und (wenn vorhanden) das Logo oben rechts; Fuß: Stand und Seitenzahl.
+    qr_links (v3.64): [{titel, url}] – nur für die Reisemappe. Ans Ende kommt je Dokument ein QR-Code mit dem dauerhaften
+    Portal-Link (z. B. die Weltpolice), statt das ganze Dokument zu drucken.
     """
     from reportlab.lib.pagesizes import A4
     from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, Table,
@@ -4580,6 +4636,37 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool) -> by
         story.extend(zeilen[1:])
         story.append(Spacer(1, 4 * mm))
 
+    if qr_links:
+        try:
+            from reportlab.graphics.barcode.qr import QrCodeWidget
+            from reportlab.graphics.shapes import Drawing
+            band = Table([[Paragraph("Dokumente jederzeit abrufbar", s_tag)]], colWidths=[180 * mm])
+            band.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), BAND),
+                ("TOPPADDING", (0, 0), (-1, -1), 3.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5), ("LEFTPADDING", (0, 0), (-1, -1), 6)]))
+            bloecke = [band, Spacer(1, 2 * mm)]
+            for q in qr_links:
+                w = QrCodeWidget(q["url"], barLevel="M")
+                x0, y0, x1, y1 = w.getBounds()
+                kante = 30 * mm
+                zeichnung = Drawing(kante, kante, transform=[kante / (x1 - x0), 0, 0, kante / (y1 - y0), 0, 0])
+                zeichnung.add(w)
+                texte = [Paragraph("<b>%s</b>" % esc(pdf_text(q["titel"])), s_ev),
+                         Spacer(1, 1 * mm),
+                         Paragraph("QR-Code mit der Handykamera scannen: Das Dokument öffnet sich sofort und ist jederzeit abrufbar "
+                                   "(auch unterwegs und ohne Anmeldung).", s_sub),
+                         Spacer(1, 1 * mm),
+                         Paragraph(esc(q["url"]), s_sub)]
+                zeile_qr = Table([[zeichnung, texte]], colWidths=[34 * mm, 146 * mm])
+                zeile_qr.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                                              ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                              ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
+                bloecke.append(zeile_qr)
+                bloecke.append(Spacer(1, 3 * mm))
+            story.append(KeepTogether(bloecke))
+        except Exception as ex:
+            print(f"[Reiseplan] QR-Code nicht gedruckt: {ex}")
+
     doc.build(story)
     return buf.getvalue()
 
@@ -4594,7 +4681,7 @@ def _reisende_kn(rcode: str) -> list:
     return erg
 
 
-def _reisemappe_mit_anlagen(rcode: str, daten: dict, pdf_bytes: bytes, kuerzel: str = "") -> tuple:
+def _reisemappe_mit_anlagen(rcode: str, daten: dict, pdf_bytes: bytes, kuerzel: str = "", ohne_ids=()) -> tuple:
     """
     Hängt an die Reisemappe (Reiseplan-PDF) hinten die Reise-PDFs aus den Einstellungen (z. B. Krankenversicherung)
     und die A1-Bescheinigung des Mitarbeiters an. Nur für die Reisemappe, nie für die E-Mail-Variante.
@@ -4608,7 +4695,7 @@ def _reisemappe_mit_anlagen(rcode: str, daten: dict, pdf_bytes: bytes, kuerzel: 
         k = gueltig.get((kuerzel or "").strip().upper(), "")
         if not k and len(reisende) == 1:
             k = reisende[0][0]
-        anlagen = mod_reisepdf.anhaenge_fuer(k or None)
+        anlagen = mod_reisepdf.anhaenge_fuer(k or None, ohne_ids)   # ohne_ids: stehen als QR-Code im Reiseplan
         if k:
             st = mod_a1.a1_status(rcode, reisende_der_reise(rcode))
             person = next((x for x in st["personen"] if x["kuerzel"] == k), None)
@@ -4784,7 +4871,7 @@ async def reise_a1_befreiung(code: str, request: Request, kuerzel: str = Form(""
 
 
 @app.get("/reise/{code}/reiseplan/pdf")
-def reiseplan_pdf(code: str, ohne_buchungscode: bool = False, kuerzel: str = "", anlagen: int = 1):
+def reiseplan_pdf(request: Request, code: str, ohne_buchungscode: bool = False, kuerzel: str = "", anlagen: int = 1):
     """
     Reiseplan als PDF. Zwei Varianten über den Query-Parameter:
     - /reise/{code}/reiseplan/pdf  -> für den Reisenden, mit Buchungscodes
@@ -4792,17 +4879,25 @@ def reiseplan_pdf(code: str, ohne_buchungscode: bool = False, kuerzel: str = "",
       Buchungscodes (z.B. zum Weitergeben an Kunden/Dritte); nie mit Anlagen
     Die Reisemappe (erste Variante) bekommt hinten die Reise-PDFs aus den Einstellungen und die A1-Bescheinigung
     des Mitarbeiters (?kuerzel=XY bei mehreren Reisenden; ?anlagen=0 schaltet die Anlagen ab).
+    v3.64: Dokumente, die in den Einstellungen als „nur QR-Code“ markiert sind (z. B. die Weltpolice), werden nicht
+    angehängt; am Ende des Reiseplans steht stattdessen ein QR-Code mit dem dauerhaften Portal-Link. Nur Reisemappe.
     """
     rcode = code.upper()
     daten = reiseplan_daten_laden(rcode)
     if not daten:
         return HTMLResponse(shell("Fehler", '<div class="alert alert-err">Reise nicht gefunden.</div>'))
     try:
-        pdf_bytes = _reiseplan_pdf_bauen(rcode, daten, ohne_buchungscode)
+        qr = []
+        if not ohne_buchungscode:
+            try:
+                qr = mod_reisepdf.qr_eintraege(basis_url(str(request.base_url)))
+            except Exception as ex:
+                print(f"[Reiseplan] QR-Links nicht ermittelt: {ex}")
+        pdf_bytes = _reiseplan_pdf_bauen(rcode, daten, ohne_buchungscode, qr)
         from fastapi.responses import Response
         zusatz = ""
         if not ohne_buchungscode and anlagen:
-            pdf_bytes, k_gewaehlt = _reisemappe_mit_anlagen(rcode, daten, pdf_bytes, kuerzel)
+            pdf_bytes, k_gewaehlt = _reisemappe_mit_anlagen(rcode, daten, pdf_bytes, kuerzel, {q["id"] for q in qr})
             zusatz = ("_" + re.sub(r"[^A-Za-z0-9]", "", k_gewaehlt)) if k_gewaehlt else ""
         dateiname = f"Reiseplan_{rcode}" + ("_Emailversand" if ohne_buchungscode else "_Reisemappe" + zusatz) + ".pdf"
         return Response(content=pdf_bytes, media_type="application/pdf",
@@ -6909,6 +7004,20 @@ def _datum_parsen(wert):
         except Exception: return None
 
 
+def _segment_endet_am_hotel(s: dict, hotel_koord, hotel_land) -> bool:
+    """v3.64: Darf die Ankunft dieses Flug-/Bahnsegments die Ankunftszeit eines Hotels nach hinten schieben?
+    Nur, wenn es am Hotelort ankommt (Koordinaten bis ca. 100 km). Fehlen Koordinaten, entscheidet das Land;
+    fehlt auch das, bleibt es beim bisherigen Verhalten (nicht raten)."""
+    if hotel_koord and s.get("nach_koord"):
+        return ort_passt(hotel_koord, s["nach_koord"])
+    land_seg = (IATA_TO_LAND.get(s.get("nach_iata")) if s.get("nach_iata") else None) \
+        or STADT_ZU_LAND.get((s.get("nach_ort") or "").strip().lower())
+    land_hotel = str(hotel_land or "").strip().upper()
+    if land_seg and len(land_hotel) == 2:
+        return str(land_seg).upper()[:2] == land_hotel
+    return True
+
+
 def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
     """
     Ermittelt den TATSÄCHLICHEN aktuellen Aufenthaltsort/-status für die
@@ -7131,10 +7240,13 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
         # pauschale Check-in-Zeit sind – nicht nur an genau diesem Kalendertag,
         # sondern über den GESAMTEN Aufenthalt hinweg (z.B. auch bei einer
         # Zwischenlandung am Folgetag durch Zeitzonen-Verschiebung).
+        # v3.64: Nur Ankünfte AM HOTELORT zählen. Ein Flug, der morgens vor dem Check-out (Standard 10:00)
+        # woandershin landet – oder abends nach dem Check-in (Standard 16:00) vom Hotelort wegfliegt –
+        # darf das Hotel nicht als "aktuellen Ort" festhalten.
         fenster_ende = dt_checkout or (dt + timedelta(hours=24))
         spaeteste_ankunft_im_aufenthalt = max(
             (s["dt_an"] for s in segmente
-             if dt < s["dt_an"] <= fenster_ende),
+             if dt < s["dt_an"] <= fenster_ende and _segment_endet_am_hotel(s, hotel_koord, land)),
             default=None)
         if spaeteste_ankunft_im_aufenthalt:
             dt = spaeteste_ankunft_im_aufenthalt
@@ -7206,7 +7318,7 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
                 kommende_kandidaten.append((s["dt_ab"], s["typ"], detail, s["dt_ab_anzeige"]))
         cur2 = db.cursor()
         cur2.execute(f"""SELECT hotel_checkin_datum, hotel_checkin_zeit, hotel_name, hotel_adresse,
-            hotel_checkout_datum, hotel_checkout_zeit, land_beleg
+            hotel_checkout_datum, hotel_checkout_zeit, land_beleg, hotel_lat, hotel_lon
             FROM belege WHERE reise_code={P} AND transportart='Hotel'""", (reise_code,))
         for row in cur2.fetchall():
             g = lambda k,i: row[k] if hasattr(row,'keys') else row[i]
@@ -7217,6 +7329,11 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
             d_checkout = _datum_parsen(g("hotel_checkout_datum",4))
             co_zeit, _co_ang = hotel_zeit(g("hotel_checkout_zeit",5), HOTEL_CHECKOUT_STANDARD)
             hotel_land = g("land_beleg",6)
+            try:
+                h_lat, h_lon = g("hotel_lat",7), g("hotel_lon",8)
+                hotel_koord2 = (float(h_lat), float(h_lon)) if h_lat is not None and h_lon is not None else None
+            except (TypeError, ValueError):
+                hotel_koord2 = None
             if not d: continue
             dt_hotel = hotel_zeit_zu_utc(d, ci_zeit, hotel_land)
             if dt_hotel is None: continue
@@ -7229,7 +7346,8 @@ def aktuelle_position_ermitteln(reise_code: str, db, debug: bool = False):
             dt_checkout = hotel_zeit_zu_utc(d_checkout, co_zeit, hotel_land) if d_checkout else None
             fenster_ende = dt_checkout or (dt_hotel + timedelta(hours=24))
             spaeteste_ankunft = max(
-                (s["dt_an"] for s in segmente if dt_hotel < s["dt_an"] <= fenster_ende),
+                (s["dt_an"] for s in segmente
+                 if dt_hotel < s["dt_an"] <= fenster_ende and _segment_endet_am_hotel(s, hotel_koord2, hotel_land)),
                 default=None)
             if spaeteste_ankunft:
                 dt_hotel = spaeteste_ankunft
@@ -8901,7 +9019,7 @@ def reise_detail(code: str, request: Request):
                         event_datum_von, event_datum_bis, hotel_checkin_datum,
                         hotel_checkout_datum, hotel_checkout_zeit, event_zeit,
                         belegart, beleg_gruppe_id, betrag_eur, betrag_eur_final, nebenkosten_eur,
-                        kreditkarte_auslandsentgelt_eur, zahlungsart
+                        kreditkarte_auslandsentgelt_eur, zahlungsart, hotel_lat, hotel_lon
                         FROM belege WHERE reise_code = {P} AND (belegart IS NULL OR belegart <> 'A1Bescheinigung')
                         ORDER BY belegdatum""", (rcode,))
         beleg_rows_tag = cur.fetchall()
@@ -9165,6 +9283,23 @@ def reise_detail(code: str, request: Request):
             zeichen = "=" if (eigen_final is not None or anteil) else "≈"
             return f"{text} ({zeichen} {eur_x:.2f} EUR)"
 
+        # v3.64: Flug-/Bahn-/Mietwagen-Fahrten dieser Reise – damit die angenommenen Hotel-Standardzeiten
+        # (Check-out 10:00 / Check-in 16:00) nicht hinter einem Flug am Hotelort landen, der früher geht bzw. später landet.
+        def _koord_ki(s, pr):
+            try:
+                return (float(s.get(f"{pr}_lat")), float(s.get(f"{pr}_lon")))
+            except (TypeError, ValueError):
+                return None
+        fahrten_tag = []
+        for b in beleg_rows_tag:
+            t_f = get(b,"transportart",1)
+            if t_f in ("Flug", "Bahn", "Mietwagen"):
+                for s in segmente_aus_ki_json(get(b,"ki_json",8)):
+                    d1 = to_d_ddmmyyyy(s.get("abreise_datum"))
+                    fahrten_tag.append((t_f.lower(), d1, str(s.get("abreise_zeit") or ""),
+                                        to_d_ddmmyyyy(s.get("ankunft_datum")) or d1, str(s.get("ankunft_zeit") or ""),
+                                        _koord_ki(s, "von"), _koord_ki(s, "nach")))
+
         visum_bids = set()          # Einreisegenehmigungen (oft Wochen vor der Reise): eigene Überschrift statt Warnung
         for b in beleg_rows_tag:
             bid = get(b,"id",0); typ = get(b,"transportart",1) or "Sonstiges"
@@ -9219,8 +9354,14 @@ def reise_detail(code: str, request: Request):
                 # v3.60: Standardzeiten, wenn der Beleg keine nennt (Anzeige "ab 16:00" / "bis 10:00")
                 ci_z, ci_ang = hotel_zeit(get(b,"hotel_checkin_zeit",7), HOTEL_CHECKIN_STANDARD)
                 co_z, co_ang = hotel_zeit(get(b,"hotel_checkout_zeit",13), HOTEL_CHECKOUT_STANDARD)
-                ci_z = ("ab " if ci_ang else "") + ci_z
-                co_z = ("bis " if co_ang else "") + co_z
+                try:
+                    h_koord = (float(get(b,"hotel_lat",22)), float(get(b,"hotel_lon",23)))
+                except (TypeError, ValueError):
+                    h_koord = None
+                _sz, _anz = _hotelzeit_abgleichen("ci", ci_d, ci_z, ci_ang, h_koord, fahrten_tag)
+                ci_z = _anz or (("ab " if ci_ang else "") + ci_z)
+                _sz, _anz = _hotelzeit_abgleichen("co", co_d, co_z, co_ang, h_koord, fahrten_tag)
+                co_z = _anz or (("bis " if co_ang else "") + co_z)
                 add_event(ci_d, ci_z, f"{icon} Hotel einchecken · {anbieter}",
                           f"{fmt_date(ci_d)}" if ci_d else "", bid, bet_s, bg, fg)
                 if bet_s: kosten_vergeben = True
@@ -9268,7 +9409,11 @@ def reise_detail(code: str, request: Request):
 
             def _sortzeit(z):
                 m = re.search(r"(\d{1,2}):(\d{2})", str(z or ""))
-                return "%02d:%s" % (int(m.group(1)), m.group(2)) if m else "99:99"
+                if not m: return "99:99"
+                minuten = int(m.group(1)) * 60 + int(m.group(2))
+                if str(z).strip().lower().startswith("vor "):   # v3.64: "vor 07:00" (Check-out) sortiert VOR der Abreise
+                    minuten = max(minuten - 1, 0)
+                return "%02d:%02d" % (minuten // 60, minuten % 60)
             eintraege.sort(key=lambda x: _sortzeit(x[0]))
             if not eintraege:
                 return '<div style="padding:12px 16px;font-size:12px;color:var(--muted);font-style:italic">Keine Termine oder Belege an diesem Tag.</div>'
@@ -10903,6 +11048,26 @@ def portal_unterlage(token: str, pid: int):
         return HTMLResponse(portal_shell("Nicht verfügbar", '<p>Das Dokument kann gerade nicht geladen werden. Bitte später noch einmal versuchen.</p>'),
                             status_code=503)
     return _datei_antwort(daten_b, d["titel"] or f"Dokument_{pid}")
+
+
+@app.get("/portal/dokument/{qr_token}")
+def portal_dokument_per_qr(qr_token: str):
+    """Dauerhafter Link hinter dem QR-Code am Ende der Reisemappe (z. B. Weltpolice). Ohne Anmeldung erreichbar; die
+    Kennung ist lang und nicht erratbar. Gilt nur für Dokumente „für alle Mitarbeiter“, die als QR-Code freigegeben und aktiv
+    sind – pausieren oder entfernen sperrt den Link."""
+    d = mod_reisepdf.holen_per_qr(qr_token)
+    if not d:
+        return HTMLResponse(portal_shell("Nicht gefunden", '<p>Dieses Dokument ist nicht (mehr) verfügbar. Bitte beim Reisebüro nachfragen.</p>'),
+                            status_code=404)
+    try:
+        daten_b = mod_reisepdf.pdf_bytes(d["id"])
+    except Exception as ex:
+        print(f"[Portal] QR-Dokument {d['id']} nicht ladbar: {ex}")
+        daten_b = None
+    if not daten_b:
+        return HTMLResponse(portal_shell("Nicht verfügbar", '<p>Das Dokument kann gerade nicht geladen werden. Bitte später noch einmal versuchen.</p>'),
+                            status_code=503)
+    return _datei_antwort(daten_b, d["titel"] or "Dokument")
 
 
 @app.get("/portal/{token}/reiseplan")
@@ -14192,15 +14357,29 @@ def _reisepdf_seite(ok: str = "", fehler: str = "") -> str:
         kb = int(round((d["groesse"] or 0) / 1024))
         akt_txt = "✅ aktiv" if d["aktiv"] else "⏸ pausiert"
         akt_btn = "Pausieren" if d["aktiv"] else "Aktivieren"
-        zeilen += (f'<tr><td><b>{_bw_e(d["titel"])}</b><div style="{leise}">{_bw_e(d["dateiname"] or "")}</div></td>'
+        qr_info = ""
+        qr_btn = ""
+        if d["nur_qr"] and d["qr_token"]:
+            qr_info = (f'<div style="{leise};margin-top:4px">🔳 <b>Reisemappe: nur QR-Code</b> (wird nicht ausgedruckt)<br>'
+                       f'Dauerhafter Link: <span style="word-break:break-all">{_bw_e(basis_url() + "/portal/dokument/" + d["qr_token"])}</span></div>')
+        if not d["kuerzel"]:
+            qr_btn = (f'<form method="post" action="/einstellungen/reise-pdfs/{d["id"]}/qr" style="display:inline">'
+                      f'<button type="submit" class="btn btn-secondary btn-sm">'
+                      f'{"Wieder anhängen" if d["nur_qr"] else "Nur QR-Code"}</button></form> ')
+        ersetzen_form = (f'<form method="post" action="/einstellungen/reise-pdfs/{d["id"]}/ersetzen" enctype="multipart/form-data" '
+                         f'style="display:block;margin-top:6px"><input type="file" name="datei" accept=".pdf,image/*" required '
+                         f'style="font-size:12px;max-width:190px"> '
+                         f'<button type="submit" class="btn btn-secondary btn-sm">Datei ersetzen</button></form>')
+        zeilen += (f'<tr><td><b>{_bw_e(d["titel"])}</b><div style="{leise}">{_bw_e(d["dateiname"] or "")}</div>{qr_info}</td>'
                    f'<td>{gilt}</td><td>{d["seiten"] or "?"} S. · {kb} KB</td><td>{akt_txt}</td>'
                    f'<td style="white-space:nowrap">'
                    f'<a href="/einstellungen/reise-pdfs/{d["id"]}/ansehen" target="_blank" class="btn btn-secondary btn-sm">Ansehen</a> '
+                   f'{qr_btn}'
                    f'<form method="post" action="/einstellungen/reise-pdfs/{d["id"]}/aktiv" style="display:inline">'
                    f'<button type="submit" class="btn btn-secondary btn-sm">{akt_btn}</button></form> '
                    f'<form method="post" action="/einstellungen/reise-pdfs/{d["id"]}/loeschen" style="display:inline" '
                    f'onsubmit="return confirm(\'Dokument wirklich entfernen?\')">'
-                   f'<button type="submit" class="btn btn-secondary btn-sm">Entfernen</button></form></td></tr>')
+                   f'<button type="submit" class="btn btn-secondary btn-sm">Entfernen</button></form>{ersetzen_form}</td></tr>')
     opts = '<option value="">Alle Mitarbeiter</option>' + "".join(
         f'<option value="{_bw_e(k)}">{_bw_e(n)} ({_bw_e(k)})</option>' for k, n in ma)
     meldung = ""
@@ -14214,7 +14393,10 @@ def _reisepdf_seite(ok: str = "", fehler: str = "") -> str:
       Diese PDFs werden automatisch hinten an die <b>Reisemappe</b> (Reiseplan-PDF) gehängt, zum Beispiel die Kopie der
       Krankenversicherung. Ein Dokument gilt entweder für <b>alle Mitarbeiter</b> oder nur für <b>einen bestimmten
       Mitarbeiter</b> (z. B. seine persönliche Versicherungskarte). Die A1-Bescheinigung kommt automatisch dazu und wird
-      an der Reise verwaltet. In der E-Mail-Variante des Reiseplans sind <b>nie</b> Anlagen enthalten.</p>
+      an der Reise verwaltet. In der E-Mail-Variante des Reiseplans sind <b>nie</b> Anlagen enthalten.<br>
+      Große Dokumente wie die <b>Weltpolice</b> werden nicht mitgedruckt: Mit <b>„Nur QR-Code“</b> steht am Ende der
+      Reisemappe nur ein QR-Code mit einem dauerhaften Link (auch ohne Anmeldung erreichbar). Der Link bleibt gleich, auch wenn
+      Sie die Datei später mit <b>„Datei ersetzen“</b> austauschen. „Pausieren“ oder „Entfernen“ sperrt den Link.</p>
     {meldung}
     <div class="card" style="margin-bottom:20px">
       <div class="card-header"><span class="card-title">Dokumente für die Reisemappe ({len(mod_reisepdf.liste())})</span></div>
@@ -14232,6 +14414,9 @@ def _reisepdf_seite(ok: str = "", fehler: str = "") -> str:
           <div class="form-group"><label>Gilt für</label><select name="kuerzel">{opts}</select></div>
           <div class="form-group"><label>Datei (PDF oder Foto, höchstens {mod_reisepdf.MAX_MB} MB)</label>
             <input type="file" name="datei" accept=".pdf,image/*" required></div>
+          <div class="form-group"><label style="display:flex;gap:8px;align-items:center;font-weight:normal">
+            <input type="checkbox" name="nur_qr" value="1" style="width:auto">
+            Nur als QR-Code ans Ende der Reisemappe (nicht ausdrucken) – nur bei „Alle Mitarbeiter“, z. B. Weltpolice</label></div>
           <div style="display:flex;gap:8px;margin-top:12px">
             <button type="submit" class="btn btn-primary">📎 Hochladen</button>
             <a href="/einstellungen" class="btn btn-secondary">Zurück</a></div>
@@ -14254,12 +14439,13 @@ def reisepdfs_seite(request: Request, ok: str = "", fehler: str = ""):
 
 @app.post("/einstellungen/reise-pdfs/hochladen", response_class=HTMLResponse)
 async def reisepdfs_hochladen(request: Request, datei: UploadFile = File(...), titel: str = Form(""),
-                              kuerzel: str = Form("")):
+                              kuerzel: str = Form(""), nur_qr: str = Form("")):
     if not ist_organisator(request):
         return _reisepdf_kein_zugriff()
     try:
         daten_b = await datei.read()
-        mod_reisepdf.hinzufuegen(titel, kuerzel, daten_b, datei.filename or "dokument.pdf", datei.content_type or "")
+        mod_reisepdf.hinzufuegen(titel, kuerzel, daten_b, datei.filename or "dokument.pdf", datei.content_type or "",
+                                 nur_qr=bool(nur_qr))
     except ValueError as ex:
         return HTMLResponse(shell("Reise-PDFs", _reisepdf_seite(fehler=str(ex)), "einstellungen"), status_code=400)
     except Exception as ex:
@@ -14276,6 +14462,38 @@ async def reisepdfs_aktiv(pid: int, request: Request):
     if d:
         mod_reisepdf.aktiv_setzen(pid, not d["aktiv"])
     return RedirectResponse("/einstellungen/reise-pdfs", status_code=303)
+
+
+@app.post("/einstellungen/reise-pdfs/{pid}/qr", response_class=HTMLResponse)
+async def reisepdfs_qr(pid: int, request: Request):
+    """Schaltet um: Dokument wird angehängt  <->  nur als QR-Code ans Ende der Reisemappe."""
+    if not ist_organisator(request):
+        return _reisepdf_kein_zugriff()
+    d = mod_reisepdf.holen(pid)
+    if not d:
+        return RedirectResponse("/einstellungen/reise-pdfs", status_code=303)
+    try:
+        mod_reisepdf.qr_setzen(pid, not d["nur_qr"])
+    except ValueError as ex:
+        return HTMLResponse(shell("Reise-PDFs", _reisepdf_seite(fehler=str(ex)), "einstellungen"), status_code=400)
+    return RedirectResponse("/einstellungen/reise-pdfs?ok=" + urllib.parse.quote(
+        "Ab jetzt nur noch als QR-Code in der Reisemappe" if not d["nur_qr"] else "Wird wieder an die Reisemappe angehängt"), status_code=303)
+
+
+@app.post("/einstellungen/reise-pdfs/{pid}/ersetzen", response_class=HTMLResponse)
+async def reisepdfs_ersetzen(pid: int, request: Request, datei: UploadFile = File(...)):
+    """Tauscht nur die Datei aus – Titel, Zuordnung und der QR-Link bleiben gleich."""
+    if not ist_organisator(request):
+        return _reisepdf_kein_zugriff()
+    try:
+        daten_b = await datei.read()
+        mod_reisepdf.ersetzen(pid, daten_b, datei.filename or "dokument.pdf", datei.content_type or "")
+    except ValueError as ex:
+        return HTMLResponse(shell("Reise-PDFs", _reisepdf_seite(fehler=str(ex)), "einstellungen"), status_code=400)
+    except Exception as ex:
+        return HTMLResponse(shell("Reise-PDFs", _reisepdf_seite(fehler=f"Ersetzen fehlgeschlagen: {ex}"), "einstellungen"),
+                            status_code=500)
+    return RedirectResponse("/einstellungen/reise-pdfs?ok=" + urllib.parse.quote("Datei ersetzt (der Link bleibt gleich)"), status_code=303)
 
 
 @app.post("/einstellungen/reise-pdfs/{pid}/loeschen")

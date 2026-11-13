@@ -8,9 +8,15 @@ einen bestimmten Mitarbeiter (z. B. seine persönliche Versicherungskarte).
 Die Reisemappe ist das Reiseplan-PDF. Dieses Modul hängt die passenden Dokumente an und setzt vorne eine
 Seite „Anlagen“ mit Inhaltsverzeichnis. Zusätzlich bekommen die PDF-Leser Lesezeichen.
 Dateien liegen im S3-Speicher (wie die Belege), die Liste in der Tabelle reise_pdfs.
+
+v3.64: Ein Dokument „für alle Mitarbeiter“ kann als „nur QR-Code“ markiert werden (z. B. die Weltpolice). Es wird dann
+nicht mehr in die Reisemappe gedruckt; stattdessen steht am Ende des Reiseplans ein QR-Code mit einem dauerhaften Link
+(/portal/dokument/<Kennung>). Die Kennung wird einmal erzeugt und bleibt für immer gleich – auch wenn die Datei
+später ersetzt wird.
 """
 from __future__ import annotations
 import io
+import secrets
 import uuid
 from datetime import datetime
 from xml.sax.saxutils import escape as _xml
@@ -36,28 +42,73 @@ def tabelle_sichern() -> None:
         key = "SERIAL PRIMARY KEY" if is_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
         cur.execute(f"CREATE TABLE IF NOT EXISTS {TABELLE} ("
                     f"id {key}, titel TEXT, kuerzel TEXT, dateiname TEXT, s3_key TEXT, "
-                    f"seiten INTEGER, groesse INTEGER, aktiv INTEGER DEFAULT 1, erstellt TEXT)")
-        db.commit(); cur.close(); db.close()
+                    f"seiten INTEGER, groesse INTEGER, aktiv INTEGER DEFAULT 1, erstellt TEXT, "
+                    f"nur_qr INTEGER DEFAULT 0, qr_token TEXT)")
+        db.commit()
+        # v3.64: Spalten für „nur QR-Code“ in bestehenden Tabellen nachrüsten (einmalig)
+        neu_angelegt = False
+        try:
+            cur.execute(f"SELECT nur_qr, qr_token FROM {TABELLE} LIMIT 1")
+            cur.fetchall()
+        except Exception:
+            try: db.rollback()
+            except Exception: pass
+            for spalte in ("nur_qr INTEGER DEFAULT 0", "qr_token TEXT"):
+                try:
+                    cur.execute(f"ALTER TABLE {TABELLE} ADD COLUMN {spalte}"); db.commit()
+                except Exception:
+                    try: db.rollback()
+                    except Exception: pass
+            neu_angelegt = True
+        if neu_angelegt:
+            # Einmalige Umstellung: Die vorhandene Weltpolice (Titel enthält „police“, gilt für alle) wird nur noch als QR-Code gedruckt.
+            P = ph()
+            cur.execute(f"SELECT id, titel, kuerzel FROM {TABELLE}")
+            for r in cur.fetchall():
+                titel = str(_g(r, "titel", 1) or "").lower()
+                if "police" in titel and not (_g(r, "kuerzel", 2) or ""):
+                    cur.execute(f"UPDATE {TABELLE} SET nur_qr=1, qr_token={P} WHERE id={P}",
+                                (secrets.token_urlsafe(18), _g(r, "id", 0)))
+                    print(f"[ReisePDF] '{_g(r, 'titel', 1)}' wird ab jetzt nur noch als QR-Code in die Reisemappe gedruckt.")
+            db.commit()
+        cur.close(); db.close()
     except Exception as ex:
         print(f"[ReisePDF] Tabelle {TABELLE} nicht angelegt: {ex}")
 
 
-_SPALTEN = ("id", "titel", "kuerzel", "dateiname", "s3_key", "seiten", "groesse", "aktiv", "erstellt")
+_SPALTEN_ALT = ("id", "titel", "kuerzel", "dateiname", "s3_key", "seiten", "groesse", "aktiv", "erstellt")
+_SPALTEN = _SPALTEN_ALT + ("nur_qr", "qr_token")
 
 
 def _zeile(r) -> dict:
-    d = {k: _g(r, k, i) for i, k in enumerate(_SPALTEN)}
+    def wert(k, i):
+        if hasattr(r, "keys"):
+            return r[k] if k in list(r.keys()) else None
+        return r[i] if i < len(r) else None
+    d = {k: wert(k, i) for i, k in enumerate(_SPALTEN)}
     d["aktiv"] = bool(d["aktiv"]) if d["aktiv"] is not None else True
     d["kuerzel"] = d["kuerzel"] or ""
+    d["nur_qr"] = bool(d.get("nur_qr"))
+    d["qr_token"] = d.get("qr_token") or ""
     return d
+
+
+def _abfrage(cur, where: str = "", args=()) -> list:
+    """Liest die Dokumentenliste; fehlen die QR-Spalten noch (ältere Tabelle), mit den alten Spalten weiterarbeiten."""
+    try:
+        cur.execute(f"SELECT {', '.join(_SPALTEN)} FROM {TABELLE} {where} ORDER BY id", args)
+    except Exception:
+        try: cur.connection.rollback()
+        except Exception: pass
+        cur.execute(f"SELECT {', '.join(_SPALTEN_ALT)} FROM {TABELLE} {where} ORDER BY id", args)
+    return [_zeile(r) for r in cur.fetchall()]
 
 
 def liste(nur_aktive: bool = False) -> list:
     """Alle Dokumente: zuerst die für alle Mitarbeiter, dann die persönlichen (je nach Anlage-Reihenfolge)."""
     db = get_db(); cur = db.cursor()
     try:
-        cur.execute(f"SELECT {', '.join(_SPALTEN)} FROM {TABELLE} ORDER BY id")
-        rows = [_zeile(r) for r in cur.fetchall()]
+        rows = _abfrage(cur)
     except Exception:
         try: db.rollback()
         except Exception: pass
@@ -73,11 +124,10 @@ def holen(pid: int) -> dict | None:
     P = ph()
     db = get_db(); cur = db.cursor()
     try:
-        cur.execute(f"SELECT {', '.join(_SPALTEN)} FROM {TABELLE} WHERE id={P}", (pid,))
-        r = cur.fetchone()
+        rows = _abfrage(cur, f"WHERE id={P}", (pid,))
     finally:
         cur.close(); db.close()
-    return _zeile(r) if r else None
+    return rows[0] if rows else None
 
 
 # ── Hochladen / Ändern ────────────────────────────────────────────
@@ -117,11 +167,14 @@ def pruefen(daten: bytes, dateiname: str, content_type: str = "") -> tuple:
     return daten, seiten
 
 
-def hinzufuegen(titel: str, kuerzel: str, daten: bytes, dateiname: str, content_type: str = "") -> int:
-    """Speichert ein Dokument (S3 + Liste). kuerzel leer = für alle Mitarbeiter. Gibt die ID zurück."""
+def hinzufuegen(titel: str, kuerzel: str, daten: bytes, dateiname: str, content_type: str = "", nur_qr: bool = False) -> int:
+    """Speichert ein Dokument (S3 + Liste). kuerzel leer = für alle Mitarbeiter. Gibt die ID zurück.
+    nur_qr: in der Reisemappe nur als QR-Code (geht nur für Dokumente „für alle Mitarbeiter“)."""
     titel = (titel or "").strip()[:120]
     if not titel:
         raise ValueError("Bitte einen Titel eingeben.")
+    if nur_qr and (kuerzel or "").strip():
+        raise ValueError("„Nur als QR-Code“ geht nur für Dokumente, die für alle Mitarbeiter gelten.")
     pdf, seiten = pruefen(daten, dateiname, content_type)
     from mod_beleg import s3_upload
     key = f"reise_pdfs/{uuid.uuid4().hex}.pdf"
@@ -143,7 +196,68 @@ def hinzufuegen(titel: str, kuerzel: str, daten: bytes, dateiname: str, content_
         db.commit()
     finally:
         cur.close(); db.close()
+    if nur_qr:
+        qr_setzen(pid, True)
     return pid
+
+
+def ersetzen(pid: int, daten: bytes, dateiname: str, content_type: str = "") -> None:
+    """Tauscht nur die Datei aus. Titel, Zuordnung und die QR-Kennung (der gedruckte Link) bleiben unverändert."""
+    d = holen(pid)
+    if not d:
+        raise ValueError("Dokument nicht gefunden.")
+    pdf, seiten = pruefen(daten, dateiname, content_type)
+    from mod_beleg import s3_upload
+    key = f"reise_pdfs/{uuid.uuid4().hex}.pdf"
+    s3_upload(key, pdf)
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(f"UPDATE {TABELLE} SET dateiname={P}, s3_key={P}, seiten={P}, groesse={P} WHERE id={P}",
+                    ((dateiname or "")[:200], key, seiten, len(pdf), pid))
+        db.commit()
+    finally:
+        cur.close(); db.close()
+
+
+def qr_setzen(pid: int, an: bool) -> str:
+    """Schaltet „nur als QR-Code“ ein oder aus. Die Kennung entsteht beim ersten Einschalten und bleibt für immer gleich
+    (auch nach dem Ausschalten), damit bereits gedruckte QR-Codes gültig bleiben. Rückgabe: die Kennung."""
+    d = holen(pid)
+    if not d:
+        raise ValueError("Dokument nicht gefunden.")
+    if an and d["kuerzel"]:
+        raise ValueError("„Nur als QR-Code“ geht nur für Dokumente, die für alle Mitarbeiter gelten.")
+    token = d["qr_token"] or (secrets.token_urlsafe(18) if an else "")
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(f"UPDATE {TABELLE} SET nur_qr={P}, qr_token={P} WHERE id={P}", (1 if an else 0, token or None, pid))
+        db.commit()
+    finally:
+        cur.close(); db.close()
+    return token
+
+
+def holen_per_qr(token: str) -> dict | None:
+    """Das Dokument zu einer QR-Kennung – nur wenn es aktiv, „für alle Mitarbeiter“ und als QR-Code freigegeben ist."""
+    token = (token or "").strip()
+    if len(token) < 16:
+        return None
+    for d in liste(nur_aktive=True):
+        if d["nur_qr"] and not d["kuerzel"] and d["qr_token"] and secrets.compare_digest(d["qr_token"], token):
+            return d
+    return None
+
+
+def qr_eintraege(basis_url: str) -> list:
+    """Für den Reiseplan: [{id, titel, url}] aller aktiven QR-Dokumente. Ohne bekannte Internetadresse der App
+    lässt sich kein gültiger Link bauen – dann leer (die Dokumente werden dann wie bisher angehängt)."""
+    basis = (basis_url or "").strip().rstrip("/")
+    if not basis:
+        return []
+    return [{"id": d["id"], "titel": d["titel"], "url": f"{basis}/portal/dokument/{d['qr_token']}"}
+            for d in liste(nur_aktive=True) if d["nur_qr"] and not d["kuerzel"] and d["qr_token"]]
 
 
 def loeschen(pid: int) -> None:
@@ -177,12 +291,15 @@ def pdf_bytes(pid: int) -> bytes | None:
 
 # ── Anhänge für die Reisemappe ────────────────────────────────────
 
-def anhaenge_fuer(kuerzel: str | None) -> list:
+def anhaenge_fuer(kuerzel: str | None, ohne_ids=()) -> list:
     """Dokumente für diese Reisemappe: alle aktiven „für alle Mitarbeiter“ plus die persönlichen des Mitarbeiters.
     Ohne Kürzel (Reise mit mehreren Reisenden, kein Mitarbeiter gewählt) nur die Dokumente für alle.
+    ohne_ids: Dokumente, die stattdessen als QR-Code im Reiseplan stehen (werden nicht angehängt).
     Rückgabe: [{titel, bytes, quelle}] – nicht ladbare Dateien werden übersprungen und in 'fehler' gemeldet."""
     erg = []
     for d in liste(nur_aktive=True):
+        if d["id"] in set(ohne_ids or ()):
+            continue
         if d["kuerzel"] and d["kuerzel"] != (kuerzel or ""):
             continue
         try:
