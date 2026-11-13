@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.62"
+DOKU_GEPRUEFT_FUER = "3.63"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -703,6 +703,12 @@ KAPITEL = [
             "Ein Segment lässt sich auch von Hand **umbuchen** (Zeiten, Nummer, Sitz). Der Sitzplatz wird von der KI aus dem Beleg gelesen und lässt sich dort eintragen.",
             "**Überschneidungen:** Enthalten zwei Belege dieselben Flug-/Zugsegmente (z. B. Buchung und Umbuchung), erscheint ein Hinweis. Auf der Seite wählen Sie je Fall: "
             "A behalten, B behalten oder beide behalten (z. B. zwei Reisende).",
+            "**Reisevorbereitung (nur Organisatoren):** Oben in der Reise meldet ein gelber Kasten, wie viele **Hotelnächte nicht gebucht** sind. "
+            "Eine Nacht gilt als abgedeckt durch ein Hotel oder durch einen **Nachtflug/Nachtzug** (mindestens 3 Stunden zwischen 23:00 und 05:00 Uhr unterwegs). "
+            "Landet ein Flug nachts (z. B. 01:30), bleibt die Nacht offen und der Hinweis nennt die späte Ankunft. "
+            "Ein zweiter Hinweis erscheint, wenn zwei aufeinanderfolgende Hotels **weit auseinander** liegen (ab 50 km oder anderes Land) und dazwischen weder Flug, Bahn, Mietwagen noch ein Fahrt-Termin gebucht ist. "
+            "Jeder Hinweis lässt sich **einzeln mit Grund ausblenden** (z. B. „Privat übernachtet“, „Im Flugzeug / Nachtzug“) und unter „ausgeblendete Hinweise“ wieder einblenden. "
+            "Der Kasten erscheint nur bei aktiven, noch nicht beendeten Reisen; es gibt dazu keine Mail und keinen Eintrag in den ToDos.",
             "**Flugstatus zurücksetzen:** löscht den gespeicherten Flug-/Bahnstatus eines Belegs, wenn ein falscher Endstatus (z. B. falsche Verspätung) auf dem Dashboard hängen bleibt.",
         ]),
     ]},

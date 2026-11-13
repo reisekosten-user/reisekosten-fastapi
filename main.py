@@ -34,6 +34,7 @@ import mod_a1
 import mod_reisepdf
 import mod_visa
 import mod_abwicklung as abw
+import mod_vorbereitung as vorb
 import mod_aufraeumen
 import mod_visum
 import mod_doku
@@ -126,6 +127,11 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.63", "zeit": "2026-11-13 06:34", "aenderungen": [
+        "Neu: Reisevorbereitung – oben in der Reise (nur für Organisatoren) zeigt ein Hinweis, wie viele Hotelnächte noch nicht gebucht sind. Nachtflüge und Nachtzüge decken die Nacht ab; bei später Ankunft (z.B. 01:30) bleibt die Nacht offen und wird mit Hinweis genannt.",
+        "Neu: Hinweis, wenn zwei aufeinanderfolgende Hotels weit auseinander liegen (ab 50 km oder anderes Land) und dazwischen kein Flug, keine Bahn, kein Mietwagen und keine Fahrt gebucht ist.",
+        "Neu: Jeder Hinweis lässt sich einzeln mit Grund ausblenden (z.B. privat übernachtet) und wieder einblenden.",
+    ]},
     {"version": "3.62", "zeit": "2026-11-12 20:30", "aenderungen": [
         "Neu: Reiseplan-PDF mit hellblauen Tagesbändern, dem Logo oben rechts (Datei static/logo3.png) und einem kleinen Piktogramm vor jedem Ereignis (Flug, Bahn, Mietwagen/Taxi, Hotel, Parken, Termin, Montage, Sonstiges).",
     ]},
@@ -936,6 +942,7 @@ async def startup():
     mod_reisepdf.tabelle_sichern()
     mod_visa.tabelle_sichern()
     abw.tabelle_sichern()
+    vorb.tabelle_sichern()
     try:
         n_mwst = mod_beleg.mwst_flug_bahn_reparieren()
         if n_mwst:
@@ -8641,6 +8648,32 @@ def _ueberschneidungs_banner_fuer_reise(rcode: str) -> str:
             f'<a href="/reise/{rcode}/ueberschneidungen" style="color:#991b1b;font-weight:700">Jetzt klären →</a></div>')
 
 
+@app.post("/reise/{code}/vorbereitung/ausblenden")
+async def reise_vorbereitung_ausblenden(code: str, request: Request):
+    """Blendet einen oder alle angezeigten Vorbereitungs-Hinweise (Hotelnächte, Transporte) aus (v3.63)."""
+    if (nein := _nur_organisator(request)):
+        return nein
+    form = await request.form()
+    keys = []
+    if form.get("schluessel"):
+        keys.append(str(form.get("schluessel")))
+    if form.get("alle"):
+        keys += str(form.get("alle")).split(",")
+    vorb.ausblenden(code.upper(), keys, (form.get("grund") or "").strip(), request.session.get("kuerzel") or "")
+    return RedirectResponse(f"/reise/{code.upper()}", status_code=303)
+
+
+@app.post("/reise/{code}/vorbereitung/einblenden")
+async def reise_vorbereitung_einblenden(code: str, request: Request):
+    if (nein := _nur_organisator(request)):
+        return nein
+    form = await request.form()
+    k = str(form.get("schluessel") or "").strip()
+    if k:
+        vorb.einblenden(code.upper(), k)
+    return RedirectResponse(f"/reise/{code.upper()}", status_code=303)
+
+
 @app.get("/reise/{code}/ueberschneidungen", response_class=HTMLResponse)
 def reise_ueberschneidungen(code: str):
     from html import escape as e
@@ -9461,10 +9494,12 @@ def reise_detail(code: str, request: Request):
         abw_knopf = (f'<a href="/reise/{rcode}/abwicklung" class="btn btn-secondary">📋 Abwicklung</a>'
                      if abw.status_von(rcode) != "aktiv" else
                      f'<a href="/reise/{rcode}/absage" class="btn btn-secondary">🚫 Absagen / verschieben</a>')
+        vorbereitung_html = vorb.banner_html(rcode) if ist_organisator(request) else ""
         content = f"""
         {abw.banner_html(rcode)}{abw.vorgaenger_html(rcode)}
         {_aenderungs_banner_fuer_reise(rcode)}
         {_ueberschneidungs_banner_fuer_reise(rcode)}
+        {vorbereitung_html}
         <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:20px;flex-wrap:wrap">
           <div style="flex:1">
             <div style="font-family:monospace;font-size:13px;color:var(--muted);margin-bottom:4px">{rcode}</div>
