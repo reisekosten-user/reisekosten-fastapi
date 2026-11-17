@@ -56,16 +56,32 @@ CHECKPOINTS_VOR_ABREISE = [timedelta(hours=4), timedelta(hours=3), timedelta(hou
 CHECKPOINT_VOR_ANKUNFT = timedelta(minutes=30)
 VERSPAETUNGS_ALARM_SCHWELLE_MIN = 15
 MINDESTABSTAND_MINUTEN = 10  # harte Sperre, siehe segment_check_faellig
-VERSPAETUNG_MAX_NACHPRUEFUNG = timedelta(hours=3)  # Obergrenze für 10-Min-Takt bei Verspätung
+VERSPAETUNG_TAKT_MINUTEN = 30  # v3.67: bei Verspätung >= Alarmschwelle: Abstand zwischen geplanter und neuer Abreise
+FEHLER_SPERRE_MINUTEN = 20     # v3.67: nach einem API-Fehler dieselbe Abfrage so lange nicht wiederholen
+
+
+def _verspaetungs_stufe(alt_status: dict | None) -> int:
+    """Bekannte Verspätung in Stufen zu 15 Minuten; unter der Alarmschwelle (15 Min) = 0.
+    Die Stufen verhindern, dass sich Prüfzeitpunkte bei jeder kleinen Änderung der Schätzung verschieben."""
+    try:
+        v = int((alt_status or {}).get("verspaetung_minuten") or 0)
+    except (TypeError, ValueError):
+        v = 0
+    if v < VERSPAETUNGS_ALARM_SCHWELLE_MIN:
+        return 0
+    return (v // 15) * 15
 
 
 def _checkpoints_fuer_segment(seg: dict, alt_status: dict | None) -> list:
-    """Berechnet die STATISCHEN Prüf-Zeitpunkte für ein Segment (nur für die
-    Diagnose-Anzeige – die eigentliche Fällig-Logik inkl. Verspätungsfall steht
-    in segment_check_faellig)."""
+    """Prüf-Zeitpunkte für ein Segment – genau der dokumentierte Plan:
+    4h/3h/2h/1h/30min/15min vor der geplanten Abreise; bei erkannter Verspätung (ab Alarmschwelle) zusätzlich
+    15 Min vor der NEUEN erwarteten Abreise; 30 Min vor der erwarteten Landung."""
     dt_ab = seg["dt_ab"]; dt_an = seg["dt_an"]
+    stufe = timedelta(minutes=_verspaetungs_stufe(alt_status))
     punkte = [dt_ab - td for td in CHECKPOINTS_VOR_ABREISE]
-    punkte.append(dt_an - CHECKPOINT_VOR_ANKUNFT)
+    if stufe:
+        punkte.append(dt_ab + stufe - timedelta(minutes=15))
+    punkte.append(dt_an + stufe - CHECKPOINT_VOR_ANKUNFT)
     return sorted(punkte)
 
 
@@ -73,25 +89,14 @@ def segment_check_faellig(seg: dict, jetzt: datetime, alt_status: dict | None) -
     """
     True, wenn ein Check fällig ist.
 
-    - Ist bereits eine Verspätung bekannt (Flug/Zug sollte laut Plan schon
-      losgefahren sein, hat sich aber verzögert): einfach alle
-      MINDESTABSTAND_MINUTEN erneut nachsehen, bis sich der Status ändert
-      (z.B. Ankunft bestätigt). KEIN rechnerisch verschobener Einzel-
-      Checkpoint mehr – der hätte sich mit jeder neu gemeldeten Verspätung
-      ein Stück nach vorn verschoben und wäre dadurch nach JEDEM Check sofort
-      wieder "fällig" gewesen (führte zum Minutentakt-Bug).
-      WICHTIG – Obergrenze: Diese 10-Minuten-Nachprüfung läuft NUR bis
-      spätestens VERSPAETUNG_MAX_NACHPRUEFUNG nach der PLANMÄSSIGEN Ankunft.
-      Ohne diese Grenze würde ein Flug, bei dem der Endstatus aus irgendeinem
-      Grund nie sauber als "Arrived" erkannt wird (z.B. mehrdeutiger
-      AeroDataBox-Status), bis zu 24h lang ALLE 10 MINUTEN abgefragt werden –
-      genau das hat die massive RapidAPI-Kostenexplosion verursacht (~200
-      Aufrufe an einem einzigen Tag für nur 2 Reisende).
-    - Sonst: feste Checkpoints vor der geplanten Abreise (4h/3h/2h/1h/30/15min)
-      und 30 Min vor der geplanten Landung, jeweils mit demselben
-      Mindestabstand zum letzten Check.
-    - Punkte zwischen Abreise und Ankunft-30min existieren bewusst nicht ->
-      während des Flugs finden automatisch keine Checks statt.
+    v3.67: Entspricht jetzt dem dokumentierten Prüfplan. Früher löste JEDE gemeldete Verspätung (auch 1 Minute)
+    einen 10-Minuten-Takt aus, der bis zu 3 Stunden nach der Ankunft lief – auch während des Flugs. Das kostete bis zu
+    45 statt 7 Abfragen pro Flug und verbrauchte das Kontingent der Flug-API.
+
+    - Feste Checkpoints (siehe _checkpoints_fuer_segment), jeder höchstens EINMAL; Mindestabstand zum letzten Check.
+    - Einzige Ausnahme: Bei einer Verspätung ab der Alarmschwelle (15 Min) wird zwischen geplanter und neuer
+      erwarteter Abreise alle VERSPAETUNG_TAKT_MINUTEN nachgesehen (dort liegt sonst kein Checkpoint).
+    - Während des Flugs/der Fahrt gibt es keine Checks, nach der Landung auch nicht mehr.
     """
     letzter_check = alt_status.get("letzter_check_am") if alt_status else None
     if isinstance(letzter_check, str):
@@ -104,13 +109,10 @@ def segment_check_faellig(seg: dict, jetzt: datetime, alt_status: dict | None) -
         if minuten_seit_check < MINDESTABSTAND_MINUTEN:
             return False
 
-    bekannte_verspaetung = (alt_status.get("verspaetung_minuten") or 0) if alt_status else 0
-    if bekannte_verspaetung > 0:
-        if jetzt > seg["dt_an"] + VERSPAETUNG_MAX_NACHPRUEFUNG:
-            return False  # längst über der Kulanzgrenze -> gilt als abgeschlossen
-        # Bereits verspätet, innerhalb der Kulanzgrenze und mindestens
-        # MINDESTABSTAND_MINUTEN seit dem letzten Check vergangen -> erneut nachsehen.
-        return True
+    stufe = _verspaetungs_stufe(alt_status)
+    if stufe and seg["dt_ab"] <= jetzt <= seg["dt_ab"] + timedelta(minutes=stufe + 15):
+        if minuten_seit_check is None or minuten_seit_check >= VERSPAETUNG_TAKT_MINUTEN:
+            return True
 
     for p in _checkpoints_fuer_segment(seg, alt_status):
         if p <= jetzt and (letzter_check is None or letzter_check < p):
@@ -581,6 +583,61 @@ def reisende_und_organisatoren_mailadressen(reise_code: str) -> list:
 
 TERMINAL_STATUS_SCHLUESSELWOERTER = ("arriv", "cancel", "divert", "land")
 
+# Nach einem API-Fehler (z. B. „Kein Flug gefunden“, Zeitüberschreitung, Kontingent erschöpft) wird dieselbe Abfrage
+# nicht jede Minute wiederholt: (Typ, Nummer, Datum) -> gesperrt bis (Berliner Zeit). Gilt je Serverprozess.
+_FEHLER_SPERRE: dict = {}
+
+
+def _zaehler_tabelle_anlegen(cur, db) -> None:
+    cur.execute("CREATE TABLE IF NOT EXISTS api_zaehler (tag TEXT, quelle TEXT, anzahl INTEGER DEFAULT 0, "
+                "PRIMARY KEY (tag, quelle))")
+    db.commit()
+
+
+def api_aufruf_zaehlen(quelle: str) -> None:
+    """Zählt einen Aufruf der externen API je Tag und Quelle (v3.67), damit sichtbar ist, wohin das Kontingent geht.
+    Ein Fehler beim Zählen darf den Prüflauf nie stören."""
+    try:
+        db = get_db(); cur = db.cursor(); P = ph()
+        tag = jetzt_lokal().date().isoformat()
+        try:
+            cur.execute(f"UPDATE api_zaehler SET anzahl = anzahl + 1 WHERE tag={P} AND quelle={P}", (tag, quelle))
+            geaendert = cur.rowcount
+        except Exception:
+            db.rollback(); _zaehler_tabelle_anlegen(cur, db); geaendert = 0
+        if not geaendert:
+            cur.execute(f"INSERT INTO api_zaehler (tag, quelle, anzahl) VALUES ({P},{P},1)", (tag, quelle))
+        db.commit(); cur.close(); db.close()
+    except Exception as ex:
+        print(f"[Flugalert] Aufruf-Zähler nicht gespeichert: {ex}")
+
+
+def api_nutzung_laden() -> dict:
+    """{Quelle: {"heute": n, "sieben_tage": n, "monat": n}} aus der Zähltabelle (Zählung ab v3.67)."""
+    heute = jetzt_lokal().date()
+    ab = (heute - timedelta(days=40)).isoformat()
+    out = {}
+    try:
+        db = get_db(); cur = db.cursor(); P = ph()
+        cur.execute(f"SELECT tag, quelle, anzahl FROM api_zaehler WHERE tag >= {P}", (ab,))
+        for r in cur.fetchall():
+            tag = str((r["tag"] if hasattr(r, "keys") else r[0]))[:10]
+            quelle = r["quelle"] if hasattr(r, "keys") else r[1]
+            n = int((r["anzahl"] if hasattr(r, "keys") else r[2]) or 0)
+            try:
+                d = date.fromisoformat(tag)
+            except ValueError:
+                continue
+            z = out.setdefault(quelle, {"heute": 0, "sieben_tage": 0, "monat": 0})
+            if d == heute: z["heute"] += n
+            if (heute - d).days < 7: z["sieben_tage"] += n
+            if d.year == heute.year and d.month == heute.month: z["monat"] += n
+        cur.close(); db.close()
+    except Exception:
+        pass   # Tabelle noch nicht vorhanden = noch nichts gezählt
+    return out
+
+
 def cron_flug_alerts(debug: bool = False) -> dict:
     """
     Wird von einem externen Cron-Pinger regelmäßig (idealerweise minütlich)
@@ -604,6 +661,11 @@ def cron_flug_alerts(debug: bool = False) -> dict:
     geprueft = 0
     alerts_gesendet = 0
     fehler = []
+    # v3.67: Derselbe Flug/Zug taucht je Reisendem in einem eigenen Beleg auf. Er wird je Lauf nur EINMAL abgefragt
+    # (Ergebnis wird wiederverwendet) und löst je Reise nur EINEN Alarm aus.
+    abfrage_cache: dict = {}
+    alarm_gesendet_fuer: set = set()
+    api_aufrufe = 0
 
     for seg in segmente:
         schritt = {"beleg_id": seg["beleg_id"], "segment_index": seg["segment_index"],
@@ -638,18 +700,38 @@ def cron_flug_alerts(debug: bool = False) -> dict:
             if debug: diag["verarbeitung"].append(schritt)
             continue
 
-        if seg["transport_typ"] == "Flug" and seg["transport_nummer"]:
-            schritt["quelle"] = "AeroDataBox"
-            schritt["api_key_gesetzt"] = bool(AERODATABOX_API_KEY)
-            ergebnis = flugstatus_abrufen(seg["transport_nummer"], seg["abreise_datum_utc"])
-        elif seg["transport_typ"] == "Bahn" and seg["transport_nummer"]:
-            schritt["quelle"] = "db.transport.rest"
-            ergebnis = bahnstatus_abrufen(seg["transport_nummer"], seg["von_ort"], seg["nach_ort"],
-                                          seg["abreise_datum"], seg["abreise_zeit"])
-        else:
+        if seg["transport_typ"] not in ("Flug", "Bahn") or not seg["transport_nummer"]:
             schritt["ergebnis"] = "keine Transportnummer – übersprungen"
             if debug: diag["verarbeitung"].append(schritt)
             continue
+
+        abfrage_key = (seg["transport_typ"], re.sub(r"\s+", "", seg["transport_nummer"]).upper(),
+                       seg["abreise_datum_utc"] if seg["transport_typ"] == "Flug" else seg["abreise_datum"],
+                       seg["abreise_zeit"] if seg["transport_typ"] == "Bahn" else "")
+        schritt["quelle"] = "AeroDataBox" if seg["transport_typ"] == "Flug" else "Deutsche Bahn"
+        if seg["transport_typ"] == "Flug":
+            schritt["api_key_gesetzt"] = bool(AERODATABOX_API_KEY)
+        if abfrage_key in abfrage_cache:
+            ergebnis = abfrage_cache[abfrage_key]
+            schritt["quelle"] += " (Ergebnis desselben Fluges/Zuges wiederverwendet, kein weiterer Aufruf)"
+        else:
+            gesperrt_bis = _FEHLER_SPERRE.get(abfrage_key)
+            if gesperrt_bis and gesperrt_bis > jetzt_lokal():
+                schritt["ergebnis"] = f"nach API-Fehler pausiert bis {gesperrt_bis.strftime('%H:%M')} (schont das Kontingent)"
+                if debug: diag["verarbeitung"].append(schritt)
+                continue
+            if seg["transport_typ"] == "Flug":
+                ergebnis = flugstatus_abrufen(seg["transport_nummer"], seg["abreise_datum_utc"])
+            else:
+                ergebnis = bahnstatus_abrufen(seg["transport_nummer"], seg["von_ort"], seg["nach_ort"],
+                                              seg["abreise_datum"], seg["abreise_zeit"])
+            api_aufrufe += 1
+            api_aufruf_zaehlen(schritt["quelle"])
+            abfrage_cache[abfrage_key] = ergebnis
+            if ergebnis.get("fehler"):
+                _FEHLER_SPERRE[abfrage_key] = jetzt_lokal() + timedelta(minutes=FEHLER_SPERRE_MINUTEN)
+            else:
+                _FEHLER_SPERRE.pop(abfrage_key, None)
 
         schritt["api_antwort"] = ergebnis
 
@@ -672,7 +754,12 @@ def cron_flug_alerts(debug: bool = False) -> dict:
             except Exception:
                 pass
 
-        if relevante_aenderung(alt_status, ergebnis):
+        alarm_key = (seg["reise_code"],) + abfrage_key
+        if relevante_aenderung(alt_status, ergebnis) and alarm_key in alarm_gesendet_fuer:
+            alert_markieren(seg["beleg_id"], seg["segment_index"])      # gleicher Flug, gleiche Reise: Mail ging schon raus
+            schritt["alert_gesendet"] = "bereits für diesen Flug in diesem Lauf versendet"
+        elif relevante_aenderung(alt_status, ergebnis):
+            alarm_gesendet_fuer.add(alarm_key)
             empfaenger = reisende_und_organisatoren_mailadressen(seg["reise_code"])
             betreff = (f"⚠ {seg['transport_typ']} {seg['transport_nummer']} "
                        f"({seg['von_ort']}→{seg['nach_ort']}): {ergebnis.get('status')}")
@@ -693,7 +780,7 @@ def cron_flug_alerts(debug: bool = False) -> dict:
         if debug: diag["verarbeitung"].append(schritt)
 
     ergebnis = {"geprueft": geprueft, "alerts_gesendet": alerts_gesendet, "fehler": fehler,
-                "segmente_im_fenster": len(segmente)}
+                "segmente_im_fenster": len(segmente), "api_aufrufe": api_aufrufe}
     if debug:
         ergebnis["diagnose"] = diag
     return ergebnis

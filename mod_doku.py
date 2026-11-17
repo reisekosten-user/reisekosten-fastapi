@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.65"
+DOKU_GEPRUEFT_FUER = "3.67"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -697,6 +697,7 @@ KAPITEL = [
         ("h3", "Reiseplan"),
         ("p", "**🗺 Reiseplan** zeigt alle Flüge, Züge und Termine in zeitlicher Reihenfolge. Zwei PDF-Varianten: „für Reisemappe Mitarbeiter“ (mit Anlagen) und „zum Emailversand“ (ohne Buchungscodes, nie mit Anlagen). Mehr dazu im Kapitel „Reisemappe, Reise-PDFs und A1-Bescheinigung“. Das PDF ist bewusst schlicht gehalten: hellblaues Tagesband, Uhrzeit links mit Zeitleiste, vor jedem Ereignis ein kleines Piktogramm (Flug, Bahn, Auto, Hotel, Parken, Termin …), Typ als kleiner grauer Text; oben rechts steht das Logo (Datei `static/logo3.png`), unten Stand und Seitenzahl."),
         ("p", "**Hotelzeiten:** Steht im Hotelbeleg keine Check-in- oder Check-out-Zeit, nimmt die App **Check-in 16:00** und **Check-out 10:00** an (jeweils Ortszeit des Hotels). Im Reiseplan, im Tagesablauf und in der Outlook-Einladung steht dann „ab 16:00“ bzw. „bis 10:00“. Eine Zeit aus dem Beleg wird unverändert angezeigt. Geht am Check-out-Tag **früher** ein Flug, ein Zug oder ein Mietwagen ab, steht der Check-out davor („vor 07:00“); landet am Check-in-Tag **später** ein Flug oder Zug am Hotelort, steht der Check-in danach („ab 19:05“). Flüge an anderen Orten ändern daran nichts."),
+        ("p", "**Doppelte Belege:** Liegt dasselbe Hotel mehrfach vor (zum Beispiel Buchungsbestätigung und Rechnung oder zweimal hochgeladen), zeigt der Reiseplan es nur **einmal**: gleiche An- und Abreise und ähnlicher Hotelname oder gleicher Buchungscode gelten als ein Aufenthalt. Zeiten aus dem Beleg, Adresse und Buchungscode werden aus allen Belegen ergänzt. Verschiedene Hotels mit gleichen Daten und zwei getrennte Aufenthalte im selben Hotel bleiben getrennt."),
         ("h3", "Änderungen und Umbuchungen"),
         ("ul", [
             "Wird ein Beleg als **Flugänderung/Umbuchung** eingestuft, erscheint oben auf der Reise-Seite „n Änderungen warten auf Klärung“. "
@@ -769,13 +770,16 @@ KAPITEL = [
         ("p", "Die App überwacht Flüge (AeroDataBox) und Züge (Deutsche Bahn, Timetables) nach einem **festen Prüfplan** – nicht editierbar:"),
         ("tab", ["Zeitpunkt", "Prüfung"], [
             ["Vor der geplanten Abreise", "4 h · 3 h · 2 h · 1 h · 30 Min · 15 Min"],
-            ["Bei erkannter Verspätung zusätzlich", "15 Min vor der neuen erwarteten Abreise"],
+            ["Bei erkannter Verspätung (ab 15 Min) zusätzlich", "15 Min vor der neuen erwarteten Abreise und alle 30 Min zwischen geplanter und neuer Abreise"],
             ["Während Flug/Fahrt", "keine Prüfung"],
             ["Vor der erwarteten Ankunft", "30 Min vorher"],
             ["Nach der Ankunft", "keine Prüfung mehr"],
         ], [45, 55]),
         ("p", "Ab **15 Minuten Verspätung** (oder bei Stornierung/Umleitung) geht sofort eine Mail an alle Reisenden der Reise **und** alle Organisatoren. "
               "Offene Alarme zeigt das Dashboard."),
+        ("p", "**Abfragen sparen (Kontingent der Flug-Schnittstelle):** Ein pünktlicher Flug kostet etwa **7 Abfragen**, ein stark verspäteter bis zu etwa 12. "
+              "Derselbe Flug mehrerer Reisender wird nur **einmal** abgefragt und löst nur **einen** Alarm aus. Nach einem Fehler der Schnittstelle (z. B. „Kein Flug gefunden“) wartet die App **20 Minuten**, bevor sie dieselbe Abfrage wiederholt. "
+              "Unter **Einstellungen › Flug-/Bahn-Alerts** zeigt die Seite, wie viele Abfragen heute, in 7 Tagen und im Monat gezählt wurden (Zählung ab Version 3.67). Verbindlich ist die Anzeige bei RapidAPI."),
         ("p", "Seite **Einstellungen › Flug-/Bahn-Alerts:** zeigt den Prüfplan und hat den Knopf **„🧪 Jetzt testweise abrufen“**. "
               "Er führt einen Prüflauf sofort aus und zeigt eine Diagnose (welche Belege im Zeitfenster liegen, was mit jedem Segment passiert ist)."),
         ("hinweis", "Voraussetzung: Der externe Cron-Dienst ruft `/cron/flug-alerts` jede Minute auf, und die API-Schlüssel (AERODATABOX_API_KEY, "

@@ -60,7 +60,7 @@ from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_tok
                          reisende_der_reise, zugaenge_der_reise, portal_mail_senden,
                          cron_portal_mails, PORTAL_TAGE_VORHER, portal_aenderungen_speichern,
                          von_reise_uebernehmen, tatsaechliche_zeit_uebernehmen, bearbeitet_nachtragen)
-from mod_flugalert import (konfiguration_laden,
+from mod_flugalert import (konfiguration_laden, api_nutzung_laden,
                             cron_flug_alerts, offene_alerts_fuer_dashboard)
 from mod_geo import koordinaten_fuer_land, adresse_geokodieren
 CRON_SECRET = os.getenv("CRON_SECRET", "")
@@ -128,6 +128,15 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.67", "zeit": "2026-11-17 15:02", "aenderungen": [
+        "Flug-Abfragen (AeroDataBox) stark reduziert: Bisher löste schon 1 Minute Verspätung einen 10-Minuten-Takt aus, auch während des Flugs (bis zu 45 statt 7 Abfragen pro Flug). Jetzt gilt genau der dokumentierte Prüfplan; bei Verspätung ab 15 Minuten zusätzlich 15 Min vor der neuen Abreise und alle 30 Min zwischen geplanter und neuer Abreise.",
+        "Derselbe Flug mehrerer Reisender wird nur einmal abgefragt und löst nur einen Alarm aus; nach einem API-Fehler wartet die App 20 Minuten, statt jede Minute neu zu fragen.",
+        "Einstellungen › Flug-/Bahn-Alerts zeigt jetzt, wie viele Abfragen heute, in 7 Tagen und im Monat gezählt wurden.",
+    ]},
+    {"version": "3.66", "zeit": "2026-11-14 07:42", "aenderungen": [
+        "Korrektur Reiseplan (Anzeige, PDF, Portal): Ein Hotel stand doppelt (2x Check-in/Check-out), wenn es als mehrere Belege vorlag, z. B. Buchungsbestätigung + Rechnung oder zweimal hochgeladen. Jetzt gilt gleiche An- und Abreise bei gleichem Hotel (ähnlicher Name oder gleicher Buchungscode) als ein Aufenthalt; Zeiten aus dem Beleg, Adresse und Buchungscode werden daraus ergänzt.",
+        "Reiseplan: Bei Flug, Bahn und Mietwagen zählt eine Rechnung ohne Segmente nicht mehr zusätzlich neben der Buchungsbestätigung; offene Flugänderungen erscheinen nicht zusätzlich (wie im Tagesablauf).",
+    ]},
     {"version": "3.65", "zeit": "2026-11-13 11:30", "aenderungen": [
         "Reise-PDFs: Der Titel eines Dokuments lässt sich jetzt ändern (Einstellungen › Reise-PDFs › „Titel ändern“), z. B. bei einem Tippfehler. Datei, Zuordnung und QR-Link bleiben gleich; der neue Titel erscheint im Inhaltsverzeichnis, unter dem QR-Code und im Portal.",
     ]},
@@ -4204,6 +4213,58 @@ async def beleg_gesamtbetrag_speichern(bid: int, request: Request):
         return JSONResponse({"fehler": str(e)}, status_code=500)
 
 
+def _hotel_namensschluessel(name) -> str:
+    """Vergleichsschlüssel für Hotelnamen: 'Hotel Campos Eliseos' == 'CAMPOS ELISEOS Hotel' (v3.66)."""
+    import re as _re
+    woerter = [w for w in _re.sub(r"[^a-z0-9äöüß]+", " ", str(name or "").lower()).split()
+               if w not in ("hotel", "hotels", "the", "und", "and", "resort")]
+    return "".join(woerter)
+
+
+def _hotels_zusammenfuehren(kandidaten: list) -> list:
+    """v3.66: Dieselbe Hotelbuchung kann als mehrere Belege vorliegen (Buchungsbestätigung + Rechnung, doppelt hochgeladen).
+    Gleiche An- und Abreise UND gleiches Hotel (Name ähnlich oder gleicher Buchungscode) = ein Aufenthalt. Aus allen Belegen wird
+    der vollständigste Eintrag gebildet: Zeiten aus dem Beleg gehen vor angenommenen Standardzeiten; Adresse, Koordinaten und
+    Buchungscode werden ergänzt. Verschiedene Hotels mit gleichen Daten bleiben getrennt."""
+    gruppen = []
+    for k in kandidaten:
+        ziel = None
+        for gr in gruppen:
+            e = gr[0]
+            if e["ci"] != k["ci"] or e["co"] != k["co"]:
+                continue
+            ka, kb = e["key"], k["key"]
+            gleicher_code = bool(k["code_echt"]) and k["code_echt"] in {x["code_echt"] for x in gr if x["code_echt"]}
+            aehnlich = bool(ka and kb) and (ka == kb or (min(len(ka), len(kb)) >= 5 and (ka in kb or kb in ka)))
+            if gleicher_code or aehnlich:
+                ziel = gr
+                break
+        if ziel is None:
+            gruppen.append([k])
+        else:
+            ziel.append(k)
+    erg = []
+    for gr in gruppen:
+        haupt = dict(max(gr, key=lambda x: ((not x["ci_ang"]) + (not x["co_ang"]) + bool(x["adresse"]) + bool(x["koord"]),
+                                            -gr.index(x))))
+        for x in gr:
+            if x is haupt:
+                continue
+            if haupt["ci_ang"] and not x["ci_ang"]:
+                haupt["ci_z"], haupt["ci_ang"] = x["ci_z"], False
+            if haupt["co_ang"] and not x["co_ang"]:
+                haupt["co_z"], haupt["co_ang"] = x["co_z"], False
+            if not haupt["adresse"] and x["adresse"]:
+                haupt["adresse"] = x["adresse"]
+            if not haupt["koord"] and x["koord"]:
+                haupt["koord"] = x["koord"]
+        echte = list(dict.fromkeys(x["code_echt"] for x in gr if x["code_echt"]))
+        sonst = list(dict.fromkeys(x["code"] for x in gr if x["code"]))
+        haupt["code"] = ", ".join(echte or sonst)
+        erg.append(haupt)
+    return erg
+
+
 def _hotelzeit_abgleichen(art: str, datum, zeit: str, angenommen: bool, h_koord, fahrten) -> tuple:
     """v3.64: Angenommene Hotel-Standardzeit gegen Flug/Bahn/Mietwagen AM HOTELORT abgleichen.
     art: 'ci' (Check-in) oder 'co' (Check-out); fahrten: [(typ, d_ab, ab_zeit, d_an, an_zeit, von_koord, nach_koord)].
@@ -4242,11 +4303,32 @@ def reiseplan_daten_laden(reise_code: str):
     cur.execute(f"""SELECT transportart, anbieter, buchungscode, rechnungsnummer,
                     ki_json, hotel_name, hotel_adresse, hotel_checkin_datum, hotel_checkin_zeit,
                     hotel_checkout_datum, hotel_checkout_zeit, transportart_freitext,
-                    event_datum_von, event_datum_bis, event_ort_von, hotel_lat, hotel_lon
+                    event_datum_von, event_datum_bis, event_ort_von, hotel_lat, hotel_lon,
+                    belegart, beleg_gruppe_id
                     FROM belege WHERE reise_code={P}
-                    AND transportart IN ('Flug','Bahn','Mietwagen','Hotel','Sonstiges')""", (reise_code,))
-    for b in cur.fetchall():
+                    AND transportart IN ('Flug','Bahn','Mietwagen','Hotel','Sonstiges')
+                    AND aenderung_status IS NULL ORDER BY id""", (reise_code,))
+    beleg_zeilen = cur.fetchall()
+    # v3.66: Wie im Tagesablauf der Reise: Eine Buchungsbestätigung, zu der es in derselben Gruppe eine Rechnung/Quittung gibt,
+    # ist Duplikat (bei Flug/Bahn/Mietwagen gilt die Bestätigung mit Segmenten als maßgeblich). Hotels werden unten zusammengeführt.
+    arten_je_gruppe, gruppen_mit_segmenten = {}, set()
+    for b in beleg_zeilen:
+        gid = g(b,"beleg_gruppe_id",18)
+        if not gid: continue
+        arten_je_gruppe.setdefault(gid, set()).add(g(b,"belegart",17) or "")
+        if (g(b,"belegart",17) or "") == "Buchungsbestaetigung" and g(b,"transportart",0) in ("Flug","Bahn","Mietwagen") \
+                and segmente_aus_ki_json(g(b,"ki_json",4)):
+            gruppen_mit_segmenten.add(gid)
+    hotel_kandidaten = []
+    for b in beleg_zeilen:
         typ = g(b,"transportart",0); anbieter = g(b,"anbieter",1) or ""
+        gid = g(b,"beleg_gruppe_id",18)
+        if gid and typ in ("Flug","Bahn","Mietwagen"):
+            if gid in gruppen_mit_segmenten:
+                if not segmente_aus_ki_json(g(b,"ki_json",4)):
+                    continue
+            elif (g(b,"belegart",17) or "") == "Buchungsbestaetigung" and arten_je_gruppe.get(gid, set()) & {"Rechnung", "Quittung"}:
+                continue
         buchungscode = g(b,"buchungscode",2) or g(b,"rechnungsnummer",3) or ""
         if typ == "Sonstiges":
             # Allgemeingültig: JEDE "Sonstiges"-Position mit einem echten
@@ -4287,16 +4369,10 @@ def reiseplan_daten_laden(reise_code: str):
                 h_koord = (float(h_lat), float(h_lon)) if h_lat is not None and h_lon is not None else None
             except (TypeError, ValueError):
                 h_koord = None
-            if ci_d:
-                ereignisse.append((ci_d, ci_z, {
-                    "icon": "🏨", "typ": "hotel", "titel": f"Check-in: {hname}", "zeit": ("ab " if ci_ang else "") + ci_z, "sub": hadresse,
-                    "extra": f"Buchungsnr.: {buchungscode}" if buchungscode else "", "ist_buchungscode": True,
-                    "_hotel": ("ci", ci_ang, h_koord)}))
-            if co_d:
-                ereignisse.append((co_d, co_z, {
-                    "icon": "🏨", "typ": "hotel", "titel": f"Check-out: {hname}", "zeit": ("bis " if co_ang else "") + co_z, "sub": hadresse,
-                    "extra": "", "ist_buchungscode": False,
-                    "_hotel": ("co", co_ang, h_koord)}))
+            hotel_kandidaten.append({
+                "name": hname, "key": _hotel_namensschluessel(hname), "adresse": hadresse, "koord": h_koord,
+                "ci": ci_d, "co": co_d, "ci_z": ci_z, "ci_ang": ci_ang, "co_z": co_z, "co_ang": co_ang,
+                "code": buchungscode, "code_echt": g(b,"buchungscode",2) or ""})
         else:
             segs = segmente_aus_ki_json(g(b,"ki_json",4))
             icon = {"Flug": "✈", "Bahn": "🚆", "Mietwagen": "🚗"}.get(typ, "📍")
@@ -4322,6 +4398,18 @@ def reiseplan_daten_laden(reise_code: str):
                     "_fahrt": (typ_key, d_ab, str(s.get("abreise_zeit") or ""),
                                _datum_parsen(s.get("ankunft_datum")) or d_ab, str(s.get("ankunft_zeit") or ""),
                                _k("von"), _k("nach"))}))
+
+    for h in _hotels_zusammenfuehren(hotel_kandidaten):
+        if h["ci"]:
+            ereignisse.append((h["ci"], h["ci_z"], {
+                "icon": "🏨", "typ": "hotel", "titel": f"Check-in: {h['name']}", "zeit": ("ab " if h["ci_ang"] else "") + h["ci_z"],
+                "sub": h["adresse"], "extra": f"Buchungsnr.: {h['code']}" if h["code"] else "", "ist_buchungscode": True,
+                "_hotel": ("ci", h["ci_ang"], h["koord"])}))
+        if h["co"]:
+            ereignisse.append((h["co"], h["co_z"], {
+                "icon": "🏨", "typ": "hotel", "titel": f"Check-out: {h['name']}", "zeit": ("bis " if h["co_ang"] else "") + h["co_z"],
+                "sub": h["adresse"], "extra": "", "ist_buchungscode": False,
+                "_hotel": ("co", h["co_ang"], h["koord"])}))
 
     TERMIN_ICON = {"termin": "🤝", "kundenbesuch": "🤝", "fahrt": "🚕",
                    "mietwagen": "🚗", "hotel": "🏨", "montage": "🔧", "sonstiges": "📌"}
@@ -15060,9 +15148,30 @@ def alert_einstellungen_form(request: Request, testergebnis: str = ""):
             </div>{diagnose_html}"""
         except Exception:
             testergebnis_html = f'<div class="alert alert-err">Testlauf-Ergebnis konnte nicht gelesen werden.</div>'
+    nutzung = api_nutzung_laden()
+    nutzung_zeilen = "".join(
+        f'<tr><td style="padding:4px 0"><b>{q}</b></td><td style="text-align:right">{z["heute"]}</td>'
+        f'<td style="text-align:right">{z["sieben_tage"]}</td><td style="text-align:right">{z["monat"]}</td></tr>'
+        for q, z in sorted(nutzung.items())) or (
+        '<tr><td colspan="4" style="padding:6px 0;color:var(--muted)">Noch keine Abfragen gezählt.</td></tr>')
+    nutzung_html = f"""
+    <div class="card" style="max-width:560px;margin-bottom:16px">
+      <div class="card-header"><span class="card-title">📊 Abfragen bei den Flug-/Bahn-Schnittstellen</span></div>
+      <div class="card-body">
+        <table style="width:100%;font-size:13px">
+          <tr style="color:var(--muted)"><td></td><td style="text-align:right">heute</td>
+              <td style="text-align:right">7 Tage</td><td style="text-align:right">dieser Monat</td></tr>
+          {nutzung_zeilen}
+        </table>
+        <p style="font-size:12px;color:var(--muted);margin:10px 0 0">
+          Gezählt wird jeder Aufruf der App (Zählung ab Version 3.67). Derselbe Flug mehrerer Reisender zählt nur einmal.
+          Verbindlich ist die Anzeige bei RapidAPI – dort kann der Abrechnungsmonat vom Kalendermonat abweichen.</p>
+      </div>
+    </div>"""
     content = f"""
     <h1 class="page-title">✈ Flug-/Bahn-Alerts – Einstellungen</h1>
     {testergebnis_html}
+    {nutzung_html}
     <div class="alert alert-warn" style="margin-bottom:16px">
       Ein externer Cron-Dienst (z.B. cron-job.org) muss regelmäßig
       <code>/cron/flug-alerts?key=DEIN_CRON_SECRET</code> aufrufen – am besten minütlich,
@@ -15076,8 +15185,9 @@ def alert_einstellungen_form(request: Request, testergebnis: str = ""):
         <table style="width:100%;font-size:13px">
           <tr><td style="padding:4px 0"><b>Vor der geplanten Abreise</b></td>
               <td style="text-align:right">4h · 3h · 2h · 1h · 30 Min · 15 Min</td></tr>
-          <tr><td style="padding:4px 0">Bei erkannter Verspätung zusätzlich</td>
-              <td style="text-align:right">15 Min vor der neuen erwarteten Abreise</td></tr>
+          <tr><td style="padding:4px 0">Bei erkannter Verspätung (ab {k['verspaetung_alarm_ab_min']} Min) zusätzlich</td>
+              <td style="text-align:right">15 Min vor der neuen erwarteten Abreise<br>
+                  und alle 30 Min zwischen geplanter und neuer Abreise</td></tr>
           <tr><td style="padding:4px 0">Während des Fluges/der Zugfahrt</td>
               <td style="text-align:right">kein Check</td></tr>
           <tr><td style="padding:4px 0">Vor der erwarteten Landung/Ankunft</td>
