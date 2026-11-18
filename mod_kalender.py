@@ -320,6 +320,25 @@ def _absender() -> tuple:
 
 # ── SOLL-Stand aus Belegen/Terminen ───────────────────────────────────────────
 _BAHN_WORT = re.compile(r"\b(bahn|train|zug|sncf|ice|tgv|railjet)\b", re.I)
+# v3.69: Lufthansa Express Rail – ICE-Züge mit LH-Flugnummer (LH 3400–3499) zum Flughafen Frankfurt.
+# Erkennung über Flugnummer, Bahnhofs-IATA-Code, „Hbf/Bahnhof“ im Ortsnamen oder „Express Rail“ im Anbieter.
+_EXPRESS_RAIL_NR = re.compile(r"^LH0?34\d\d$")
+_EXPRESS_RAIL_IATA = {"XHJ", "AGY", "ZBA", "QPP", "DHC", "DTZ", "XIR", "QDU", "XIU", "ESZ", "QKL", "XIT",
+                      "MHJ", "ZMU", "MKF", "ZAQ", "ZPE", "ZPY", "ZWS", "QUL", "ZQU", "QWU"}
+_BAHNHOF_WORT = re.compile(r"(hbf|hauptbahnhof|bahnhof|express\s*rail|airrail)", re.I)
+
+
+def _ist_express_rail(s: dict, nr: str) -> bool:
+    """True, wenn ein als Flug gebuchtes Segment in Wahrheit ein Lufthansa-Express-Rail-Zug ist."""
+    if _EXPRESS_RAIL_NR.match(nr or ""):
+        return True
+    for f in ("von_iata", "nach_iata"):
+        if str(s.get(f) or "").strip().upper() in _EXPRESS_RAIL_IATA:
+            return True
+    for f in ("von_ort", "nach_ort", "transport_name"):
+        if _BAHNHOF_WORT.search(str(s.get(f) or "")):
+            return True
+    return False
 
 
 def _zusatz(wert, art) -> str:
@@ -345,6 +364,9 @@ def _segment_ereignisse(beleg: dict, ankuenfte: list, probleme: list) -> list:
         if art not in ("Flug", "Bahn"):
             continue
         nr = re.sub(r"\s+", "", str(s.get("transport_nummer") or "")).upper()
+        schluessel_art = art                                 # Schlüssel bleibt gleich -> Outlook aktualisiert statt neu
+        if art == "Flug" and _ist_express_rail(s, nr):
+            art = "Bahn"
         marke = "Beleg #%s Segment %d" % (beleg.get("id"), idx + 1)
         d_ab = _datum(s.get("abreise_datum"))
         naiv_ab = _lokal(d_ab, s.get("abreise_zeit"))
@@ -372,7 +394,7 @@ def _segment_ereignisse(beleg: dict, ankuenfte: list, probleme: list) -> list:
             utc_an = utc_ab + timedelta(hours=2)
             naiv_an = None
         von, nach = s.get("von_ort") or s.get("von_iata") or "?", s.get("nach_ort") or s.get("nach_iata") or "?"
-        schluessel = "%s|%s|%s" % (art.lower(), nr or ("%s-%s" % (von, nach)).upper(), d_ab.isoformat())
+        schluessel = "%s|%s|%s" % (schluessel_art.lower(), nr or ("%s-%s" % (von, nach)).upper(), d_ab.isoformat())
         out.append({
             "schluessel": schluessel, "art": art, "nummer": str(s.get("transport_nummer") or "").strip(),
             "gesellschaft": str(s.get("transport_name") or "").strip(),
