@@ -50,7 +50,7 @@ from mod_beleg import _namens_tokens
 import mod_mail
 from mod_mail import sende_mail
 
-RUHE_SEKUNDEN = int(os.getenv("KALENDER_RUHE_SEKUNDEN", "120") or "120")
+RUHE_SEKUNDEN = int(os.getenv("KALENDER_RUHE_SEKUNDEN", "300") or "300")
 ERINNERUNG_MIN = {"Flug": 180, "Bahn": 45, "Termin": 30, "Hotel": 0}
 UID_DOMAIN = "reisekosten.herrhammer"
 PRODID = "-//Herrhammer Reisekosten//Kalender 1.0//DE"
@@ -536,6 +536,12 @@ def _ort_zeile(art, ort, iata, zusatz) -> str:
     return ", ".join(teile)
 
 
+def _mit_kuerzel(reise: dict, text: str) -> str:
+    """v3.68: Jeder Kalendertitel beginnt mit dem Reisekürzel (Reisecode, z. B. „26-004 · ✈ VB 1379 …“)."""
+    code = str((reise or {}).get("code") or "").strip()
+    return ("%s · %s" % (code, text)) if code else text
+
+
 def _komponieren(ev: dict, reise: dict, klarname: str) -> dict:
     """Macht aus dem Ereignis die Texte für die Einladung."""
     reise_zeile = "Reise: %s – %s" % (reise.get("code"), reise.get("titel") or "")
@@ -545,7 +551,7 @@ def _komponieren(ev: dict, reise: dict, klarname: str) -> dict:
         bez = ev["nummer"] or ev["gesellschaft"] or ev["art"]
         von = ev["von_ort"] or ev["von_iata"] or "?"
         nach = ev["nach_ort"] or ev["nach_iata"] or "?"
-        summary = "%s %s %s → %s" % (symbol, bez, von, nach)
+        summary = _mit_kuerzel(reise, "%s %s %s → %s" % (symbol, bez, von, nach))
         ort_ab = _ort_zeile(ev["art"], ev["von_ort"], ev["von_iata"], ev["ab_term"])
         ort_an = _ort_zeile(ev["art"], ev["nach_ort"], ev["nach_iata"], ev["an_term"])
         kopf = [("Flug" if flug else "Zug") + " " + bez]
@@ -586,10 +592,10 @@ def _komponieren(ev: dict, reise: dict, klarname: str) -> dict:
         z.append("Gast: " + (klarname or ev.get("reisender") or ""))
         z.append(reise_zeile)
         z.append("Bei Änderungen der Buchung wird dieser Termin automatisch aktualisiert.")
-        return {"summary": "🏨 " + (ev["name"] or "Hotel"), "location": ev["ort_text"], "description": "\n".join(z),
+        return {"summary": _mit_kuerzel(reise, "🏨 " + (ev["name"] or "Hotel")), "location": ev["ort_text"], "description": "\n".join(z),
                 "erinnerung": ERINNERUNG_MIN["Hotel"]}
     # manueller Termin
-    summary = "%s %s" % (_TERMIN_ICON.get(ev["typ"], "📌"), ev["titel"])
+    summary = _mit_kuerzel(reise, "%s %s" % (_TERMIN_ICON.get(ev["typ"], "📌"), ev["titel"]))
     z = []
     if ev["naiv_ab"]:
         z.append("Zeit: %s – %s (Ortszeit)" % (_lokal_text(ev["naiv_ab"]), _lokal_text(ev["naiv_an"], False)))
@@ -623,7 +629,7 @@ def _zeit_zeile(t: dict) -> str:
     return "Zeit: %s – %s (Ortszeit)" % (_lokal_text(t["naiv_ab"]), _lokal_text(t["naiv_an"], False))
 
 
-def _serie_tag(t: dict, reise_zeile: str) -> dict:
+def _serie_tag(t: dict, reise_zeile: str, reise: dict | None = None) -> dict:
     """Ein Tag der Serie: Berliner Zeiten für die Wiederholung, Texte ohne Zeitzeile."""
     rest = []
     for etikett, feld in (("Ort", "ort"), ("Ansprechpartner", "ansprechpartner"), ("Telefon", "telefon"),
@@ -634,7 +640,7 @@ def _serie_tag(t: dict, reise_zeile: str) -> dict:
     if t["zeit_geschaetzt"]:
         rest.append("Hinweis: Zeitzone des Termins nicht bekannt – MEZ/MESZ angenommen.")
     a = {"t": t, "datum": _tag_datum(t), "ganztag": bool(t["ganztag"]), "rest": rest,
-         "summary": "%s %s" % (_TERMIN_ICON.get(t["typ"], "📌"), t["titel"]), "location": t["ort"]}
+         "summary": _mit_kuerzel(reise, "%s %s" % (_TERMIN_ICON.get(t["typ"], "📌"), t["titel"])), "location": t["ort"]}
     if a["ganztag"]:
         a.update(von=None, bis=None, dauer=0)
     else:
@@ -649,7 +655,7 @@ def _inhalt_serie(ev: dict, reise: dict, klarname: str) -> dict:
     """Einladungsinhalt einer Terminserie. Häufigster Tag = Haupttermin; abweichende Tage = Ausnahmen,
     Lücken = EXDATE. Alle Uhrzeiten in Berliner Ortszeit (bleibt über die Zeitumstellung gleich)."""
     reise_zeile = "Reise: %s – %s" % (reise.get("code"), reise.get("titel") or "")
-    tage = sorted((_serie_tag(t, reise_zeile) for t in ev["serie_tage"]), key=lambda a: a["datum"])
+    tage = sorted((_serie_tag(t, reise_zeile, reise) for t in ev["serie_tage"]), key=lambda a: a["datum"])
     zaehler = {}
     for a in tage:
         zaehler[a["muster"]] = zaehler.get(a["muster"], 0) + 1
@@ -866,8 +872,52 @@ def _uid(code: str, kuerzel: str, schluessel: str) -> str:
     return "rk-%s-%s-%s@%s" % (code, kuerzel, h, UID_DOMAIN)
 
 
+_FELD_NAMEN = {"summary": "Titel", "start_text": "Beginn", "start": "Beginn (UTC)", "ende": "Ende (UTC)",
+               "location": "Ort", "ganztag": "Ganztägig", "anzahl": "Anzahl Tage", "tage": "Tage",
+               "ausnahmen": "Ausnahmen", "abweichungen": "Abweichende Tage", "serie": "Serie"}
+
+
+def _kurz(wert, n: int = 110) -> str:
+    t = "–" if wert in (None, "", [], {}) else (json.dumps(wert, ensure_ascii=False) if isinstance(wert, (list, dict)) else str(wert))
+    t = " ".join(t.split())
+    return t if len(t) <= n else t[:n - 1] + "…"
+
+
+def aenderungen_ermitteln(alt: dict | None, neu: dict) -> list:
+    """v3.68: Lesbare Liste, was sich zwischen der zuletzt gesendeten und der neuen Einladung geändert hat
+    (steht in der Aktualisierungs-Mail, damit sofort klar ist, ob und was sich wirklich geändert hat)."""
+    if not alt:
+        return []
+    out = []
+    for k in ("summary", "start_text", "start", "ende", "location", "ganztag", "serie", "anzahl", "tage",
+              "ausnahmen", "abweichungen"):
+        if alt.get(k) != neu.get(k):
+            out.append("%s: %s → %s" % (_FELD_NAMEN.get(k, k), _kurz(alt.get(k)), _kurz(neu.get(k))))
+    a_zeilen, n_zeilen = str(alt.get("description") or "").split("\n"), str(neu.get("description") or "").split("\n")
+    weg = [x for x in a_zeilen if x.strip() and x not in n_zeilen]
+    neu_z = [x for x in n_zeilen if x.strip() and x not in a_zeilen]
+    for i in range(max(len(weg), len(neu_z))):
+        a = weg[i] if i < len(weg) else None
+        b = neu_z[i] if i < len(neu_z) else None
+        if a is not None and b is not None:
+            out.append("Text: „%s“ → „%s“" % (_kurz(a), _kurz(b)))
+        elif a is not None:
+            out.append("Text entfallen: „%s“" % _kurz(a))
+        else:
+            out.append("Text neu: „%s“" % _kurz(b))
+    return out
+
+
+def _ist_vorbei(ev: dict, jetzt: datetime) -> bool:
+    """Termin/Flug/Aufenthalt ist zu Ende – daran ändert eine Einladung nichts mehr."""
+    if ev.get("ganztag"):
+        return (ev.get("bis") or ev["datum"]) < jetzt.date()
+    ende = ev.get("utc_an") or ev.get("utc_ab")
+    return bool(ende) and ende < jetzt
+
+
 def _sende_einladung(person: dict, reise: dict, z: dict, inhalt: dict, sequence: int, methode: str,
-                     aktualisierung: bool) -> dict:
+                     aktualisierung: bool, aenderungen: list | None = None) -> dict:
     org_mail, org_name = _absender()
     ziel = person["email"]
     serie = bool(inhalt.get("serie"))
@@ -895,6 +945,8 @@ def _sende_einladung(person: dict, reise: dict, z: dict, inhalt: dict, sequence:
     elif aktualisierung:
         betreff = "Aktualisiert: " + betreff
         kopf = "deine %s zur Reise %s wurde aktualisiert:" % (wort, reise["code"])
+        if aenderungen:
+            kopf += "\n\nWas sich geändert hat:\n" + "\n".join("• " + x for x in aenderungen[:12])
         fuss = "Bitte in Outlook die Aktualisierung annehmen."
     else:
         kopf = ("hier deine Terminserie zur Reise %s (ein Eintrag für alle Tage):" % reise["code"]) if wort == "Terminserie" \
@@ -941,12 +993,16 @@ def _reise_abgleichen(db, cur, code: str, sofort: bool, jetzt: datetime, erg: di
                 z["offen_hash"], z["offen_seit"] = None, None
                 _speichern(db, cur, code, z)
             continue
+        if z and z["status"] == "aktiv" and _ist_vorbei(ev, jetzt):
+            # v3.68: Ein Eintrag, der schon zu Ende ist (gelandet, ausgecheckt), wird nicht mehr aktualisiert –
+            # der Stand wird nur still nachgezogen, damit keine Mail für Vergangenes rausgeht.
+            z.update({"inhalt_hash": h, "daten": json.dumps(inhalt, ensure_ascii=False), "offen_hash": None,
+                      "offen_seit": None, "titel": inhalt["summary"], "start_text": inhalt["start_text"]})
+            _speichern(db, cur, code, z)
+            continue
+        if (z is None or z["status"] == "wartend") and _ist_vorbei(ev, jetzt):
+            continue                                         # Vergangenes nicht (neu) einladen
         if z is None:
-            ende_utc = ev["utc_an"] or ev["utc_ab"]
-            if ev["ganztag"] and (ev.get("bis") or ev["datum"]) < jetzt.date():
-                continue                                     # Aufenthalt/Termin ist schon vorbei
-            if (not ev["ganztag"]) and ende_utc < jetzt:
-                continue                                     # Vergangenes nicht neu einladen
             z = {"kuerzel": kz, "schluessel": key, "uid": _uid(code, kz, key), "seq_nr": -1,
                  "status": "wartend", "inhalt_hash": None, "daten": None, "offen_hash": None,
                  "offen_seit": None, "gesendet_am": None, "empfaenger": person["email"], "letzter_fehler": None}
@@ -956,8 +1012,16 @@ def _reise_abgleichen(db, cur, code: str, sofort: bool, jetzt: datetime, erg: di
             continue
         seq = z["seq_nr"] + 1
         aktualisierung = (z["status"] == "aktiv")
-        res = _sende_einladung(person, reise, z, inhalt, seq, "REQUEST", aktualisierung)
+        aenderungen = []
+        if aktualisierung and z.get("daten"):
+            try:
+                aenderungen = aenderungen_ermitteln(json.loads(z["daten"]), inhalt)
+            except Exception:
+                aenderungen = []
+        res = _sende_einladung(person, reise, z, inhalt, seq, "REQUEST", aktualisierung, aenderungen)
         if res.get("ok"):
+            if aktualisierung:
+                erg.setdefault("aenderungen", []).append("%s/%s %s: %s" % (code, kz, inhalt["summary"], "; ".join(aenderungen) or "keine lesbare Änderung"))
             z.update({"seq_nr": seq, "status": "aktiv", "inhalt_hash": h, "daten": json.dumps(inhalt, ensure_ascii=False),
                       "offen_hash": None, "offen_seit": None, "gesendet_am": _iso(_jetzt_utc()),
                       "empfaenger": person["email"], "letzter_fehler": None})

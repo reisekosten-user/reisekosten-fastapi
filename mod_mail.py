@@ -24,6 +24,102 @@ IMAP_TIMEOUT = 30                                                 # Wartezeit je
 from mod_db import get_db, ph, is_postgres
 
 
+# ── Mail-ID eines Belegs (v3.68) ──────────────────────────────────────────────
+# Früher wurde die Message-ID einer Mail OHNE Anhang als „MAIL:<id>“ in das Feld buchungscode des Belegs geschrieben
+# und überschrieb dabei den echten Buchungs-/Reservierungscode (z. B. Viva). Jetzt hat sie eine eigene Spalte (mail_id);
+# der Buchungscode bleibt unberührt. Alte Belege werden beim Start einmalig repariert (mail_codes_reparieren).
+MAIL_PRAEFIX = "MAIL:"
+
+
+def ist_mail_kennung(code) -> bool:
+    """True, wenn der Wert keine echte Buchungsnummer, sondern die alte interne Mail-Kennung ist."""
+    return str(code or "").strip().upper().startswith(MAIL_PRAEFIX)
+
+
+def mail_id_spalte_sichern() -> None:
+    """Legt belege.mail_id an, falls sie fehlt (ein Neustart genügt, /init ist nicht nötig)."""
+    try:
+        db = get_db(); cur = db.cursor()
+        if is_postgres():
+            cur.execute("ALTER TABLE belege ADD COLUMN IF NOT EXISTS mail_id TEXT")
+        else:
+            cur.execute("PRAGMA table_info(belege)")
+            if "mail_id" not in {(r["name"] if hasattr(r, "keys") else r[1]) for r in cur.fetchall()}:
+                cur.execute("ALTER TABLE belege ADD COLUMN mail_id TEXT")
+        db.commit(); cur.close(); db.close()
+    except Exception as ex:
+        print(f"[Startup] Spalte belege.mail_id nicht angelegt (bitte /init aufrufen): {ex}")
+
+
+def mail_bereits_verarbeitet(msg_id: str) -> bool:
+    """Duplikat-Check einer Mail: neue Spalte mail_id, zusätzlich die alte Schreibweise im Feld buchungscode."""
+    msg_id = (msg_id or "").strip()[:80]
+    if not msg_id:
+        return False
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    try:
+        try:
+            cur.execute(f"SELECT id FROM belege WHERE mail_id={P} OR buchungscode={P}", (msg_id, MAIL_PRAEFIX + msg_id))
+        except Exception:                       # Spalte mail_id fehlt noch (Start/Init nicht gelaufen): alter Weg
+            db.rollback()
+            cur.execute(f"SELECT id FROM belege WHERE buchungscode={P}", (MAIL_PRAEFIX + msg_id,))
+        return cur.fetchone() is not None
+    finally:
+        cur.close(); db.close()
+
+
+def mail_id_speichern(beleg_id, msg_id: str) -> None:
+    """Merkt die Message-ID am Beleg (für den Duplikat-Check künftiger Weiterleitungen). Der Buchungscode bleibt unberührt."""
+    msg_id = (msg_id or "").strip()[:80]
+    if not msg_id or not beleg_id:
+        return
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(f"UPDATE belege SET mail_id={P} WHERE id={P}", (msg_id, beleg_id))
+        db.commit()
+    except Exception:
+        db.rollback()
+        print("[Mail] mail_id konnte nicht gespeichert werden (Spalte fehlt – Neustart/Init nötig)")
+    finally:
+        cur.close(); db.close()
+
+
+def mail_codes_reparieren() -> int:
+    """Einmalig beim Start: Belege mit „MAIL:…“ im Buchungscode bekommen ihren echten Code zurück (aus den gespeicherten
+    KI-Daten) und die Mail-Kennung wandert in die Spalte mail_id. Ist kein echter Code gespeichert, bleibt das Feld leer.
+    Läuft gefahrlos mehrfach (ändert nur Zeilen, die noch „MAIL:…“ enthalten). Rückgabe: Anzahl reparierter Belege."""
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    n = 0
+    try:
+        cur.execute("SELECT id, buchungscode, ki_json FROM belege WHERE buchungscode LIKE 'MAIL:%'")
+        zeilen = cur.fetchall()
+        for z in zeilen:
+            bid = z["id"] if hasattr(z, "keys") else z[0]
+            alt = (z["buchungscode"] if hasattr(z, "keys") else z[1]) or ""
+            ki_str = (z["ki_json"] if hasattr(z, "keys") else z[2]) or ""
+            try:
+                echt = str((json.loads(ki_str) or {}).get("buchungscode") or "").strip()
+            except Exception:
+                echt = ""
+            if ist_mail_kennung(echt):
+                echt = ""
+            cur.execute(f"UPDATE belege SET mail_id={P}, buchungscode={P} WHERE id={P}",
+                        (alt.strip()[len(MAIL_PRAEFIX):][:80], echt or None, bid))
+            n += 1
+        db.commit()
+    except Exception as ex:
+        try: db.rollback()
+        except Exception: pass
+        print(f"[Startup] Mail-Kennungen nicht repariert: {ex}")
+        return 0
+    finally:
+        cur.close(); db.close()
+    return n
+
+
 # ── Verschlüsselte Verbindung zum Mailserver (IMAP und SMTP) ───────────────────
 # imaplib und smtplib prüfen von sich aus NICHTS (kein Zertifikat, kein Servername). Wer sich zwischen App und Mailserver
 # schaltet, könnte das Postfach-Passwort mitlesen. Deshalb bekommen beide einen prüfenden Kontext (wie ein Browser).
@@ -558,17 +654,10 @@ async def fetch_mails() -> dict:
             msg_id = (msg.get("Message-ID") or "").strip()
 
             # Duplikat-Check via Message-ID
-            if msg_id:
-                db = get_db(); cur = db.cursor()
-                P = ph()
-                cur.execute(f"SELECT id FROM belege WHERE buchungscode={P}",
-                            (f"MAIL:{msg_id[:80]}",))
-                if cur.fetchone():
-                    cur.close(); db.close()
-                    duplikate += 1
-                    mail.store(mid, "+FLAGS", "\\Seen")
-                    continue
-                cur.close(); db.close()
+            if msg_id and mail_bereits_verarbeitet(msg_id):
+                duplikate += 1
+                mail.store(mid, "+FLAGS", "\\Seen")
+                continue
 
             body, attachments = mail_body_text(msg)
 
@@ -634,16 +723,11 @@ async def fetch_mails() -> dict:
                     else:
                         belege_erstellt += 1
                         # Nur beim tatsächlich NEU angelegten Beleg die Message-ID
-                        # eintragen – bei einem erkannten Duplikat bleibt der
-                        # ORIGINAL-Buchungscode des bestehenden Belegs unangetastet,
-                        # sonst würde er hier überschrieben und der Duplikat-Check
-                        # für künftige Weiterleitungen wieder unbrauchbar gemacht.
+                        # eintragen (eigene Spalte mail_id, seit v3.68). Der echte
+                        # Buchungscode des Belegs bleibt unangetastet – früher wurde er
+                        # hier mit „MAIL:…“ überschrieben und fehlte dann im Reiseplan.
                         if msg_id and result.get("beleg_id"):
-                            db = get_db(); cur = db.cursor()
-                            P = ph()
-                            cur.execute(f"UPDATE belege SET buchungscode={P} WHERE id={P}",
-                                        (f"MAIL:{msg_id[:80]}", result["beleg_id"]))
-                            db.commit(); cur.close(); db.close()
+                            mail_id_speichern(result["beleg_id"], msg_id)
 
             # Mail löschen (nach erfolgreicher Verarbeitung)
             mail.store(mid, "+FLAGS", "\\Deleted")

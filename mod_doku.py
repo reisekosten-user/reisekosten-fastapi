@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.67"
+DOKU_GEPRUEFT_FUER = "3.68"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -86,7 +86,7 @@ UMGEBUNG = [
      "So viele Tage vor der Abreise geht der Portal-Link automatisch per Mail an die Reisenden.", False),
     ("KALENDER_ABSENDER", "Outlook-Einladungen", "nein", "",
      "Absenderadresse der Einladungen. Leer = SMTP_USER.", False),
-    ("KALENDER_RUHE_SEKUNDEN", "Outlook-Einladungen", "nein", "120",
+    ("KALENDER_RUHE_SEKUNDEN", "Outlook-Einladungen", "nein", "300",
      "Änderungen werden erst gesendet, wenn sie so viele Sekunden unverändert geblieben sind (verhindert eine Mail-Flut beim Korrigieren). 0 = sofort.", False),
     ("AERODATABOX_API_KEY", "Flug-/Bahn-Alerts", "Funktion", "",
      "Zugang zur Flugdaten-Schnittstelle (AeroDataBox über RapidAPI). Ohne ihn keine Flug-Verspätungsalarme.", True),
@@ -819,7 +819,12 @@ KAPITEL = [
               "**„Reiseantritt (tatsächlich)“ / „Reiseende (tatsächlich)“**. Sobald die Zeit eingetragen ist, wird automatisch (auch rückwirkend) nachgerechnet. "
               "An Wochenendtagen kann die Pauschale außerdem von Hand gewählt werden."),
         ("h3", "VMA-Sätze"),
-        ("p", "Menü **VMA-Sätze** (`/vma`) zeigt die amtlichen Sätze je Land und Städte-Sonderfälle. Mit **Import** werden die aktuellen Sätze übernommen."),
+        ("p", "Menü **VMA-Sätze** (`/vma`) zeigt die amtlichen Sätze je Land und Städte-Sonderfälle. Mit **Import** werden die aktuellen Sätze von Hand übernommen."),
+        ("ul", [
+            "**Automatischer Abruf:** Die amtlichen Sätze ändern sich einmal im Jahr zum 1. Januar. Die App holt sie deshalb automatisch einmal im Monat und nach dem Jahreswechsel sofort, sobald die neue Tabelle verfügbar ist (Prüfung höchstens täglich; ein fehlgeschlagener Abruf wird nach 6 Stunden wiederholt). Ein Knopfdruck ist nicht nötig. Der Abruf läuft im Takt von `/cron/flug-alerts`; die Seite „VMA-Sätze“ zeigt, wann er zuletzt lief.",
+            "**An- und Abreisetag:** Im Ausland ist dieser Satz amtlich festgelegt und **nicht** die Hälfte des Tagessatzes (z. B. USA 59 € für 24 Stunden, 40 € für An-/Abreisetag; Deutschland 28 € / 14 €).",
+            "**Bereits berechnete Reisetage** behalten ihren Satz. Nach einer Satzänderung rechnet **🔄 VMA neu berechnen** (Reise-Seite) die Tage mit den neuen Sätzen neu.",
+        ]),
     ]},
     {"id": "b-bewirtung", "teil": "B", "titel": "Bewirtungsbelege", "bloecke": [
         ("p", "Der Reisende erstellt den Bewirtungsbeleg im Portal (siehe Teil A). Sie sehen und prüfen ihn wie jeden Beleg; er erscheint in Prüfung, offenen Aufgaben und Abschluss."),
@@ -864,7 +869,9 @@ KAPITEL = [
             "Die Einladung enthält absolute Zeiten (Outlook rechnet in die eigene Zeitzone um); die Ortszeiten stehen zusätzlich im Text.",
             "**Montage über mehrere Tage** geht als **eine Terminserie** in einer Mail raus (mit Ausnahmen für abweichende Tage). Serien laufen in Berliner Zeit, damit die Uhrzeit über die Zeitumstellung gleich bleibt. Siehe Kapitel „Flug, Bahn und Termine“.",
             "**Hotels:** Ein ganztägiger Eintrag vom Check-in- bis zum Check-out-Tag (blockiert keine Zeit). Im Feld „Ort“ stehen Hotelname und Adresse, damit sich daraus direkt Google Maps oder die Karten-App öffnen lässt; im Text stehen außerdem Check-in/-out-Zeit (fehlt sie im Beleg: 16:00 bzw. 10:00 als Standardzeit), Nächte, Buchungscode und ein Karten-Link. Mehrere Belege zum selben Aufenthalt (Buchungsbestätigung und Rechnung) ergeben **einen** Eintrag. Ohne Check-in-Datum im Beleg gibt es keinen Eintrag (Hinweis unter „Nicht berücksichtigt“).",
-            "Für **bereits vergangene** Termine und beendete Hotelaufenthalte werden keine Einladungen mehr gesendet. Sie bleiben „noch nicht gesendet“.",
+            "Für **bereits vergangene** Termine und beendete Hotelaufenthalte werden keine Einladungen mehr gesendet. Sie bleiben „noch nicht gesendet“. Auch bereits gesendete Einträge werden nicht mehr aktualisiert, sobald sie zu Ende sind (gelandet, ausgecheckt).",
+            "**Titel:** Jeder Eintrag beginnt mit dem Reisekürzel, z. B. „26-004 · ✈ VB 1379 Cancún → Mexico City“. So lassen sich alle Einträge einer Reise im Kalender finden.",
+            "**Was hat sich geändert?** Jede Aktualisierungs-Mail nennt unter „Was sich geändert hat“ genau, was anders ist (z. B. Zeit, Ort, Titel). Kommt eine Aktualisierung ohne erkennbare Änderung, bitte die Mail an den Administrator weiterleiten.",
         ]),
         ("p", "Seite **📅 Outlook** je Reise: Tabelle mit Reisendem, Termin, Status und zuletzt gesendet. **„Jetzt senden / aktualisieren“** überspringt die Wartezeit "
               "und zeigt: neu gesendet, aktualisiert, abgesagt, Fehler. Unter „Nicht berücksichtigt“ stehen Termine, die nicht eingeladen werden konnten (mit Grund)."),
@@ -1167,7 +1174,7 @@ def kontext_bauen(version: str, versionen: list, jetzt: str) -> dict:
         "jetzt": jetzt,
         "postfach": os.getenv("IMAP_USER", "") or "das Reisekosten-Postfach",
         "portal_tage": _zahl("PORTAL_TAGE_VORHER", 5),
-        "ruhe_sekunden": _zahl("KALENDER_RUHE_SEKUNDEN", 120),
+        "ruhe_sekunden": _zahl("KALENDER_RUHE_SEKUNDEN", 300),
         "habel_max_mb": ("%g" % habel).replace(".", ","),
     }
 

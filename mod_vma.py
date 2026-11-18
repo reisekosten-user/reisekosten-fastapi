@@ -3,74 +3,77 @@ mod_vma.py – VMA-Sätze 2026, IATA-Codes, Länderlisten
 """
 from __future__ import annotations
 import httpx
-from datetime import date as _date
+from datetime import date as _date, datetime as _dt, timedelta as _td, timezone as _tz
+import time as _time
 
 PAUSCHBETRAG_URL = "https://cdn.jsdelivr.net/npm/pauschbetrag-api@1/ALL.json"
 
-# Quelle: BMF-Schreiben Auslandsreisekosten 2024 (gilt weiter für 2026)
+# Ersatztabelle: gilt nur, solange die amtlichen Sätze noch nicht importiert sind (der Import läuft automatisch, siehe
+# vma_auto_import). Quelle: BMF-Schreiben vom 05.12.2025, gültig ab 1.1.2026 (24 Std. / An- und Abreisetag >8 Std.).
+# Achtung: Der Satz für An-/Abreisetag ist amtlich festgelegt und NICHT die Hälfte des 24-Stunden-Satzes
+# (außer Deutschland: 28 / 14). Hongkong = Sondersatz der Stadt (Land China).
 VMA_SAETZE: dict[str, dict] = {
-    "DE": {"name": "Deutschland",        "voll": 28.00,  "halb": 14.00},
-    "FR": {"name": "Frankreich",         "voll": 53.00,  "halb": 26.50},
-    "CH": {"name": "Schweiz",            "voll": 82.00,  "halb": 41.00},
-    "AT": {"name": "Österreich",         "voll": 50.00,  "halb": 25.00},
-    "GB": {"name": "Großbritannien",     "voll": 53.00,  "halb": 26.50},
-    "IT": {"name": "Italien",            "voll": 48.00,  "halb": 24.00},
-    "ES": {"name": "Spanien",            "voll": 45.00,  "halb": 22.50},
-    "NL": {"name": "Niederlande",        "voll": 48.00,  "halb": 24.00},
-    "BE": {"name": "Belgien",            "voll": 48.00,  "halb": 24.00},
-    "PL": {"name": "Polen",              "voll": 45.00,  "halb": 22.50},
-    "CZ": {"name": "Tschechien",         "voll": 45.00,  "halb": 22.50},
-    "SE": {"name": "Schweden",           "voll": 55.00,  "halb": 27.50},
-    "NO": {"name": "Norwegen",           "voll": 72.00,  "halb": 36.00},
-    "DK": {"name": "Dänemark",           "voll": 58.00,  "halb": 29.00},
-    "FI": {"name": "Finnland",           "voll": 53.00,  "halb": 26.50},
-    "PT": {"name": "Portugal",           "voll": 45.00,  "halb": 22.50},
-    "GR": {"name": "Griechenland",       "voll": 45.00,  "halb": 22.50},
-    "TR": {"name": "Türkei",             "voll": 45.00,  "halb": 22.50},
-    "US": {"name": "USA",                "voll": 59.00,  "halb": 29.50},
-    "CA": {"name": "Kanada",             "voll": 55.00,  "halb": 27.50},
-    "JP": {"name": "Japan",              "voll": 73.00,  "halb": 36.50},
-    "CN": {"name": "China",              "voll": 53.00,  "halb": 26.50},
-    "SG": {"name": "Singapur",           "voll": 60.00,  "halb": 30.00},
-    "IN": {"name": "Indien",             "voll": 40.00,  "halb": 20.00},
-    "AE": {"name": "VAE / Dubai",        "voll": 53.00,  "halb": 26.50},
-    "QA": {"name": "Katar",              "voll": 50.00,  "halb": 25.00},
-    "AU": {"name": "Australien",         "voll": 65.00,  "halb": 32.50},
-    "BR": {"name": "Brasilien",          "voll": 46.00,  "halb": 23.00},
-    "MX": {"name": "Mexiko",             "voll": 46.00,  "halb": 23.00},
-    "AR": {"name": "Argentinien",        "voll": 45.00,  "halb": 22.50},
-    "ZA": {"name": "Südafrika",          "voll": 40.00,  "halb": 20.00},
-    "CR": {"name": "Costa Rica",         "voll": 40.00,  "halb": 20.00},
-    "PA": {"name": "Panama",             "voll": 45.00,  "halb": 22.50},
-    "DO": {"name": "Dominikanische Republik", "voll": 44.00, "halb": 22.00},  # Platzhalter, bitte via "VMA-Sätze importieren" aktualisieren
-    "CO": {"name": "Kolumbien",          "voll": 40.00,  "halb": 20.00},
-    "CL": {"name": "Chile",              "voll": 45.00,  "halb": 22.50},
-    "KR": {"name": "Südkorea",           "voll": 55.00,  "halb": 27.50},
-    "TH": {"name": "Thailand",           "voll": 40.00,  "halb": 20.00},
-    "ID": {"name": "Indonesien",         "voll": 40.00,  "halb": 20.00},
-    "MY": {"name": "Malaysia",           "voll": 40.00,  "halb": 20.00},
-    "HK": {"name": "Hongkong",           "voll": 67.00,  "halb": 33.50},
-    "IL": {"name": "Israel",             "voll": 55.00,  "halb": 27.50},
-    "RU": {"name": "Russland",           "voll": 45.00,  "halb": 22.50},
-    "UA": {"name": "Ukraine",            "voll": 35.00,  "halb": 17.50},
-    "HU": {"name": "Ungarn",             "voll": 40.00,  "halb": 20.00},
-    "RO": {"name": "Rumänien",           "voll": 35.00,  "halb": 17.50},
-    "HR": {"name": "Kroatien",           "voll": 45.00,  "halb": 22.50},
-    "SK": {"name": "Slowakei",           "voll": 40.00,  "halb": 20.00},
-    "SI": {"name": "Slowenien",          "voll": 45.00,  "halb": 22.50},
-    "BG": {"name": "Bulgarien",          "voll": 35.00,  "halb": 17.50},
-    "RS": {"name": "Serbien",            "voll": 35.00,  "halb": 17.50},
-    "EG": {"name": "Ägypten",            "voll": 35.00,  "halb": 17.50},
-    "MA": {"name": "Marokko",            "voll": 35.00,  "halb": 17.50},
-    "NG": {"name": "Nigeria",            "voll": 40.00,  "halb": 20.00},
-    "KE": {"name": "Kenia",              "voll": 35.00,  "halb": 17.50},
-    "PH": {"name": "Philippinen",        "voll": 37.00,  "halb": 18.50},
-    "VN": {"name": "Vietnam",            "voll": 35.00,  "halb": 17.50},
-    "NZ": {"name": "Neuseeland",         "voll": 55.00,  "halb": 27.50},
-    # Baltikum: amtliche BMF-Sätze ab 1.1.2026 (24 Std. / An- und Abreisetag)
-    "EE": {"name": "Estland",            "voll": 39.00,  "halb": 26.00},
-    "LV": {"name": "Lettland",           "voll": 46.00,  "halb": 31.00},
-    "LT": {"name": "Litauen",            "voll": 48.00,  "halb": 32.00},
+    "DE": {"name": "Deutschland",        "voll":  28.00, "halb":  14.00},
+    "FR": {"name": "Frankreich",         "voll":  53.00, "halb":  36.00},
+    "CH": {"name": "Schweiz",            "voll":  70.00, "halb":  47.00},
+    "AT": {"name": "Österreich",         "voll":  50.00, "halb":  33.00},
+    "GB": {"name": "Großbritannien",     "voll":  52.00, "halb":  35.00},
+    "IT": {"name": "Italien",            "voll":  42.00, "halb":  28.00},
+    "ES": {"name": "Spanien",            "voll":  34.00, "halb":  23.00},
+    "NL": {"name": "Niederlande",        "voll":  58.00, "halb":  39.00},
+    "BE": {"name": "Belgien",            "voll":  59.00, "halb":  40.00},
+    "PL": {"name": "Polen",              "voll":  34.00, "halb":  23.00},
+    "CZ": {"name": "Tschechien",         "voll":  32.00, "halb":  21.00},
+    "SE": {"name": "Schweden",           "voll":  66.00, "halb":  44.00},
+    "NO": {"name": "Norwegen",           "voll":  75.00, "halb":  50.00},
+    "DK": {"name": "Dänemark",           "voll":  75.00, "halb":  50.00},
+    "FI": {"name": "Finnland",           "voll":  54.00, "halb":  36.00},
+    "PT": {"name": "Portugal",           "voll":  32.00, "halb":  21.00},
+    "GR": {"name": "Griechenland",       "voll":  36.00, "halb":  24.00},
+    "TR": {"name": "Türkei",             "voll":  24.00, "halb":  16.00},
+    "US": {"name": "USA",                "voll":  59.00, "halb":  40.00},
+    "CA": {"name": "Kanada",             "voll":  54.00, "halb":  36.00},
+    "JP": {"name": "Japan",              "voll":  33.00, "halb":  22.00},
+    "CN": {"name": "China",              "voll":  48.00, "halb":  32.00},
+    "SG": {"name": "Singapur",           "voll":  71.00, "halb":  48.00},
+    "IN": {"name": "Indien",             "voll":  22.00, "halb":  15.00},
+    "AE": {"name": "VAE / Dubai",        "voll":  81.00, "halb":  54.00},
+    "QA": {"name": "Katar",              "voll":  81.00, "halb":  54.00},
+    "AU": {"name": "Australien",         "voll":  57.00, "halb":  38.00},
+    "BR": {"name": "Brasilien",          "voll":  46.00, "halb":  31.00},
+    "MX": {"name": "Mexiko",             "voll":  40.00, "halb":  27.00},
+    "AR": {"name": "Argentinien",        "voll":  42.00, "halb":  28.00},
+    "ZA": {"name": "Südafrika",          "voll":  29.00, "halb":  20.00},
+    "CR": {"name": "Costa Rica",         "voll":  60.00, "halb":  40.00},
+    "PA": {"name": "Panama",             "voll":  41.00, "halb":  28.00},
+    "DO": {"name": "Dominikanische Republik", "voll":  50.00, "halb":  33.00},
+    "CO": {"name": "Kolumbien",          "voll":  34.00, "halb":  23.00},
+    "CL": {"name": "Chile",              "voll":  44.00, "halb":  29.00},
+    "KR": {"name": "Südkorea",           "voll":  39.00, "halb":  26.00},
+    "TH": {"name": "Thailand",           "voll":  36.00, "halb":  24.00},
+    "ID": {"name": "Indonesien",         "voll":  45.00, "halb":  30.00},
+    "MY": {"name": "Malaysia",           "voll":  36.00, "halb":  24.00},
+    "HK": {"name": "Hongkong",           "voll":  83.00, "halb":  56.00},
+    "IL": {"name": "Israel",             "voll":  59.00, "halb":  40.00},
+    "RU": {"name": "Russland",           "voll":  28.00, "halb":  19.00},
+    "UA": {"name": "Ukraine",            "voll":  33.00, "halb":  22.00},
+    "HU": {"name": "Ungarn",             "voll":  32.00, "halb":  21.00},
+    "RO": {"name": "Rumänien",           "voll":  38.00, "halb":  25.00},
+    "HR": {"name": "Kroatien",           "voll":  46.00, "halb":  31.00},
+    "SK": {"name": "Slowakei",           "voll":  33.00, "halb":  22.00},
+    "SI": {"name": "Slowenien",          "voll":  38.00, "halb":  25.00},
+    "BG": {"name": "Bulgarien",          "voll":  38.00, "halb":  25.00},
+    "RS": {"name": "Serbien",            "voll":  27.00, "halb":  18.00},
+    "EG": {"name": "Ägypten",            "voll":  50.00, "halb":  33.00},
+    "MA": {"name": "Marokko",            "voll":  41.00, "halb":  28.00},
+    "NG": {"name": "Nigeria",            "voll":  52.00, "halb":  35.00},
+    "KE": {"name": "Kenia",              "voll":  48.00, "halb":  32.00},
+    "PH": {"name": "Philippinen",        "voll":  41.00, "halb":  28.00},
+    "VN": {"name": "Vietnam",            "voll":  36.00, "halb":  24.00},
+    "NZ": {"name": "Neuseeland",         "voll":  58.00, "halb":  39.00},
+    "EE": {"name": "Estland",            "voll":  39.00, "halb":  26.00},
+    "LV": {"name": "Lettland",           "voll":  46.00, "halb":  31.00},
+    "LT": {"name": "Litauen",            "voll":  48.00, "halb":  32.00},
 }
 
 # IATA → ISO-Ländercode – VOLLSTÄNDIGE öffentliche Flughafendatenbank
@@ -468,12 +471,63 @@ def _land_name_de(iso_code: str) -> str:
     return VMA_SAETZE.get(iso_code.upper(), {}).get("name", iso_code.upper())
 
 
-def importiere_aktuelle_saetze() -> dict:
+def _land_satz_speichern(cur, code, name, voll, halb, uebernacht, gueltig_ab, gueltig_bis) -> None:
+    """Länder-Satz (ohne Stadt) aktualisieren oder neu anlegen. WICHTIG: UNIQUE(land_code, ort) greift bei ort = NULL nicht
+    (NULL gilt als „verschieden“), ON CONFLICT hat deshalb bei jedem Import eine NEUE Zeile angelegt, und die alte (veraltete)
+    blieb maßgeblich. Darum hier: erst UPDATE, nur wenn nichts da ist INSERT (bis v3.67 war das fehlerhaft)."""
+    from mod_db import ph, is_postgres
+    P = ph()
+    jetzt_sql = "NOW()" if is_postgres() else "datetime('now')"
+    cur.execute(f"""UPDATE vma_saetze SET land_name={P}, vma_voll={P}, vma_halb={P}, uebernachtung={P},
+                    gueltig_ab={P}, gueltig_bis={P}, quelle='pauschbetrag-api', aktualisiert={jetzt_sql}
+                    WHERE land_code={P} AND ort IS NULL""",
+                (name, voll, halb, uebernacht, gueltig_ab, gueltig_bis, code))
+    if cur.rowcount == 0:
+        cur.execute(f"""INSERT INTO vma_saetze (land_code, ort, land_name, vma_voll, vma_halb,
+                        uebernachtung, gueltig_ab, gueltig_bis, quelle)
+                        VALUES ({P},NULL,{P},{P},{P},{P},{P},{P},'pauschbetrag-api')""",
+                    (code, name, voll, halb, uebernacht, gueltig_ab, gueltig_bis))
+
+
+def vma_duplikate_bereinigen() -> int:
+    """Entfernt doppelte Länder-Zeilen (siehe _land_satz_speichern); je Land bleibt die jüngste (höchste id).
+    Läuft beim Start und vor jedem Import, gefahrlos mehrfach. Rückgabe: Anzahl gelöschter Zeilen."""
+    from mod_db import get_db
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("""DELETE FROM vma_saetze WHERE ort IS NULL AND id NOT IN
+                       (SELECT MAX(id) FROM vma_saetze WHERE ort IS NULL GROUP BY land_code)""")
+        n = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        db.commit()
+        return n
+    except Exception as ex:
+        try: db.rollback()
+        except Exception: pass
+        print(f"[VMA] Doppelte Länder-Sätze nicht bereinigt: {ex}")
+        return 0
+    finally:
+        cur.close(); db.close()
+
+
+def _periode_fuer_stichtag(perioden: list, stichtag: _date) -> dict:
+    """Die Periode, die AM STICHTAG amtlich gilt (validFrom <= Stichtag <= validUntil). So landen im Dezember nicht schon die
+    Sätze des Folgejahres in der Tabelle, solange sie noch nicht gelten. Gibt es keine passende, gilt wie bisher die jüngste."""
+    iso = stichtag.isoformat()
+    passend = [p for p in perioden
+               if str(p.get("validFrom") or "")[:10] <= iso
+               and (p.get("validUntil") is None or iso <= str(p.get("validUntil"))[:10])]
+    if passend:
+        return sorted(passend, key=lambda p: str(p.get("validFrom") or ""))[-1]
+    offen = next((p for p in perioden if p.get("validUntil") is None), None)
+    return offen or sorted(perioden, key=lambda p: str(p.get("validFrom") or ""))[-1]
+
+
+def importiere_aktuelle_saetze(stichtag: _date | None = None) -> dict:
     """
     Lädt die aktuellen BMF-Auslandstagegeld-Sätze (inkl. Städte-Sonderfälle
     wie Los Angeles, New York etc.) von der öffentlichen pauschbetrag-api
     (https://github.com/david-loe/pauschbetrag-api, offizielle BMF-Quelle)
-    und speichert sie in der Tabelle vma_saetze.
+    und speichert sie in der Tabelle vma_saetze. Es gilt die Periode, die am Stichtag (Standard: heute) gültig ist.
     """
     from mod_db import get_db, ph, is_postgres
 
@@ -487,16 +541,14 @@ def importiere_aktuelle_saetze() -> dict:
     if not perioden:
         return {"fehler": "Keine Daten erhalten"}
 
-    # Aktuell gültige Periode: validUntil ist null, sonst die mit dem
-    # spätesten validFrom nehmen
-    aktuelle = next((p for p in perioden if p.get("validUntil") is None), None)
-    if not aktuelle:
-        aktuelle = sorted(perioden, key=lambda p: p.get("validFrom", ""))[-1]
+    # v3.68: Die Periode nehmen, die heute gilt (nicht blind die „offene“ – im Dezember wäre das schon das Folgejahr)
+    aktuelle = _periode_fuer_stichtag(perioden, stichtag or _date.today())
 
     gueltig_ab = aktuelle.get("validFrom")
     gueltig_bis = aktuelle.get("validUntil")
     laender = aktuelle.get("data", [])
 
+    vma_duplikate_bereinigen()
     db = get_db(); cur = db.cursor()
     P = ph()
     anzahl_laender = 0
@@ -513,26 +565,7 @@ def importiere_aktuelle_saetze() -> dict:
         if voll is None or halb is None:
             continue
 
-        if is_postgres():
-            cur.execute(f"""
-                INSERT INTO vma_saetze (land_code, ort, land_name, vma_voll, vma_halb,
-                    uebernachtung, gueltig_ab, gueltig_bis, quelle, aktualisiert)
-                VALUES ({P},NULL,{P},{P},{P},{P},{P},{P},'pauschbetrag-api',NOW())
-                ON CONFLICT (land_code, ort) DO UPDATE SET
-                    land_name={P}, vma_voll={P}, vma_halb={P}, uebernachtung={P},
-                    gueltig_ab={P}, gueltig_bis={P}, quelle='pauschbetrag-api', aktualisiert=NOW()
-            """, (code, name, voll, halb, uebernacht, gueltig_ab, gueltig_bis,
-                  name, voll, halb, uebernacht, gueltig_ab, gueltig_bis))
-        else:
-            cur.execute(f"""
-                INSERT INTO vma_saetze (land_code, ort, land_name, vma_voll, vma_halb,
-                    uebernachtung, gueltig_ab, gueltig_bis, quelle)
-                VALUES ({P},NULL,{P},{P},{P},{P},{P},{P},'pauschbetrag-api')
-                ON CONFLICT (land_code, ort) DO UPDATE SET
-                    land_name=excluded.land_name, vma_voll=excluded.vma_voll,
-                    vma_halb=excluded.vma_halb, uebernachtung=excluded.uebernachtung,
-                    gueltig_ab=excluded.gueltig_ab, gueltig_bis=excluded.gueltig_bis
-            """, (code, name, voll, halb, uebernacht, gueltig_ab, gueltig_bis))
+        _land_satz_speichern(cur, code, name, voll, halb, uebernacht, gueltig_ab, gueltig_bis)
         anzahl_laender += 1
 
         for special in (land.get("specials") or []):
@@ -563,10 +596,14 @@ def importiere_aktuelle_saetze() -> dict:
                     ON CONFLICT (land_code, ort) DO UPDATE SET
                         land_name=excluded.land_name, vma_voll=excluded.vma_voll,
                         vma_halb=excluded.vma_halb, uebernachtung=excluded.uebernachtung,
-                        gueltig_ab=excluded.gueltig_ab, gueltig_bis=excluded.gueltig_bis
+                        gueltig_ab=excluded.gueltig_ab, gueltig_bis=excluded.gueltig_bis,
+                    aktualisiert=datetime('now')
                 """, (code, stadt, stadt_name, s_voll, s_halb, s_uebernacht, gueltig_ab, gueltig_bis))
             anzahl_staedte += 1
 
+    # Städte-Sondersätze, die in der neuen Periode nicht mehr vorkommen (amtlich weggefallen), nicht mit alten Werten weiterführen
+    cur.execute(f"DELETE FROM vma_saetze WHERE ort IS NOT NULL AND quelle='pauschbetrag-api' "
+                f"AND (gueltig_ab IS NULL OR gueltig_ab<>{P})", (gueltig_ab,))
     db.commit(); cur.close(); db.close()
 
     return {
@@ -575,6 +612,147 @@ def importiere_aktuelle_saetze() -> dict:
         "staedte": anzahl_staedte,
         "gueltig_ab": gueltig_ab,
     }
+
+
+# ── Automatischer Abruf (v3.68) ────────────────────────────────────────────────
+# Amtliche Sätze ändern sich einmal im Jahr zum 1.1. (BMF-Schreiben im Dezember). Die App holt sie deshalb
+# - einmal im Monat (30 Tage nach dem letzten erfolgreichen Abruf),
+# - sofort nach dem Jahreswechsel, sobald die neue Periode verfügbar ist (Prüfung höchstens täglich),
+# - und beim allerersten Start, wenn noch nie importiert wurde.
+# Fehlgeschlagene Abrufe werden nach 6 Stunden wiederholt. Jeder Versuch steht in der Tabelle vma_import_log.
+VMA_AUTO_TAGE = 30
+VMA_AUTO_WIEDERHOLUNG_STUNDEN = 6
+VMA_AUTO_JAHRESWECHSEL_STUNDEN = 24
+_VMA_AUTO_PRUEFTAKT_SEKUNDEN = 600
+_vma_auto_zuletzt_geprueft = 0.0
+
+
+def vma_import_tabelle_sichern() -> None:
+    from mod_db import get_db
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS vma_import_log (zeitpunkt TEXT, ok INTEGER, meldung TEXT)")
+        db.commit(); cur.close(); db.close()
+    except Exception as ex:
+        print(f"[VMA] Tabelle vma_import_log nicht angelegt: {ex}")
+
+
+def _import_log_lesen() -> tuple:
+    """(Zeitpunkt des letzten erfolgreichen Abrufs, Zeitpunkt des letzten Versuchs) als datetime (UTC) oder None."""
+    from mod_db import get_db
+    db = get_db(); cur = db.cursor()
+
+    def _wert(sql):
+        cur.execute(sql)
+        r = cur.fetchone()
+        v = (r[0] if r is not None else None)
+        try:
+            return _dt.fromisoformat(str(v)[:19]).replace(tzinfo=_tz.utc) if v else None
+        except ValueError:
+            return None
+    try:
+        return (_wert("SELECT MAX(zeitpunkt) FROM vma_import_log WHERE ok=1"),
+                _wert("SELECT MAX(zeitpunkt) FROM vma_import_log"))
+    finally:
+        cur.close(); db.close()
+
+
+def _import_log_schreiben(jetzt: _dt, ok: bool, meldung: str) -> None:
+    from mod_db import get_db, ph
+    P = ph()
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(f"INSERT INTO vma_import_log (zeitpunkt, ok, meldung) VALUES ({P},{P},{P})",
+                    (jetzt.strftime("%Y-%m-%dT%H:%M:%S"), 1 if ok else 0, (meldung or "")[:300]))
+        db.commit()
+    finally:
+        cur.close(); db.close()
+
+
+def _gespeichert_gueltig_ab() -> str:
+    """Jüngstes „gültig ab“ der importierten Sätze (ISO-Text), leer wenn nichts importiert ist."""
+    from mod_db import get_db
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("SELECT MAX(gueltig_ab) FROM vma_saetze")
+        r = cur.fetchone()
+        return str((r[0] if r is not None else "") or "")[:10]
+    except Exception:
+        try: db.rollback()
+        except Exception: pass
+        return ""
+    finally:
+        cur.close(); db.close()
+
+
+def _gespeichert_aktualisiert() -> _dt | None:
+    """Zeitpunkt der letzten Aktualisierung der importierten Sätze (auch von Hand importiert), sonst None."""
+    from mod_db import get_db
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("SELECT MAX(aktualisiert) FROM vma_saetze")
+        r = cur.fetchone()
+        v = r[0] if r is not None else None
+        return _dt.fromisoformat(str(v)[:19].replace(" ", "T")).replace(tzinfo=_tz.utc) if v else None
+    except Exception:
+        try: db.rollback()
+        except Exception: pass
+        return None
+    finally:
+        cur.close(); db.close()
+
+
+def vma_auto_import_faellig(jetzt: _dt | None = None) -> str:
+    """Grund, warum jetzt ein Abruf nötig ist (leer = nichts zu tun). Reine Prüfung, ruft nichts ab."""
+    jetzt = jetzt or _dt.now(_tz.utc)
+    letzter_ok, letzter_versuch = _import_log_lesen()
+    if letzter_versuch and jetzt - letzter_versuch < _td(hours=VMA_AUTO_WIEDERHOLUNG_STUNDEN):
+        return ""                                            # gerade erst versucht (Fehler nicht im Minutentakt wiederholen)
+    if letzter_ok is None:
+        letzter_ok = _gespeichert_aktualisiert()             # von Hand importierte Sätze zählen als Ausgangspunkt
+    if letzter_ok is None:
+        return "noch nie abgerufen"
+    if jetzt - letzter_ok >= _td(days=VMA_AUTO_TAGE):
+        return "monatlicher Abruf"
+    ab = _gespeichert_gueltig_ab()
+    if ab and ab[:4] < str(jetzt.year) and (not letzter_versuch or jetzt - letzter_versuch >= _td(hours=VMA_AUTO_JAHRESWECHSEL_STUNDEN)):
+        return "Jahreswechsel: neue Sätze prüfen"
+    return ""
+
+
+def vma_auto_import(jetzt: _dt | None = None, erzwingen: bool = False) -> dict:
+    """Holt die amtlichen Sätze, wenn es fällig ist (siehe oben). Wird vom Cron-Aufruf mitgenommen; die Prüfung selbst ist
+    billig (höchstens alle 10 Minuten eine kleine Datenbankabfrage). Fehler stören den Cron nie."""
+    global _vma_auto_zuletzt_geprueft
+    jetzt = jetzt or _dt.now(_tz.utc)
+    if not erzwingen and _time.monotonic() - _vma_auto_zuletzt_geprueft < _VMA_AUTO_PRUEFTAKT_SEKUNDEN and _vma_auto_zuletzt_geprueft:
+        return {"geprueft": False}
+    _vma_auto_zuletzt_geprueft = _time.monotonic()
+    try:
+        vma_import_tabelle_sichern()
+        grund = vma_auto_import_faellig(jetzt)
+        if not grund:
+            return {"geprueft": True, "importiert": False}
+        erg = importiere_aktuelle_saetze(jetzt.date())
+        if erg.get("ok"):
+            _import_log_schreiben(jetzt, True, f"{grund}: {erg.get('laender')} Länder, {erg.get('staedte')} Städte, gültig ab {erg.get('gueltig_ab')}")
+            print(f"[VMA] Sätze automatisch abgerufen ({grund}): gültig ab {erg.get('gueltig_ab')}")
+            return {"geprueft": True, "importiert": True, "grund": grund, **erg}
+        _import_log_schreiben(jetzt, False, f"{grund}: {erg.get('fehler')}")
+        print(f"[VMA] Automatischer Abruf fehlgeschlagen: {erg.get('fehler')}")
+        return {"geprueft": True, "importiert": False, "grund": grund, "fehler": erg.get("fehler")}
+    except Exception as ex:
+        print(f"[VMA] Automatischer Abruf übersprungen: {ex}")
+        return {"geprueft": True, "importiert": False, "fehler": str(ex)}
+
+
+def vma_import_status() -> dict:
+    """Für die Seite „VMA-Sätze“: letzter erfolgreicher Abruf und letzter Versuch (Text) – leer, wenn es noch keinen gab."""
+    try:
+        letzter_ok, letzter_versuch = _import_log_lesen()
+    except Exception:
+        return {"ok": None, "versuch": None}
+    return {"ok": letzter_ok, "versuch": letzter_versuch}
 
 
 def vma_fuer_land_erweitert(cur, land_code: str, ort: str | None = None) -> dict:

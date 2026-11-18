@@ -18,7 +18,8 @@ from starlette.middleware.sessions import SessionMiddleware
 # ── Module importieren ────────────────────────────────────────────────────────
 from mod_db import get_db, is_postgres, ph, fmt_date, next_reise_code, get_schema, get_migrations, repair_legacy_columns, migriere_verknuepfungen_zu_gruppen
 from mod_vma import (VMA_SAETZE, IATA_TO_LAND, LAENDER_LISTE, vma_fuer_land,
-                      importiere_aktuelle_saetze, vma_fuer_land_erweitert, STADT_ZU_LAND, saetze_alle)
+                      importiere_aktuelle_saetze, vma_fuer_land_erweitert, STADT_ZU_LAND, saetze_alle,
+                     vma_auto_import, vma_import_status, vma_import_tabelle_sichern, vma_duplikate_bereinigen)
 from mod_anon import anonymisieren
 from mod_kk import (abrechnung_parsen, abrechnung_zuordnen, mitarbeiter_finden, auswahl_wert,
                     zuordnungen_laden as kk_zuordnungen_laden,
@@ -49,7 +50,8 @@ from mod_beleg import (beleg_verarbeiten, gpt_analyse, gpt_analyse_bild,
                         S3_ENDPOINT, S3_BUCKET,
                         _gleicher_reisender, _namens_tokens, _SEG_FELDER, _wert_gleich)
 import mod_belegdeckung as deckung_mod
-from mod_mail import fetch_mails, sende_dms_mail, dms_konfiguriert, DMS_EMAIL_TO, smtp_diagnose
+from mod_mail import (fetch_mails, sende_dms_mail, dms_konfiguriert, DMS_EMAIL_TO, smtp_diagnose,
+                      mail_id_spalte_sichern, mail_codes_reparieren, ist_mail_kennung)
 from mod_vma_tage import (vma_berechnen, land_fuer_tag, trennungspauschale_berechnen,
                            fruehstueck_aus_beleg, vma_tage_generieren, land_fuer_letzten_tag,
                            vma_auto_aktualisieren, vma_auto_fuer_beleg)
@@ -128,6 +130,11 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.68", "zeit": "2026-11-18 05:53", "aenderungen": [
+        "Korrektur Buchungscode: Bei Mails ohne Anhang überschrieb die App den echten Buchungs-/Reservierungscode mit einer internen Mail-Kennung („MAIL:…“); im Reiseplan stand dann kein oder ein falscher Code (z. B. Viva). Die Kennung hat jetzt eine eigene Spalte, alte Belege werden beim Start repariert, der Reiseplan nimmt bei fehlendem Code den der Buchungsgruppe.",
+        "Outlook-Einladungen: Jeder Titel beginnt mit dem Reisekürzel (z. B. „26-004 · ✈ VB 1379 …“). Jede Aktualisierungs-Mail nennt, was sich geändert hat. Die Wartezeit ist 5 statt 2 Minuten (weniger Mehrfach-Mails); Beendetes (gelandet, ausgecheckt) wird nicht mehr aktualisiert.",
+        "VMA-Sätze: Automatischer Abruf der amtlichen Sätze einmal im Monat und nach dem Jahreswechsel; es gilt die am Stichtag gültige Periode. Die Ersatztabelle im Programm war bei den meisten Ländern veraltet (An-/Abreisetag fälschlich halber Tagessatz) und entspricht jetzt dem BMF-Stand 1.1.2026.",
+    ]},
     {"version": "3.67", "zeit": "2026-11-17 15:02", "aenderungen": [
         "Flug-Abfragen (AeroDataBox) stark reduziert: Bisher löste schon 1 Minute Verspätung einen 10-Minuten-Takt aus, auch während des Flugs (bis zu 45 statt 7 Abfragen pro Flug). Jetzt gilt genau der dokumentierte Prüfplan; bei Verspätung ab 15 Minuten zusätzlich 15 Min vor der neuen Abreise und alle 30 Min zwischen geplanter und neuer Abreise.",
         "Derselbe Flug mehrerer Reisender wird nur einmal abgefragt und löst nur einen Alarm aus; nach einem API-Fehler wartet die App 20 Minuten, statt jede Minute neu zu fragen.",
@@ -952,7 +959,21 @@ async def startup():
     for _zf in ("reise_beginn_zone", "reise_ende_zone", "arbeit_beginn_zone", "arbeit_ende_zone"):
         spalte_sichern("reisetage_person", _zf, "TEXT")
     zs.tabelle_sichern()
+    vma_import_tabelle_sichern()
+    try:
+        n_vma = vma_duplikate_bereinigen()
+        if n_vma:
+            print(f"[Startup] {n_vma} doppelte VMA-Länderzeile(n) entfernt")
+    except Exception as e:
+        print(f"[Startup] VMA-Bereinigung übersprungen: {e}")
     spalte_sichern("belege", "a1_kuerzel", "TEXT")
+    mail_id_spalte_sichern()
+    try:
+        n_mail = mail_codes_reparieren()
+        if n_mail:
+            print(f"[Startup] Buchungscode bei {n_mail} Beleg(en) wiederhergestellt (war durch eine interne Mail-Kennung überschrieben)")
+    except Exception as e:
+        print(f"[Startup] Mail-Kennungen nicht repariert: {e}")
     spalte_sichern("termine", "serie_id", "TEXT")
     spalte_sichern("reisetage_person", "bearbeitet", "BOOLEAN")
     bearbeitet_nachtragen()
@@ -4280,6 +4301,19 @@ def _hotelzeit_abgleichen(art: str, datum, zeit: str, angenommen: bool, h_koord,
     return checkin_nach_ankunft(zeit, angenommen, ankuenfte)
 
 
+def _echter_buchungscode(code, ki_json_str=None) -> str:
+    """Echte Buchungsnummer eines Belegs. Eine alte interne Mail-Kennung („MAIL:…“, bis v3.67 im Feld Buchungscode)
+    zählt nicht; dann gilt, falls vorhanden, der Code aus den gespeicherten KI-Daten."""
+    c = str(code or "").strip()
+    if not ist_mail_kennung(c):
+        return c
+    try:
+        c2 = str((json.loads(ki_json_str or "{}") or {}).get("buchungscode") or "").strip()
+    except Exception:
+        c2 = ""
+    return "" if ist_mail_kennung(c2) else c2
+
+
 def reiseplan_daten_laden(reise_code: str):
     """
     Sammelt alle Reiseplan-relevanten Ereignisse für eine Reise – BEWUSST OHNE
@@ -4319,6 +4353,12 @@ def reiseplan_daten_laden(reise_code: str):
         if (g(b,"belegart",17) or "") == "Buchungsbestaetigung" and g(b,"transportart",0) in ("Flug","Bahn","Mietwagen") \
                 and segmente_aus_ki_json(g(b,"ki_json",4)):
             gruppen_mit_segmenten.add(gid)
+    code_je_gruppe = {}
+    for b in beleg_zeilen:
+        gid = g(b,"beleg_gruppe_id",18)
+        c = _echter_buchungscode(g(b,"buchungscode",2), g(b,"ki_json",4))
+        if gid and c:
+            code_je_gruppe.setdefault(gid, c)
     hotel_kandidaten = []
     for b in beleg_zeilen:
         typ = g(b,"transportart",0); anbieter = g(b,"anbieter",1) or ""
@@ -4329,7 +4369,9 @@ def reiseplan_daten_laden(reise_code: str):
                     continue
             elif (g(b,"belegart",17) or "") == "Buchungsbestaetigung" and arten_je_gruppe.get(gid, set()) & {"Rechnung", "Quittung"}:
                 continue
-        buchungscode = g(b,"buchungscode",2) or g(b,"rechnungsnummer",3) or ""
+        # v3.68: echter Code des Belegs; fehlt er, der echte Code eines anderen Belegs derselben Gruppe (z. B. Bestätigung + Rechnung)
+        buchungscode = (_echter_buchungscode(g(b,"buchungscode",2), g(b,"ki_json",4))
+                        or (code_je_gruppe.get(gid) if gid else "") or g(b,"rechnungsnummer",3) or "")
         if typ == "Sonstiges":
             # Allgemeingültig: JEDE "Sonstiges"-Position mit einem echten
             # Datums-ZEITRAUM (von != bis, z.B. Parkplatzreservierung am
@@ -4372,7 +4414,7 @@ def reiseplan_daten_laden(reise_code: str):
             hotel_kandidaten.append({
                 "name": hname, "key": _hotel_namensschluessel(hname), "adresse": hadresse, "koord": h_koord,
                 "ci": ci_d, "co": co_d, "ci_z": ci_z, "ci_ang": ci_ang, "co_z": co_z, "co_ang": co_ang,
-                "code": buchungscode, "code_echt": g(b,"buchungscode",2) or ""})
+                "code": buchungscode, "code_echt": _echter_buchungscode(g(b,"buchungscode",2), g(b,"ki_json",4))})
         else:
             segs = segmente_aus_ki_json(g(b,"ki_json",4))
             icon = {"Flug": "✈", "Bahn": "🚆", "Mietwagen": "🚗"}.get(typ, "📍")
@@ -10753,8 +10795,20 @@ def vma_uebersicht(ok: str = "", fehler: str = "", laender: str = "", staedte: s
     elif not laender_map:
         banner = ('<div class="alert alert-warn" style="margin-bottom:20px">'
                    'Es wurden noch keine aktuellen Sätze importiert – unten stehen die im Code '
-                   'hinterlegten Werte (Stand 2024/2026, ohne Städte-Sonderfälle).</div>')
+                   'hinterlegten Werte (Stand 1.1.2026, ohne Städte-Sonderfälle).</div>')
 
+    try:
+        _st = vma_import_status()
+        _ok, _vs = _st.get("ok"), _st.get("versuch")
+        stand_zeile = ('<p style="color:var(--muted);font-size:13px;margin:0 0 12px">Die App holt die amtlichen Sätze '
+                       'automatisch: einmal im Monat und sofort nach dem Jahreswechsel (die Sätze ändern sich amtlich '
+                       'einmal im Jahr zum 1.1.). '
+                       + (f'Letzter automatischer Abruf: {_ok.astimezone().strftime("%d.%m.%Y %H:%M")} Uhr.' if _ok else
+                          'Noch kein automatischer Abruf protokolliert.')
+                       + (f' Letzter Versuch: {_vs.astimezone().strftime("%d.%m.%Y %H:%M")} Uhr.' if _vs and _vs != _ok else '')
+                       + '</p>')
+    except Exception:
+        stand_zeile = ""
     content = f"""
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
       <h1 class="page-title" style="margin:0">VMA-Tagessätze</h1>
@@ -10763,20 +10817,22 @@ def vma_uebersicht(ok: str = "", fehler: str = "", laender: str = "", staedte: s
       </form>
     </div>
     {banner}
+    {stand_zeile}
     <div class="card">
       <div class="table-wrap">
         <table>
           <thead><tr>
             <th>ISO</th><th>Land / Ort</th>
             <th style="text-align:right">Voller Satz/Tag</th>
-            <th style="text-align:right">Halber Satz/Tag</th>
+            <th style="text-align:right">An-/Abreisetag</th>
           </tr></thead>
           <tbody>{zeilen}</tbody>
         </table>
       </div>
     </div>
     <div class="alert alert-ok" style="margin-top:16px">
-      <b>Regel:</b> Erster und letzter Reisetag → halber Satz. Volle Tage dazwischen → voller Satz.
+      <b>Regel:</b> Erster und letzter Reisetag → Satz für An-/Abreisetag (amtlich festgelegt, im Ausland nicht
+      die Hälfte des Tagessatzes; in Deutschland 14 €). Volle Tage dazwischen → voller Satz.
       Bei Aufenthalt in mehreren Ländern gilt der Satz des Landes, in dem der Reisende
       um 24:00 Uhr Ortszeit war. Städte-Sonderfälle (z.B. Los Angeles) werden beim
       "Land hinzufügen" in der Reise automatisch zur Auswahl angeboten, sobald importiert.
@@ -11433,6 +11489,12 @@ def cron_flug_alerts_route(key: str = ""):
         result["kalender"] = kal.kalender_abgleich()
     except Exception as e:
         result["kalender"] = {"fehler": str(e)}
+    try:   # v3.68: amtliche VMA-Sätze automatisch holen (monatlich / nach Jahreswechsel; sonst nur eine kleine Prüfung)
+        vma_erg = vma_auto_import()
+        if vma_erg.get("importiert") or vma_erg.get("fehler"):
+            result["vma_sätze"] = vma_erg
+    except Exception as e:
+        result["vma_sätze"] = {"fehler": str(e)}
     return JSONResponse(result)
 
 
