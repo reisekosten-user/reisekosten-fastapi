@@ -1625,7 +1625,7 @@ def beleg_detail(bid: int, request: Request):
                 <dd>{reisender or "–"}</dd>
                 <dt style="color:var(--muted);font-size:12px">Land</dt>
                 <dd>{land or "–"}</dd>
-                <dt style="color:var(--muted);font-size:12px">Betrag brutto</dt>
+                <!--A1_OHNE_BETRAG_START--><dt style="color:var(--muted);font-size:12px">Betrag brutto</dt>
                 <dd style="font-weight:700;color:var(--green);font-size:15px">
                   {f"{float(betrag_brutto):.2f}" if betrag_brutto else "–"} {waehrung}
                   <a href="/beleg/{bid2}/betrag/bearbeiten" style="font-size:12px;color:var(--muted);
@@ -1650,7 +1650,7 @@ def beleg_detail(bid: int, request: Request):
                   {kreditkarte_dropdown_html}
                 </dd>
                 {f'<dt style="color:var(--muted);font-size:12px">Netto</dt><dd>{float(betrag_netto):.2f} {waehrung}</dd>' if betrag_netto else ""}
-                {f'<dt style="color:var(--muted);font-size:12px">{"MwSt." if land == "DE" else "VAT"}</dt><dd>{float(betrag_mwst):.2f} {waehrung}</dd>' if betrag_mwst else ""}
+                {f'<dt style="color:var(--muted);font-size:12px">{"MwSt." if land == "DE" else "VAT"}</dt><dd>{float(betrag_mwst):.2f} {waehrung}</dd>' if betrag_mwst else ""}<!--A1_OHNE_BETRAG_ENDE-->
                 <dt style="color:var(--muted);font-size:12px">Belegdatum</dt>
                 <dd>{fmt_date(belegdatum)}</dd>
                 <dt style="color:var(--muted);font-size:12px">Event</dt>
@@ -1805,6 +1805,9 @@ def beleg_detail(bid: int, request: Request):
                         padding:12px;border-radius:var(--radius-s)">{(rohtext or "").replace("<","&lt;")[:3000]}</pre>
           </div>
         </div>"""
+        if belegart == mod_a1.BELEGART:
+            # v3.69: A1-Bescheinigung hat keinen Betrag und keine Bezahlart – Felder ausblenden
+            content = re.sub(r"<!--A1_OHNE_BETRAG_START-->.*?<!--A1_OHNE_BETRAG_ENDE-->", "", content, flags=re.S)
         return HTMLResponse(shell(f"Beleg #{bid2}", content))
     except Exception as e:
         import traceback
@@ -4341,6 +4344,7 @@ def reiseplan_daten_laden(reise_code: str):
                     belegart, beleg_gruppe_id
                     FROM belege WHERE reise_code={P}
                     AND transportart IN ('Flug','Bahn','Mietwagen','Hotel','Sonstiges')
+                    AND (belegart IS NULL OR belegart <> 'A1Bescheinigung')
                     AND aenderung_status IS NULL ORDER BY id""", (reise_code,))
     beleg_zeilen = cur.fetchall()
     # v3.66: Wie im Tagesablauf der Reise: Eine Buchungsbestätigung, zu der es in derselben Gruppe eine Rechnung/Quittung gibt,
@@ -4629,6 +4633,27 @@ def _pikto_zeichnen(c, name: str, x: float, y: float, groesse: float, farbe) -> 
     c.restoreState()
 
 
+def _pdf_schrift() -> tuple:
+    """v3.69: Schrift mit allen europäischen Sonderzeichen (ł, ś, ż, č, ő …) für das Reiseplan-PDF.
+    Liberation Sans hat dieselben Maße wie Helvetica – das Layout bleibt unverändert.
+    Dateien: static/fonts/LiberationSans-Regular.ttf und -Bold.ttf. Fehlen sie, gilt wie bisher Helvetica."""
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.lib.fonts import addMapping
+    if "RpSans" in pdfmetrics.getRegisteredFontNames():
+        return "RpSans", "RpSans-Bold"
+    ordner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "fonts")
+    try:
+        pdfmetrics.registerFont(TTFont("RpSans", os.path.join(ordner, "LiberationSans-Regular.ttf")))
+        pdfmetrics.registerFont(TTFont("RpSans-Bold", os.path.join(ordner, "LiberationSans-Bold.ttf")))
+        addMapping("RpSans", 0, 0, "RpSans"); addMapping("RpSans", 1, 0, "RpSans-Bold")
+        addMapping("RpSans", 0, 1, "RpSans"); addMapping("RpSans", 1, 1, "RpSans-Bold")
+        return "RpSans", "RpSans-Bold"
+    except Exception as ex:
+        print(f"[Reiseplan] Unicode-Schrift nicht gefunden, nutze Helvetica: {ex}")
+        return "Helvetica", "Helvetica-Bold"
+
+
 def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool, qr_links=None) -> bytes:
     """
     Baut das Reiseplan-PDF (Layout „Zeitleiste“, v3.61). Zwei Varianten über ohne_buchungscode:
@@ -4649,6 +4674,7 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool, qr_li
     from reportlab.lib import colors
     from reportlab.lib.utils import ImageReader
 
+    SCHRIFT, SCHRIFT_FETT = _pdf_schrift()
     TXT = colors.HexColor("#1f2937"); GRAU = colors.HexColor("#6b7280")
     LINIE = colors.HexColor("#d1d5db"); BAND = colors.HexColor("#e3ebf7"); AKZ = colors.HexColor("#0f2d6e")
 
@@ -4669,15 +4695,15 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool, qr_li
     wochentage = ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag","Samstag","Sonntag"]
 
     def stil(name, **kw):
-        basis = dict(fontName="Helvetica", fontSize=9, leading=11.5, textColor=TXT)
+        basis = dict(fontName=SCHRIFT, fontSize=9, leading=11.5, textColor=TXT)
         basis.update(kw)
         return ParagraphStyle(name, **basis)
 
-    s_titel = stil("RpTitel", fontName="Helvetica-Bold", fontSize=17, leading=20, textColor=AKZ)
+    s_titel = stil("RpTitel", fontName=SCHRIFT_FETT, fontSize=17, leading=20, textColor=AKZ)
     s_kopf = stil("RpKopf", fontSize=9.5, textColor=GRAU)
-    s_tag = stil("RpTag", fontName="Helvetica-Bold", fontSize=10, leading=12, textColor=AKZ)
-    s_zeit = stil("RpZeit", fontName="Helvetica-Bold", fontSize=8.8, alignment=2)
-    s_ev = stil("RpEv", fontName="Helvetica-Bold", fontSize=9.2)
+    s_tag = stil("RpTag", fontName=SCHRIFT_FETT, fontSize=10, leading=12, textColor=AKZ)
+    s_zeit = stil("RpZeit", fontName=SCHRIFT_FETT, fontSize=8.8, alignment=2)
+    s_ev = stil("RpEv", fontName=SCHRIFT_FETT, fontSize=9.2)
     s_sub = stil("RpSub", fontSize=8, leading=10, textColor=GRAU)
 
     class Zeile(Flowable):
@@ -4722,7 +4748,7 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool, qr_li
 
     def fuss(canvas, doc):
         canvas.saveState()
-        canvas.setFont("Helvetica", 7.5); canvas.setFillColor(GRAU)
+        canvas.setFont(SCHRIFT, 7.5); canvas.setFillColor(GRAU)
         canvas.drawString(15 * mm, 9 * mm, f"Reiseplan {rcode} · Stand {stand}")
         canvas.drawRightString(195 * mm, 9 * mm, f"Seite {doc.page}")
         canvas.restoreState()
