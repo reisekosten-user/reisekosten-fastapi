@@ -130,6 +130,11 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.69", "zeit": "2026-11-20 17:30", "aenderungen": [
+        "Reiseplan (Anzeige, PDF, Portal) und Tagesablauf: Hotel-Check-in und -Check-out ohne Uhrzeit. Der Check-out steht immer als erstes Ereignis des Tages, der Check-in immer als letztes.",
+        "Reiseplan-PDF zeigt polnische und andere Sonderzeichen (ł, ś, ż, ń …) richtig an. Die A1-Bescheinigung erscheint nicht mehr als „Sonstiges: Beginn/Ende“ im Reiseplan und hat in der Beleg-Ansicht keine Felder für Betrag und Bezahlart mehr.",
+        "Outlook-Einladungen: Lufthansa Express Rail (Züge mit LH-Nummer, z. B. LH3447 Nürnberg → Frankfurt) wird als Bahn statt als Flug angezeigt.",
+    ]},
     {"version": "3.68", "zeit": "2026-11-18 05:53", "aenderungen": [
         "Korrektur Buchungscode: Bei Mails ohne Anhang überschrieb die App den echten Buchungs-/Reservierungscode mit einer internen Mail-Kennung („MAIL:…“); im Reiseplan stand dann kein oder ein falscher Code (z. B. Viva). Die Kennung hat jetzt eine eigene Spalte, alte Belege werden beim Start repariert, der Reiseplan nimmt bei fehlendem Code den der Buchungsgruppe.",
         "Outlook-Einladungen: Jeder Titel beginnt mit dem Reisekürzel (z. B. „26-004 · ✈ VB 1379 …“). Jede Aktualisierungs-Mail nennt, was sich geändert hat. Die Wartezeit ist 5 statt 2 Minuten (weniger Mehrfach-Mails); Beendetes (gelandet, ausgecheckt) wird nicht mehr aktualisiert.",
@@ -4289,6 +4294,10 @@ def _hotels_zusammenfuehren(kandidaten: list) -> list:
     return erg
 
 
+HOTEL_CI_MARKE = "~CI"      # v3.69: Sortiermarke Hotel-Check-in (Tagesablauf), wird nicht angezeigt
+HOTEL_CO_MARKE = "!CO"      # v3.69: Sortiermarke Hotel-Check-out (Tagesablauf), wird nicht angezeigt
+
+
 def _hotelzeit_abgleichen(art: str, datum, zeit: str, angenommen: bool, h_koord, fahrten) -> tuple:
     """v3.64: Angenommene Hotel-Standardzeit gegen Flug/Bahn/Mietwagen AM HOTELORT abgleichen.
     art: 'ci' (Check-in) oder 'co' (Check-out); fahrten: [(typ, d_ab, ab_zeit, d_an, an_zeit, von_koord, nach_koord)].
@@ -4445,17 +4454,18 @@ def reiseplan_daten_laden(reise_code: str):
                                _datum_parsen(s.get("ankunft_datum")) or d_ab, str(s.get("ankunft_zeit") or ""),
                                _k("von"), _k("nach"))}))
 
+    # v3.69: Hotels ohne Uhrzeit – Check-out immer als ERSTES Ereignis des Tages, Check-in immer als LETZTES.
     for h in _hotels_zusammenfuehren(hotel_kandidaten):
         if h["ci"]:
-            ereignisse.append((h["ci"], h["ci_z"], {
-                "icon": "🏨", "typ": "hotel", "titel": f"Check-in: {h['name']}", "zeit": ("ab " if h["ci_ang"] else "") + h["ci_z"],
+            ereignisse.append((h["ci"], "", {
+                "icon": "🏨", "typ": "hotel", "titel": f"Check-in: {h['name']}", "zeit": "",
                 "sub": h["adresse"], "extra": f"Buchungsnr.: {h['code']}" if h["code"] else "", "ist_buchungscode": True,
-                "_hotel": ("ci", h["ci_ang"], h["koord"])}))
+                "_rang": 2}))
         if h["co"]:
-            ereignisse.append((h["co"], h["co_z"], {
-                "icon": "🏨", "typ": "hotel", "titel": f"Check-out: {h['name']}", "zeit": ("bis " if h["co_ang"] else "") + h["co_z"],
+            ereignisse.append((h["co"], "", {
+                "icon": "🏨", "typ": "hotel", "titel": f"Check-out: {h['name']}", "zeit": "",
                 "sub": h["adresse"], "extra": "", "ist_buchungscode": False,
-                "_hotel": ("co", h["co_ang"], h["koord"])}))
+                "_rang": 0}))
 
     TERMIN_ICON = {"termin": "🤝", "kundenbesuch": "🤝", "fahrt": "🚕",
                    "mietwagen": "🚗", "hotel": "🏨", "montage": "🔧", "sonstiges": "📌"}
@@ -4492,15 +4502,13 @@ def reiseplan_daten_laden(reise_code: str):
                 ev["zeit"] = anzeige
         neu_liste.append((d, sz, ev))
     ereignisse = neu_liste
-    for _d, _sz, ev in ereignisse:
-        ev.pop("_hotel", None); ev.pop("_fahrt", None)
-
-    # Sortierung nach der Sortierzeit (nicht nach dem Anzeigetext, der bei Hotels "ab 16:00" lautet)
+    # Sortierung: Rang (Check-out 0 – übrige 1 – Check-in 2), danach Uhrzeit
     tage = {}
     for d, sz, ev in ereignisse:
-        tage.setdefault(d, []).append((str(sz or ""), ev))
+        tage.setdefault(d, []).append((ev.pop("_rang", 1), str(sz or ""), ev))
+        ev.pop("_hotel", None); ev.pop("_fahrt", None)
     for d in tage:
-        tage[d] = [ev for _sz, ev in sorted(tage[d], key=lambda x: x[0])]
+        tage[d] = [ev for _r, _sz, ev in sorted(tage[d], key=lambda x: (x[0], x[1]))]
     return {"titel": titel, "abreise": abreise, "rueckkehr": rueckkehr, "tage": tage}
 
 
@@ -9517,10 +9525,8 @@ def reise_detail(code: str, request: Request):
                     h_koord = (float(get(b,"hotel_lat",22)), float(get(b,"hotel_lon",23)))
                 except (TypeError, ValueError):
                     h_koord = None
-                _sz, _anz = _hotelzeit_abgleichen("ci", ci_d, ci_z, ci_ang, h_koord, fahrten_tag)
-                ci_z = _anz or (("ab " if ci_ang else "") + ci_z)
-                _sz, _anz = _hotelzeit_abgleichen("co", co_d, co_z, co_ang, h_koord, fahrten_tag)
-                co_z = _anz or (("bis " if co_ang else "") + co_z)
+                # v3.69: ohne Uhrzeit – Check-in immer zuletzt, Check-out immer zuerst am Tag
+                ci_z, co_z = HOTEL_CI_MARKE, HOTEL_CO_MARKE
                 add_event(ci_d, ci_z, f"{icon} Hotel einchecken · {anbieter}",
                           f"{fmt_date(ci_d)}" if ci_d else "", bid, bet_s, bg, fg)
                 if bet_s: kosten_vergeben = True
@@ -9567,6 +9573,8 @@ def reise_detail(code: str, request: Request):
                 eintraege.append((von or "99:99", "termin", tid, f"{icon} {titel_t}", sub_t, zeit_txt, None, None))
 
             def _sortzeit(z):
+                if z == HOTEL_CO_MARKE: return ""            # v3.69: Hotel-Check-out zuerst
+                if z == HOTEL_CI_MARKE: return "99:99~"      # v3.69: Hotel-Check-in zuletzt
                 m = re.search(r"(\d{1,2}):(\d{2})", str(z or ""))
                 if not m: return "99:99"
                 minuten = int(m.group(1)) * 60 + int(m.group(2))
@@ -9579,7 +9587,7 @@ def reise_detail(code: str, request: Request):
 
             rows = ""
             for zeit, art, eid, titel_txt, sub_txt, rechts, bg, fg in eintraege:
-                zeit_disp = "" if zeit == "99:99" else zeit
+                zeit_disp = "" if zeit in ("99:99", HOTEL_CI_MARKE, HOTEL_CO_MARKE) else zeit
                 if art == "beleg":
                     rechts_html = (f'<span style="background:{bg};color:{fg};padding:2px 8px;'
                                     f'border-radius:12px;font-size:11px;font-weight:500">{rechts}</span>'
