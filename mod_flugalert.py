@@ -26,6 +26,9 @@ DB_TIMETABLES_CLIENT_ID = os.getenv("DB_TIMETABLES_CLIENT_ID", "")
 DB_TIMETABLES_API_KEY = os.getenv("DB_TIMETABLES_API_KEY", "")
 DB_TIMETABLES_BASE = "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1"
 DB_STADA_BASE = "https://apis.deutschebahn.com/db-api-marketplace/apis/station-data/v2"
+# Nachfolger der Timetables-API (Abschaltung der alten voraussichtlich Mitte 2027). Gleiche Zugangsdaten, solange das
+# OpenBoards-Abo zur selben Marketplace-Anwendung gehört.
+DB_OPENBOARDS_BASE = "https://apis.deutschebahn.com/db-api-marketplace/apis/open-boards/v1"
 
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
@@ -183,6 +186,33 @@ def flugstatus_abrufen(transport_nummer: str, abreise_datum: date) -> dict:
 def _db_headers() -> dict:
     return {"DB-Client-Id": DB_TIMETABLES_CLIENT_ID, "DB-Api-Key": DB_TIMETABLES_API_KEY,
             "Accept": "application/json"}
+
+
+def openboards_test(bahnhof: str = "8000105", art: str = "arrivals") -> dict:
+    """Diagnose (v3.69): ruft die OpenBoards-API EINMAL ab und gibt die ROHE Antwort zurück, damit das Antwortformat
+    geprüft werden kann. Anfrage genau wie in der Dokumentation der DB (POST, Bahnhof per EVA-Nummer, Startzeit jetzt).
+    Der API-Schlüssel erscheint nie im Ergebnis."""
+    if not (DB_TIMETABLES_CLIENT_ID and DB_TIMETABLES_API_KEY):
+        return {"fehler": "DB_TIMETABLES_CLIENT_ID/DB_TIMETABLES_API_KEY nicht konfiguriert (Render → Environment)"}
+    art = "departures" if art == "departures" else "arrivals"
+    eva = (bahnhof or "").strip() or "8000105"
+    try:
+        if not eva.isdigit():
+            gefunden = eva_fuer_bahnhof(eva)
+            if not gefunden:
+                return {"fehler": f"Bahnhof '{eva}' nicht gefunden (bitte EVA-Nummer eingeben, z. B. 8000105)"}
+            eva = gefunden
+        start = datetime.now(ZoneInfo("Europe/Berlin")).replace(microsecond=0)
+        anfrage = {"stopPlaceOrStation": {"evaNumbers": [eva]},
+                   "timeWindow": {"timeStart": start.isoformat()},
+                   "maxViaStops": 3, "maxEntriesPerTransportType": 10, "languages": ["deu"]}
+        headers = dict(_db_headers(), **{"Content-Type": "application/json"})
+        resp = httpx.post(f"{DB_OPENBOARDS_BASE}/{art}", json=anfrage, headers=headers, timeout=30)
+        text = resp.text or ""
+        return {"status": resp.status_code, "art": art, "eva": eva, "anfrage": anfrage,
+                "antwort": text[:80000], "gekuerzt": len(text) > 80000}
+    except Exception as e:
+        return {"fehler": f"Abruf fehlgeschlagen: {e}"}
 
 
 def eva_fuer_bahnhof(name: str) -> str | None:

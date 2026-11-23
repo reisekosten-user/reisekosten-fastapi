@@ -63,7 +63,7 @@ from mod_portal import (zugang_holen_oder_erstellen, portal_link, zugang_aus_tok
                          cron_portal_mails, PORTAL_TAGE_VORHER, portal_aenderungen_speichern,
                          von_reise_uebernehmen, tatsaechliche_zeit_uebernehmen, bearbeitet_nachtragen)
 from mod_flugalert import (konfiguration_laden, api_nutzung_laden,
-                            cron_flug_alerts, offene_alerts_fuer_dashboard)
+                            cron_flug_alerts, offene_alerts_fuer_dashboard, openboards_test)
 from mod_geo import koordinaten_fuer_land, adresse_geokodieren
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 # Größte erlaubte Habel-Mail (Summe aller PDF-Anhänge in MB; Base64 macht die Mail ca. ein Drittel größer)
@@ -130,10 +130,8 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
-    {"version": "3.69", "zeit": "2026-11-20 17:30", "aenderungen": [
-        "Reiseplan (Anzeige, PDF, Portal) und Tagesablauf: Hotel-Check-in und -Check-out ohne Uhrzeit. Der Check-out steht immer als erstes Ereignis des Tages, der Check-in immer als letztes.",
-        "Reiseplan-PDF zeigt polnische und andere Sonderzeichen (ł, ś, ż, ń …) richtig an. Die A1-Bescheinigung erscheint nicht mehr als „Sonstiges: Beginn/Ende“ im Reiseplan und hat in der Beleg-Ansicht keine Felder für Betrag und Bezahlart mehr.",
-        "Outlook-Einladungen: Lufthansa Express Rail (Züge mit LH-Nummer, z. B. LH3447 Nürnberg → Frankfurt) wird als Bahn statt als Flug angezeigt.",
+    {"version": "3.69", "zeit": "2026-11-23 17:48", "aenderungen": [
+        "Vorbereitung auf die neue Bahn-Schnittstelle: Die Deutsche Bahn löst die Timetables-API durch OpenBoards ab (Abschaltung der alten voraussichtlich Mitte 2027). In den Alert-Einstellungen gibt es den Knopf „OpenBoards testen“, der die neue Schnittstelle einmal abruft und die rohe Antwort zeigt. Die Verspätungsalarme laufen unverändert weiter.",
     ]},
     {"version": "3.68", "zeit": "2026-11-18 05:53", "aenderungen": [
         "Korrektur Buchungscode: Bei Mails ohne Anhang überschrieb die App den echten Buchungs-/Reservierungscode mit einer internen Mail-Kennung („MAIL:…“); im Reiseplan stand dann kein oder ein falscher Code (z. B. Viva). Die Kennung hat jetzt eine eigene Spalte, alte Belege werden beim Start repariert, der Reiseplan nimmt bei fehlendem Code den der Buchungsgruppe.",
@@ -1630,7 +1628,7 @@ def beleg_detail(bid: int, request: Request):
                 <dd>{reisender or "–"}</dd>
                 <dt style="color:var(--muted);font-size:12px">Land</dt>
                 <dd>{land or "–"}</dd>
-                <!--A1_OHNE_BETRAG_START--><dt style="color:var(--muted);font-size:12px">Betrag brutto</dt>
+                <dt style="color:var(--muted);font-size:12px">Betrag brutto</dt>
                 <dd style="font-weight:700;color:var(--green);font-size:15px">
                   {f"{float(betrag_brutto):.2f}" if betrag_brutto else "–"} {waehrung}
                   <a href="/beleg/{bid2}/betrag/bearbeiten" style="font-size:12px;color:var(--muted);
@@ -1655,7 +1653,7 @@ def beleg_detail(bid: int, request: Request):
                   {kreditkarte_dropdown_html}
                 </dd>
                 {f'<dt style="color:var(--muted);font-size:12px">Netto</dt><dd>{float(betrag_netto):.2f} {waehrung}</dd>' if betrag_netto else ""}
-                {f'<dt style="color:var(--muted);font-size:12px">{"MwSt." if land == "DE" else "VAT"}</dt><dd>{float(betrag_mwst):.2f} {waehrung}</dd>' if betrag_mwst else ""}<!--A1_OHNE_BETRAG_ENDE-->
+                {f'<dt style="color:var(--muted);font-size:12px">{"MwSt." if land == "DE" else "VAT"}</dt><dd>{float(betrag_mwst):.2f} {waehrung}</dd>' if betrag_mwst else ""}
                 <dt style="color:var(--muted);font-size:12px">Belegdatum</dt>
                 <dd>{fmt_date(belegdatum)}</dd>
                 <dt style="color:var(--muted);font-size:12px">Event</dt>
@@ -1810,9 +1808,6 @@ def beleg_detail(bid: int, request: Request):
                         padding:12px;border-radius:var(--radius-s)">{(rohtext or "").replace("<","&lt;")[:3000]}</pre>
           </div>
         </div>"""
-        if belegart == mod_a1.BELEGART:
-            # v3.69: A1-Bescheinigung hat keinen Betrag und keine Bezahlart – Felder ausblenden
-            content = re.sub(r"<!--A1_OHNE_BETRAG_START-->.*?<!--A1_OHNE_BETRAG_ENDE-->", "", content, flags=re.S)
         return HTMLResponse(shell(f"Beleg #{bid2}", content))
     except Exception as e:
         import traceback
@@ -4294,10 +4289,6 @@ def _hotels_zusammenfuehren(kandidaten: list) -> list:
     return erg
 
 
-HOTEL_CI_MARKE = "~CI"      # v3.69: Sortiermarke Hotel-Check-in (Tagesablauf), wird nicht angezeigt
-HOTEL_CO_MARKE = "!CO"      # v3.69: Sortiermarke Hotel-Check-out (Tagesablauf), wird nicht angezeigt
-
-
 def _hotelzeit_abgleichen(art: str, datum, zeit: str, angenommen: bool, h_koord, fahrten) -> tuple:
     """v3.64: Angenommene Hotel-Standardzeit gegen Flug/Bahn/Mietwagen AM HOTELORT abgleichen.
     art: 'ci' (Check-in) oder 'co' (Check-out); fahrten: [(typ, d_ab, ab_zeit, d_an, an_zeit, von_koord, nach_koord)].
@@ -4353,7 +4344,6 @@ def reiseplan_daten_laden(reise_code: str):
                     belegart, beleg_gruppe_id
                     FROM belege WHERE reise_code={P}
                     AND transportart IN ('Flug','Bahn','Mietwagen','Hotel','Sonstiges')
-                    AND (belegart IS NULL OR belegart <> 'A1Bescheinigung')
                     AND aenderung_status IS NULL ORDER BY id""", (reise_code,))
     beleg_zeilen = cur.fetchall()
     # v3.66: Wie im Tagesablauf der Reise: Eine Buchungsbestätigung, zu der es in derselben Gruppe eine Rechnung/Quittung gibt,
@@ -4454,18 +4444,17 @@ def reiseplan_daten_laden(reise_code: str):
                                _datum_parsen(s.get("ankunft_datum")) or d_ab, str(s.get("ankunft_zeit") or ""),
                                _k("von"), _k("nach"))}))
 
-    # v3.69: Hotels ohne Uhrzeit – Check-out immer als ERSTES Ereignis des Tages, Check-in immer als LETZTES.
     for h in _hotels_zusammenfuehren(hotel_kandidaten):
         if h["ci"]:
-            ereignisse.append((h["ci"], "", {
-                "icon": "🏨", "typ": "hotel", "titel": f"Check-in: {h['name']}", "zeit": "",
+            ereignisse.append((h["ci"], h["ci_z"], {
+                "icon": "🏨", "typ": "hotel", "titel": f"Check-in: {h['name']}", "zeit": ("ab " if h["ci_ang"] else "") + h["ci_z"],
                 "sub": h["adresse"], "extra": f"Buchungsnr.: {h['code']}" if h["code"] else "", "ist_buchungscode": True,
-                "_rang": 2}))
+                "_hotel": ("ci", h["ci_ang"], h["koord"])}))
         if h["co"]:
-            ereignisse.append((h["co"], "", {
-                "icon": "🏨", "typ": "hotel", "titel": f"Check-out: {h['name']}", "zeit": "",
+            ereignisse.append((h["co"], h["co_z"], {
+                "icon": "🏨", "typ": "hotel", "titel": f"Check-out: {h['name']}", "zeit": ("bis " if h["co_ang"] else "") + h["co_z"],
                 "sub": h["adresse"], "extra": "", "ist_buchungscode": False,
-                "_rang": 0}))
+                "_hotel": ("co", h["co_ang"], h["koord"])}))
 
     TERMIN_ICON = {"termin": "🤝", "kundenbesuch": "🤝", "fahrt": "🚕",
                    "mietwagen": "🚗", "hotel": "🏨", "montage": "🔧", "sonstiges": "📌"}
@@ -4502,13 +4491,15 @@ def reiseplan_daten_laden(reise_code: str):
                 ev["zeit"] = anzeige
         neu_liste.append((d, sz, ev))
     ereignisse = neu_liste
-    # Sortierung: Rang (Check-out 0 – übrige 1 – Check-in 2), danach Uhrzeit
+    for _d, _sz, ev in ereignisse:
+        ev.pop("_hotel", None); ev.pop("_fahrt", None)
+
+    # Sortierung nach der Sortierzeit (nicht nach dem Anzeigetext, der bei Hotels "ab 16:00" lautet)
     tage = {}
     for d, sz, ev in ereignisse:
-        tage.setdefault(d, []).append((ev.pop("_rang", 1), str(sz or ""), ev))
-        ev.pop("_hotel", None); ev.pop("_fahrt", None)
+        tage.setdefault(d, []).append((str(sz or ""), ev))
     for d in tage:
-        tage[d] = [ev for _r, _sz, ev in sorted(tage[d], key=lambda x: (x[0], x[1]))]
+        tage[d] = [ev for _sz, ev in sorted(tage[d], key=lambda x: x[0])]
     return {"titel": titel, "abreise": abreise, "rueckkehr": rueckkehr, "tage": tage}
 
 
@@ -4641,27 +4632,6 @@ def _pikto_zeichnen(c, name: str, x: float, y: float, groesse: float, farbe) -> 
     c.restoreState()
 
 
-def _pdf_schrift() -> tuple:
-    """v3.69: Schrift mit allen europäischen Sonderzeichen (ł, ś, ż, č, ő …) für das Reiseplan-PDF.
-    Liberation Sans hat dieselben Maße wie Helvetica – das Layout bleibt unverändert.
-    Dateien: static/fonts/LiberationSans-Regular.ttf und -Bold.ttf. Fehlen sie, gilt wie bisher Helvetica."""
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.lib.fonts import addMapping
-    if "RpSans" in pdfmetrics.getRegisteredFontNames():
-        return "RpSans", "RpSans-Bold"
-    ordner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "fonts")
-    try:
-        pdfmetrics.registerFont(TTFont("RpSans", os.path.join(ordner, "LiberationSans-Regular.ttf")))
-        pdfmetrics.registerFont(TTFont("RpSans-Bold", os.path.join(ordner, "LiberationSans-Bold.ttf")))
-        addMapping("RpSans", 0, 0, "RpSans"); addMapping("RpSans", 1, 0, "RpSans-Bold")
-        addMapping("RpSans", 0, 1, "RpSans"); addMapping("RpSans", 1, 1, "RpSans-Bold")
-        return "RpSans", "RpSans-Bold"
-    except Exception as ex:
-        print(f"[Reiseplan] Unicode-Schrift nicht gefunden, nutze Helvetica: {ex}")
-        return "Helvetica", "Helvetica-Bold"
-
-
 def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool, qr_links=None) -> bytes:
     """
     Baut das Reiseplan-PDF (Layout „Zeitleiste“, v3.61). Zwei Varianten über ohne_buchungscode:
@@ -4682,7 +4652,6 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool, qr_li
     from reportlab.lib import colors
     from reportlab.lib.utils import ImageReader
 
-    SCHRIFT, SCHRIFT_FETT = _pdf_schrift()
     TXT = colors.HexColor("#1f2937"); GRAU = colors.HexColor("#6b7280")
     LINIE = colors.HexColor("#d1d5db"); BAND = colors.HexColor("#e3ebf7"); AKZ = colors.HexColor("#0f2d6e")
 
@@ -4703,15 +4672,15 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool, qr_li
     wochentage = ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag","Samstag","Sonntag"]
 
     def stil(name, **kw):
-        basis = dict(fontName=SCHRIFT, fontSize=9, leading=11.5, textColor=TXT)
+        basis = dict(fontName="Helvetica", fontSize=9, leading=11.5, textColor=TXT)
         basis.update(kw)
         return ParagraphStyle(name, **basis)
 
-    s_titel = stil("RpTitel", fontName=SCHRIFT_FETT, fontSize=17, leading=20, textColor=AKZ)
+    s_titel = stil("RpTitel", fontName="Helvetica-Bold", fontSize=17, leading=20, textColor=AKZ)
     s_kopf = stil("RpKopf", fontSize=9.5, textColor=GRAU)
-    s_tag = stil("RpTag", fontName=SCHRIFT_FETT, fontSize=10, leading=12, textColor=AKZ)
-    s_zeit = stil("RpZeit", fontName=SCHRIFT_FETT, fontSize=8.8, alignment=2)
-    s_ev = stil("RpEv", fontName=SCHRIFT_FETT, fontSize=9.2)
+    s_tag = stil("RpTag", fontName="Helvetica-Bold", fontSize=10, leading=12, textColor=AKZ)
+    s_zeit = stil("RpZeit", fontName="Helvetica-Bold", fontSize=8.8, alignment=2)
+    s_ev = stil("RpEv", fontName="Helvetica-Bold", fontSize=9.2)
     s_sub = stil("RpSub", fontSize=8, leading=10, textColor=GRAU)
 
     class Zeile(Flowable):
@@ -4756,7 +4725,7 @@ def _reiseplan_pdf_bauen(rcode: str, daten: dict, ohne_buchungscode: bool, qr_li
 
     def fuss(canvas, doc):
         canvas.saveState()
-        canvas.setFont(SCHRIFT, 7.5); canvas.setFillColor(GRAU)
+        canvas.setFont("Helvetica", 7.5); canvas.setFillColor(GRAU)
         canvas.drawString(15 * mm, 9 * mm, f"Reiseplan {rcode} · Stand {stand}")
         canvas.drawRightString(195 * mm, 9 * mm, f"Seite {doc.page}")
         canvas.restoreState()
@@ -9525,8 +9494,10 @@ def reise_detail(code: str, request: Request):
                     h_koord = (float(get(b,"hotel_lat",22)), float(get(b,"hotel_lon",23)))
                 except (TypeError, ValueError):
                     h_koord = None
-                # v3.69: ohne Uhrzeit – Check-in immer zuletzt, Check-out immer zuerst am Tag
-                ci_z, co_z = HOTEL_CI_MARKE, HOTEL_CO_MARKE
+                _sz, _anz = _hotelzeit_abgleichen("ci", ci_d, ci_z, ci_ang, h_koord, fahrten_tag)
+                ci_z = _anz or (("ab " if ci_ang else "") + ci_z)
+                _sz, _anz = _hotelzeit_abgleichen("co", co_d, co_z, co_ang, h_koord, fahrten_tag)
+                co_z = _anz or (("bis " if co_ang else "") + co_z)
                 add_event(ci_d, ci_z, f"{icon} Hotel einchecken · {anbieter}",
                           f"{fmt_date(ci_d)}" if ci_d else "", bid, bet_s, bg, fg)
                 if bet_s: kosten_vergeben = True
@@ -9573,8 +9544,6 @@ def reise_detail(code: str, request: Request):
                 eintraege.append((von or "99:99", "termin", tid, f"{icon} {titel_t}", sub_t, zeit_txt, None, None))
 
             def _sortzeit(z):
-                if z == HOTEL_CO_MARKE: return ""            # v3.69: Hotel-Check-out zuerst
-                if z == HOTEL_CI_MARKE: return "99:99~"      # v3.69: Hotel-Check-in zuletzt
                 m = re.search(r"(\d{1,2}):(\d{2})", str(z or ""))
                 if not m: return "99:99"
                 minuten = int(m.group(1)) * 60 + int(m.group(2))
@@ -9587,7 +9556,7 @@ def reise_detail(code: str, request: Request):
 
             rows = ""
             for zeit, art, eid, titel_txt, sub_txt, rechts, bg, fg in eintraege:
-                zeit_disp = "" if zeit in ("99:99", HOTEL_CI_MARKE, HOTEL_CO_MARKE) else zeit
+                zeit_disp = "" if zeit == "99:99" else zeit
                 if art == "beleg":
                     rechts_html = (f'<span style="background:{bg};color:{fg};padding:2px 8px;'
                                     f'border-radius:12px;font-size:11px;font-weight:500">{rechts}</span>'
@@ -15307,8 +15276,54 @@ def alert_einstellungen_form(request: Request, testergebnis: str = ""):
           <button type="submit" class="btn btn-secondary" style="width:100%">🧪 Jetzt testweise abrufen</button>
         </form>
       </div>
+    </div>
+    <div class="card" style="max-width:560px;margin-top:16px">
+      <div class="card-body">
+        <p style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          <b>Bahn-Schnittstelle OpenBoards testen</b> (Nachfolger der Timetables-API, die DB voraussichtlich Mitte 2027
+          abschaltet). Ruft die Schnittstelle einmal mit Ihrem Zugang ab und zeigt die rohe Antwort.</p>
+        <form method="post" action="/einstellungen/alerts/openboards-test">
+          <label style="font-size:12px">Bahnhof (EVA-Nummer oder Name)</label>
+          <input type="text" name="bahnhof" value="8000105" style="width:100%;margin-bottom:8px">
+          <select name="art" style="width:100%;margin-bottom:8px">
+            <option value="arrivals">Ankünfte</option><option value="departures">Abfahrten</option>
+          </select>
+          <button type="submit" class="btn btn-secondary" style="width:100%">🚆 OpenBoards testen</button>
+        </form>
+      </div>
     </div>"""
     return HTMLResponse(shell("Alert-Einstellungen", content))
+
+
+@app.post("/einstellungen/alerts/openboards-test", response_class=HTMLResponse)
+def alert_openboards_test(request: Request, bahnhof: str = Form("8000105"), art: str = Form("arrivals")):
+    if not ist_organisator(request):
+        return HTMLResponse(shell("Kein Zugriff",
+            '<div class="alert alert-err">Nur Organisatoren dürfen diese Einstellungen ändern.</div>'), status_code=403)
+    import html as _html
+    r = openboards_test(bahnhof, art)
+    if r.get("fehler"):
+        kern = f'<div class="alert alert-err">{_html.escape(str(r["fehler"]))}</div>'
+    else:
+        antwort = r.get("antwort") or ""
+        try:   # lesbar einrücken, wenn es JSON ist
+            antwort = json.dumps(json.loads(antwort), ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+        ok = 200 <= int(r.get("status", 0)) < 300
+        kern = f"""<div class="alert {'alert-ok' if ok else 'alert-err'}">
+            <b>HTTP {r.get('status')}</b> · {'Ankünfte' if r.get('art') == 'arrivals' else 'Abfahrten'} · Bahnhof (EVA) {_html.escape(str(r.get('eva')))}
+            {'· Antwort gekürzt' if r.get('gekuerzt') else ''}</div>
+          <p style="font-size:12px;color:var(--muted)">Bitte die komplette Antwort unten markieren, kopieren und an Claude schicken.</p>
+          <textarea readonly style="width:100%;height:420px;font-family:monospace;font-size:11px">{_html.escape(antwort)}</textarea>
+          <details style="margin-top:8px"><summary style="font-size:12px">Gesendete Anfrage</summary>
+            <pre style="font-size:11px;white-space:pre-wrap">{_html.escape(json.dumps(r.get('anfrage'), ensure_ascii=False, indent=1))}</pre></details>"""
+    content = f"""<div class="card" style="max-width:900px">
+      <div class="card-header"><span class="card-title">🚆 OpenBoards-Test</span></div>
+      <div class="card-body">{kern}
+        <p style="margin-top:12px"><a href="/einstellungen/alerts" class="btn btn-secondary">← zurück zu den Alert-Einstellungen</a></p>
+      </div></div>"""
+    return HTMLResponse(shell("OpenBoards-Test", content))
 
 
 @app.post("/einstellungen/alerts/testlauf")

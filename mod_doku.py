@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.68"
+DOKU_GEPRUEFT_FUER = "3.69"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -93,9 +93,9 @@ UMGEBUNG = [
     ("AERODATABOX_HOST", "Flug-/Bahn-Alerts", "nein", "aerodatabox.p.rapidapi.com",
      "Server der Flugdaten-Schnittstelle. Normalerweise nicht ändern.", False),
     ("DB_TIMETABLES_CLIENT_ID", "Flug-/Bahn-Alerts", "Funktion", "",
-     "Client-ID der Deutschen Bahn (Timetables-API). Ohne sie keine Bahn-Verspätungsalarme.", True),
+     "Client-ID der Deutschen Bahn (Marketplace-Anwendung; gilt für Timetables und OpenBoards). Ohne sie keine Bahn-Verspätungsalarme.", True),
     ("DB_TIMETABLES_API_KEY", "Flug-/Bahn-Alerts", "Funktion", "",
-     "API-Schlüssel der Deutschen Bahn (Timetables-API).", True),
+     "API-Schlüssel der Deutschen Bahn (Marketplace-Anwendung; gilt für Timetables und OpenBoards).", True),
     ("GOOGLE_PLACES_API_KEY", "Termine", "nein", "",
      "Schlüssel für Google-Adressvorschläge im Termin-Formular. Ohne ihn wird die Adresse von Hand eingetippt.", True),
 ]
@@ -782,6 +782,9 @@ KAPITEL = [
               "Unter **Einstellungen › Flug-/Bahn-Alerts** zeigt die Seite, wie viele Abfragen heute, in 7 Tagen und im Monat gezählt wurden (Zählung ab Version 3.67). Verbindlich ist die Anzeige bei RapidAPI."),
         ("p", "Seite **Einstellungen › Flug-/Bahn-Alerts:** zeigt den Prüfplan und hat den Knopf **„🧪 Jetzt testweise abrufen“**. "
               "Er führt einen Prüflauf sofort aus und zeigt eine Diagnose (welche Belege im Zeitfenster liegen, was mit jedem Segment passiert ist)."),
+        ("p", "**Bahn-Schnittstelle:** Die Deutsche Bahn löst die bisherige Timetables-API durch **OpenBoards** ab (Parallelbetrieb ab November 2026, Abschaltung der alten voraussichtlich Mitte 2027). "
+              "Das OpenBoards-Abo muss zur selben Marketplace-Anwendung gehören wie das Timetables-Abo, dann bleiben Client-ID und API-Schlüssel gleich. "
+              "Auf der Seite **Alert-Einstellungen** ruft **„🚆 OpenBoards testen“** die neue Schnittstelle einmal ab und zeigt die rohe Antwort (Bahnhof per EVA-Nummer, z. B. 8000105 für Frankfurt Hbf)."),
         ("hinweis", "Voraussetzung: Der externe Cron-Dienst ruft `/cron/flug-alerts` jede Minute auf, und die API-Schlüssel (AERODATABOX_API_KEY, "
                     "DB_TIMETABLES_CLIENT_ID, DB_TIMETABLES_API_KEY) sind gesetzt. Siehe Teil C."),
     ]},
