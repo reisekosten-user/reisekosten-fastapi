@@ -22,7 +22,7 @@ import re
 from html import escape as _esc
 
 # Für diese App-Version wurde das Handbuch zuletzt inhaltlich geprüft.
-DOKU_GEPRUEFT_FUER = "3.69"
+DOKU_GEPRUEFT_FUER = "3.71"
 
 TEILE = {
     "A": "Teil A – Anleitung für Reisende",
@@ -161,7 +161,7 @@ SEITEN = [
     ("/reise/{code}/habel/vorschau", "Vorschau der Habel-Mail (sendet nichts)", "b-habel"),
     ("/reise/{code}/habel/datei/{datei}", "Einzelne Datei der Habel-Mail öffnen", "b-habel"),
     ("/reise/{code}/kalender", "Outlook-Einladungen der Reise: Status und „Jetzt senden“", "b-kalender"),
-    ("/einstellungen/kalender-antworten", "Alte Kalender-Antworten („Mail: Accepted: …“) als Belege auflisten und löschen", "b-eingang"),
+    ("/einstellungen/kalender-antworten", "Alte Kalender-Antworten und Abwesenheitsnotizen („Mail: Accepted: …“, „Mail: Automatische Antwort: …“) als Belege auflisten und löschen", "b-eingang"),
     ("/reise/{code}/absage", "Reise absagen oder verschieben (Formular)", "b-absage"),
     ("/reise/{code}/abwicklung", "Checkliste der abgesagten/verschobenen Reise: Erstattungen, Umbuchungen, Gutscheine", "b-absage"),
     ("/reise/{code}/vorschuss", "Reisevorschuss und Bargeld-Konto der Reise", "b-vorschuss"),
@@ -561,7 +561,8 @@ KAPITEL = [
             "Nur kleine eingebettete **Bilder** (Logos in der Signatur) und Kalender-/Kontaktdateien werden ignoriert. Ein PDF in einer als Anhang weitergeleiteten Mail wird ebenfalls gefunden.",
             "Verarbeitete Mails werden im Postfach **gelöscht**. Doppelte Weiterleitungen werden über die Message-ID erkannt.",
             "**Kalender-Antworten sind kein Beleg:** Nimmt ein Reisender die Kalendereinladung der App an oder lehnt sie ab, geht die Antwort („Accepted: …“) an dieses Postfach. "
-            "Solche Mails und Abwesenheitsnotizen werden **übersprungen**: kein Beleg, die Mail bleibt als gelesen im Postfach. Das Ergebnis nennt Anzahl und Betreff. Ältere Antworten, die schon als Beleg abgelegt wurden, räumt Einstellungen › „Kalender-Antworten aufräumen“ auf.",
+            "Solche Mails werden **übersprungen**: kein Beleg, die Mail bleibt als gelesen im Postfach. Das Ergebnis nennt Anzahl und Betreff. Dasselbe gilt für **Abwesenheitsnotizen** (Betreff „Automatische Antwort: …“, „Out of Office: …“, „Abwesenheitsnotiz …“ oder Kopfzeile „Auto-Submitted: auto-replied“) und **Zustellberichte** (Rückläufer „Unzustellbar“, Lesebestätigungen). "
+            "Damit solche Antworten gar nicht erst entstehen, tragen alle von der App versendeten Mails den Vermerk „automatisch erzeugt“. Ältere Antworten, die schon als Beleg abgelegt wurden, räumt Einstellungen › „Kalender-Antworten aufräumen“ auf.",
             "Das Ergebnis zeigt: Mails verarbeitet, Belege erstellt, Duplikate, Fehler (mit Details). Wurde der Mailtext zum Beleg, obwohl die Mail weitere Teile hat oder im Text einen Anhang nennt, "
             "steht darunter **„⚠ Mails ohne erkannten Anhang“** mit der Liste der Mail-Teile (Typ, Name, Größe). Dann die Mail erneut weiterleiten und die Liste mitschicken.",
         ]),
@@ -767,7 +768,7 @@ KAPITEL = [
               "Ist die Datei ein reiner **Ausdruck ohne Textebene** („Microsoft: Print To PDF“), werden die Seiten dafür als Bild gelesen – dafür muss die Bibliothek `pypdfium2` installiert sein (steht in `requirements.txt`)."),
     ]},
     {"id": "b-alerts", "teil": "B", "titel": "Verspätungs-Alarme (Flug und Bahn)", "bloecke": [
-        ("p", "Die App überwacht Flüge (AeroDataBox) und Züge (Deutsche Bahn, Timetables) nach einem **festen Prüfplan** – nicht editierbar:"),
+        ("p", "Die App überwacht Flüge (AeroDataBox) und Züge (Deutsche Bahn, OpenBoards) nach einem **festen Prüfplan** – nicht editierbar:"),
         ("tab", ["Zeitpunkt", "Prüfung"], [
             ["Vor der geplanten Abreise", "4 h · 3 h · 2 h · 1 h · 30 Min · 15 Min"],
             ["Bei erkannter Verspätung (ab 15 Min) zusätzlich", "15 Min vor der neuen erwarteten Abreise und alle 30 Min zwischen geplanter und neuer Abreise"],
@@ -783,8 +784,12 @@ KAPITEL = [
         ("p", "Seite **Einstellungen › Flug-/Bahn-Alerts:** zeigt den Prüfplan und hat den Knopf **„🧪 Jetzt testweise abrufen“**. "
               "Er führt einen Prüflauf sofort aus und zeigt eine Diagnose (welche Belege im Zeitfenster liegen, was mit jedem Segment passiert ist)."),
         ("p", "**Bahn-Schnittstelle:** Die Deutsche Bahn löst die bisherige Timetables-API durch **OpenBoards** ab (Parallelbetrieb ab November 2026, Abschaltung der alten voraussichtlich Mitte 2027). "
-              "Das OpenBoards-Abo muss zur selben Marketplace-Anwendung gehören wie das Timetables-Abo, dann bleiben Client-ID und API-Schlüssel gleich. "
-              "Auf der Seite **Alert-Einstellungen** ruft **„🚆 OpenBoards testen“** die neue Schnittstelle einmal ab und zeigt die rohe Antwort (Bahnhof per EVA-Nummer, z. B. 8000105 für Frankfurt Hbf)."),
+              "Seit Version 3.71 fragt die App Züge über **OpenBoards** ab: Sie liest die **Ankunftstafel des Zielbahnhofs** (für Reisende zählt die Ankunft) und findet den Zug über seine Nummer. "
+              "**Verspätung** = erwartete minus geplante Ankunft; ein **Ausfall** und ein **Gleiswechsel** am Zielbahnhof werden ebenfalls erkannt. "
+              "Das Zeitfenster der Schnittstelle beginnt 10 Minuten vor der **geplanten Ankunft laut Ticket**. Fehlt die Ankunftszeit im Beleg, werden die 6 Stunden nach der Abreise abschnittsweise abgesucht (mehr Abfragen). "
+              "Findet OpenBoards den Zug nicht oder antwortet nicht, fragt die App die **alte Timetables-API als Reserve**, solange die DB sie noch betreibt. Der Testlauf nennt je Zug, welche Schnittstelle geantwortet hat."),
+        ("p", "Das OpenBoards-Abo muss zur selben Marketplace-Anwendung gehören wie das Timetables-Abo, dann bleiben Client-ID und API-Schlüssel gleich. "
+              "Auf der Seite **Alert-Einstellungen** ruft **„🚆 OpenBoards testen“** die Schnittstelle einmal ab und zeigt die rohe Antwort (Bahnhof per EVA-Nummer, z. B. 8000105 für Frankfurt Hbf)."),
         ("hinweis", "Voraussetzung: Der externe Cron-Dienst ruft `/cron/flug-alerts` jede Minute auf, und die API-Schlüssel (AERODATABOX_API_KEY, "
                     "DB_TIMETABLES_CLIENT_ID, DB_TIMETABLES_API_KEY) sind gesetzt. Siehe Teil C."),
     ]},
@@ -1093,7 +1098,7 @@ KAPITEL = [
     {"id": "c-fehler", "teil": "C", "titel": "Fehlersuche", "bloecke": [
         ("tab", ["Beobachtung", "Prüfen / Lösung"], [
             ["Beleg landet im Posteingang", "Reisecode fehlt oder ist falsch (Form JJ-NNN, Reise muss existieren). Beleg dort einer Reise zuordnen."],
-            ["Beleg „Mail: Accepted: …“ oder „Declined: …“", "Antwort auf eine Kalendereinladung, die vor Version 3.52 als Beleg abgelegt wurde. Alle auf einmal löschen: Einstellungen › „Kalender-Antworten aufräumen“. Neue Antworten werden übersprungen."],
+            ["Beleg „Mail: Accepted: …“, „Declined: …“ oder „Automatische Antwort: …“", "Antwort auf eine Kalendereinladung oder Abwesenheitsnotiz, die vor Version 3.52 bzw. 3.70 als Beleg abgelegt wurde. Alle auf einmal löschen: Einstellungen › „Kalender-Antworten aufräumen“. Neue Antworten werden übersprungen."],
             ["„IMAP nicht konfiguriert“", "IMAP_HOST, IMAP_USER, IMAP_PASS setzen."],
             ["„Zertifikat des Mailservers ist nicht gültig“ (Mail-Abruf oder Versand)", "Seit Version 3.54 prüft die App das Zertifikat. Servername in IMAP_HOST / SMTP_HOST muss genau dem Namen im Zertifikat des Anbieters entsprechen (Mail-Diagnose zeigt die Zeile „Zertifikat Mail-Eingang“). Nur zur Überbrückung in Render MAIL_TLS_PRUEFEN=0 eintragen und den Anbieter fragen."],
             ["„IMAP-Verbindung fehlgeschlagen“", "Zugangsdaten und Server des Postfachs prüfen."],

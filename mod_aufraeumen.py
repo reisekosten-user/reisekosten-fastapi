@@ -1,5 +1,5 @@
 """
-mod_aufraeumen.py – Alte Kalender-Antworten als Belege aufräumen (v3.57)
+mod_aufraeumen.py – Alte Kalender-Antworten, Abwesenheitsnotizen und Zustellberichte als Belege aufräumen (v3.57, erweitert v3.70)
 
 Vor Version 3.52 wurden Antworten auf Outlook-Einladungen („Accepted: …“, „Declined: …“) als Beleg abgelegt, Dateiname
 „Mail: Accepted: …“. Diese Seite listet sie auf und löscht die ausgewählten. Gelöscht wird nur, was sicher kein echter Beleg ist:
@@ -9,7 +9,7 @@ from __future__ import annotations
 from html import escape as e
 
 from mod_db import get_db, ph
-from mod_mail import _KAL_BETREFF
+from mod_mail import _KAL_BETREFF, _AUTO_BETREFF, _ZUSTELL_BETREFF
 
 PRUEF_ARTEN = ("Rechnung", "Quittung", "Bewirtungsbeleg", "Vorschussquittung", "Rueckgabequittung", "Bargeldbeschaffung")
 
@@ -19,11 +19,12 @@ def _g(row, key, idx):
 
 
 def ist_kalender_antwort(dateiname) -> bool:
-    """True bei „Mail: Accepted: …“, „Mail: Declined: …“ und den Entsprechungen anderer Sprachen."""
+    """True bei „Mail: Accepted: …“, „Mail: Declined: …“ (und anderen Sprachen), Abwesenheitsnotizen und Zustellberichten."""
     name = str(dateiname or "")
     if not name.lower().startswith("mail:"):
         return False
-    return bool(_KAL_BETREFF.match(name[5:]))
+    rest = name[5:]
+    return bool(_KAL_BETREFF.match(rest) or _AUTO_BETREFF.match(rest) or _ZUSTELL_BETREFF.match(rest))
 
 
 _SPALTEN = ("id", "dateiname", "reise_code", "belegdatum", "erstellt", "betrag_brutto", "geprueft", "dms_versendet_am", "belegart")
@@ -127,15 +128,15 @@ def seite_html(sperre=None, ergebnis: dict | None = None) -> str:
         zeilen += ('<tr><td style="width:36px">%s</td><td><a href="/beleg/%s">#%s</a></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
                    % (box, r["id"], r["id"], e(name[:90]), e(r["reise_code"] or "–"), e(str(r["erstellt"] or "")[:10]), hinweis))
     if not zeilen:
-        zeilen = '<tr><td colspan="6" class="empty-state">Keine alten Kalender-Antworten vorhanden 🎉</td></tr>'
+        zeilen = '<tr><td colspan="6" class="empty-state">Keine Kalender-Antworten oder Abwesenheitsnotizen vorhanden 🎉</td></tr>'
     knopf = ""
     if loeschbar:
         knopf = ('<button type="submit" class="btn btn-primary" onclick="return confirm(\'Die markierten Belege unwiderruflich löschen?\')">'
                  '🗑 Markierte löschen (%d)</button>' % len(loeschbar))
     return (
         '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'
-        '<div><h1 class="page-title" style="margin:0">🧹 Alte Kalender-Antworten aufräumen</h1>'
-        '<div style="color:var(--muted);font-size:13px">Antworten auf Outlook-Einladungen („Accepted: …“), die vor Version 3.52 als Beleg abgelegt wurden.</div></div>'
+        '<div><h1 class="page-title" style="margin:0">🧹 Alte Kalender-Antworten und Abwesenheitsnotizen aufräumen</h1>'
+        '<div style="color:var(--muted);font-size:13px">Antworten auf Einladungen („Accepted: …“), Abwesenheitsnotizen („Automatische Antwort: …“) und Zustellberichte, die als Beleg abgelegt wurden.</div></div>'
         '<a href="/einstellungen" class="btn btn-secondary">← Einstellungen</a></div>'
         + meldung +
         '<form method="post" action="/einstellungen/kalender-antworten">'

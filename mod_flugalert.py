@@ -233,9 +233,10 @@ def eva_fuer_bahnhof(name: str) -> str | None:
     return None
 
 
-def bahnstatus_abrufen(transport_nummer: str, von_ort: str, nach_ort: str,
-                       abreise_datum: date, abreise_zeit: str) -> dict:
+def _bahnstatus_timetables(transport_nummer: str, von_ort: str, nach_ort: str,
+                           abreise_datum: date, abreise_zeit: str) -> dict:
     """
+    RESERVE (bis zur Abschaltung durch die DB, voraussichtlich Mitte 2027):
     Fragt die OFFIZIELLE DB-Timetables-API (IRIS) nach dem Zugstatus ab –
     ersetzt die inoffizielle db.transport.rest-Schnittstelle, die durch die
     dauerhafte Abschaltung der alten DB-HAFAS-API zu häufigen 503-Fehlern
@@ -332,6 +333,149 @@ def bahnstatus_abrufen(transport_nummer: str, von_ort: str, nach_ort: str,
         }
     except Exception as e:
         return {"fehler": str(e)}
+
+
+# ── OpenBoards (Nachfolger der Timetables-API) ─────────────────────────────────
+# Antwortformat laut echter Antwort der API (Test vom 23.11.2026): Liste "arrivals"; je Eintrag "time" (erwartet),
+# "timeSchedule" (geplant), "platform"/"platformSchedule" (Gleis), "cancelled", "journeyInfo", "transport"
+# (category, journeyNumber, journeyDescription, line.name). Fenster: 30 Minuten ab timeWindow.timeStart.
+OPENBOARDS_MAX_EINTRAEGE = 25        # je Produktklasse (Standard der API); große Knoten haben viele ICE in 30 Minuten
+OPENBOARDS_VORLAUF_MIN = 10          # Fenster beginnt so viele Minuten VOR der geplanten Ankunft
+OPENBOARDS_SUCHFENSTER = 12          # ohne bekannte Ankunftszeit: so viele 30-Minuten-Fenster absuchen (= 6 Stunden)
+
+
+def _zug_norm(text) -> str:
+    return re.sub(r"[\s\-]+", "", str(text or "")).upper()
+
+
+def _iso_zeit(text):
+    try:
+        return datetime.fromisoformat(str(text))
+    except Exception:
+        return None
+
+
+def _openboards_zugnamen(eintrag: dict) -> set:
+    """Alle Schreibweisen, unter denen ein Zug in einem Eintrag geführt wird (z. B. ICE691, ICE 691, RE20, 691)."""
+    namen = set()
+    info = eintrag.get("journeyInfo") or {}
+    for t in (eintrag.get("transport") or {}, info.get("transportAtStart") or {}):
+        nummer = t.get("journeyNumber") if t.get("journeyNumber") is not None else t.get("operationalJourneyNumber")
+        if t.get("category") and nummer is not None:
+            namen.add(_zug_norm(f"{t['category']}{nummer}"))
+        if t.get("journeyDescription"):
+            namen.add(_zug_norm(t["journeyDescription"]))
+        if (t.get("line") or {}).get("name"):
+            namen.add(_zug_norm(t["line"]["name"]))
+        if nummer is not None:
+            namen.add("#" + str(nummer))          # reine Zugnummer, nur für Suche nach „691“ ohne Gattung
+    return namen
+
+
+def _openboards_ergebnis(eintrag: dict, eva: str) -> dict:
+    geplant = _iso_zeit(eintrag.get("timeSchedule"))
+    erwartet = _iso_zeit(eintrag.get("time"))
+    verspaetung = 0
+    if geplant and erwartet:
+        verspaetung = int(round((erwartet - geplant).total_seconds() / 60))
+    info = eintrag.get("journeyInfo") or {}
+    ausgefallen = bool(eintrag.get("cancelled")) or bool(info.get("journeyCancelled"))
+    if ausgefallen:
+        status, verspaetung = "cancelled", 0
+    else:
+        status = "delayed" if verspaetung > 0 else "on-time"
+    gleis = (eintrag.get("platform") or {}).get("name") or (eintrag.get("platformSchedule") or {}).get("name")
+    return {
+        "status": status,
+        "verspaetung_minuten": verspaetung,
+        "gate": None,
+        "terminal": gleis,
+        "quelle": "OpenBoards",
+        "rohdaten": json.dumps({"quelle": "OpenBoards", "eva_ziel": eva, "journeyId": eintrag.get("journeyId"),
+                                 "geplante_zeit": eintrag.get("timeSchedule"), "erwartete_zeit": eintrag.get("time")},
+                                ensure_ascii=False)[:4000],
+    }
+
+
+def _bahnstatus_openboards(transport_nummer: str, von_ort: str, nach_ort: str,
+                           abreise_datum: date, abreise_zeit: str, ankunft_zeit: datetime | None) -> dict:
+    """
+    Zugstatus über die OpenBoards-API: Ankunftstafel des ZIELBAHNHOFS (für Reisende zählt die Ankunft), Zug über seine
+    Nummer finden, Verspätung = erwartete minus geplante Ankunft. Das Fenster der API ist 30 Minuten lang und enthält
+    jeden Zug, dessen GEPLANTE Ankunft darin liegt – deshalb beginnt es kurz vor der geplanten Ankunft laut Ticket.
+    Ist die Ankunftszeit nicht bekannt, werden die 6 Stunden nach der Abreise abschnittsweise abgesucht.
+    Rückgabe wie bahnstatus_abrufen; bei Problemen {"fehler": …} (der Aufrufer fällt dann auf Timetables zurück).
+    """
+    try:
+        nummer_norm = _zug_norm(transport_nummer)
+        if not nummer_norm:
+            return {"fehler": "keine Zugnummer"}
+        ziel = (nach_ort or "").strip() or (von_ort or "").strip()
+        eva = eva_fuer_bahnhof(ziel)
+        if not eva:
+            return {"fehler": f"Bahnhof '{ziel}' nicht gefunden (EVA-Nummer)"}
+
+        if ankunft_zeit is not None:
+            fenster = [ankunft_zeit - timedelta(minutes=OPENBOARDS_VORLAUF_MIN),
+                       ankunft_zeit + timedelta(minutes=30 - OPENBOARDS_VORLAUF_MIN)]   # 2. Fenster nur, falls nötig
+            soll = ankunft_zeit
+        else:
+            ab = datetime.combine(abreise_datum, datetime.strptime((abreise_zeit or "00:00")[:5], "%H:%M").time())
+            fenster = [ab + timedelta(minutes=30 * k - 5) for k in range(1, OPENBOARDS_SUCHFENSTER + 1)]
+            soll = None
+
+        headers = dict(_db_headers(), **{"Content-Type": "application/json"})
+        for start in fenster:
+            anfrage = {"stopPlaceOrStation": {"evaNumbers": [eva]},
+                       "timeWindow": {"timeStart": start.replace(tzinfo=BERLIN_TZ).isoformat()},
+                       "maxViaStops": 3, "maxEntriesPerTransportType": OPENBOARDS_MAX_EINTRAEGE, "languages": ["deu"]}
+            resp = httpx.post(f"{DB_OPENBOARDS_BASE}/arrivals", json=anfrage, headers=headers, timeout=20)
+            if resp.status_code in (401, 403):
+                return {"fehler": f"OpenBoards: Zugang abgelehnt (HTTP {resp.status_code}) – Abo der Marketplace-Anwendung prüfen"}
+            if resp.status_code != 200:
+                return {"fehler": f"OpenBoards: HTTP {resp.status_code} {(resp.text or '')[:120]}"}
+            daten = resp.json()
+            if not isinstance(daten, dict):
+                return {"fehler": "OpenBoards: unerwartete Antwort (kein Objekt)"}
+            treffer = []
+            for e in daten.get("arrivals") or []:       # fehlt die Liste, ist das Fenster leer
+                if not isinstance(e, dict):
+                    continue
+                namen = _openboards_zugnamen(e)
+                if nummer_norm in namen or (nummer_norm.isdigit() and "#" + nummer_norm in namen):
+                    treffer.append(e)
+            if treffer:
+                if soll is not None and len(treffer) > 1:      # z. B. mehrere Züge „S4“: den zur geplanten Ankunft passenden wählen
+                    def abstand(e):
+                        g = _iso_zeit(e.get("timeSchedule"))
+                        return abs((g.replace(tzinfo=None) - soll).total_seconds()) if g else 10 ** 9
+                    treffer.sort(key=abstand)
+                return _openboards_ergebnis(treffer[0], eva)
+        return {"fehler": f"Zug '{transport_nummer}' in der OpenBoards-Ankunftstafel von EVA {eva} nicht gefunden"}
+    except Exception as e:
+        return {"fehler": f"OpenBoards: {e}"}
+
+
+def bahnstatus_abrufen(transport_nummer: str, von_ort: str, nach_ort: str,
+                       abreise_datum: date, abreise_zeit: str, ankunft_zeit: datetime | None = None) -> dict:
+    """
+    Zugstatus der Deutschen Bahn. Zuerst die neue OpenBoards-API; kommt von dort kein brauchbares Ergebnis (Fehler,
+    Zug nicht gefunden), fragt die alte Timetables-API als Reserve – bis die DB sie abschaltet (voraussichtlich Mitte 2027).
+    ankunft_zeit: geplante Ankunft laut Ticket (Ortszeit, ohne Zeitzone); verkürzt die Suche auf ein Zeitfenster.
+    Ergebnis: {status, verspaetung_minuten, gate, terminal, quelle, rohdaten} oder {fehler}.
+    """
+    if not (DB_TIMETABLES_CLIENT_ID and DB_TIMETABLES_API_KEY):
+        return {"fehler": "DB_TIMETABLES_CLIENT_ID/DB_TIMETABLES_API_KEY nicht konfiguriert"}
+    neu = _bahnstatus_openboards(transport_nummer, von_ort, nach_ort, abreise_datum, abreise_zeit, ankunft_zeit)
+    if not neu.get("fehler"):
+        return neu
+    alt = _bahnstatus_timetables(transport_nummer, von_ort, nach_ort, abreise_datum, abreise_zeit)
+    if alt.get("fehler"):
+        alt["fehler"] = f"{neu['fehler']} · Reserve (Timetables): {alt['fehler']}"
+    else:
+        alt["quelle"] = "Timetables (Reserve)"
+        alt["openboards_fehler"] = neu["fehler"]
+    return alt
 
 
 # ── Segmente aus Belegen extrahieren ────────────────────────────────────────────
@@ -439,6 +583,16 @@ def ueberwachte_segmente_laden(debug: bool = False):
                     dt_an = dt_an_utc.astimezone(BERLIN_TZ).replace(tzinfo=None)
             if not dt_an or dt_an <= dt_ab:
                 dt_an = dt_ab + timedelta(hours=2)
+            # Bahn: geplante Ankunft so, wie sie auf dem Ticket steht (Ortszeit = Berliner Zeit bei der DB). Ohne Umrechnung über
+            # den UTC-Offset, der bei älteren Belegen fehlt und im Winter eine Stunde Abweichung brächte. None = nicht bekannt.
+            ankunft_lokal = None
+            try:
+                if d_an and s.get("ankunft_zeit"):
+                    kandidat = datetime.combine(d_an, datetime.strptime(str(s["ankunft_zeit"])[:5], "%H:%M").time())
+                    if kandidat > datetime.combine(d_ab, datetime.strptime(str(zeit_ab)[:5], "%H:%M").time()):
+                        ankunft_lokal = kandidat
+            except Exception:
+                ankunft_lokal = None
 
             beleg_diag["segmente_uebernommen"] += 1
             segmente.append({
@@ -449,7 +603,7 @@ def ueberwachte_segmente_laden(debug: bool = False):
                 "abreise_datum": d_ab, "abreise_zeit": zeit_ab,
                 "abreise_datum_utc": dt_ab_utc.astimezone(timezone.utc).date(),
                 "stunden_bis_abreise": stunden_bis,
-                "dt_ab": dt_ab, "dt_an": dt_an,
+                "dt_ab": dt_ab, "dt_an": dt_an, "ankunft_lokal": ankunft_lokal,
             })
         diag["belege_details"].append(beleg_diag)
 
@@ -754,9 +908,12 @@ def cron_flug_alerts(debug: bool = False) -> dict:
                 ergebnis = flugstatus_abrufen(seg["transport_nummer"], seg["abreise_datum_utc"])
             else:
                 ergebnis = bahnstatus_abrufen(seg["transport_nummer"], seg["von_ort"], seg["nach_ort"],
-                                              seg["abreise_datum"], seg["abreise_zeit"])
+                                              seg["abreise_datum"], seg["abreise_zeit"],
+                                              seg.get("ankunft_lokal"))
             api_aufrufe += 1
             api_aufruf_zaehlen(schritt["quelle"])
+            if ergebnis.get("quelle"):      # Diagnose: welche Schnittstelle hat geantwortet (OpenBoards oder Reserve)
+                schritt["quelle"] += f" – {ergebnis['quelle']}"
             abfrage_cache[abfrage_key] = ergebnis
             if ergebnis.get("fehler"):
                 _FEHLER_SPERRE[abfrage_key] = jetzt_lokal() + timedelta(minutes=FEHLER_SPERRE_MINUTEN)

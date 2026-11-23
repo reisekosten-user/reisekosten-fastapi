@@ -412,6 +412,9 @@ def sende_mail(empfaenger: str, betreff: str, text: str,
         msg["From"] = SMTP_USER
         msg["To"] = empfaenger
         msg["Subject"] = betreff
+        # Automatisch erzeugte Mail: Abwesenheits-Systeme sollen nicht darauf antworten (RFC 3834; Exchange/Outlook).
+        msg["Auto-Submitted"] = "auto-generated"
+        msg["X-Auto-Response-Suppress"] = "OOF, AutoReply"
 
         for daten, name in alle_anhaenge:
             part = MIMEApplication(daten, Name=name or "anhang.pdf")
@@ -583,6 +586,19 @@ _KAL_TEXT = re.compile(
     r"has\s+(?:accepted|declined|tentatively\s+accepted)\s+this\s+invitation|hat\s+die\s+Einladung\s+(?:angenommen|abgelehnt)"
     r"|hat\s+(?:zugesagt|abgesagt)|Sent\s+by\s+Google\s+Calendar|Gesendet\s+von\s+Google\s+Kalender", re.I)
 
+# Abwesenheitsnotizen (Betreff beginnt so; davor ggf. „AW:“/„RE:“). Eine Notiz bei Exchange/Outlook trägt oft NICHT den
+# Kopfzeilen-Vermerk „Auto-Submitted“, ist aber am Betreff sicher zu erkennen.
+_AUTO_BETREFF = re.compile(
+    r"^\s*(?:(?:AW|RE|WG|FW|FWD)\s*:\s*)*(?:Automatische\s+(?:Antwort|Rückmeldung)|Automatic\s+reply|Auto[\s\-]?reply|"
+    r"Autoresponder|Out\s+of\s+(?:the\s+)?office(?:\s+auto[\s\-]?reply)?|Abwesenheit(?:s(?:notiz|nachricht|meldung))?|"
+    r"Abwesend|Réponse\s+automatique|Respuesta\s+automática|Automatisch\s+antwoord|Risposta\s+automatica)"
+    r"\s*(?::|[-–—]|$)", re.I)
+# Zustellberichte: Rückläufer („Unzustellbar“) und Lesebestätigungen. Auch sie sind nie ein Beleg.
+_ZUSTELL_BETREFF = re.compile(
+    r"^\s*(?:(?:AW|RE|WG|FW|FWD)\s*:\s*)*(?:Undeliverable|Unzustellbar|Nicht\s+zustellbar|Delivery\s+Status\s+Notification|"
+    r"Mail\s+delivery\s+(?:failed|failure)|Returned\s+mail|Zustellung\s+fehlgeschlagen|Zustellbericht|Delivery\s+has\s+failed|"
+    r"Failure\s+notice)\b", re.I)
+
 
 def automatische_antwort(msg, betreff: str = "", body: str = "") -> str:
     """
@@ -611,8 +627,27 @@ def automatische_antwort(msg, betreff: str = "", body: str = "") -> str:
                 return "Kalender-Antwort" + (f" ({status})" if status else "")
     except Exception:
         pass
+    # Abwesenheitsnotiz: Kopfzeilen (RFC 3834 und gängige Zusätze). Bewusst NICHT geprüft werden „Auto-Submitted: auto-generated“,
+    # „Precedence: bulk“ und „X-Auto-Response-Suppress“: Die tragen auch ganz normale Rechnungs- und Buchungsmails.
     if str(msg.get("Auto-Submitted") or "").strip().lower().startswith("auto-replied"):
-        return "automatische Antwort (z. B. Abwesenheit)"
+        return "Abwesenheitsnotiz (automatische Antwort)"
+    if str(msg.get("Precedence") or "").strip().lower() in ("auto_reply", "auto-reply", "autoreply"):
+        return "Abwesenheitsnotiz (automatische Antwort)"
+    for kopf in ("X-Autoreply", "X-Autorespond", "X-Auto-Reply"):
+        if str(msg.get(kopf) or "").strip():
+            return "Abwesenheitsnotiz (automatische Antwort)"
+    if _AUTO_BETREFF.match(betreff or ""):
+        return "Abwesenheitsnotiz (automatische Antwort)"
+    # Zustellbericht: Rückläufer oder Lesebestätigung
+    if msg.get_content_type() == "multipart/report":
+        return "Zustellbericht (Rückläufer oder Lesebestätigung)"
+    try:
+        from email.utils import parseaddr
+        lokal = parseaddr(str(msg.get("From") or ""))[1].split("@")[0].strip().lower()
+    except Exception:
+        lokal = ""
+    if lokal in ("mailer-daemon", "postmaster") or _ZUSTELL_BETREFF.match(betreff or ""):
+        return "Zustellbericht (Rückläufer oder Lesebestätigung)"
     if _KAL_BETREFF.match(betreff or "") and _KAL_TEXT.search(body or ""):
         return "Kalender-Antwort"
     return ""

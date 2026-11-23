@@ -130,6 +130,13 @@ mod_doku.SESSION_QUELLE = SESSION_SECRET_HERKUNFT      # für die Prüfung der E
 # "zeit" = Datum und Uhrzeit der Auslieferung (Ortszeit), "aenderungen" = 2-3 kurze Zeilen
 # zur Vorgängerversion. APP_VERSION wird automatisch aus dem obersten Eintrag gelesen.
 VERSIONEN = [
+    {"version": "3.71", "zeit": "2026-11-23 17:59", "aenderungen": [
+        "Bahn-Verspätungsalarme laufen jetzt über die neue DB-Schnittstelle OpenBoards (Ankunftstafel des Zielbahnhofs: Verspätung, Ausfall, Gleiswechsel). Die alte Timetables-Schnittstelle bleibt bis zu ihrer Abschaltung als Reserve. Keine neuen Einstellungen nötig.",
+    ]},
+    {"version": "3.70", "zeit": "2026-11-23 17:54", "aenderungen": [
+        "Mail-Eingang: Abwesenheitsnotizen („Automatische Antwort: …“, „Out of Office: …“) und Zustellberichte (Rückläufer) werden nicht mehr als Beleg angelegt, auch wenn ihnen der Kopfzeilen-Vermerk fehlt. Bereits angelegte lassen sich unter Einstellungen › Kalender-Antworten aufräumen löschen.",
+        "Von der App versendete Mails tragen jetzt den Vermerk „automatisch erzeugt“, damit Abwesenheits-Systeme gar nicht erst antworten.",
+    ]},
     {"version": "3.69", "zeit": "2026-11-23 17:48", "aenderungen": [
         "Vorbereitung auf die neue Bahn-Schnittstelle: Die Deutsche Bahn löst die Timetables-API durch OpenBoards ab (Abschaltung der alten voraussichtlich Mitte 2027). In den Alert-Einstellungen gibt es den Knopf „OpenBoards testen“, der die neue Schnittstelle einmal abruft und die rohe Antwort zeigt. Die Verspätungsalarme laufen unverändert weiter.",
     ]},
@@ -3798,7 +3805,7 @@ async def mails_abrufen():
           {result.get("belege_erstellt",0)} Belege erstellt &nbsp;·&nbsp;
           {result.get("duplikate",0)} Duplikate &nbsp;·&nbsp;
           {result.get("fehler",0)} Fehler
-          {f'&nbsp;·&nbsp; {result["uebersprungen"]} übersprungen (Kalender-/Abwesenheits-Antworten)' if result.get("uebersprungen") else ""}
+          {f'&nbsp;·&nbsp; {result["uebersprungen"]} übersprungen (Kalender-Antworten, Abwesenheitsnotizen, Zustellberichte)' if result.get("uebersprungen") else ""}
         </div>
         {fehler_html}
         {skip_html}
@@ -14463,7 +14470,7 @@ def einstellungen_uebersicht(request: Request):
          "für alle Mitarbeiter oder nur für einen.", "/einstellungen/reise-pdfs"),
         ("🔧", "Mail-Diagnose", "Prüft den Mail-Postausgang Schritt für Schritt (es wird keine Mail gesendet).",
          "/einstellungen/mail-diagnose"),
-        ("🧹", "Kalender-Antworten aufräumen", "Alte „Accepted: …“-Antworten auf Outlook-Einladungen, die als Beleg abgelegt wurden, "
+        ("🧹", "Kalender-Antworten aufräumen", "Alte „Accepted: …“-Antworten auf Einladungen und Abwesenheitsnotizen, die als Beleg abgelegt wurden, "
          "auflisten und löschen.", "/einstellungen/kalender-antworten"),
         ("📖", "Dokumentation", "Handbuch für Reisende und Organisatoren, alle Einstellungen und Funktionen – "
          "als Seite und PDF.", "/einstellungen/dokumentation"),
